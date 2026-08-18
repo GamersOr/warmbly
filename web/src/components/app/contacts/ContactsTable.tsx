@@ -32,6 +32,7 @@ import {
     TrashIcon,
     UploadIcon,
     UserPlusIcon,
+    UsersIcon,
 } from "lucide-react";
 
 import { useConfirm } from "@/hooks/context/confirm";
@@ -58,6 +59,8 @@ import ContactsEditBulk from "./ContactsEditBulk";
 import { NewContactDialog } from "./NewContactDialog";
 import ExportDialog from "./ExportDialog";
 import ImportWizard from "./ImportWizard";
+import AddFromContactsDialog from "./AddFromContactsDialog";
+import useAiMetered from "@/hooks/useAiMetered";
 import SyncSourcesPanel from "./SyncSourcesPanel";
 import { CategoryChip } from "./CategoryPicker";
 
@@ -107,6 +110,7 @@ export default function ContactsTable({
     const [exportOpen, setExportOpen] = React.useState<boolean>(false);
     const [importOpen, setImportOpen] = React.useState<boolean>(false);
     const [syncOpen, setSyncOpen] = React.useState<boolean>(false);
+    const [fromContactsOpen, setFromContactsOpen] = React.useState<boolean>(false);
 
     const [searchProps, setSearchProps] = React.useState<SearchContacts>({
         query: "",
@@ -224,11 +228,14 @@ export default function ContactsTable({
     // Bulk AI research. Confirms the credit cost (2 per contact) before queuing;
     // runs drain in the background and the tab refreshes live via realtime.
     const batchResearch = useBatchResearch();
+    const metered = useAiMetered();
     function bulkResearch() {
         if (selected.length === 0) return;
         const ids = selected;
         confirm?.show(
-            `Research ${ids.length} ${ids.length === 1 ? "contact" : "contacts"}? This uses up to ${ids.length * 2} AI credits and runs in the background.`,
+            `Research ${ids.length} ${ids.length === 1 ? "contact" : "contacts"}? ${
+                metered ? `This uses up to ${ids.length * 2} AI credits and runs` : "This runs"
+            } in the background.`,
             async () => {
                 const res = await batchResearch.mutateAsync({ contactIds: ids, objective: "" });
                 toast.success(`Queued research for ${res.queued} contacts`);
@@ -270,13 +277,31 @@ export default function ContactsTable({
             emptyBody={
                 subFilter !== "all"
                     ? "Switch to All to see the full list."
-                    : "Add or upload contacts to get started."
+                    : current_campaign
+                        ? "Pick people from your contacts, import a file, or add one by hand."
+                        : "Add or upload contacts to get started."
             }
             emptyCta={
                 subFilter !== "all" ? (
                     <TopbarAction variant="ghost" onClick={() => setSubFilter("all")}>
                         Show all
                     </TopbarAction>
+                ) : current_campaign ? (
+                    <div className="flex items-center justify-center gap-1.5">
+                        <TopbarAction
+                            icon={<UsersIcon className="w-3 h-3" />}
+                            onClick={() => setFromContactsOpen(true)}
+                        >
+                            From contacts
+                        </TopbarAction>
+                        <TopbarAction
+                            variant="ghost"
+                            icon={<UploadIcon className="w-3 h-3" />}
+                            onClick={() => setImportOpen(true)}
+                        >
+                            Import file
+                        </TopbarAction>
+                    </div>
                 ) : (
                     <TopbarAction
                         icon={<UserPlusIcon className="w-3 h-3" />}
@@ -308,6 +333,13 @@ export default function ContactsTable({
                         onClick={() => setFiltersOpen(true)}
                     >
                         Filters
+                    </TopbarAction>
+                    <TopbarAction
+                        variant="ghost"
+                        icon={<UsersIcon className="w-3 h-3" />}
+                        onClick={() => setFromContactsOpen(true)}
+                    >
+                        From contacts
                     </TopbarAction>
                     <TopbarAction
                         variant="ghost"
@@ -379,6 +411,11 @@ export default function ContactsTable({
                     open={importOpen}
                     onClose={() => setImportOpen(false)}
                     lockedCampaign={current_campaign}
+                />
+                <AddFromContactsDialog
+                    open={fromContactsOpen}
+                    onClose={() => setFromContactsOpen(false)}
+                    campaign={current_campaign}
                 />
             </>
         );
