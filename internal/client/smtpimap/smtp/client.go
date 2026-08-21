@@ -21,6 +21,7 @@ import (
 	"github.com/warmbly/warmbly/internal/client/netbind"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/mailhdr"
 	"golang.org/x/oauth2"
 )
 
@@ -47,6 +48,10 @@ type Attachment struct {
 	Data     []byte
 }
 
+// Send submits the message and returns the exact RFC 5322 bytes it put on the
+// wire, so the caller can file the same copy in the mailbox's Sent folder.
+// The bytes are returned even on failure: they are useful in a log, and a
+// caller that ignores them is unaffected.
 func (c *Client) Send(
 	ctx context.Context,
 	to, cc, bcc []string,
@@ -55,14 +60,16 @@ func (c *Client) Send(
 	inReplyTo string,
 	attachments []Attachment,
 	customHeaders ...map[string]string,
-) *errx.MailError {
+) ([]byte, *errx.MailError) {
 	from := mail.Address{Address: c.Email, Name: fmt.Sprintf("%s %s", c.FirstName, c.LastName)}
 
 	// ----- Headers -----
 	headers := map[string]string{
-		"From":         from.String(),
-		"To":           strings.Join(to, ", "),
-		"Subject":      subject,
+		"From": from.String(),
+		"To":   mailhdr.AddressList(to),
+		// Headers are ASCII on the wire: a raw accent or emoji in the subject
+		// arrives as mojibake, so RFC 2047-encode it (a no-op for plain ASCII).
+		"Subject":      mailhdr.Subject(subject),
 		"Date":         time.Now().Format(time.RFC1123Z),
 		"MIME-Version": "1.0",
 	}
@@ -73,7 +80,7 @@ func (c *Client) Send(
 		headers["Message-ID"] = "<" + strings.Trim(messageID, "<>") + ">"
 	}
 	if len(cc) > 0 {
-		headers["Cc"] = strings.Join(cc, ", ")
+		headers["Cc"] = mailhdr.AddressList(cc)
 	}
 	if inReplyTo != "" {
 		// The parent Message-ID may arrive already wrapped in <...>; trim before
@@ -98,10 +105,14 @@ func (c *Client) Send(
 		c.writeAlternativeBody(&msg, headers, bodyPlain, bodyHTML)
 	}
 
-	recipients := append(append([]string{}, to...), cc...)
-	recipients = append(recipients, bcc...)
+	// Envelope recipients are bare addresses: a display name belongs in the
+	// header, and "Ana <a@b.com>" in RCPT TO is rejected by the server.
+	recipients := mailhdr.BareList(to)
+	recipients = append(recipients, mailhdr.BareList(cc)...)
+	recipients = append(recipients, mailhdr.BareList(bcc)...)
 
-	return c.sendRaw(ctx, from.Address, recipients, msg.Bytes())
+	raw := msg.Bytes()
+	return raw, c.sendRaw(ctx, from.Address, recipients, raw)
 }
 
 // writeAlternativeBody writes a multipart/alternative message (text/plain +

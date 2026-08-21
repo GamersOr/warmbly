@@ -34,9 +34,14 @@ type EmailMessage struct { // used for sending to the user
 	// ModSeq (CONDSTORE)
 	ModSeq uint64 `json:"mod_seq"`
 
-	// Body
+	// Body. BodyHTML is sanitized for display: scripts, event handlers, and
+	// unsafe URL schemes are stripped before it leaves the API.
 	BodyPlain string `json:"body_plain"`
 	BodyHTML  string `json:"body_html"`
+	// BodyTruncated marks a message whose stored body could not be read, so
+	// BodyPlain holds only the preview snippet. Clients show a notice instead
+	// of presenting a partial message as the whole thing.
+	BodyTruncated bool `json:"body_truncated"`
 }
 
 type EmailMessageData struct { // used when for kafka when an email arrives
@@ -105,8 +110,12 @@ type EmailMessageStoreData struct {
 	SentDate     time.Time `json:"sent_date"`
 	Snippet      string    `json:"snippet"`
 	Seen         bool      `json:"seen"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	CreatedAt    time.Time `json:"created_at"`
+	// BodyText is a bounded plain-text rendering of the message, carried on the
+	// new-email event so the consumer can make the message findable by what it
+	// says. The full body goes to object storage, never here.
+	BodyText  string    `json:"body_text,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type EmailMessageStoreDataPreview struct {
@@ -137,6 +146,20 @@ type EmailMessageStoreDataPreview struct {
 	// id/title/color so the row renders chips without a second lookup).
 	// Always non-nil so it marshals to [] not null.
 	Labels []MiniCategory `json:"labels"`
+}
+
+// MessageGrounding is one message rendered for an AI prompt: the stored body
+// text when it exists, with the preview snippet as the fallback for mail synced
+// before bodies were indexed. Deliberately separate from the preview shape so a
+// 16 KB body can never leak into a list response by accident.
+type MessageGrounding struct {
+	ID       uuid.UUID `json:"id"`
+	FromAddr []string  `json:"from_addr"`
+	ToAddr   []string  `json:"to_addr"`
+	Subject  string    `json:"subject"`
+	BodyText string    `json:"body_text"`
+	Snippet  string    `json:"snippet"`
+	SentAt   time.Time `json:"sent_at"`
 }
 
 type EmailParent struct { // used to get information from the parent email

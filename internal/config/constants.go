@@ -22,9 +22,17 @@ const (
 	CampaignRampCeilingDefault   = 50
 	CampaignMaxNewLeadsMax       = 1000
 
-	MaxContactSize   = 10240
-	MaxEmailBodySize = 200 * 1024 // 200 KB
+	MaxContactSize = 10240
+	// MaxEmailBodySize bounds a single stored message body. 200 KB cut real
+	// HTML newsletters mid-document; 512 KB clears the overwhelming majority
+	// of them while still bounding what one message can cost.
+	MaxEmailBodySize = 512 * 1024 // 512 KB
 	MaxEmailFolders  = 30
+
+	// MaxSearchBodyText bounds the plain-text copy of a message body kept in
+	// Postgres for full-text search. The body itself lives in object storage;
+	// this only has to be long enough to find a message by what it says.
+	MaxSearchBodyText = 16 * 1024 // 16 KB
 
 	// ImapFetchBatchSize bounds how many messages one IMAP sync window holds in
 	// memory, so a large folder is never buffered whole before any body is read.
