@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -111,6 +113,10 @@ type HeartbeatPayload struct {
 	// heartbeat ages out. Placement would otherwise keep handing work to a
 	// process that is already gone.
 	Stopping bool `json:"stopping,omitempty"`
+	// Booted is set on the first beat of a fresh process. A worker holds its
+	// mailboxes in memory only, so the backend reloads every mailbox assigned
+	// to it right away; until then each send to it fails with "not found".
+	Booted bool `json:"booted,omitempty"`
 }
 
 func (h *Handler) InternalWorkerHeartbeat(c *gin.Context) {
@@ -160,6 +166,14 @@ func (h *Handler) InternalWorkerHeartbeat(c *gin.Context) {
 	if err := h.WorkerRepo.UpsertOnHeartbeat(c.Request.Context(), id, p.BindIP, p.Tier, p.EgressKind); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if p.Booted && h.EmailService != nil {
+		// Off the request: the reload publishes one ADD_EMAIL per mailbox.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			h.EmailService.ReloadWorkerAccounts(ctx, id)
+		}()
 	}
 	c.Status(http.StatusNoContent)
 }

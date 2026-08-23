@@ -2,10 +2,12 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/warmbly/warmbly/internal/events"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -41,9 +43,23 @@ type EmailSender interface {
 	Send(ctx context.Context, taskID uuid.UUID, msg EmailMessage, account models.Email) error
 }
 
+// WorkerLiveness reports whether a worker is still heartbeating. Satisfied by
+// repository.WorkerRepository.
+type WorkerLiveness interface {
+	IsWorkerLive(ctx context.Context, workerID uuid.UUID) (bool, error)
+}
+
+// ErrWorkerOffline is returned by Send when the mailbox's worker has stopped
+// heartbeating. The send is not published: a command queued for a worker that
+// is gone is never executed and never answered, which would leave the step
+// looking sent forever. The worker reconciler moves the mailbox to a live
+// worker and the dead-letter retry replays the task.
+var ErrWorkerOffline = errors.New("the mailbox's sending worker is offline")
+
 type emailSender struct {
 	emailRepo repository.EmailRepository
 	publisher events.Publisher
+	liveness  WorkerLiveness
 }
 
 // NewEmailSender creates a new email sender
@@ -54,12 +70,27 @@ func NewEmailSender(emailRepo repository.EmailRepository, publisher events.Publi
 	}
 }
 
+// WireWorkerLiveness makes Send refuse to publish to a worker that is not
+// heartbeating. Optional; without it Send trusts the assignment.
+func (s *emailSender) WireWorkerLiveness(l WorkerLiveness) {
+	s.liveness = l
+}
+
 // Send publishes an email to the worker service for sending
 func (s *emailSender) Send(ctx context.Context, taskID uuid.UUID, msg EmailMessage, account models.Email) error {
 	// Get worker ID for this email account
 	workerID := account.WorkerID
 	if workerID == nil {
 		return fmt.Errorf("no worker assigned to email account %s", account.ID)
+	}
+	if s.liveness != nil {
+		live, err := s.liveness.IsWorkerLive(ctx, *workerID)
+		if err != nil {
+			return fmt.Errorf("check worker %s liveness: %w", workerID, err)
+		}
+		if !live {
+			return fmt.Errorf("%w (worker %s, mailbox %s)", ErrWorkerOffline, workerID, account.Email)
+		}
 	}
 
 	// Email content is sealed with the organization DEK; an account without an
@@ -114,4 +145,40 @@ func generateMessageID(fromEmail string) string {
 
 	// Generate unique ID
 	return fmt.Sprintf("<%s@%s>", uuid.New().String(), domain)
+}
+
+// HeartbeatChecker reports whether a worker's short-lived heartbeat key is
+// present. Satisfied by *cache.Cache (go-redis Exists).
+type HeartbeatChecker interface {
+	Exists(ctx context.Context, keys ...string) *redis.IntCmd
+}
+
+// workerLiveness combines the registry's view of a worker (active, seen in the
+// last ten minutes) with its three-minute heartbeat key, so a crashed worker
+// stops receiving sends within minutes rather than at the end of the registry
+// window. A heartbeat lookup error fails open to the registry's answer: a
+// cache blip must not stop every send.
+type workerLiveness struct {
+	repo      WorkerLiveness
+	heartbeat HeartbeatChecker
+}
+
+// NewWorkerLiveness builds the liveness check Send uses. heartbeat may be nil.
+func NewWorkerLiveness(repo WorkerLiveness, heartbeat HeartbeatChecker) WorkerLiveness {
+	return &workerLiveness{repo: repo, heartbeat: heartbeat}
+}
+
+func (l *workerLiveness) IsWorkerLive(ctx context.Context, workerID uuid.UUID) (bool, error) {
+	live, err := l.repo.IsWorkerLive(ctx, workerID)
+	if err != nil || !live {
+		return live, err
+	}
+	if l.heartbeat == nil {
+		return true, nil
+	}
+	n, herr := l.heartbeat.Exists(ctx, "worker:heartbeat:"+workerID.String()).Result()
+	if herr != nil {
+		return true, nil
+	}
+	return n > 0, nil
 }

@@ -238,12 +238,18 @@ func runInternalHeartbeat(ctx context.Context, workerID uuid.UUID, bindIP string
 	client := &http.Client{Timeout: 10 * time.Second}
 	// reqCtx is separate from ctx so the farewell beat still sends after ctx is
 	// cancelled by the shutdown signal.
-	send := func(reqCtx context.Context, stopping bool) {
+	send := func(reqCtx context.Context, booted, stopping bool) {
 		payload := map[string]any{
 			"worker_id":   workerID.String(),
 			"bind_ip":     reportedIP,
 			"tier":        os.Getenv("WORKER_TIER"),
 			"egress_kind": os.Getenv("WORKER_EGRESS_KIND"),
+		}
+		if booted {
+			// Mailboxes live in memory only, so a fresh process holds none.
+			// The backend reloads this worker's mailboxes on this beat
+			// instead of leaving them to the reconciler's next pass.
+			payload["booted"] = true
 		}
 		if stopping {
 			payload["stopping"] = true
@@ -267,7 +273,7 @@ func runInternalHeartbeat(ctx context.Context, workerID uuid.UUID, bindIP string
 		}
 	}
 
-	send(ctx, false)
+	send(ctx, true, false)
 	ticker := time.NewTicker(90 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -277,11 +283,11 @@ func runInternalHeartbeat(ctx context.Context, workerID uuid.UUID, bindIP string
 			// without this the row stays selectable until the heartbeat ages
 			// out, so placement keeps picking a worker that has exited.
 			byeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			send(byeCtx, true)
+			send(byeCtx, false, true)
 			cancel()
 			return
 		case <-ticker.C:
-			send(ctx, false)
+			send(ctx, false, false)
 		}
 	}
 }

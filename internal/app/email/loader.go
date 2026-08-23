@@ -86,6 +86,29 @@ func (s *emailService) reconcileWorkerAccounts(ctx context.Context, lastPublishe
 	}
 }
 
+// ReloadWorkerAccounts publishes every active mailbox assigned to workerID
+// back onto it. Called from the boot heartbeat, so a restarted worker is
+// sending and syncing again within seconds rather than after the reconciler's
+// next republish window.
+func (s *emailService) ReloadWorkerAccounts(ctx context.Context, workerID uuid.UUID) {
+	ids, err := s.emailRepository.ListActiveAccountsByWorker(ctx, workerID)
+	if err != nil {
+		log.Warn().Err(err).Str("worker_id", workerID.String()).Msg("worker boot reload: list accounts failed")
+		return
+	}
+	loaded := 0
+	for _, id := range ids {
+		if err := s.LoadAccountOntoWorker(ctx, id); err != nil {
+			log.Warn().Err(err).Str("email_id", id.String()).Str("worker_id", workerID.String()).Msg("worker boot reload: load account failed")
+			continue
+		}
+		loaded++
+	}
+	if len(ids) > 0 {
+		log.Info().Str("worker_id", workerID.String()).Int("loaded", loaded).Int("assigned", len(ids)).Msg("worker boot reload: mailboxes re-shipped")
+	}
+}
+
 // loadAccountBestEffort loads a freshly onboarded account onto its worker without
 // blocking or failing the onboarding response; the reconciler is the safety net.
 func (s *emailService) loadAccountBestEffort(ctx context.Context, accountID uuid.UUID) {

@@ -1317,6 +1317,13 @@ func main() {
 			contactRepostory, aiDraftRepo, streamingPublisher,
 		))
 		emailSender := tasks.NewEmailSender(emailRepostory, eventsPublisher)
+		// Never hand a send to a worker that stopped heartbeating: nothing
+		// would execute it and nothing would report it, so the step would
+		// look sent forever. The worker reconciler re-places the mailbox and
+		// the dead-letter retry replays the task once it has.
+		if liveness, ok := emailSender.(interface{ WireWorkerLiveness(tasks.WorkerLiveness) }); ok {
+			liveness.WireWorkerLiveness(tasks.NewWorkerLiveness(workerRepository, cache))
+		}
 		tasksService = tasks.NewService(
 			tasksClient,
 			generationClient,

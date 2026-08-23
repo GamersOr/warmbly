@@ -70,6 +70,9 @@ type EmailService interface {
 	// StartWorkerReconciler periodically ensures every active mailbox is
 	// assigned to a worker and loaded onto it (blocks until ctx is cancelled).
 	StartWorkerReconciler(ctx context.Context, interval time.Duration)
+	// ReloadWorkerAccounts re-ships every active mailbox assigned to one
+	// worker, for a worker that just booted and holds none in memory.
+	ReloadWorkerAccounts(ctx context.Context, workerID uuid.UUID)
 }
 
 type emailService struct {

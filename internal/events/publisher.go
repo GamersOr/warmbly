@@ -92,6 +92,14 @@ func (p *publisher) PublishSendEmail(ctx context.Context, workerID uuid.UUID, pa
 	// Store email body (and attachment refs) in S3. The attachment refs ride
 	// inside the emsg blob so the worker receives them via BodyS3Key without any
 	// change to the Avro event contract.
+	if p.bus == nil {
+		return fmt.Errorf("event bus not configured; cannot hand send %s to a worker", params.TaskID)
+	}
+	if p.storageClient == nil {
+		// The worker reads the body from object storage; without it the send
+		// would be published body-less and fail there.
+		return fmt.Errorf("object storage not configured; cannot hand send %s to a worker", params.TaskID)
+	}
 	s3Key, err := p.storeEmailBody(ctx, params.TaskID, params.OrgID, params.BodyPlain, params.BodyHTML, params.Attachments)
 	if err != nil {
 		return fmt.Errorf("failed to store email body: %w", err)
