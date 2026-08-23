@@ -249,10 +249,16 @@ func (b *NATSBus) Subscribe(ctx context.Context, topics []string, group string, 
 		// on the exact separator and should use Subject() if it needs to
 		// compare against a Kafka-style topic name.
 		topic := strings.TrimPrefix(m.Subject(), b.prefix+".")
+		attempt := 1
+		if meta, merr := m.Metadata(); merr == nil && meta.NumDelivered > 0 {
+			attempt = int(meta.NumDelivered)
+		}
 		if err := invokeHandler(hctx, handler, Message{
-			Topic:   topic,
-			Key:     key,
-			Payload: m.Data(),
+			Topic:      topic,
+			Key:        key,
+			Payload:    m.Data(),
+			Attempt:    attempt,
+			Redelivers: true,
 		}); err != nil {
 			log.Error().Err(err).Str("subject", m.Subject()).Msg("eventbus nats handler error")
 			// Nak with a short delay so transient errors don't hot-loop.

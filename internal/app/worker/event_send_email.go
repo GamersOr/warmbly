@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -29,9 +30,13 @@ func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.Se
 	w.mailManager.RUnlock()
 
 	if !exists {
+		// The mailbox is not loaded here: it is still being added (its
+		// ADD_EMAIL is queued behind this send), or this worker restarted and
+		// the reconciler has not re-shipped it yet. Leave the send for
+		// redelivery a few times so a queued ADD_EMAIL gets processed first,
+		// then report the failure so the control plane retries the step.
 		err := fmt.Errorf("email account %s not found in worker", sendEmail.EmailID.String())
-		w.sendEmailFailure(sendEmail.TaskID, sendEmail.EmailID, mail, err.Error())
-		return err
+		return w.failSend(ctx, sendEmail, err.Error(), true)
 	}
 
 	// Decrypt subject
@@ -50,8 +55,7 @@ func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.Se
 	bodyPlain, bodyHTML, attachmentRefs, err := w.fetchEmailBody(ctx, sendEmail.OrgID, sendEmail.BodyS3Key)
 	if err != nil {
 		log.Error().Err(err).Str("s3_key", sendEmail.BodyS3Key).Msg("Failed to fetch email body from S3")
-		w.sendEmailFailure(sendEmail.TaskID, sendEmail.EmailID, mail, fmt.Sprintf("failed to fetch email body: %v", err))
-		return err
+		return w.failSend(ctx, sendEmail, fmt.Sprintf("failed to fetch email body: %v", err), true)
 	}
 
 	// Fetch each attachment's bytes from object storage by key. A fetch failure
@@ -59,8 +63,7 @@ func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.Se
 	attachments, err := w.fetchAttachments(ctx, attachmentRefs)
 	if err != nil {
 		log.Error().Err(err).Str("task_id", sendEmail.TaskID.String()).Msg("Failed to fetch attachment bytes from S3")
-		w.sendEmailFailure(sendEmail.TaskID, sendEmail.EmailID, mail, fmt.Sprintf("failed to fetch attachment: %v", err))
-		return err
+		return w.failSend(ctx, sendEmail, fmt.Sprintf("failed to fetch attachment: %v", err), true)
 	}
 
 	// Use unified Send method
@@ -220,7 +223,30 @@ func (w *WorkerService) sendEmailSuccess(taskID uuid.UUID, messageID, providerMs
 	}
 }
 
-// sendEmailError sends a structured error result back to the jobs service
+// sendNotLoadedRedeliveries is how many bus deliveries a send may burn waiting
+// for a transient condition (mailbox not loaded yet, object storage blip)
+// before the worker reports it failed. Each redelivery is a second apart, and
+// the bus stops redelivering at ten, so this stays well inside that.
+const sendNotLoadedRedeliveries = 5
+
+// failSend reports a send the worker could not attempt. A retryable condition
+// is first left for bus redelivery (returning an error naks the message) so a
+// queued ADD_EMAIL or a storage blip can clear; once the redeliveries are
+// spent, when the bus does not redeliver, or when the condition is not
+// retryable, the failure result is produced and the message is acked, handing
+// the retry to the control plane.
+func (w *WorkerService) failSend(ctx context.Context, sendEmail models.SendEmail, reason string, retryable bool) error {
+	if d := deliveryOf(ctx); retryable && d.redelivers && d.attempt < sendNotLoadedRedeliveries {
+		return errors.New(reason)
+	}
+	w.sendEmailFailure(sendEmail.TaskID, sendEmail.EmailID, nil, reason)
+	return nil
+}
+
+// sendEmailError reports a failed send attempt. The per-task result is always
+// an EMAIL_FAILED so the control plane has one result channel to walk the
+// send back on; account-level conditions (auth, disabled, rate limit, server
+// error) additionally raise their own typed event carrying the full context.
 func (w *WorkerService) sendEmailError(taskID uuid.UUID, emailID uuid.UUID, mail *wmail.WMail, mailErr *errx.MailError) {
 	// Determine the appropriate event type based on error
 	eventType := wmail.DetermineErrorEventType(mailErr)
@@ -236,14 +262,15 @@ func (w *WorkerService) sendEmailError(taskID uuid.UUID, emailID uuid.UUID, mail
 		SentAt:         time.Now(),
 	}
 
-	if err := w.Produce(eventType, taskID.String(), result); err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("Failed to produce email error event")
+	if err := w.Produce(models.JobEventTypeEmailFailed, taskID.String(), result); err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("Failed to produce email failed event")
 	}
 
-	// For critical auth/disabled errors, also send a separate error event with full context
+	// Account-level conditions also raise their typed event with full context
 	if eventType == models.JobEventTypeEmailAuthError ||
 		eventType == models.JobEventTypeEmailDisabled ||
-		eventType == models.JobEventTypeEmailRateLimited {
+		eventType == models.JobEventTypeEmailRateLimited ||
+		eventType == models.JobEventTypeEmailServerError {
 
 		userInfo := mailErr.GetUserErrorInfo()
 		errorEvent := models.EmailErrorEvent{
