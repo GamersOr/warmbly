@@ -19635,12 +19635,12 @@
           "tracking_domain": {
             "type": "string"
           },
-          "sequences": {
+          "steps": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CampaignStepCreate"
             },
-            "description": "Initial sequence steps in order."
+            "description": "Initial sequence steps in order. They are connected in order: each step routes unconditionally to the next, waiting that step's wait_after days (first step 0, follow-ups 3 unless given)."
           },
           "variants": {
             "type": "array",
@@ -19906,7 +19906,7 @@
           },
           "wait_after": {
             "type": "integer",
-            "description": "Minutes to wait after this step before the next."
+            "description": "Days to wait before this step, counted from the contact's previous step."
           },
           "position": {
             "type": "integer"
@@ -19921,7 +19921,7 @@
           },
           "conditions": {
             "type": "object",
-            "description": "Branching tree ({branches: [...]}).",
+            "description": "The connections out of this step ({branches: [...]}). Empty means no outgoing path: the flow ends here for the contact.",
             "additionalProperties": true
           },
           "action": {
@@ -19992,11 +19992,11 @@
           },
           "wait_after": {
             "type": "integer",
-            "description": "Minutes to wait after this step (spacing model; no standalone wait node for email steps)."
+            "description": "Days to wait before this step, counted from the contact's previous step (0 to 60). Spacing belongs to the target step; there is no standalone wait node for email steps."
           },
           "conditions": {
             "type": "object",
-            "description": "Branching tree ({branches: [...]}). Send {} or empty branches to clear branching.",
+            "description": "The connections out of this step ({branches: [...]}), evaluated in order; a branch with no conditions is a plain go-there-next link. Routing follows connections only: {} or empty branches means no outgoing path, which ends the flow for the contact.",
             "additionalProperties": true
           },
           "kind": {

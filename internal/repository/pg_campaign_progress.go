@@ -538,16 +538,20 @@ func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx con
 }
 
 // FindNextRoutedPair selects the next (contact, step) to send by FOLLOWING THE
-// FLOW graph instead of linear position order. For each contact, the next step
-// is the route out of their last-sent step:
+// FLOW graph. For each contact, the next step is the route out of their
+// last-sent step:
 //  1. conditional branches (first match wins, evaluated against engagement),
-//  2. then the explicit "else" catch-all branch (empty conditions; target nil = STOP),
-//  3. then linear position+1 — but ONLY when the step defines no branches at all
-//     (so plain linear campaigns keep working unchanged).
+//  2. then the explicit "else" catch-all branch (empty conditions; target nil = STOP).
+//
+// There is no implicit advance by position: a step with no outgoing connection
+// ends the contact's flow. The campaign wizard connects the steps it creates
+// in order, and the canvas connects steps as they are dragged.
 //
 // A contact who has never been sent starts at the entry step (position 1). A
 // step is sent only if the route reaches it, so branch-only steps are never sent
 // linearly, and a routed step that was already sent (a loop) stops the contact.
+// A contact whose step failed in the worker more than CampaignSendMaxAttempts
+// times is dropped, the same way a bounced or suppressed contact is.
 //
 // Conditions are evaluated SEND-RELATIVE with a three-valued result: a contact
 // whose next step isn't decidable yet (an engagement window still open) is not

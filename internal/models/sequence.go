@@ -27,9 +27,11 @@ type Sequence struct {
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
 
-	// Conditions is the per-step branching tree. When empty (`{}` / no
-	// branches), the step keeps the default linear behaviour (advance to the
-	// next position). When populated, the scheduler evaluates the contact's
+	// Conditions is the per-step routing: the connections out of this step.
+	// Routing follows connections only. When empty (`{}` / no branches) the
+	// step has no outgoing path and the contact's flow ends there; position
+	// orders the canvas and picks the entry step, it never advances a contact
+	// by itself. When populated, the scheduler evaluates the contact's
 	// engagement against these branches at schedule time to decide which step
 	// (or stop) comes next. Stored as a single jsonb column on `sequences`.
 	Conditions json.RawMessage `json:"conditions,omitempty"`
@@ -220,8 +222,9 @@ type SequencePosition struct {
 // `conditions` jsonb column. Branches are evaluated in declared order; the first
 // branch whose conditions ALL match wins. A winning branch routes the contact to
 // its TargetSequenceID (any step in the campaign), or stops them when the target
-// is nil. When no branch matches (or Branches is empty) the scheduler keeps the
-// default linear progression (advance to the next step by position).
+// is nil. When no branch matches (or Branches is empty) the contact's flow
+// ends at this step; a plain "go there next" link is a branch with no
+// conditions.
 type BranchConditions struct {
 	Branches []Branch `json:"branches,omitempty"`
 }
