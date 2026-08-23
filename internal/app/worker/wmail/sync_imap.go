@@ -33,6 +33,9 @@ func (w *WMail) Sync(ctx context.Context) *errx.MailError {
 	stats := &tickStats{}
 
 	client := w.SmtpImapData.ImapClient
+	// A mailbox left selected by the previous pass freezes LIST-STATUS on this
+	// connection, so release it before asking what changed.
+	client.ReleaseMailbox()
 	folders, err := client.Folders()
 	if err != nil {
 		return err

@@ -193,6 +193,17 @@ func (c *Client) SelectForSync(mailbox string) (uint32, *errx.MailError) {
 	return data.NumMessages, nil
 }
 
+// ReleaseMailbox drops the selected mailbox. Dovecot answers LIST-STATUS for
+// the selected mailbox with the values it held at SELECT, so a loop that keeps
+// INBOX selected never sees another change land. Servers without UNSELECT keep
+// the previous behaviour.
+func (c *Client) ReleaseMailbox() {
+	if c.client == nil || !c.client.Caps().Has(imap.CapUnselect) {
+		return
+	}
+	_ = c.client.Unselect().Wait()
+}
+
 // Fetched is one message's envelope as read by FetchEnvelopes, plus what
 // FetchBody needs to read its text parts later. Bodies are deliberately a
 // second step: the sync loop decides per message whether it is new and
