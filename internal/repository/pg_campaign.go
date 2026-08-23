@@ -87,6 +87,14 @@ type CampaignRepository interface {
 	// CountNewLeadsStartedToday returns new_leads_started for the current UTC
 	// day (0 when no row exists yet).
 	CountNewLeadsStartedToday(ctx context.Context, campaignID uuid.UUID) (int, error)
+	// DecrementCampaignDailySend gives back a counted send the worker could not
+	// deliver, against the day it was counted on (sentAt), so the new-lead cap
+	// and the campaign daily limit do not charge for mail that never left.
+	DecrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, sentAt time.Time, newLead bool) error
+	// ReopenAfterSendFailure flips a campaign that completed while a send was
+	// still in flight back to active, so the failed step is retried instead of
+	// being finalised as done. Returns true when the status changed.
+	ReopenAfterSendFailure(ctx context.Context, campaignID uuid.UUID) (bool, error)
 
 	// ── Campaign-scoped tracking domain (feature 5) ─────────────────────
 	// SetCampaignTrackingDomainVerified flips the verified flag / timestamp on
@@ -1806,6 +1814,37 @@ func (r *campaignRepository) AdvanceRampLevel(ctx context.Context, campaignID uu
 		  AND (ramp_level_date IS NULL OR ramp_level_date < CURRENT_DATE)
 	`, campaignID)
 	return err
+}
+
+// DecrementCampaignDailySend reverses IncrementCampaignDailySend for a send
+// that failed in the worker. Clamped at zero; a missing row is left alone.
+func (r *campaignRepository) DecrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, sentAt time.Time, newLead bool) error {
+	newLeadDec := 0
+	if newLead {
+		newLeadDec = 1
+	}
+	_, err := r.DB.Exec(ctx, `
+		UPDATE campaign_daily_sends
+		SET emails_sent = GREATEST(emails_sent - 1, 0),
+		    new_leads_started = GREATEST(new_leads_started - $3, 0)
+		WHERE campaign_id = $1 AND send_date = $2::date
+	`, campaignID, sentAt.UTC(), newLeadDec)
+	return err
+}
+
+// ReopenAfterSendFailure moves a completed campaign back to active. Only the
+// completed state is touched: a paused campaign stays paused and picks the
+// retry up when it is resumed.
+func (r *campaignRepository) ReopenAfterSendFailure(ctx context.Context, campaignID uuid.UUID) (bool, error) {
+	tag, err := r.DB.Exec(ctx, `
+		UPDATE campaigns
+		SET status = 'active', last_status_change_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND status = 'completed'
+	`, campaignID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // IncrementCampaignDailySend bumps today's per-campaign send counters. newLead

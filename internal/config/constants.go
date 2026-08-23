@@ -73,6 +73,12 @@ const (
 	// delay that the scheduler would then turn into an unreachable send time.
 	SequenceWaitAfterMax = 60
 
+	// CampaignSendMaxAttempts is how many times one (contact, step) may be
+	// handed to a worker before the lead is marked failed and dropped from the
+	// campaign. A worker-reported failure clears the step's sent_at so the next
+	// tick retries it; this bounds that loop for a mailbox that can never send.
+	CampaignSendMaxAttempts = 5
+
 	// Webhook/integration fan-out throttle. Caps how many events of a single
 	// type one org can fan out to its webhooks + integration sinks
 	// (Slack/Discord/CRM) per minute — the backstop against a campaign "notify"
