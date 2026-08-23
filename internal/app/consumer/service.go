@@ -59,6 +59,16 @@ type JobsService struct {
 	// dead-worker job moves or strands their mailboxes. Nil disables it.
 	Notifier OrgNotifier
 
+	// Send-outcome handling (EMAIL_SENT / EMAIL_FAILED from workers). The task
+	// and campaign progress the control plane stamped at hand-off are walked
+	// back here when a worker reports it could not send. Nil TaskRepo disables
+	// the handlers.
+	TaskRepo             repository.TaskRepository
+	CampaignRepo         repository.CampaignRepository
+	CampaignProgressRepo repository.CampaignProgressRepository
+	CampaignLogRepo      repository.CampaignLogRepository
+	ContactRepo          repository.ContactRepository
+
 	eventHandlers map[models.JobEventType]func(ctx context.Context, body any) error
 }
 

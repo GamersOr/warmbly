@@ -68,9 +68,12 @@ The **Leads** tab takes contacts four ways. **From contacts** opens a picker ove
 | Done | Every step sent, no reply or bounce |
 | Replied | Contact replied; sending stops |
 | Bounced | A send hard-bounced |
+| Failed | A step could not be sent after every retry; hover the status for the reason |
 | Unsubscribed | Unsubscribed or suppressed |
 
 A lead is **Processing** only while steps remain, so a finished campaign reads as done rather than stuck mid-flight.
+
+A step counts as sent only once the sending worker has handed it to the mailbox provider. If the worker cannot send (the mailbox was still loading, the provider refused the message, a storage hiccup), the step goes back to the queue, the failure appears in **Needs attention** with the reason, and the next pass retries it. After five failed attempts the lead is marked **Failed** and dropped from the campaign, so a mailbox that can never send does not loop forever. A recipient the mail server refuses outright is not retried: it is recorded as a **Bounced** lead straight away and goes through the same bounce handling (suppression, guardrails, webhooks) as a bounce notice. A campaign that finished while a send was still in flight reopens to retry it.
 
 ## Scheduling
 
@@ -107,7 +110,7 @@ A paused campaign shows the reason and the numbers behind it on the **Auto-pause
 
 ## Live activity
 
-The detail view streams sends, opens, clicks, replies, bounces, and skips as they happen, for every teammate at once. A **Needs attention** panel above it surfaces failures such as a step that could not be scheduled; these retry automatically and stay visible so nothing fails silently.
+The detail view streams sends, opens, clicks, replies, bounces, and skips as they happen, for every teammate at once. A **Needs attention** panel above it surfaces failures such as a step that could not be scheduled, a send the worker could not complete, or a mailbox whose sending worker is offline; these retry automatically and stay visible so nothing fails silently.
 
 If scheduling stalls on a transient infrastructure hiccup, Warmbly re-seeds within a few minutes. Pausing and resuming forces a fresh start.
 

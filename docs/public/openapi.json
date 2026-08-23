@@ -20842,10 +20842,13 @@
             "enum": [
               "pending",
               "active",
+              "completed",
               "replied",
               "bounced",
+              "failed",
               "unsubscribed"
-            ]
+            ],
+            "description": "Derived, highest priority first: unsubscribed, bounced, replied, failed (a step could not be sent after every retry), completed (every email step sent), active (some steps sent), pending (nothing sent yet)."
           },
           "sent": {
             "type": "integer"
@@ -20865,6 +20868,10 @@
           "current_step": {
             "type": "string",
             "description": "Label of the step the contact is on now. Empty when nothing sent yet."
+          },
+          "failure_reason": {
+            "type": "string",
+            "description": "Why the last send failed, as reported by the sending worker. Present only when status is failed."
           },
           "last_activity_at": {
             "type": [
