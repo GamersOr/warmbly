@@ -171,6 +171,24 @@ export function useRealtimeEvents() {
         return
       }
 
+      // A user-addressed mailbox/send error (a compose or reply the worker
+      // could not send, a mailbox that needs re-authorizing). Nothing else
+      // would tell the user, so toast it, then refresh the mailbox views.
+      if (event === 'ERROR') {
+        const data = payload.data as Record<string, unknown> | undefined
+        const title =
+          typeof data?.title === 'string' && data.title
+            ? data.title
+            : (getString('message') ?? 'Something went wrong')
+        const detail = typeof data?.message === 'string' ? data.message : ''
+        toast.error(detail ? `${title}: ${detail}` : title, {
+          id: `email-error-${getString('task_id') ?? getString('email_id') ?? 'general'}`,
+          duration: 8000,
+        })
+        invalidate([['emails', 'list'], ['unibox']])
+        return
+      }
+
       if (includes('ACCOUNT', 'EMAIL_STATUS', 'EMAIL_ERROR', 'WARMUP')) {
         // ACCOUNT_SYNC_STATE: the mailbox's import finished or fair use
         // started/stopped holding it; the drawer's sync card refetches.

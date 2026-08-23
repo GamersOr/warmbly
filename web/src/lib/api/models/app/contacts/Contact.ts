@@ -1,15 +1,17 @@
 import type MiniCampaign from "../campaigns/MiniCampaign";
 import type MiniCategory from "./MiniCategory";
 
-// LeadStatus mirrors models.ContactCampaignProgress.Status — a contact's
+// LeadStatus mirrors models.ContactCampaignProgress.Status, a contact's
 // processing state inside a single campaign. "completed" = every step sent, no
-// reply (done); "active" = some but not all steps sent (still processing).
+// reply (done); "active" = some but not all steps sent (still processing);
+// "failed" = the mailbox could not send a step after every retry.
 export type LeadStatus =
     | "pending"
     | "active"
     | "completed"
     | "replied"
     | "bounced"
+    | "failed"
     | "unsubscribed";
 
 // ContactCampaignProgress is set only on contacts returned by a single-campaign
@@ -25,6 +27,9 @@ export interface ContactCampaignProgress {
     // Label of the step the lead is on now (latest step sent). Empty when the
     // lead hasn't been contacted yet.
     current_step?: string;
+    // The worker's reason for the last failed send; set only when status is
+    // "failed".
+    failure_reason?: string;
 }
 
 export default interface Contact {
