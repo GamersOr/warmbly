@@ -990,6 +990,7 @@ const LEAD_META: Record<
     completed: { label: "Done", dot: "bg-indigo-500", text: "text-indigo-700", Icon: CheckIcon },
     replied: { label: "Replied", dot: "bg-emerald-500", text: "text-emerald-700", Icon: CornerUpLeftIcon },
     bounced: { label: "Bounced", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
+    failed: { label: "Failed", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
     unsubscribed: { label: "Unsubscribed", dot: "bg-slate-300", text: "text-slate-400", Icon: BanIcon },
 };
 
@@ -997,9 +998,16 @@ function LeadStatusPill({ lead }: { lead?: ContactCampaignProgress | null }) {
     const status: LeadStatus = lead?.status ?? "pending";
     const meta = LEAD_META[status];
     const Icon = meta.Icon;
+    // A failed lead carries the worker's reason; surface it on hover since the
+    // pill itself only has room for the word.
+    const title =
+        status === "failed" && lead?.failure_reason
+            ? `Could not send: ${lead.failure_reason}`
+            : undefined;
     return (
         <span
             className={`inline-flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] ${meta.text}`}
+            title={title}
         >
             {status === "active" ? (
                 <span className="campaign-grid text-sky-600 shrink-0" aria-hidden />
@@ -1030,6 +1038,7 @@ function LeadProgressStrip({
             completed: 0,
             replied: 0,
             bounced: 0,
+            failed: 0,
             unsubscribed: 0,
         };
         for (const ct of contacts) c[ct.campaign_lead?.status ?? "pending"]++;
@@ -1045,6 +1054,7 @@ function LeadProgressStrip({
         { key: "replied", color: "bg-emerald-500" },
         { key: "pending", color: "bg-slate-300" },
         { key: "bounced", color: "bg-rose-400" },
+        { key: "failed", color: "bg-rose-500" },
         { key: "unsubscribed", color: "bg-slate-200" },
     ];
 
@@ -1069,6 +1079,7 @@ function LeadProgressStrip({
                 <StripChip dot="bg-emerald-500" label="Replied" n={counts.replied} />
                 <StripChip dot="bg-slate-300" label="Queued" n={counts.pending} />
                 <StripChip dot="bg-rose-400" label="Bounced" n={counts.bounced} />
+                {counts.failed > 0 && <StripChip dot="bg-rose-500" label="Failed" n={counts.failed} />}
                 <StripChip dot="bg-slate-300" label="Unsub" n={counts.unsubscribed} />
             </div>
             <div className="ml-auto flex items-center gap-2 text-[10.5px] text-slate-400 tabular-nums">

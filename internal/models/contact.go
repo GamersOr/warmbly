@@ -65,6 +65,7 @@ type ContactCampaignProgress struct {
 	//   completed    — every sequence step was sent, no reply (done, nothing left to send)
 	//   replied      — the contact has replied (terminal/positive)
 	//   bounced      — a send hard-bounced (terminal/negative)
+	//   failed       — the mailbox could not send a step after every retry (terminal/negative)
 	//   unsubscribed — the contact is unsubscribed/suppressed (terminal)
 	Status         string     `json:"status"`
 	Sent           int        `json:"sent"`
@@ -77,6 +78,9 @@ type ContactCampaignProgress struct {
 	// step actually sent ("Email 2", a custom step name, or an action label).
 	// Empty when nothing has been sent yet (status "pending").
 	CurrentStep string `json:"current_step,omitempty"`
+	// FailureReason is the worker's reason for the last failed send, set only
+	// when Status is "failed".
+	FailureReason string `json:"failure_reason,omitempty"`
 }
 
 // Lead status constants for ContactCampaignProgress.Status.
@@ -86,6 +90,7 @@ const (
 	LeadStatusCompleted    = "completed"
 	LeadStatusReplied      = "replied"
 	LeadStatusBounced      = "bounced"
+	LeadStatusFailed       = "failed"
 	LeadStatusUnsubscribed = "unsubscribed"
 )
 
@@ -93,7 +98,7 @@ const (
 // Used to gate the single-campaign Leads-view `lead_status` search filter.
 func ValidLeadStatus(s string) bool {
 	switch s {
-	case LeadStatusPending, LeadStatusActive, LeadStatusCompleted, LeadStatusReplied, LeadStatusBounced, LeadStatusUnsubscribed:
+	case LeadStatusPending, LeadStatusActive, LeadStatusCompleted, LeadStatusReplied, LeadStatusBounced, LeadStatusFailed, LeadStatusUnsubscribed:
 		return true
 	default:
 		return false
@@ -118,8 +123,8 @@ type ContactsResult struct {
 
 // CampaignLeadCounts are per-status lead totals within a single campaign,
 // derived the same way as ContactCampaignProgress.Status (unsubscribed >
-// bounced > replied > completed > processing > queued). Drives the Leads-view
-// scope chips.
+// bounced > replied > failed > completed > processing > queued). Drives the
+// Leads-view scope chips.
 type CampaignLeadCounts struct {
 	Total        int `json:"total"`
 	Queued       int `json:"queued"`     // pending: a lead, no email sent yet
@@ -127,6 +132,7 @@ type CampaignLeadCounts struct {
 	Completed    int `json:"completed"`  // done: every step sent, no reply
 	Replied      int `json:"replied"`
 	Bounced      int `json:"bounced"`
+	Failed       int `json:"failed"` // a step could not be sent after every retry
 	Unsubscribed int `json:"unsubscribed"`
 }
 

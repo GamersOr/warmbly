@@ -76,6 +76,15 @@ type Message struct {
 	Topic   string
 	Key     string
 	Payload []byte
+	// Attempt is the 1-based delivery count of this message (NATS reports it
+	// from the consumer's redelivery metadata; Kafka always reports 1). A
+	// handler that retries by returning an error can read it to know when the
+	// broker is about to stop redelivering and give up cleanly instead.
+	Attempt int
+	// Redelivers is true when a handler error leaves the message for another
+	// delivery (NATS). Kafka commits regardless, so a handler must not count
+	// on a retry there and should finish what it can on this delivery.
+	Redelivers bool
 }
 
 // Subject normalises a topic name to the dot-separated form by replacing any

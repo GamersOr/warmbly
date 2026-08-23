@@ -140,6 +140,7 @@ func (b *KafkaBus) Subscribe(ctx context.Context, topics []string, group string,
 			Topic:   topic,
 			Key:     string(msg.Key),
 			Payload: msg.Value,
+			Attempt: 1,
 		}); err != nil {
 			log.Error().Err(err).Str("topic", topic).Msg("eventbus kafka handler error")
 			return err

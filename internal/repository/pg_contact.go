@@ -705,8 +705,9 @@ func (r *contactRepository) Search(
 	// Lead status filter (single-campaign Leads view only)
 	// -----------------------------
 	// The derived status has no stored column, so reproduce the same priority
-	// chain used on read (unsubscribed > bounced > replied > processing >
-	// queued) as a boolean predicate over the campaign's progress rows. Only
+	// chain used on read (unsubscribed > bounced > replied > failed >
+	// processing > queued) as a boolean predicate over the campaign's progress
+	// rows. Only
 	// meaningful with exactly one campaign bound; ignored otherwise.
 	if filters.LeadStatus != "" && singleCampaignPlaceholder != "" {
 		if clause := leadStatusClause(filters.LeadStatus, singleCampaignPlaceholder); clause != "" {
@@ -828,7 +829,14 @@ func (r *contactRepository) Search(
 				'clicked', COUNT(*) FILTER (WHERE p.clicked_at IS NOT NULL),
 				'replied', COUNT(*) FILTER (WHERE p.replied_at IS NOT NULL),
 				'bounced', COUNT(*) FILTER (WHERE p.bounced_at IS NOT NULL),
-				'last_at', MAX(GREATEST(p.sent_at, p.opened_at, p.clicked_at, p.replied_at, p.bounced_at)),
+				-- Steps the mailbox could not send after every retry.
+				'failed',  COUNT(*) FILTER (WHERE p.sent_at IS NULL AND p.failed_at IS NOT NULL AND p.send_attempts >= %[2]d),
+				'failure_reason', (
+					SELECT fp.failure_reason FROM campaign_contact_progress fp
+					WHERE fp.campaign_id = %[1]s AND fp.contact_id = c.id AND fp.failed_at IS NOT NULL
+					ORDER BY fp.failed_at DESC LIMIT 1
+				),
+				'last_at', MAX(GREATEST(p.sent_at, p.opened_at, p.clicked_at, p.replied_at, p.bounced_at, p.failed_at)),
 				-- Total email steps in the sequence, to tell "still sending" (active)
 				-- apart from "every step sent" (completed/done).
 				'total_steps', (SELECT COUNT(*) FROM sequences st WHERE st.campaign_id = %[1]s AND st.kind = 'email'),
@@ -861,7 +869,7 @@ func (r *contactRepository) Search(
 			)
 			FROM campaign_contact_progress p
 			WHERE p.campaign_id = %[1]s AND p.contact_id = c.id
-		)`, singleCampaignPlaceholder)
+		)`, singleCampaignPlaceholder, config.CampaignSendMaxAttempts)
 	}
 
 	// Main query.
@@ -969,6 +977,8 @@ func (r *contactRepository) Search(
 				Clicked    int        `json:"clicked"`
 				Replied    int        `json:"replied"`
 				Bounced    int        `json:"bounced"`
+				Failed     int        `json:"failed"`
+				FailReason *string    `json:"failure_reason"`
 				TotalSteps int        `json:"total_steps"`
 				LastAt     *time.Time `json:"last_at"`
 				Step       *string    `json:"step"`
@@ -985,6 +995,8 @@ func (r *contactRepository) Search(
 				status = models.LeadStatusBounced
 			case lp.Replied > 0:
 				status = models.LeadStatusReplied
+			case lp.Failed > 0:
+				status = models.LeadStatusFailed
 			case lp.Sent > 0 && lp.TotalSteps > 0 && lp.Sent >= lp.TotalSteps:
 				// Every email step has been sent and the contact hasn't replied
 				// or bounced: the sequence is exhausted, so the lead is done.
@@ -996,6 +1008,10 @@ func (r *contactRepository) Search(
 			if lp.Step != nil {
 				currentStep = *lp.Step
 			}
+			failureReason := ""
+			if status == models.LeadStatusFailed && lp.FailReason != nil {
+				failureReason = *lp.FailReason
+			}
 			c.CampaignLead = &models.ContactCampaignProgress{
 				Status:         status,
 				Sent:           lp.Sent,
@@ -1005,6 +1021,7 @@ func (r *contactRepository) Search(
 				Bounced:        lp.Bounced,
 				LastActivityAt: lp.LastAt,
 				CurrentStep:    currentStep,
+				FailureReason:  failureReason,
 			}
 		}
 
@@ -1151,7 +1168,7 @@ func (r *contactRepository) DistinctCustomFieldKeys(ctx context.Context, orgID u
 
 // leadStatusClause builds the WHERE predicate for a derived lead status inside
 // ONE campaign, matching pg_contact Search's read-time derivation exactly:
-// unsubscribed > bounced > replied > completed > processing(active) >
+// unsubscribed > bounced > replied > failed > completed > processing(active) >
 // queued(pending). `cp` is the already-bound placeholder for that campaign id
 // (e.g. "$5"). Returns "" for an unknown status (the caller then applies no lead
 // filter).
@@ -1164,6 +1181,13 @@ func leadStatusClause(status, cp string) string {
 		)
 	}
 	sent, replied, bounced := has("sent_at"), has("replied_at"), has("bounced_at")
+	// failed: a step the mailbox could not send after every retry (sent_at was
+	// walked back and the attempt cap is spent).
+	failed := fmt.Sprintf(
+		"EXISTS (SELECT 1 FROM campaign_contact_progress p WHERE p.campaign_id = %s AND p.contact_id = c.id "+
+			"AND p.sent_at IS NULL AND p.failed_at IS NOT NULL AND p.send_attempts >= %d)",
+		cp, config.CampaignSendMaxAttempts,
+	)
 	// allSent: every email step of the campaign has been sent to this contact.
 	allSent := fmt.Sprintf(
 		"((SELECT COUNT(*) FROM sequences st WHERE st.campaign_id = %[1]s AND st.kind = 'email') > 0 "+
@@ -1178,12 +1202,14 @@ func leadStatusClause(status, cp string) string {
 		return fmt.Sprintf("(c.subscribed AND %s)", bounced)
 	case models.LeadStatusReplied:
 		return fmt.Sprintf("(c.subscribed AND NOT %s AND %s)", bounced, replied)
+	case models.LeadStatusFailed:
+		return fmt.Sprintf("(c.subscribed AND NOT %s AND NOT %s AND %s)", bounced, replied, failed)
 	case models.LeadStatusCompleted:
-		return fmt.Sprintf("(c.subscribed AND NOT %s AND NOT %s AND %s AND %s)", bounced, replied, sent, allSent)
+		return fmt.Sprintf("(c.subscribed AND NOT %s AND NOT %s AND NOT %s AND %s AND %s)", bounced, replied, failed, sent, allSent)
 	case models.LeadStatusActive:
-		return fmt.Sprintf("(c.subscribed AND NOT %s AND NOT %s AND %s AND NOT %s)", bounced, replied, sent, allSent)
+		return fmt.Sprintf("(c.subscribed AND NOT %s AND NOT %s AND NOT %s AND %s AND NOT %s)", bounced, replied, failed, sent, allSent)
 	case models.LeadStatusPending:
-		return fmt.Sprintf("(c.subscribed AND NOT %s AND NOT %s AND NOT %s)", bounced, replied, sent)
+		return fmt.Sprintf("(c.subscribed AND NOT %s AND NOT %s AND NOT %s AND NOT %s)", bounced, replied, failed, sent)
 	default:
 		return ""
 	}
@@ -1192,22 +1218,24 @@ func leadStatusClause(status, cp string) string {
 // CampaignLeadCounts returns per-status lead totals for one campaign (the
 // campaign Leads view scope chips). A single aggregate over the campaign's
 // leads joined to their contact and a rolled-up view of their progress, so the
-// buckets follow the same unsubscribed > bounced > replied > completed >
-// processing > queued priority as the row-level derived status. Scoped to the
-// org through the contacts join.
+// buckets follow the same unsubscribed > bounced > replied > failed >
+// completed > processing > queued priority as the row-level derived status.
+// Scoped to the org through the contacts join.
 func (r *contactRepository) CampaignLeadCounts(ctx context.Context, orgID, campaignID string) (*models.CampaignLeadCounts, *errx.Error) {
 	// A lead is "done" (completed) when every email step has been sent and it
 	// hasn't replied or bounced; "processing" when some but not all steps sent.
 	const done = "ts.total_steps > 0 AND COALESCE(pr.sent_steps, 0) >= ts.total_steps"
+	const live = "c.subscribed AND NOT COALESCE(pr.has_bounced, false) AND NOT COALESCE(pr.has_replied, false) AND NOT COALESCE(pr.has_failed, false)"
 	query := fmt.Sprintf(`
 		SELECT
 			COUNT(*) AS total,
 			COUNT(*) FILTER (WHERE NOT c.subscribed) AS unsubscribed,
 			COUNT(*) FILTER (WHERE c.subscribed AND COALESCE(pr.has_bounced, false)) AS bounced,
 			COUNT(*) FILTER (WHERE c.subscribed AND NOT COALESCE(pr.has_bounced, false) AND COALESCE(pr.has_replied, false)) AS replied,
-			COUNT(*) FILTER (WHERE c.subscribed AND NOT COALESCE(pr.has_bounced, false) AND NOT COALESCE(pr.has_replied, false) AND COALESCE(pr.has_sent, false) AND (%[1]s)) AS completed,
-			COUNT(*) FILTER (WHERE c.subscribed AND NOT COALESCE(pr.has_bounced, false) AND NOT COALESCE(pr.has_replied, false) AND COALESCE(pr.has_sent, false) AND NOT (%[1]s)) AS processing,
-			COUNT(*) FILTER (WHERE c.subscribed AND NOT COALESCE(pr.has_bounced, false) AND NOT COALESCE(pr.has_replied, false) AND NOT COALESCE(pr.has_sent, false)) AS queued
+			COUNT(*) FILTER (WHERE c.subscribed AND NOT COALESCE(pr.has_bounced, false) AND NOT COALESCE(pr.has_replied, false) AND COALESCE(pr.has_failed, false)) AS failed,
+			COUNT(*) FILTER (WHERE %[2]s AND COALESCE(pr.has_sent, false) AND (%[1]s)) AS completed,
+			COUNT(*) FILTER (WHERE %[2]s AND COALESCE(pr.has_sent, false) AND NOT (%[1]s)) AS processing,
+			COUNT(*) FILTER (WHERE %[2]s AND NOT COALESCE(pr.has_sent, false)) AS queued
 		FROM campaign_leads cl
 		JOIN contacts c ON c.id = cl.contact_id AND c.organization_id = $2
 		CROSS JOIN (SELECT COUNT(*) AS total_steps FROM sequences st WHERE st.campaign_id = $1 AND st.kind = 'email') ts
@@ -1216,15 +1244,16 @@ func (r *contactRepository) CampaignLeadCounts(ctx context.Context, orgID, campa
 				bool_or(p.sent_at IS NOT NULL)    AS has_sent,
 				bool_or(p.replied_at IS NOT NULL) AS has_replied,
 				bool_or(p.bounced_at IS NOT NULL) AS has_bounced,
+				bool_or(p.sent_at IS NULL AND p.failed_at IS NOT NULL AND p.send_attempts >= $3) AS has_failed,
 				COUNT(*) FILTER (WHERE p.sent_at IS NOT NULL) AS sent_steps
 			FROM campaign_contact_progress p
 			WHERE p.campaign_id = cl.campaign_id AND p.contact_id = cl.contact_id
 		) pr ON true
 		WHERE cl.campaign_id = $1
-	`, done)
+	`, done, live)
 	out := &models.CampaignLeadCounts{}
-	if err := r.DB.QueryRow(ctx, query, campaignID, orgID).Scan(
-		&out.Total, &out.Unsubscribed, &out.Bounced, &out.Replied, &out.Completed, &out.Processing, &out.Queued,
+	if err := r.DB.QueryRow(ctx, query, campaignID, orgID, config.CampaignSendMaxAttempts).Scan(
+		&out.Total, &out.Unsubscribed, &out.Bounced, &out.Replied, &out.Failed, &out.Completed, &out.Processing, &out.Queued,
 	); err != nil {
 		if err == pgx.ErrNoRows {
 			return out, nil

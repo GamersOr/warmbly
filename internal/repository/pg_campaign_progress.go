@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
 )
 
@@ -74,6 +77,16 @@ type CampaignSequencePair struct {
 type CampaignProgressRepository interface {
 	// Record email status
 	RecordEmailSent(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
+	// RecordSendFailure walks back a step the worker could not send: sent_at is
+	// cleared so routing offers the step again, and the attempt is counted. It
+	// returns the attempts so far and whether the lead has now exhausted
+	// config.CampaignSendMaxAttempts. rolledBack is false when there was
+	// nothing to walk back (a duplicate result, or the send was already retried).
+	RecordSendFailure(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string) (attempts int, exhausted bool, rolledBack bool, err error)
+	// HasSentSteps reports whether the contact has any other step of the
+	// campaign stamped sent, which is what decides if a failed send was the
+	// lead's first step (a "new lead" for the daily new-lead counter).
+	HasSentSteps(ctx context.Context, campaignID, contactID uuid.UUID) (bool, error)
 	RecordEmailOpened(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, machine bool) error
 	RecordEmailClicked(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
 	RecordEmailReplied(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
@@ -149,17 +162,60 @@ func NewCampaignProgressRepository(db *pgxpool.Pool) CampaignProgressRepository 
 	return &campaignProgressRepository{db: db}
 }
 
-// RecordEmailSent records that an email was sent
+// RecordEmailSent stamps a step as handed to the worker. A retry after a
+// worker-reported failure clears the failure marker again; send_attempts is
+// kept as history so the retry cap still holds.
 func (r *campaignProgressRepository) RecordEmailSent(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
 	query := `
 		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at)
 		VALUES ($1, $2, $3, NOW())
 		ON CONFLICT (campaign_id, contact_id, sequence_id)
-		DO UPDATE SET sent_at = NOW()
+		DO UPDATE SET sent_at = NOW(), failed_at = NULL, failure_reason = ''
 	`
 
 	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
+}
+
+// RecordSendFailure clears sent_at on a stamped step and counts the attempt.
+// Only a row that is currently stamped sent is touched, so a duplicate worker
+// result after the step was already walked back (or re-sent) is a no-op.
+func (r *campaignProgressRepository) RecordSendFailure(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string) (int, bool, bool, error) {
+	if len(reason) > 500 {
+		reason = reason[:500]
+	}
+	query := `
+		UPDATE campaign_contact_progress
+		SET sent_at = NULL,
+		    send_attempts = send_attempts + 1,
+		    failed_at = NOW(),
+		    failure_reason = $4
+		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
+		  AND sent_at IS NOT NULL
+		RETURNING send_attempts
+	`
+	var attempts int
+	err := r.db.QueryRow(ctx, query, campaignID, contactID, sequenceID, reason).Scan(&attempts)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, false, nil
+		}
+		return 0, false, false, err
+	}
+	return attempts, attempts >= config.CampaignSendMaxAttempts, true, nil
+}
+
+// HasSentSteps reports whether any step of the campaign is stamped sent for
+// the contact.
+func (r *campaignProgressRepository) HasSentSteps(ctx context.Context, campaignID, contactID uuid.UUID) (bool, error) {
+	var has bool
+	err := r.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM campaign_contact_progress
+			WHERE campaign_id = $1 AND contact_id = $2 AND sent_at IS NOT NULL
+		)
+	`, campaignID, contactID).Scan(&has)
+	return has, err
 }
 
 // RecordEmailOpened records that an email was opened. machine marks automated
@@ -538,16 +594,20 @@ func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx con
 }
 
 // FindNextRoutedPair selects the next (contact, step) to send by FOLLOWING THE
-// FLOW graph instead of linear position order. For each contact, the next step
-// is the route out of their last-sent step:
+// FLOW graph. For each contact, the next step is the route out of their
+// last-sent step:
 //  1. conditional branches (first match wins, evaluated against engagement),
-//  2. then the explicit "else" catch-all branch (empty conditions; target nil = STOP),
-//  3. then linear position+1 — but ONLY when the step defines no branches at all
-//     (so plain linear campaigns keep working unchanged).
+//  2. then the explicit "else" catch-all branch (empty conditions; target nil = STOP).
+//
+// There is no implicit advance by position: a step with no outgoing connection
+// ends the contact's flow. The campaign wizard connects the steps it creates
+// in order, and the canvas connects steps as they are dragged.
 //
 // A contact who has never been sent starts at the entry step (position 1). A
 // step is sent only if the route reaches it, so branch-only steps are never sent
 // linearly, and a routed step that was already sent (a loop) stops the contact.
+// A contact whose step failed in the worker more than CampaignSendMaxAttempts
+// times is dropped, the same way a bounced or suppressed contact is.
 //
 // Conditions are evaluated SEND-RELATIVE with a three-valued result: a contact
 // whose next step isn't decidable yet (an engagement window still open) is not
@@ -788,6 +848,12 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		    WHERE b.contact_id = cl.contact_id AND b.bounced_at IS NOT NULL
 		  )
 		  AND NOT EXISTS (
+		    SELECT 1 FROM campaign_contact_progress f
+		    WHERE f.campaign_id = $1 AND f.contact_id = cl.contact_id
+		      AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
+		      AND f.send_attempts >= $2
+		  )
+		  AND NOT EXISTS (
 		    SELECT 1 FROM suppressed_recipients sr
 		    JOIN campaigns camp ON camp.organization_id = sr.organization_id
 		    WHERE camp.id = $1
@@ -797,7 +863,7 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		ORDER BY ` + orderPrefix + contactOrder + ` ` + dir + `
 	`
 
-	rows, err := r.db.Query(ctx, query, campaignID)
+	rows, err := r.db.Query(ctx, query, campaignID, config.CampaignSendMaxAttempts)
 	if err != nil {
 		return nil, nil, err
 	}

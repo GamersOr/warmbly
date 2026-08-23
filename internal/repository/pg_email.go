@@ -102,6 +102,9 @@ type EmailRepository interface {
 	// worker reconciler uses it to (re)load accounts onto their assigned workers
 	// after onboarding, worker restarts, or reassignment.
 	ListActiveWorkerAccounts(ctx context.Context) ([]uuid.UUID, error)
+	// ListActiveAccountsByWorker returns the ids of the active mailboxes
+	// assigned to one worker, for reloading them after that worker restarts.
+	ListActiveAccountsByWorker(ctx context.Context, workerID uuid.UUID) ([]uuid.UUID, error)
 }
 
 type emailRepository struct {
@@ -204,6 +207,25 @@ func (r *emailRepository) ListWarmupScheduleCandidates(ctx context.Context, limi
 func (r *emailRepository) ListActiveWorkerAccounts(ctx context.Context) ([]uuid.UUID, error) {
 	const query = `SELECT id FROM email_accounts WHERE status = 'active'`
 	rows, err := r.DB.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (r *emailRepository) ListActiveAccountsByWorker(ctx context.Context, workerID uuid.UUID) ([]uuid.UUID, error) {
+	const query = `SELECT id FROM email_accounts WHERE status = 'active' AND worker_id = $1`
+	rows, err := r.DB.Query(ctx, query, workerID)
 	if err != nil {
 		return nil, err
 	}

@@ -564,16 +564,23 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	}
 
 	if err := s.emailSender.Send(ctx, taskID, emailMsg, *account); err != nil {
-		// Failed to send to worker, record failure
+		// The send never reached a worker (none assigned, worker offline, bus
+		// or storage down). Nothing is stamped sent; the task is dead-lettered
+		// for the retry loop and the chain is re-seeded by the reconciler.
 		s.taskRepo.RecordTaskFailure(ctx, taskID, "Send failed", err.Error())
 		if s.campaignLogRepo != nil {
 			s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
 				CampaignID: campaign.ID,
 				EventType:  "email_failed",
-				Message:    fmt.Sprintf("Failed to send to %s", contact.Email),
+				Message:    fmt.Sprintf("Could not hand %s's email to a sending worker, will retry: %s", contact.Email, err.Error()),
 				Metadata: map[string]interface{}{
-					"contact_id": contact.ID.String(),
-					"error":      err.Error(),
+					"level":       "error",
+					"code":        "WORKER_UNAVAILABLE",
+					"contact_id":  contact.ID.String(),
+					"sequence_id": sequence.ID.String(),
+					"account_id":  account.ID.String(),
+					"error":       err.Error(),
+					"will_retry":  true,
 				},
 			})
 		}

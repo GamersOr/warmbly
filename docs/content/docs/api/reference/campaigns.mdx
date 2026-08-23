@@ -140,7 +140,7 @@ Create a campaign. Only `name` is required, every other field is optional and ap
 | `max_new_leads_per_day` | integer | no | New-lead throttle, `0` is unlimited. |
 | `prioritize_new_leads` | boolean | no | Prefer new leads in each send window. |
 | `tracking_domain` | string | no | Campaign-scoped tracking domain (honored only once verified). |
-| `sequences` | object[] | no | Initial sequence steps in order (see create sequence input below). |
+| `steps` | object[] | no | Initial sequence steps in order (see create sequence input below). They are connected in order: each step routes unconditionally to the next, waiting that step's `wait_after` days. The first step's `wait_after` defaults to `0`, follow-ups to `3`. |
 | `variants` | object[] | no | A/B variants for the first step (same shape as create A/B variant). |
 | `advanced_overrides` | object | no | Advanced outreach overrides, see [advanced settings](#get-advanced-settings). |
 
@@ -163,8 +163,9 @@ Create a campaign. Only `name` is required, every other field is optional and ap
   "ramp_start": 10,
   "ramp_increment": 2,
   "ramp_ceiling": 40,
-  "sequences": [
-    { "name": "Step 1", "subject": "Quick question, {{first_name}}", "body_plain": "Hi {{first_name}}...", "wait_after": 0 }
+  "steps": [
+    { "name": "Step 1", "subject": "Quick question, {{first_name}}", "body_plain": "Hi {{first_name}}...", "wait_after": 0 },
+    { "name": "Step 2", "subject": "", "body_plain": "Just bumping this...", "wait_after": 3 }
   ]
 }
 ```
@@ -829,8 +830,8 @@ All fields optional.
 | `body_html` | string | no | HTML body template. |
 | `body_sync` | boolean | no | Keep plain and HTML bodies in sync. |
 | `body_code` | boolean | no | Treat the body as raw code (no auto-formatting). |
-| `wait_after` | integer | no | Minutes to wait after this step before the next (the spacing model, there is no standalone wait node for email steps). |
-| `conditions` | object | no | Branching tree (`{branches: [...]}`). Send `{}` or empty branches to clear branching and fall back to linear progression. |
+| `wait_after` | integer | no | Days to wait before this step, counted from the contact's previous step (`0` to `60`). Spacing belongs to the target step, so there is no standalone wait node for email steps. |
+| `conditions` | object | no | The connections out of this step (`{branches: [...]}`), evaluated in order; a branch with no `conditions` is a plain "go there next" link. Routing follows connections only: a step with `{}` or no branches has no outgoing path and ends the flow for the contact. |
 | `kind` | string | no | `email` (default), `action`, or `wait`. |
 | `action` | object | no | Typed config for non-email nodes. `type` is the switch (`wait`, `add_tag`, `remove_tag`, `unsubscribe`, `notify`, `create_task`, `create_deal`, `move_deal_stage`, `run_automation`, `end`), the remaining fields are type-scoped. |
 
@@ -839,7 +840,7 @@ All fields optional.
   "name": "Step 2",
   "subject": "Following up, {{first_name}}",
   "body_plain": "Just bumping this...",
-  "wait_after": 2880,
+  "wait_after": 2,
   "conditions": {
     "branches": [
       {

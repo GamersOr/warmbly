@@ -731,6 +731,17 @@ When extending anti-fraud logic in this repo:
 - keep worker-side abuse checks lightweight and infrastructure-backed
 - record enough structured evidence for admin review when a user or mailbox is blocked
 
+## Send Outcome Loop
+
+A campaign step is stamped sent (`campaign_contact_progress.sent_at`, task `completed`, daily counters) the moment the backend hands the `SEND_EMAIL` to a worker, before anything has left the mailbox. What keeps that honest is the worker's per-task result on `jobs.worker-events`: every send is answered with exactly one `EMAIL_SENT` or `EMAIL_FAILED`, and the consumer's `HandleEmailFailed` (`internal/app/consumer/event_send_result.go`) walks the stamp back (clears `sent_at`, counts the attempt, gives back the daily counters, logs to the campaign feed, reopens a campaign that completed meanwhile). Routing retries the step on the next tick and drops the lead as `failed` after `config.CampaignSendMaxAttempts`.
+
+Rules that follow from this:
+
+- a worker must always answer a `SEND_EMAIL` it acked; a failure path that returns without producing `EMAIL_FAILED` leaves the lead at "processing" forever. Use `failSend` in `event_send_email.go`
+- the per-task result is always `EMAIL_FAILED`; the typed account events (`EMAIL_AUTH_ERROR` and friends) are raised in addition and carry an `EmailErrorEvent`, never a `SendEmailResult`
+- the backend refuses to publish a send to a worker that is not heartbeating (`tasks.NewWorkerLiveness`), because a command queued for a dead worker is never executed and never answered
+- the campaign wizard (and `POST /campaigns` with `steps`) connects steps in order at creation. Routing has no implicit "next position": a step with no outgoing connection ends the flow
+
 ## Control Plane vs Execution Plane
 
 Prefer this split:

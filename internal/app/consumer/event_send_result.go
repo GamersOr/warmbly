@@ -1,0 +1,327 @@
+package jobs
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+
+	"github.com/warmbly/warmbly/internal/config"
+	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
+	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/repository"
+)
+
+// errSendResultEarly is returned when a worker result lands before the
+// control plane has finished stamping the task it belongs to. The message is
+// left for redelivery; the stamping finishes within milliseconds.
+var errSendResultEarly = errors.New("send result arrived before the task was stamped; retrying")
+
+// HandleEmailSent confirms a send the worker delivered to the provider. The
+// control plane stamped the task when it handed the send over, so the only
+// thing left to persist is the Message-ID the worker actually put on the wire.
+func (s *JobsService) HandleEmailSent(ctx context.Context, result models.SendEmailResult) error {
+	if s.TaskRepo == nil || result.TaskID == uuid.Nil {
+		return nil
+	}
+	task, err := s.TaskRepo.GetTask(ctx, result.TaskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		log.Warn().Str("task_id", result.TaskID.String()).Msg("email sent result for unknown task")
+		return nil
+	}
+	if result.MessageID != "" && task.MessageID == "" {
+		if err := s.TaskRepo.UpdateTaskMessageID(ctx, task.ID, result.MessageID); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ID.String()).Msg("could not record worker message id")
+		}
+	}
+	return nil
+}
+
+// HandleEmailFailed walks back a send the worker could not deliver. The
+// control plane stamps a task sent the moment it hands it to a worker, so
+// without this the lead would sit at "processing" forever with no email ever
+// leaving. For a campaign send the step's sent_at is cleared so the next tick
+// retries it, the day's counters give the send back, the failure is written to
+// the campaign's activity log, and a campaign that completed while the send
+// was in flight is reopened. Once the retry cap is spent the lead is marked
+// failed and routing drops it.
+func (s *JobsService) HandleEmailFailed(ctx context.Context, result models.SendEmailResult) error {
+	if s.TaskRepo == nil || result.TaskID == uuid.Nil {
+		return nil
+	}
+	task, err := s.TaskRepo.GetTask(ctx, result.TaskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		log.Warn().Str("task_id", result.TaskID.String()).Msg("email failed result for unknown task")
+		return nil
+	}
+
+	if task.Status == "active" {
+		// The worker answered before the control plane finished the tick; the
+		// stamping completes within milliseconds, so look once more before
+		// leaving the result for redelivery.
+		time.Sleep(300 * time.Millisecond)
+		if task, err = s.TaskRepo.GetTask(ctx, result.TaskID); err != nil || task == nil {
+			return err
+		}
+	}
+	switch task.Status {
+	case "completed":
+		// The normal case: stamped by the control plane, refused by the worker.
+	case "active":
+		return errSendResultEarly
+	default:
+		// Already walked back (duplicate delivery), cancelled, or dead-lettered.
+		return nil
+	}
+
+	reason, code := sendFailureReason(result)
+	if err := s.TaskRepo.RecordTaskFailure(ctx, task.ID, "Send failed", reason); err != nil {
+		return err
+	}
+
+	switch task.TaskType {
+	case "campaign":
+		return s.failCampaignSend(ctx, task, reason, code)
+	case "email":
+		s.notifyUserSendFailed(ctx, task, reason)
+	}
+	return nil
+}
+
+// failCampaignSend is the campaign half of HandleEmailFailed.
+func (s *JobsService) failCampaignSend(ctx context.Context, task *repository.Task, reason, code string) error {
+	ct, err := s.TaskRepo.GetCampaignTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	if ct == nil || ct.CampaignID == nil {
+		return nil
+	}
+	campaignID := *ct.CampaignID
+
+	var campaign *models.Campaign
+	if s.CampaignRepo != nil {
+		campaign, _ = s.CampaignRepo.GetByID(ctx, campaignID)
+	}
+
+	recipient := ""
+	if ct.ContactID != nil && s.ContactRepo != nil {
+		if contact, cerr := s.ContactRepo.GetByID(ctx, *ct.ContactID); cerr == nil && contact != nil {
+			recipient = contact.Email
+		}
+	}
+
+	attempts, exhausted, rolledBack := 0, false, false
+	if ct.ContactID != nil && ct.SequenceID != nil && s.CampaignProgressRepo != nil {
+		attempts, exhausted, rolledBack, err = s.CampaignProgressRepo.RecordSendFailure(ctx, campaignID, *ct.ContactID, *ct.SequenceID, reason)
+		if err != nil {
+			return err
+		}
+	}
+
+	if rolledBack && s.CampaignRepo != nil {
+		// With the step walked back, no other stamped step means this was the
+		// lead's first email, which the new-lead cap counted.
+		newLead := true
+		if has, herr := s.CampaignProgressRepo.HasSentSteps(ctx, campaignID, *ct.ContactID); herr == nil {
+			newLead = !has
+		}
+		countedOn := time.Now()
+		if task.CompletedAt != nil {
+			countedOn = *task.CompletedAt
+		}
+		if derr := s.CampaignRepo.DecrementCampaignDailySend(ctx, campaignID, countedOn, newLead); derr != nil {
+			log.Warn().Err(derr).Str("campaign_id", campaignID.String()).Msg("could not give back the failed send's daily count")
+		}
+	}
+
+	// A recipient the mail server refused at RCPT is a hard bounce that simply
+	// arrived synchronously. Retrying it from the same mailbox only spends
+	// reputation, so it goes through the bounce pipeline (progress, optional
+	// suppression, guardrails, warmup health, webhooks) and the lead is
+	// dropped as bounced instead of being offered again.
+	if rolledBack && code == string(errx.MailErrorCodeRecipientRejected) {
+		if s.recordSynchronousBounce(ctx, task, ct, campaign, recipient, reason) {
+			s.logCampaignSendFailure(ctx, campaignID, ct, recipient, reason, code, attempts, false, false, false)
+			s.publishCampaignUpdated(ctx, campaign, campaignID, "")
+			log.Info().Str("task_id", task.ID.String()).Str("campaign_id", campaignID.String()).Msg("campaign send refused at RCPT; recorded as bounce")
+			return nil
+		}
+	}
+
+	reopened := false
+	if rolledBack && !exhausted && campaign != nil && campaign.Status == "completed" && s.CampaignRepo != nil {
+		if ok, rerr := s.CampaignRepo.ReopenAfterSendFailure(ctx, campaignID); rerr != nil {
+			log.Warn().Err(rerr).Str("campaign_id", campaignID.String()).Msg("could not reopen campaign after send failure")
+		} else {
+			reopened = ok
+		}
+	}
+
+	s.logCampaignSendFailure(ctx, campaignID, ct, recipient, reason, code, attempts, exhausted, rolledBack, reopened)
+
+	status := ""
+	if reopened {
+		status = "active"
+	}
+	s.publishCampaignUpdated(ctx, campaign, campaignID, status)
+
+	log.Info().
+		Str("task_id", task.ID.String()).
+		Str("campaign_id", campaignID.String()).
+		Str("code", code).
+		Int("attempts", attempts).
+		Bool("exhausted", exhausted).
+		Bool("rolled_back", rolledBack).
+		Bool("reopened", reopened).
+		Msg("campaign send failed in worker; step walked back")
+	return nil
+}
+
+// recordSynchronousBounce feeds a RCPT-refused send into the deliverability
+// pipeline as a bounce. Returns false when the bounce could not be attributed
+// (no org, no recipient), in which case the caller falls back to the retry
+// path.
+func (s *JobsService) recordSynchronousBounce(ctx context.Context, task *repository.Task, ct *repository.CampaignTask, campaign *models.Campaign, recipient, reason string) bool {
+	if s.AdvancedService == nil || campaign == nil || campaign.OrganizationID == nil || recipient == "" {
+		return false
+	}
+	taskID := task.ID
+	req := &models.IngestDeliverabilityEventRequest{
+		EventType:      models.DeliverabilityEventBounce,
+		Provider:       "smtp_reject",
+		TaskID:         &taskID,
+		CampaignID:     ct.CampaignID,
+		ContactID:      ct.ContactID,
+		RecipientEmail: recipient,
+		Reason:         reason,
+		IdempotencyKey: "reject:" + taskID.String(),
+	}
+	if xerr := s.AdvancedService.IngestDeliverabilityEvent(ctx, *campaign.OrganizationID, req); xerr != nil {
+		log.Warn().Str("task_id", taskID.String()).Str("error", xerr.Message).Msg("could not record refused recipient as a bounce")
+		return false
+	}
+	return true
+}
+
+// publishCampaignUpdated pulses the campaign for every teammate (status "" keeps
+// the dashboard's status as is).
+func (s *JobsService) publishCampaignUpdated(ctx context.Context, campaign *models.Campaign, campaignID uuid.UUID, status string) {
+	if s.StreamingPublisher == nil || campaign == nil {
+		return
+	}
+	s.StreamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
+		BaseEvent:  pubsub.BaseEvent{EventType: pubsub.EventCampaignUpdated, UserID: campaign.UserID},
+		OrgID:      campaignOrgID(campaign),
+		CampaignID: campaignID.String(),
+		Name:       campaign.Name,
+		Status:     status,
+	})
+}
+
+// logCampaignSendFailure writes the failure to the campaign activity log.
+// metadata.level "error" tints it red in the dashboard's activity feed.
+func (s *JobsService) logCampaignSendFailure(ctx context.Context, campaignID uuid.UUID, ct *repository.CampaignTask, recipient, reason, code string, attempts int, exhausted, rolledBack, reopened bool) {
+	if s.CampaignLogRepo == nil {
+		return
+	}
+	who := recipient
+	if who == "" {
+		who = "the recipient"
+	}
+	var msg string
+	switch {
+	case code == string(errx.MailErrorCodeRecipientRejected):
+		msg = fmt.Sprintf("The mail server refused %s (hard bounce): %s", who, reason)
+	case exhausted:
+		msg = fmt.Sprintf("Gave up on %s after %d failed attempts: %s", who, attempts, reason)
+	case rolledBack:
+		msg = fmt.Sprintf("Could not send to %s (attempt %d of %d), will retry: %s", who, attempts, config.CampaignSendMaxAttempts, reason)
+	default:
+		msg = fmt.Sprintf("Could not send to %s: %s", who, reason)
+	}
+	if reopened {
+		msg += ". Campaign reopened to retry."
+	}
+	meta := map[string]interface{}{
+		"level":        "error",
+		"code":         code,
+		"error":        reason,
+		"attempts":     attempts,
+		"max_attempts": config.CampaignSendMaxAttempts,
+		"will_retry":   rolledBack && !exhausted && code != string(errx.MailErrorCodeRecipientRejected),
+		"task_id":      ct.TaskID.String(),
+	}
+	if ct.ContactID != nil {
+		meta["contact_id"] = ct.ContactID.String()
+	}
+	if ct.SequenceID != nil {
+		meta["sequence_id"] = ct.SequenceID.String()
+	}
+	if reopened {
+		meta["reopened"] = true
+	}
+	_ = s.CampaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+		CampaignID: campaignID,
+		EventType:  "email_failed",
+		Message:    msg,
+		Metadata:   meta,
+	})
+}
+
+// notifyUserSendFailed tells the mailbox owner that a one-off send (compose,
+// reply, scheduled email) did not leave, since nothing else would.
+func (s *JobsService) notifyUserSendFailed(ctx context.Context, task *repository.Task, reason string) {
+	if s.StreamingPublisher == nil || s.EmailRepository == nil {
+		return
+	}
+	account, xerr := s.EmailRepository.GetByID(ctx, task.EmailAccountID)
+	if xerr != nil || account == nil {
+		return
+	}
+	s.StreamingPublisher.PublishEmailError(ctx, account.UserID, account.ID, task.ID,
+		"Email could not be sent",
+		fmt.Sprintf("%s could not send your email: %s", account.Email, reason))
+}
+
+// sendFailureReason picks the most useful human-readable reason and the
+// machine code out of a worker result.
+func sendFailureReason(result models.SendEmailResult) (reason, code string) {
+	if result.Error != nil {
+		code = result.Error.Code
+		reason = strings.TrimSpace(result.Error.Message)
+		if reason == "" {
+			reason = strings.TrimSpace(result.Error.UserMessage)
+		}
+	}
+	if reason == "" {
+		reason = strings.TrimSpace(result.LegacyErrorMsg)
+	}
+	if reason == "" {
+		reason = "the sending worker reported an unknown error"
+	}
+	if code == "" {
+		code = "SEND_FAILED"
+	}
+	return reason, code
+}
+
+// campaignOrgID returns the campaign's organization id for org-scoped
+// realtime events, or "" for legacy orgless rows.
+func campaignOrgID(campaign *models.Campaign) string {
+	if campaign == nil || campaign.OrganizationID == nil {
+		return ""
+	}
+	return campaign.OrganizationID.String()
+}

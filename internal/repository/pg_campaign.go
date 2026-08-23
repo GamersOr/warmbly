@@ -87,6 +87,14 @@ type CampaignRepository interface {
 	// CountNewLeadsStartedToday returns new_leads_started for the current UTC
 	// day (0 when no row exists yet).
 	CountNewLeadsStartedToday(ctx context.Context, campaignID uuid.UUID) (int, error)
+	// DecrementCampaignDailySend gives back a counted send the worker could not
+	// deliver, against the day it was counted on (sentAt), so the new-lead cap
+	// and the campaign daily limit do not charge for mail that never left.
+	DecrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, sentAt time.Time, newLead bool) error
+	// ReopenAfterSendFailure flips a campaign that completed while a send was
+	// still in flight back to active, so the failed step is retried instead of
+	// being finalised as done. Returns true when the status changed.
+	ReopenAfterSendFailure(ctx context.Context, campaignID uuid.UUID) (bool, error)
 
 	// ── Campaign-scoped tracking domain (feature 5) ─────────────────────
 	// SetCampaignTrackingDomainVerified flips the verified flag / timestamp on
@@ -482,8 +490,12 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 
 	// Initial sequences. Position is the array index; wait_after defaults
 	// to 0 for the first step and 3 days for any follow-ups so a default
-	// wizard run still produces something usable.
+	// wizard run still produces something usable. Steps given together are a
+	// linear sequence, so each one is connected to the next: routing follows
+	// connections only (a step with no outgoing connection ends the flow), and
+	// a follow-up that is listed but not connected would never send.
 	if len(data.Sequences) > 0 {
+		stepIDs := make([]uuid.UUID, 0, len(data.Sequences))
 		for i, seq := range data.Sequences {
 			waitAfter := 0
 			if i > 0 {
@@ -513,16 +525,22 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 					body_plain, body_html, body_sync, body_code,
 					wait_after, position
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				RETURNING id
 			`
 			seqParams := []any{
 				campaign.ID, orgID, seq.Name, seq.Subject,
 				seq.BodyPlain, bodyHTML, bodySync, bodyCode,
 				waitAfter, i + 1,
 			}
-			if _, err := tx.Exec(ctx, seqInsert, seqParams...); err != nil {
-				db.CaptureError(err, seqInsert, seqParams, "exec")
+			var stepID uuid.UUID
+			if err := tx.QueryRow(ctx, seqInsert, seqParams...).Scan(&stepID); err != nil {
+				db.CaptureError(err, seqInsert, seqParams, "queryrow")
 				return nil, errx.InternalError()
 			}
+			stepIDs = append(stepIDs, stepID)
+		}
+		if err := connectLinearSequenceTx(ctx, tx, stepIDs); err != nil {
+			return nil, errx.InternalError()
 		}
 	}
 
@@ -1798,6 +1816,37 @@ func (r *campaignRepository) AdvanceRampLevel(ctx context.Context, campaignID uu
 	return err
 }
 
+// DecrementCampaignDailySend reverses IncrementCampaignDailySend for a send
+// that failed in the worker. Clamped at zero; a missing row is left alone.
+func (r *campaignRepository) DecrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, sentAt time.Time, newLead bool) error {
+	newLeadDec := 0
+	if newLead {
+		newLeadDec = 1
+	}
+	_, err := r.DB.Exec(ctx, `
+		UPDATE campaign_daily_sends
+		SET emails_sent = GREATEST(emails_sent - 1, 0),
+		    new_leads_started = GREATEST(new_leads_started - $3, 0)
+		WHERE campaign_id = $1 AND send_date = $2::date
+	`, campaignID, sentAt.UTC(), newLeadDec)
+	return err
+}
+
+// ReopenAfterSendFailure moves a completed campaign back to active. Only the
+// completed state is touched: a paused campaign stays paused and picks the
+// retry up when it is resumed.
+func (r *campaignRepository) ReopenAfterSendFailure(ctx context.Context, campaignID uuid.UUID) (bool, error) {
+	tag, err := r.DB.Exec(ctx, `
+		UPDATE campaigns
+		SET status = 'active', last_status_change_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND status = 'completed'
+	`, campaignID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // IncrementCampaignDailySend bumps today's per-campaign send counters. newLead
 // also increments new_leads_started (a position-1 send) so the new-lead cap can
 // read it back.
@@ -1876,4 +1925,28 @@ func (r *campaignRepository) UpdateStatusWithLock(ctx context.Context, campaignI
 		committed = true
 	}
 	return err
+}
+
+// connectLinearSequenceTx links steps in order with an unconditional
+// connection from each to the next, the same shape the sequence canvas writes
+// when a step is dragged onto another ("just go there after the wait").
+func connectLinearSequenceTx(ctx context.Context, tx pgx.Tx, stepIDs []uuid.UUID) error {
+	for i := 0; i+1 < len(stepIDs); i++ {
+		next := stepIDs[i+1]
+		conditions, err := json.Marshal(models.BranchConditions{
+			Branches: []models.Branch{{
+				BranchID:         uuid.New().String(),
+				TargetSequenceID: &next,
+			}},
+		})
+		if err != nil {
+			return err
+		}
+		const q = `UPDATE sequences SET conditions = $2 WHERE id = $1`
+		if _, err := tx.Exec(ctx, q, stepIDs[i], conditions); err != nil {
+			db.CaptureError(err, q, []any{stepIDs[i]}, "exec")
+			return err
+		}
+	}
+	return nil
 }

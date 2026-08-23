@@ -39,6 +39,11 @@ func (w *JobsService) InitEvents() {
 	Register(w, models.JobEventTypeSyncState, w.HandleSyncState)
 	Register(w, models.JobEventTypeTokenUpdate, w.HandleTokenUpdate)
 
+	// Send outcomes. A worker reports every send it was handed; a failure
+	// walks back what the control plane stamped at hand-off.
+	Register(w, models.JobEventTypeEmailSent, w.HandleEmailSent)
+	Register(w, models.JobEventTypeEmailFailed, w.HandleEmailFailed)
+
 	// Email error handlers
 	Register(w, models.JobEventTypeEmailAuthError, w.HandleEmailAuthError)
 	Register(w, models.JobEventTypeEmailDisabled, w.HandleEmailDisabled)

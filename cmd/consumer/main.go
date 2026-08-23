@@ -380,6 +380,11 @@ func main() {
 		AdminRepo:                   repository.NewAdminRepository(primaryDB.Pool),
 		AssignmentService:           workerAssignmentSvc,
 		Notifier:                    notificationService,
+		TaskRepo:                    taskRepo,
+		CampaignRepo:                campaignRepo,
+		CampaignProgressRepo:        campaignProgressRepo,
+		CampaignLogRepo:             repository.NewCampaignLogRepository(primaryDB),
+		ContactRepo:                 contactRepo,
 	}
 
 	jobsService.InitEvents()
