@@ -31,11 +31,17 @@ func (s *campaignService) Create(ctx context.Context, userID string, orgID *uuid
 		return nil, err
 	}
 
+	// A campaign carries its workspace from creation: suppression, the
+	// entitlement gate and the throttle below are all org-scoped, and a row
+	// without one would skip every one of them at send time.
+	if orgID == nil {
+		return nil, errx.ErrNoOrganization
+	}
+
 	// Daily creation throttle (config.DailyThrottleNewCampaigns). Caps
 	// per-day new-campaign rate per org so an unlimited plan can't be
-	// abused to ramp instantly. Scoped on org when present; otherwise
-	// best-effort skipped (the older campaign API allows orgless rows).
-	if orgID != nil && s.throttle != nil {
+	// abused to ramp instantly.
+	if s.throttle != nil {
 		if xerr := s.throttle.CheckAndIncrement(ctx, *orgID, dailythrottle.ResourceCampaign, config.DailyThrottleNewCampaigns); xerr != nil {
 			return nil, xerr
 		}

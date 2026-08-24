@@ -102,6 +102,8 @@ If a campaign has already been paused because every one of its mailboxes was gat
 
 **Suppression** is the safety net: a suppressed recipient is never emailed again by any campaign. Warmbly suppresses automatically on a bounce, a spam complaint, or an unsubscribe, because once someone has bounced or complained the safest response is to stop, not to keep collecting negative signals.
 
+The list is held per workspace, and the check runs against the sending campaign's workspace before every send. If a campaign somehow has no workspace, that check cannot be applied, so the campaign is paused with the reason in its activity feed instead of sending unchecked.
+
 Bounces are detected from the delivery-status report the recipient's server sends back. Only permanent failures (`5.x.x`, such as a nonexistent address) record a bounce and suppress; temporary ones (`4.x.x`, such as a full mailbox or greylisting) never do. This works the same for Gmail and Microsoft Graph mailboxes, where the send reports success and the bounce arrives later.
 
 ## How to read it

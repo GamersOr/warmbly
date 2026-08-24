@@ -31,6 +31,10 @@ type OnboardingSMTPIMAPRequest struct {
 func (h *Handler) StartEmailOAuth(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
 
 	var req OnboardingOAuthStartRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -73,6 +77,10 @@ func (h *Handler) FinishEmailOAuth(c *gin.Context) {
 func (h *Handler) ConnectEmailSMTPIMAP(c *gin.Context) {
 	userIDStr := middleware.GetUserID(c)
 	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
 
 	var req OnboardingSMTPIMAPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

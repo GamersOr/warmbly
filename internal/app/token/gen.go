@@ -67,6 +67,17 @@ func (s *tokenService) GenerateSession(ctx context.Context, userID uuid.UUID, em
 }
 
 func (s *tokenService) GenerateSessionWithOrg(ctx context.Context, userID uuid.UUID, email, ipaddr, userAgent, authProvider string, orgID *uuid.UUID) (*models.Token, *errx.Error) {
+	// A session always starts inside a workspace. Without one the caller would
+	// reach org-scoped writes with no tenant, and the rows they create are the
+	// ones that later skip suppression and the entitlement gate (issue #168).
+	if orgID == nil {
+		resolved, xerr := s.tokenRepository.DefaultOrganization(ctx, userID)
+		if xerr != nil {
+			return nil, xerr
+		}
+		orgID = resolved
+	}
+
 	ip, err := netip.ParseAddr(ipaddr)
 	if err != nil {
 		sentry.CaptureException(err)

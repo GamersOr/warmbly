@@ -127,9 +127,20 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		})
 	}
 
+	// STEP 5.4: Tenancy gate. organization_id is what scopes the entitlement
+	// check below and the recipient suppression check in STEP 7; missing it used
+	// to skip both and send anyway. Fail closed instead — an orgless campaign is
+	// stopped and surfaced, never mailed unchecked.
+	if campaign.OrganizationID == nil {
+		s.haltOrglessCampaign(ctx, campaign.ID, taskID)
+		executionStatus = "completed"
+		return nil
+	}
+	orgID := *campaign.OrganizationID
+
 	// STEP 5.5: Check if organization can send campaign emails (trial expired, etc.)
-	if s.featureGate != nil && campaign.OrganizationID != nil {
-		canSend, _ := s.featureGate.CanSendCampaignEmail(ctx, *campaign.OrganizationID)
+	if s.featureGate != nil {
+		canSend, _ := s.featureGate.CanSendCampaignEmail(ctx, orgID)
 		if !canSend {
 			// Organization cannot send - pause campaign
 			s.campaignRepo.UpdateStatus(ctx, campaign.ID, "paused_trial_expired")
@@ -139,9 +150,9 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 
 		// Check daily limit
-		limit, _ := s.featureGate.GetDailyEmailLimit(ctx, *campaign.OrganizationID)
+		limit, _ := s.featureGate.GetDailyEmailLimit(ctx, orgID)
 		if limit >= 0 {
-			sentToday, err := s.campaignProgressRepo.CountEmailsSentTodayByOrganization(ctx, *campaign.OrganizationID)
+			sentToday, err := s.campaignProgressRepo.CountEmailsSentTodayByOrganization(ctx, orgID)
 			if err == nil && sentToday >= limit {
 				s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_daily_limit")
 				if s.campaignLogRepo != nil {
@@ -265,8 +276,8 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		return xerr
 	}
 
-	if s.advanced != nil && campaign.OrganizationID != nil {
-		suppressed, reason, sxerr := s.advanced.ShouldSuppressRecipient(ctx, *campaign.OrganizationID, contact.Email)
+	if s.advanced != nil {
+		suppressed, reason, sxerr := s.advanced.ShouldSuppressRecipient(ctx, orgID, contact.Email)
 		if sxerr != nil {
 			return sxerr
 		}
@@ -427,8 +438,8 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		bodyPlain = ExtractPlainTextFromHTML(bodyHTML)
 	}
 
-	if s.advanced != nil && campaign.OrganizationID != nil {
-		selection, sxerr := s.advanced.SelectVariant(ctx, *campaign.OrganizationID, campaign.ID, contact.ID, sequence.ID, subject, bodyHTML, bodyPlain)
+	if s.advanced != nil {
+		selection, sxerr := s.advanced.SelectVariant(ctx, orgID, campaign.ID, contact.ID, sequence.ID, subject, bodyHTML, bodyPlain)
 		if sxerr != nil {
 			return sxerr
 		}
@@ -445,7 +456,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// zero-cost no-op when the body has no AI blocks. A generation failure fails
 	// the send (recorded like other send failures) so the task retries with the
 	// same cached output.
-	if campaign.OrganizationID != nil && s.aiProvider != nil && s.aiCredits != nil {
+	if s.aiProvider != nil && s.aiCredits != nil {
 		var aerr error
 		subject, bodyHTML, bodyPlain, aerr = s.resolveAIVariables(ctx, campaign, contact, sequence.ID, subject, bodyHTML, bodyPlain)
 		if aerr != nil {
@@ -776,6 +787,33 @@ func (s *tasksService) autoPauseCampaign(ctx context.Context, campaignID, taskID
 			CampaignID: campaignID,
 			EventType:  "auto_paused",
 			Message:    reason,
+		})
+	}
+}
+
+// haltOrglessCampaign stops a campaign that reached the send path with no
+// organization. Suppression and the entitlement gate are both org-scoped, so
+// there is no way to honour an unsubscribe, bounce or complaint for this
+// campaign — it is parked rather than sent unchecked. Since migration 000092
+// made campaigns.organization_id NOT NULL this should be unreachable, so it is
+// also reported to Sentry: reaching it means tenancy was lost somewhere else.
+func (s *tasksService) haltOrglessCampaign(ctx context.Context, campaignID, taskID uuid.UUID) {
+	const reason = "Campaign paused: it has no workspace, so unsubscribes, bounces and complaints cannot be checked before sending. Contact support to reattach it."
+
+	sentry.CaptureException(fmt.Errorf("campaign %s reached the send path with no organization", campaignID))
+	log.Error().Str("campaign_id", campaignID.String()).Str("task_id", taskID.String()).
+		Msg("campaign send blocked: no organization, suppression cannot be enforced")
+
+	if err := s.campaignRepo.UpdateStatusWithLock(ctx, campaignID, "paused"); err != nil {
+		sentry.CaptureException(err)
+	}
+	s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+	if s.campaignLogRepo != nil {
+		s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+			CampaignID: campaignID,
+			EventType:  "auto_paused",
+			Message:    reason,
+			Metadata:   map[string]interface{}{"level": "error", "code": "no_organization"},
 		})
 	}
 }
