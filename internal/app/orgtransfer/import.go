@@ -220,10 +220,26 @@ func (s *service) importTable(
 			writable[c.Name] = true
 		}
 	}
+
+	// A reset column is left out of the statement entirely rather than written
+	// as NULL, so the destination's own DEFAULT fills it. Writing NULL only
+	// worked for the nullable ones and aborted the whole import on a NOT NULL
+	// counter such as webhook_endpoints.consecutive_failures.
+	reset := make(map[string]bool, len(t.ResetOnImport))
+	for _, c := range t.ResetOnImport {
+		reset[c] = true
+	}
+
 	insertCols := make([]string, 0, len(mt.Columns))
+	unknown := 0
 	for _, c := range mt.Columns {
-		if writable[c] {
+		switch {
+		case reset[c]:
+			// deliberately omitted
+		case writable[c]:
 			insertCols = append(insertCols, c)
+		default:
+			unknown++
 		}
 	}
 	if len(insertCols) == 0 {
@@ -231,9 +247,9 @@ func (s *service) importTable(
 	}
 
 	var warnings []string
-	if dropped := len(mt.Columns) - len(insertCols); dropped > 0 {
+	if unknown > 0 {
 		warnings = append(warnings, fmt.Sprintf(
-			"%s: %d column(s) in the archive do not exist here and were ignored.", t.Name, dropped))
+			"%s: %d column(s) in the archive do not exist here and were ignored.", t.Name, unknown))
 	}
 
 	var pk []string
@@ -377,12 +393,6 @@ func (s *service) importRow(
 	// them keeps the row valid instead of failing the whole import on a
 	// constraint the archive never promised to satisfy.
 	for _, c := range refs.nullify {
-		if _, ok := obj[c]; ok {
-			obj[c] = json.RawMessage(`null`)
-		}
-	}
-
-	for _, c := range t.ResetOnImport {
 		if _, ok := obj[c]; ok {
 			obj[c] = json.RawMessage(`null`)
 		}
