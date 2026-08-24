@@ -748,6 +748,8 @@ Rules that follow from this:
 - the per-task result is always `EMAIL_FAILED`; the typed account events (`EMAIL_AUTH_ERROR` and friends) are raised in addition and carry an `EmailErrorEvent`, never a `SendEmailResult`
 - the backend refuses to publish a send to a worker that is not heartbeating (`tasks.NewWorkerLiveness`), because a command queued for a dead worker is never executed and never answered
 - the campaign wizard (and `POST /campaigns` with `steps`) connects steps in order at creation. Routing has no implicit "next position": a step with no outgoing connection ends the flow
+- the campaign task handler sends whatever pair `CalculateNextCampaignTime` returns, so the scheduler is the timing gate: when the step's hard constraints (wait_after, start date, sending windows, day capacity, mailbox min-gap) sit beyond `config.CampaignNotDueGraceSeconds`, it returns `ErrCampaignDeferred` with the slot instead of a pair, and the task reschedules without sending. Without this, any early tick (the successor task after a send, a duplicate chain, a moved slot) sends a "wait 3 days" follow-up seconds after step one
+- schedule edits on an active campaign reschedule the parked wakeup (`rescheduleCampaignWakeup` in the campaign service): clearing or shortening a future start date takes effect immediately instead of when the old slot fires. PATCH `start_date`/`end_date` accept explicit `null` to clear (`models.NullableTime` distinguishes absent from null)
 
 ## Control Plane vs Execution Plane
 

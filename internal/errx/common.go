@@ -129,7 +129,7 @@ var (
 	ErrCampaignName        = New(BadRequest, "Campaign name length must be between 3 and 50 characters.")
 	ErrCampaignDescription = New(BadRequest, "Campaign description length must be below 300 characters.")
 	ErrCampaignDailyLimit  = New(BadRequest, "Daily limit must be between 3 and 10000000.")
-	ErrCampaignStartDate   = New(BadRequest, "Start date must be in the future, use null if you want to start now.")
+	ErrCampaignStartDate   = New(BadRequest, "Start date cannot be in the past. Pick today or later, or clear it (null) to start right away.")
 	ErrCampaignEndDate     = New(BadRequest, "End date must be in the future.")
 	ErrCampaignLimit       = New(BadRequest, "You reached your limit for campaigns, please try again later.")
 

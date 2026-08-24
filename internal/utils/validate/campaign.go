@@ -32,8 +32,12 @@ func CampaignDailyLimit(val int) *errx.Error {
 	return nil
 }
 
+// CampaignStartDate accepts today and future dates. The dashboard's date
+// picker sends midnight in the user's timezone, so "today" always sits a few
+// hours in the past at submit time; a 24h grace keeps "today = start now"
+// working from any timezone while still rejecting genuinely past dates.
 func CampaignStartDate(date time.Time) *errx.Error {
-	if !date.After(time.Now()) {
+	if date.Before(time.Now().Add(-24 * time.Hour)) {
 		return errx.ErrCampaignStartDate
 	}
 	return nil

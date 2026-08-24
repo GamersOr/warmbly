@@ -81,13 +81,15 @@ Campaigns send only inside the **weekly sending windows** you define, in the cam
 
 Within a window Warmbly spreads the day's emails evenly, adds random jitter, and rounds to natural send times so nothing arrives in obvious bursts. A mailbox with its own timezone is also kept inside its local business hours (`8am` to `8pm`).
 
-Optional **campaign dates** bound when it may send. Leave both blank to run open-ended.
+Optional **campaign dates** bound when it may send. Leave both blank to run open-ended. Picking today as the start date means "start now", and clearing a start date on a running campaign removes the wait entirely. Schedule changes on an active campaign take effect immediately: the next send is recomputed on save, so a campaign waiting on a future start date starts sending as soon as you clear or shorten it.
 
 ## Start and stop
 
 The play and pause buttons work from the list row or the detail view. Starting moves the campaign to **active** and begins scheduling inside your windows and limits; pausing stops new scheduling immediately and resumes from where it left off.
 
-A campaign can pause itself: **paused, no accounts** when it loses every sender, **paused, trial expired** when a trial ends, and **auto-paused** when a guardrail trips. It moves to **finished** once every contact completes the sequence. Configured to do so, it also stops following up with a contact the moment they reply.
+A campaign can pause itself: **paused, no accounts** when it loses every sender, **paused, trial expired** when a trial ends, and **auto-paused** when a guardrail trips. It moves to **finished** once every contact completes the sequence or its end date passes. Configured to do so, it also stops following up with a contact the moment they reply.
+
+A finished campaign can be started again: after extending or clearing its end date, or adding new leads, pressing play resumes it. If there is genuinely nothing left to send it finishes again immediately with a message saying so.
 
 ## Auto-pause guardrails
 

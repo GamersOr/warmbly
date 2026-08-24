@@ -79,6 +79,13 @@ const (
 	// tick retries it; this bounds that loop for a mailbox that can never send.
 	CampaignSendMaxAttempts = 5
 
+	// CampaignNotDueGraceSeconds is how far in the future a step's hard
+	// constraints (wait_after, start date, sending window, mailbox min-gap)
+	// may sit while a firing task still sends it. Beyond this the scheduler
+	// reports the step deferred so the task reschedules instead of sending a
+	// follow-up early; a task that fired on time always passes.
+	CampaignNotDueGraceSeconds = 60
+
 	// Webhook/integration fan-out throttle. Caps how many events of a single
 	// type one org can fan out to its webhooks + integration sinks
 	// (Slack/Discord/CRM) per minute — the backstop against a campaign "notify"

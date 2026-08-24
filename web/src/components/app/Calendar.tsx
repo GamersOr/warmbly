@@ -13,6 +13,8 @@ import {
   isSameMonth,
   isSameDay,
   isToday,
+  isBefore,
+  startOfDay,
 } from "date-fns";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 
@@ -21,11 +23,14 @@ export default function Calendar({
   active,
   close,
   onSubmit,
+  minDate,
 }: {
   date: null | Date,
   active: boolean,
   close: () => void;
   onSubmit: (d: Date | null) => void,
+  /** Days before this date render disabled (compared at day granularity). */
+  minDate?: Date,
 }) {
   const [currentMonth, setCurrentMonth] = React.useState(date || new Date());
 
@@ -171,23 +176,27 @@ export default function Calendar({
                       const isSelected = date && isSameDay(day, date);
                       const isCurrentDay = isToday(day);
                       const isCurrentMonth = isSameMonth(day, currentMonth);
+                      const isDisabled = !!minDate && isBefore(day, startOfDay(minDate));
 
                       return (
                         <button
                           key={day.toString()}
                           type="button"
+                          disabled={isDisabled}
                           onClick={() => {
                             handleDateSelect(day);
                             if (!isCurrentMonth) setCurrentMonth(day);
                           }}
                           className={`aspect-square w-full inline-flex items-center justify-center text-[12px] rounded-md transition-colors ${
-                            isSelected
-                              ? "bg-sky-600 text-white font-medium"
-                              : isCurrentDay
-                                ? "bg-sky-50 text-sky-700 font-medium hover:bg-sky-100"
-                                : isCurrentMonth
-                                  ? "text-slate-700 hover:bg-slate-100"
-                                  : "text-slate-300 hover:bg-slate-50"
+                            isDisabled
+                              ? "text-slate-300 cursor-not-allowed"
+                              : isSelected
+                                ? "bg-sky-600 text-white font-medium"
+                                : isCurrentDay
+                                  ? "bg-sky-50 text-sky-700 font-medium hover:bg-sky-100"
+                                  : isCurrentMonth
+                                    ? "text-slate-700 hover:bg-slate-100"
+                                    : "text-slate-300 hover:bg-slate-50"
                           }`}
                         >
                           {format(day, "d")}

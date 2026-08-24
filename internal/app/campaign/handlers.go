@@ -111,7 +111,32 @@ func (s *campaignService) Overview(ctx context.Context, orgID string) (*models.C
 }
 
 func (s *campaignService) Update(ctx context.Context, userID, query string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error) {
-	return s.campaignRepository.Update(ctx, userID, query, data)
+	resp, err := s.campaignRepository.Update(ctx, userID, query, data)
+	if err != nil {
+		return nil, err
+	}
+	// A schedule edit on a running campaign must move its parked wakeup task:
+	// otherwise a cleared or earlier start date only takes effect when the old
+	// slot fires, and the campaign looks stuck until then (issue #171).
+	if data.TouchesSchedule() && resp != nil && resp.Status == "active" {
+		s.rescheduleCampaignWakeup(ctx, resp.ID)
+	}
+	return resp, nil
+}
+
+// rescheduleCampaignWakeup drops the campaign's parked pending tasks and seeds
+// a fresh wakeup from the just-saved schedule. Best-effort: enqueue handles the
+// no-mailbox/completed cases itself, and the campaign reconciler re-seeds any
+// chain left without a task.
+func (s *campaignService) rescheduleCampaignWakeup(ctx context.Context, campaignID uuid.UUID) {
+	if s.taskRepo != nil {
+		if pending, err := s.campaignRepository.GetPendingCampaignTasks(ctx, campaignID); err == nil {
+			for _, t := range pending {
+				_ = s.taskRepo.DeleteTask(ctx, t.ID)
+			}
+		}
+	}
+	_ = s.enqueueCampaignWakeup(ctx, campaignID)
 }
 
 func (s *campaignService) Delete(ctx context.Context, userID, id string) *errx.Error {
@@ -147,12 +172,16 @@ func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, ca
 
 	// Verify status allows starting. paused_guardrail is included: an
 	// auto-pause is meant to be reviewed and then explicitly restarted, not to
-	// become a dead end the owner cannot recover from.
+	// become a dead end the owner cannot recover from. completed is included
+	// for the same reason: a campaign closed by a passed end date must be
+	// restartable once the date is extended or cleared, and a truly finished
+	// one just re-completes in enqueueCampaignWakeup with a clear message.
 	startable := map[string]bool{
-		"draft": true, "paused": true, "paused_no_accounts": true, "paused_guardrail": true,
+		"draft": true, "paused": true, "paused_no_accounts": true,
+		"paused_guardrail": true, "completed": true,
 	}
 	if !startable[campaign.Status] {
-		return errx.New(errx.BadRequest, "campaign must be in draft, paused, paused_no_accounts, or paused_guardrail status to start")
+		return errx.New(errx.BadRequest, "campaign must be in draft, paused, or completed status to start")
 	}
 
 	// Check cooldown
@@ -276,6 +305,9 @@ func (s *campaignService) enqueueCampaignWakeup(ctx context.Context, campaignID 
 		case errors.Is(err, scheduler.ErrCampaignCompleted):
 			_ = s.campaignRepository.UpdateStatusWithLock(ctx, campaignID, "completed")
 			return errx.New(errx.BadRequest, "campaign has no remaining contacts to send")
+		case errors.Is(err, scheduler.ErrCampaignEnded):
+			_ = s.campaignRepository.UpdateStatusWithLock(ctx, campaignID, "completed")
+			return errx.New(errx.BadRequest, "campaign is past its end date; extend or clear the end date to keep sending")
 		default:
 			sentry.CaptureException(err)
 			return errx.InternalError()

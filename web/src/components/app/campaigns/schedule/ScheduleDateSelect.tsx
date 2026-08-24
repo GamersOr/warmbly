@@ -8,10 +8,12 @@ export default function DateSelect({
     title,
     value,
     onChange,
+    minDate,
 }: {
     title: string;
     value: Date | null;
     onChange: (v: Date | null) => void;
+    minDate?: Date;
 }) {
     const [open, setOpen] = React.useState(false);
     const modalRef = React.useRef<HTMLDivElement>(null);
@@ -62,7 +64,7 @@ export default function DateSelect({
                         <span className="text-slate-400">Not set</span>
                     )}
                 </button>
-                <Calendar date={value} active={open} close={() => setOpen(false)} onSubmit={onChange} />
+                <Calendar date={value} active={open} close={() => setOpen(false)} onSubmit={onChange} minDate={minDate} />
             </div>
         </div>
     );

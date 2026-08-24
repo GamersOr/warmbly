@@ -121,8 +121,8 @@ Create a campaign. Only `name` is required, every other field is optional and ap
 | `risky_emails` | boolean | no | Allow sending to risky/unverified addresses. |
 | `cc` | string[] | no | Static CC list. |
 | `bcc` | string[] | no | Static BCC list. |
-| `start_date` | string (RFC 3339) | no | Earliest send time. |
-| `end_date` | string (RFC 3339) | no | Latest send time. |
+| `start_date` | string (RFC 3339), nullable | no | Earliest send time. Today or later; omit or send `null` to start as soon as the campaign is active. |
+| `end_date` | string (RFC 3339), nullable | no | Latest send time. Must be in the future; omit or send `null` for an open-ended campaign. |
 | `timezone` | string | no | IANA timezone for the schedule. |
 | `days` | integer (0-127) | no | Legacy weekday bitmask (superseded by `schedule_windows`). |
 | `start_time` | string | no | Legacy daily start (`HH:MM`). |
@@ -200,7 +200,7 @@ Patch any subset of campaign fields. Omitted fields are left unchanged. The expl
 
 ### Request body
 
-Every field is optional. Scalar fields use nullable pointers, so any field you send is applied. Notable fields: `name`, `description`, `status`, `stop_on_reply`, `open_tracking`, `link_tracking`, `text_only`, `daily_limit`, `unsubscribe_header`, `risky_emails`, `cc`, `bcc`, `start_date`, `end_date`, `timezone`, `days`, `start_time`, `end_time`, `schedule_windows`, `email_tags`, `folders`, `contact_order_by`, `contact_order_dir`, `contact_order_field`, `sender_strategy`, `rotation_mode`, `ramp_enabled`, `ramp_start`, `ramp_increment`, `ramp_ceiling`, `esp_match_mode`, `max_new_leads_per_day`, `prioritize_new_leads`, `tracking_domain`.
+Every field is optional. Scalar fields use nullable pointers, so any field you send is applied. `start_date` and `end_date` additionally accept an explicit `null` to clear the stored date: a null `start_date` means "start now" and a null `end_date` means "run open-ended". Changing any schedule field (`start_date`, `end_date`, `timezone`, `days`, `start_time`, `end_time`, `schedule_windows`) on an active campaign reschedules its next send immediately, so clearing a future start date takes effect right away. Notable fields: `name`, `description`, `status`, `stop_on_reply`, `open_tracking`, `link_tracking`, `text_only`, `daily_limit`, `unsubscribe_header`, `risky_emails`, `cc`, `bcc`, `start_date`, `end_date`, `timezone`, `days`, `start_time`, `end_time`, `schedule_windows`, `email_tags`, `folders`, `contact_order_by`, `contact_order_dir`, `contact_order_field`, `sender_strategy`, `rotation_mode`, `ramp_enabled`, `ramp_start`, `ramp_increment`, `ramp_ceiling`, `esp_match_mode`, `max_new_leads_per_day`, `prioritize_new_leads`, `tracking_domain`.
 
 ```json
 {
@@ -617,7 +617,7 @@ Send a one-off preview of a sequence step to a chosen recipient through a chosen
 
 `POST /campaigns/:id/start`
 
-Start (activate) the campaign so it begins sending real mail. **Scope** `SEND_CAMPAIGNS` · **Org permission** `send_campaigns`.
+Start (activate) the campaign so it begins sending real mail. Works from `draft`, any paused status, or `completed` (a campaign closed by a passed end date resumes once the date is extended or cleared; one with nothing left to send re-completes with a `400` explaining why). **Scope** `SEND_CAMPAIGNS` · **Org permission** `send_campaigns`.
 
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
