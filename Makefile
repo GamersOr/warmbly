@@ -22,7 +22,7 @@ PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.1
 PROTO_DIR := internal/tasks/proto
 PROTO_GEN_FILES := $(PROTO_DIR)/tasks.pb.go
 
-.PHONY: setup-tools fmt lint proto check-proto \
+.PHONY: setup-tools fmt lint check-migrations proto check-proto \
         up claim doctor cli seed-demo seed seed-plan sandbox sandbox-seed sandbox-simulate reset logs status stop down test-seed \
         restart restart-go restart-all infra infra-down app app-down app-logs \
         backend consumer worker run dev tracking realtime web \
@@ -39,8 +39,14 @@ setup-tools:
 fmt:
 	gofmt -w ./cmd ./internal
 
-lint:
+lint: check-migrations
 	$(GO_BIN)/golangci-lint run --timeout=5m
+
+# Duplicate migration versions only collide once two PRs are both on main, and
+# the backend then refuses to boot. Runs in a second; part of `make lint` so the
+# documented ship signal covers it.
+check-migrations:
+	@./scripts/check-migrations.sh
 
 proto:
 	@command -v protoc >/dev/null || (echo "protoc not found in PATH"; exit 1)

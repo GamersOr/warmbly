@@ -27,6 +27,13 @@ Other CI-touching rules:
 - never push without first re-running the relevant `*build*` / `*typecheck*` / `*lint*` step on the affected tree
 - a `make lint` (or `gofmt -l`) failure is always a real CI failure; do not push hoping it will pass
 
+Migrations are numbered against `main`, not against your branch:
+
+- a new migration takes the next six-digit version after the highest one on `main`, with a matching `.up.sql` and `.down.sql`
+- two branches that each pick "the next number" independently are both green alone and collide once both merge; golang-migrate then refuses to build its source driver and the backend restart-loops at boot, so nothing deploys
+- run `make check-migrations` (also a prerequisite of `make lint`, and its own CI job) before pushing anything that adds a migration
+- if a duplicate does reach `main`, renumber the migration that has NOT been released yet. The other one is already recorded in deployments' `schema_migrations`, and renumbering it makes them re-apply it
+
 Docs stay in sync:
 
 - the customer docs site lives in `docs/` (Fumadocs, served at docs.warmbly.com); content is MDX under `docs/content/docs/` in three sections: `guides/` (product behavior), `learn/` (fundamentals), `api/` (API reference)
@@ -81,7 +88,7 @@ Keep the loop fast. The signals that matter are formatting, lint, and typecheck 
 Always, before calling a Go change done:
 
 - run `make fmt` (or `gofmt -w cmd internal`); `gofmt -l ./...` must print nothing
-- run `make lint` (golangci-lint)
+- run `make lint` (golangci-lint, which first runs `make check-migrations`)
 
 For frontend changes, run `pnpm typecheck` and `pnpm lint` in any tree you touched.
 
