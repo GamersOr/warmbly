@@ -39,19 +39,50 @@ type OAuthCredentials struct {
 	ExpiresAt    time.Time
 }
 
+// AccountScope confines a mailbox lookup to one tenant. The organization is the
+// tenant boundary: a multi-org user must never send organization A's campaign
+// from an organization B mailbox, so resolution keys on organization_id and
+// never on the owner.
+type AccountScope struct {
+	// OrgID is the tenant key. Nil is not a wildcard — it resolves to no
+	// mailboxes at all, matching how the campaign task halts an orgless
+	// campaign rather than sending it unchecked.
+	OrgID *uuid.UUID
+}
+
+// NewAccountScope builds the scope for an organization, treating the nil UUID
+// the same as no organization.
+func NewAccountScope(orgID *uuid.UUID) AccountScope {
+	if orgID != nil && *orgID == uuid.Nil {
+		orgID = nil
+	}
+	return AccountScope{OrgID: orgID}
+}
+
+// tenant returns the organization to query for, and false when the scope has
+// none — the caller then answers "no mailboxes" instead of running a query with
+// an unbound tenant.
+func (s AccountScope) tenant() (uuid.UUID, bool) {
+	if s.OrgID == nil {
+		return uuid.Nil, false
+	}
+	return *s.OrgID, true
+}
+
 type EmailRepository interface {
 	Search(ctx context.Context, userID, search string, cursor, tag *string, limit int32, allowedAccountIDs []uuid.UUID) (*models.EmailsResult, *errx.Error)
 	Get(ctx context.Context, userID, emailAccountID string) (*models.Email, *errx.Error)
 	GetByID(ctx context.Context, emailAccountID uuid.UUID) (*models.Email, *errx.Error)
-	GetByTags(ctx context.Context, userID string, tags []string) ([]models.Email, *errx.Error)
-	// GetAllActiveByUser returns every active mailbox for a user (no tag/sender
-	// filter) — the "all" sender pool used when a campaign picks neither tags nor
-	// explicit accounts.
-	GetAllActiveByUser(ctx context.Context, userID string) ([]models.Email, *errx.Error)
+	// GetByTags returns the scope's active mailboxes carrying any of the tags.
+	GetByTags(ctx context.Context, scope AccountScope, tags []string) ([]models.Email, *errx.Error)
+	// GetAllActiveInScope returns every active mailbox in the scope (no
+	// tag/sender filter) — the "all" sender pool used when a campaign picks
+	// neither tags nor explicit accounts.
+	GetAllActiveInScope(ctx context.Context, scope AccountScope) ([]models.Email, *errx.Error)
 	// GetByCampaignSenders returns the active mailboxes in a campaign's explicit
 	// sender pool, carrying each sender's rotation metadata (weight,
 	// rotation_position, last_sent_at) for the scheduler's rotation modes.
-	GetByCampaignSenders(ctx context.Context, userID string, campaignID uuid.UUID) ([]CampaignSenderAccount, *errx.Error)
+	GetByCampaignSenders(ctx context.Context, scope AccountScope, campaignID uuid.UUID) ([]CampaignSenderAccount, *errx.Error)
 	GetSMTPCredentials(ctx context.Context, emailAccountID uuid.UUID) (*SMTPCredentials, *errx.Error)
 	GetOAuthCredentials(ctx context.Context, emailAccountID uuid.UUID) (*OAuthCredentials, *errx.Error)
 	GetWorkerID(ctx context.Context, emailAccountID uuid.UUID) (*uuid.UUID, *errx.Error)
@@ -1309,9 +1340,13 @@ func (r *emailRepository) GetByID(ctx context.Context, emailAccountID uuid.UUID)
 	return &i, nil
 }
 
-// GetByTags retrieves email accounts matching any of the specified tags
-func (r *emailRepository) GetByTags(ctx context.Context, userID string, tags []string) ([]models.Email, *errx.Error) {
-	if len(tags) == 0 {
+// GetByTags retrieves the scope's active mailboxes matching any of the tags.
+// Tags themselves are owned by a user, not an organization, so a multi-org
+// user's tag can span workspaces — the scope predicate is what keeps the
+// resolved senders inside one tenant.
+func (r *emailRepository) GetByTags(ctx context.Context, scope AccountScope, tags []string) ([]models.Email, *errx.Error) {
+	orgID, ok := scope.tenant()
+	if len(tags) == 0 || !ok {
 		return []models.Email{}, nil
 	}
 
@@ -1326,15 +1361,15 @@ func (r *emailRepository) GetByTags(ctx context.Context, userID string, tags []s
 		 ea.created_at, ea.updated_at
 		FROM email_accounts ea
 		JOIN email_tags eat ON eat.email_id = ea.id
-		WHERE ea.user_id = $1
+		WHERE ea.organization_id = $1
 		  AND eat.tag_id = ANY($2)
 		  AND ea.status = 'active'
 		ORDER BY ea.id
 	`
 
-	rows, err := r.DB.Query(ctx, query, userID, tags)
+	rows, err := r.DB.Query(ctx, query, orgID, tags)
 	if err != nil {
-		db.CaptureError(err, query, []any{userID, tags}, "query")
+		db.CaptureError(err, query, []any{orgID, tags}, "query")
 		return nil, errx.InternalError()
 	}
 	defer rows.Close()
@@ -1362,9 +1397,14 @@ func (r *emailRepository) GetByTags(ctx context.Context, userID string, tags []s
 	return emails, nil
 }
 
-// GetAllActiveByUser returns every active mailbox for a user (the "all" sender
-// pool). Same projection as GetByTags, without the tag join.
-func (r *emailRepository) GetAllActiveByUser(ctx context.Context, userID string) ([]models.Email, *errx.Error) {
+// GetAllActiveInScope returns every active mailbox in the scope (the "all"
+// sender pool). Same projection as GetByTags, without the tag join.
+func (r *emailRepository) GetAllActiveInScope(ctx context.Context, scope AccountScope) ([]models.Email, *errx.Error) {
+	orgID, ok := scope.tenant()
+	if !ok {
+		return []models.Email{}, nil
+	}
+
 	query := `
 		SELECT
 		 ea.id, ea.user_id, ea.email, ea.name, ea.signature_plain, ea.signature_html, ea.signature_sync, ea.signature_code,
@@ -1375,14 +1415,14 @@ func (r *emailRepository) GetAllActiveByUser(ctx context.Context, userID string)
 		 ea.auth_state, ea.auth_failing_since,
 		 ea.created_at, ea.updated_at
 		FROM email_accounts ea
-		WHERE ea.user_id = $1
+		WHERE ea.organization_id = $1
 		  AND ea.status = 'active'
 		ORDER BY ea.id
 	`
 
-	rows, err := r.DB.Query(ctx, query, userID)
+	rows, err := r.DB.Query(ctx, query, orgID)
 	if err != nil {
-		db.CaptureError(err, query, []any{userID}, "query")
+		db.CaptureError(err, query, []any{orgID}, "query")
 		return nil, errx.InternalError()
 	}
 	defer rows.Close()
@@ -1424,7 +1464,12 @@ type CampaignSenderAccount struct {
 // explicit campaign_senders pool instead of email tags. Only enabled senders
 // backing an active mailbox are returned; the per-sender weight/cursor/last-send
 // ride along for rotation.
-func (r *emailRepository) GetByCampaignSenders(ctx context.Context, userID string, campaignID uuid.UUID) ([]CampaignSenderAccount, *errx.Error) {
+func (r *emailRepository) GetByCampaignSenders(ctx context.Context, scope AccountScope, campaignID uuid.UUID) ([]CampaignSenderAccount, *errx.Error) {
+	orgID, ok := scope.tenant()
+	if !ok {
+		return nil, nil
+	}
+
 	query := `
 		SELECT
 		 ea.id, ea.user_id, ea.email, ea.name, ea.signature_plain, ea.signature_html, ea.signature_sync, ea.signature_code,
@@ -1439,14 +1484,14 @@ func (r *emailRepository) GetByCampaignSenders(ctx context.Context, userID strin
 		JOIN campaign_senders cs ON cs.email_account_id = ea.id
 		WHERE cs.campaign_id = $2
 		  AND cs.enabled
-		  AND ea.user_id = $1
+		  AND ea.organization_id = $1
 		  AND ea.status = 'active'
 		ORDER BY ea.id
 	`
 
-	rows, err := r.DB.Query(ctx, query, userID, campaignID)
+	rows, err := r.DB.Query(ctx, query, orgID, campaignID)
 	if err != nil {
-		db.CaptureError(err, query, []any{userID, campaignID}, "query")
+		db.CaptureError(err, query, []any{orgID, campaignID}, "query")
 		return nil, errx.InternalError()
 	}
 	defer rows.Close()

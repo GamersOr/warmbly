@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -318,12 +319,10 @@ func liveCampaignService(t *testing.T, handle *db.DB, sender EmailSender) *tasks
 // The regression issue #168 asks for: a campaign with no organization, whose
 // recipient is on the suppression list, must not send.
 //
-// Suppression is enforced twice, and the missing tenant defeats both. Routing
+// Suppression is enforced twice, and the missing tenant defeats both: routing
 // excludes a suppressed lead by joining suppressed_recipients on the campaign's
-// organization_id, which matches nothing when that is NULL, so the scheduler
-// still hands the suppressed contact back (asserted here, because it is what
-// makes this a real regression rather than a test that passes by accident).
-// The send gate then has to be the thing that stops it.
+// organization_id, which matches nothing when that is NULL. The send gate is
+// what has to stop it, and that is what this asserts.
 func TestLiveOrglessCampaignDoesNotSendToSuppressedRecipient(t *testing.T) {
 	handle := liveCampaignDB(t)
 	svc := liveCampaignService(t, handle, nil)
@@ -332,10 +331,13 @@ func TestLiveOrglessCampaignDoesNotSendToSuppressedRecipient(t *testing.T) {
 	f.suppress(t, "unsubscribed")
 	f.dropOrganization(t)
 
-	// Routing's own suppression filter is bypassed: the lead is still routable.
+	// Sender resolution is org-scoped too (issue #167), so an orgless campaign
+	// now finds no mailboxes before routing is even consulted. That is a second
+	// lock on the same door, not the one under test: the tick below still runs
+	// the send gate, which is what must refuse.
 	_, pair, _, err := svc.scheduler.CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil || pair == nil {
-		t.Fatalf("expected the suppressed lead to still route on an orgless campaign, got pair=%v err=%v", pair, err)
+	if pair != nil || !errors.Is(err, scheduler.ErrNoEmailAccounts) {
+		t.Fatalf("expected an orgless campaign to resolve no senders, got pair=%v err=%v", pair, err)
 	}
 
 	taskID := f.queueTick(t, svc.taskRepo)

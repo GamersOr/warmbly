@@ -43,7 +43,6 @@ type CampaignRepository interface {
 	Update(ctx context.Context, userID, query string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error)
 	UpdateStatus(ctx context.Context, campaignID uuid.UUID, status string) error
 	UpdateStatusWithLock(ctx context.Context, campaignID uuid.UUID, status string) error
-	PauseAllByUserID(ctx context.Context, userID uuid.UUID, reason string) error
 	Delete(ctx context.Context, userID, id string) error
 
 	// Campaign start/stop
@@ -1375,13 +1374,6 @@ func (r *campaignRepository) UpdateStatus(ctx context.Context, campaignID uuid.U
 	return err
 }
 
-// PauseAllByUserID pauses all active campaigns for a user
-func (r *campaignRepository) PauseAllByUserID(ctx context.Context, userID uuid.UUID, reason string) error {
-	query := `UPDATE campaigns SET status = $1, updated_at = NOW() WHERE user_id = $2 AND status = 'active'`
-	_, err := r.DB.Exec(ctx, query, reason, userID)
-	return err
-}
-
 // StartCampaign sets campaign status to active and updates last_status_change_at.
 // When ramp is enabled and not yet started (ramp_level = 0), it also seeds the
 // ramp at ramp_start for today so the first day sends at the ramp floor rather
@@ -1562,10 +1554,13 @@ func (r *campaignRepository) AccountHasActiveCampaign(ctx context.Context, accou
 			  AND ea.status = 'active'
 			  AND c.status = 'active'
 			UNION ALL
-			-- "all" campaigns (no tags, no enabled senders) back every active mailbox of their owner
+			-- "all" campaigns (no tags, no enabled senders) back every active
+			-- mailbox in their tenant. Joined on the organization, like the
+			-- scheduler's AccountScope: on the owner it also counted a multi-org
+			-- user's OTHER workspace.
 			SELECT 1
 			FROM campaigns c
-			JOIN email_accounts ea ON ea.user_id = c.user_id
+			JOIN email_accounts ea ON ea.organization_id = c.organization_id
 			WHERE ea.id = $1
 			  AND ea.status = 'active'
 			  AND c.status = 'active'
@@ -1600,10 +1595,11 @@ func (r *campaignRepository) CountActiveCampaignsForAccount(ctx context.Context,
 			  AND cs.enabled
 			  AND c.status = 'active'
 			UNION
-			-- "all" campaigns (no tags, no enabled senders) count for every active mailbox of their owner
+			-- "all" campaigns (no tags, no enabled senders) count for every active
+			-- mailbox in their tenant — same scope rule as the scheduler.
 			SELECT c.id
 			FROM campaigns c
-			JOIN email_accounts ea ON ea.user_id = c.user_id
+			JOIN email_accounts ea ON ea.organization_id = c.organization_id
 			WHERE ea.id = $1
 			  AND ea.status = 'active'
 			  AND c.status = 'active'

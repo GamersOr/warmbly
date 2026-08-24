@@ -66,7 +66,9 @@ func NewService(emailRepo repository.EmailRepository, composeRepo repository.Com
 }
 
 func (s *service) Candidates(ctx context.Context, userID, orgID uuid.UUID, address string) ([]Candidate, *errx.Error) {
-	accounts, xerr := s.emailRepo.GetAllActiveByUser(ctx, userID.String())
+	// Scoped to the caller's current organization, not to the caller: a member of
+	// two workspaces must not compose from the other workspace's mailboxes.
+	accounts, xerr := s.emailRepo.GetAllActiveInScope(ctx, repository.NewAccountScope(&orgID))
 	if xerr != nil {
 		return nil, xerr
 	}
@@ -148,9 +150,10 @@ func (s *service) Resolve(ctx context.Context, userID, orgID uuid.UUID, accountI
 
 	// Tag-scoped auto: restrict the pool to mailboxes carrying the tag,
 	// then apply the same best-with-budget-first rule within it. GetByTags
-	// is already user-scoped, so a foreign tag id just yields no members.
+	// is scoped to the same organization, so a foreign tag id just yields no
+	// members.
 	if tagID != nil {
-		members, merr := s.emailRepo.GetByTags(ctx, userID.String(), []string{tagID.String()})
+		members, merr := s.emailRepo.GetByTags(ctx, repository.NewAccountScope(&orgID), []string{tagID.String()})
 		if merr != nil {
 			return nil, false, merr
 		}

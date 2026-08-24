@@ -78,7 +78,7 @@ For drafts written automatically on every inbound reply and held for approval, t
 
 ### Auto mailbox selection
 
-**From** defaults to **Auto**, scoring every active mailbox for the recipient: an existing conversation with them wins first (contacts should keep hearing from one address), then the most remaining daily budget, with domain auth health as the tiebreaker.
+**From** defaults to **Auto**, scoring every active mailbox in the current workspace for the recipient: an existing conversation with them wins first (contacts should keep hearing from one address), then the most remaining daily budget, with domain auth health as the tiebreaker.
 
 The picker shows the pick and its reason before sending. Opening it reveals every mailbox with a budget bar (sent today against its limit), a history badge, and an auth-health dot, so overriding is informed. The menu filters by mailbox tag; with a tag selected, Auto picks within that group only, which is the `from_tag_id` field on `POST /unibox/compose`.
 

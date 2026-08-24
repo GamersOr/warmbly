@@ -1509,7 +1509,8 @@ func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID u
 	}
 
 	if settings.Preflight.CheckTrackingDomain && (campaign.OpenTracking || campaign.LinkTracking) {
-		accounts, err := s.emailRepo.GetByTags(ctx, campaign.UserID, campaign.EmailTags)
+		scope := repository.NewAccountScope(campaign.OrganizationID)
+		accounts, err := s.emailRepo.GetByTags(ctx, scope, campaign.EmailTags)
 		if err != nil || len(accounts) == 0 {
 			checks = append(checks, models.PreflightCheckResult{
 				Key:         "tracking_domain",
