@@ -46,6 +46,9 @@ func EmailName(name *string) bool {
 	return true
 }
 
+// ValidateTrackingDomain checks a mailbox's custom tracking domain against the
+// same rule as the campaign override. Callers normalize the value first, so a
+// pasted URL is reduced to its host rather than rejected.
 func ValidateTrackingDomain(domain string) *errx.Error {
 	if domain == "" {
 		return errx.ErrEmailTrackingDomain
@@ -53,19 +56,9 @@ func ValidateTrackingDomain(domain string) *errx.Error {
 	if len(domain) > 253 {
 		return errx.ErrEmailTrackingDomainLength
 	}
-
-	domain = strings.ToLower(domain)
-
-	domainRegex := regexp.MustCompile(`^([a-z0-9-]+\.)+[a-z]{2,}$`)
-
-	if !domainRegex.MatchString(domain) {
+	if !TrackingHostname(strings.ToLower(domain)) {
 		return errx.ErrEmailTrackingDomain
 	}
-
-	if strings.HasPrefix(domain, "-") || strings.HasSuffix(domain, "-") {
-		return errx.ErrEmailTrackingDomain
-	}
-
 	return nil
 }
 

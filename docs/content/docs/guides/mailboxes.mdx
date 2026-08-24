@@ -67,7 +67,28 @@ SMTP mailboxes get a **Keep a copy of sent mail** toggle, on by default. SMTP su
 
 Turn it off when your provider already saves its own copy of anything submitted over SMTP, which Gmail, Fastmail and Zoho do, or the folder ends up with two of every message. Gmail and Outlook mailboxes connected with OAuth never show the toggle: their APIs file the copy themselves. Warmup mail is never filed, since it would bury your real sent mail.
 
-The same tab sets the **display name**, **reply-to** (empty uses the mailbox address), **signature** in plain text and HTML, **tags** for grouping, and a **custom tracking domain**. The tracking domain routes opens and clicks through your own subdomain instead of the shared host; Warmbly gives you a `CNAME` to add and verifies it on save.
+The same tab sets the **display name**, **reply-to** (empty uses the mailbox address), **signature** in plain text and HTML, and **tags** for grouping.
+
+### Custom tracking domain
+
+Open pixels and click links go out on a shared tracking host by default, which means their reputation is the sum of everyone else using it. Pointing a subdomain of the domain you send from at that host puts them on your own name instead.
+
+Type the subdomain into **Custom tracking domain** in the mailbox's Settings tab. Warmbly shows the exact `CNAME` to add, with the value taken from the host this Warmbly install serves tracking on (on a self-hosted install, that is whatever the operator set `TRACKING_DOMAIN` to). Add the record at your DNS provider, then press **Save & verify**.
+
+Verification resolves the record live and reports what it finds:
+
+| What it says | What it means |
+| --- | --- |
+| **Verified** | The subdomain resolves to the tracking host. New sends use it. |
+| No DNS record yet | The name does not exist. The record has not been added, or has not propagated; usually minutes, up to an hour. |
+| Points at something else | The record exists but its value is another host. The message names what it found so you can compare it with what you typed. |
+| Nothing to point at | This install has no tracking host configured. Nothing can verify until an operator sets `TRACKING_DOMAIN`. |
+
+A provider that flattens `CNAME` records (ALIAS records, apex flattening, proxied records) still verifies: Warmbly compares the addresses when there is no `CNAME` to read.
+
+Press **Check again** any time to re-resolve without changing the value. Warmbly also re-checks every custom tracking domain on its own, hourly, so a record that finishes propagating after you saved starts being used without you doing anything, and one that later stops pointing at the tracking host stops being used instead of quietly breaking every link.
+
+Until it verifies, tracking falls back to the shared host, so an unverified domain never breaks sending: links keep working, they just are not on your name yet. Links already sent keep working after a change; new sends pick up the new domain.
 
 ## Warmup
 

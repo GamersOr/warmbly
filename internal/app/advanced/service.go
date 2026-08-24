@@ -1520,13 +1520,19 @@ func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID u
 			})
 			recommendations = append(recommendations, "Attach at least one sender account with tracking domain.")
 		} else {
-			missing := 0
+			// Unverified counts as missing: an unverified domain is not used
+			// at send time, so those mailboxes track on the shared host just
+			// like the ones with nothing set.
+			missing, unverified := 0, 0
 			for _, account := range accounts {
-				if strings.TrimSpace(account.TrackingDomain) == "" {
+				switch {
+				case strings.TrimSpace(account.TrackingDomain) == "":
 					missing++
+				case !account.TrackingDomainVerified:
+					unverified++
 				}
 			}
-			pass := missing == 0
+			pass := missing == 0 && unverified == 0
 			check := models.PreflightCheckResult{
 				Key:      "tracking_domain",
 				Passed:   pass,
@@ -1534,9 +1540,16 @@ func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID u
 				Message:  "Tracking domain configured for all senders.",
 			}
 			if !pass {
-				check.Message = fmt.Sprintf("%d sender account(s) missing tracking domain.", missing)
-				check.Remediation = "Set tracking_domain on every sender account used by this campaign."
-				recommendations = append(recommendations, "Configure tracking domains on all sender accounts.")
+				switch {
+				case missing > 0 && unverified > 0:
+					check.Message = fmt.Sprintf("%d sender account(s) missing tracking domain, %d not verified.", missing, unverified)
+				case unverified > 0:
+					check.Message = fmt.Sprintf("%d sender account(s) have an unverified tracking domain.", unverified)
+				default:
+					check.Message = fmt.Sprintf("%d sender account(s) missing tracking domain.", missing)
+				}
+				check.Remediation = "Set a tracking domain on every sender account used by this campaign and verify its CNAME."
+				recommendations = append(recommendations, "Configure and verify tracking domains on all sender accounts.")
 			}
 			checks = append(checks, check)
 		}

@@ -9,6 +9,7 @@ import (
 	"text/template"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/tmplfuncs"
 	"github.com/warmbly/warmbly/internal/pkg/warmpersona"
@@ -252,15 +253,19 @@ func AddSignature(body string, signature string, isHTML bool) string {
 	return body + "\n\n" + signature
 }
 
-// AddOpenTrackingPixel adds an invisible tracking pixel to HTML email
-// The pixel URL points to the Rust tracking service endpoint: /t/o/{taskID}.png
+// AddOpenTrackingPixel adds an invisible tracking pixel to HTML email.
+// The pixel URL points to the tracking service endpoint: /t/o/{taskID}.png.
+//
+// An empty host means this install has no tracking host at all, and the pixel
+// is left out. It used to fall back to a hardcoded warmbly.com name, so a
+// self-hosted deployment mailed a pixel pointing at someone else's service:
+// nothing was ever recorded, and the recipient's open was reported to a third
+// party instead.
 func AddOpenTrackingPixel(htmlBody string, taskID uuid.UUID, trackingDomain string) string {
-	if trackingDomain == "" {
-		trackingDomain = "track.warmbly.com"
+	pixelURL := config.TrackingURL(trackingDomain, fmt.Sprintf("/t/o/%s.png", taskID.String()))
+	if pixelURL == "" {
+		return htmlBody
 	}
-
-	// Use /t/o/ path to match Rust tracking service
-	pixelURL := fmt.Sprintf("https://%s/t/o/%s.png", trackingDomain, taskID.String())
 	pixel := fmt.Sprintf(`<img src="%s" width="1" height="1" style="display:none;" alt="" />`, pixelURL)
 
 	// Try to insert before closing body tag
@@ -280,8 +285,11 @@ func AddOpenTrackingPixel(htmlBody string, taskID uuid.UUID, trackingDomain stri
 // returned rows before using the rewritten body (and fall back to the
 // original body on failure) so an email can never ship dead tickets.
 func WrapLinksForTracking(htmlBody string, taskID, campaignID uuid.UUID, trackingDomain string) (string, []repository.TrackedLink) {
+	// No tracking host means no ticket can be resolved, and a wrapped link
+	// would be a dead link in a real customer's email. Ship the originals.
+	trackingDomain = config.NormalizeTrackingHost(trackingDomain)
 	if trackingDomain == "" {
-		trackingDomain = "track.warmbly.com"
+		return htmlBody, nil
 	}
 
 	// Regex to find href attributes
@@ -319,7 +327,7 @@ func WrapLinksForTracking(htmlBody string, taskID, campaignID uuid.UUID, trackin
 			Destination: originalURL,
 		})
 
-		return fmt.Sprintf(`href="https://%s/c/%s"`, trackingDomain, id.String())
+		return fmt.Sprintf(`href="%s"`, config.TrackingURL(trackingDomain, "/c/"+id.String()))
 	})
 
 	return result, links

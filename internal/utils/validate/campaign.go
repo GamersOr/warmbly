@@ -1,8 +1,6 @@
 package validate
 
 import (
-	"net"
-	"strings"
 	"time"
 
 	"github.com/warmbly/warmbly/internal/bitmask"
@@ -146,35 +144,14 @@ func CampaignMaxNewLeads(v int) *errx.Error {
 }
 
 // CampaignTrackingDomain validates a campaign-scoped tracking-domain override.
-// Empty means "fall back to the mailbox/default domain". Otherwise it must be a
-// bare hostname: no scheme, no path, no raw IP literal, and no internal/metadata
-// host — mirroring the mailbox tracking-domain rules and the webhook-SSRF posture.
+// Empty means "fall back to the mailbox/default domain". Otherwise it has to be
+// a bare hostname, by the same rule the mailbox field uses.
 func CampaignTrackingDomain(host string) *errx.Error {
 	if host == "" {
 		return nil
 	}
-	if len(host) > 253 || strings.Contains(host, "://") || strings.ContainsAny(host, " \t\r\n/\\?#@:") {
+	if !TrackingHostname(host) {
 		return errx.New(errx.BadRequest, "invalid tracking domain")
-	}
-	if net.ParseIP(host) != nil {
-		return errx.New(errx.BadRequest, "invalid tracking domain")
-	}
-	lower := strings.ToLower(host)
-	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") || lower == "metadata.google.internal" {
-		return errx.New(errx.BadRequest, "invalid tracking domain")
-	}
-	if !strings.Contains(host, ".") {
-		return errx.New(errx.BadRequest, "invalid tracking domain")
-	}
-	for _, label := range strings.Split(host, ".") {
-		if label == "" || len(label) > 63 {
-			return errx.New(errx.BadRequest, "invalid tracking domain")
-		}
-		for _, c := range label {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-') {
-				return errx.New(errx.BadRequest, "invalid tracking domain")
-			}
-		}
 	}
 	return nil
 }

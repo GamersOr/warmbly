@@ -68,7 +68,14 @@ type EmailRepository interface {
 	// warmup off entirely. The timestamp math runs in SQL so the transition
 	// is atomic and idempotent.
 	SetWarmupLifecycle(ctx context.Context, userID, emailAccountID, action string) (*models.Email, *errx.Error)
-	UpdateTrackingDomain(ctx context.Context, userID, emailAccountID, domain string, verified bool, verifiedAt *time.Time) *errx.Error
+	UpdateTrackingDomain(ctx context.Context, orgID, emailAccountID, domain string, verified bool, verifiedAt *time.Time) *errx.Error
+	// ListTrackingDomainCheckDue returns active mailboxes with a custom
+	// tracking domain that has not been resolved since staleBefore (or never),
+	// oldest-first. Drives the background re-verification sweep.
+	ListTrackingDomainCheckDue(ctx context.Context, staleBefore time.Time, limit int) ([]models.TrackingDomainTarget, *errx.Error)
+	// SetTrackingDomainVerified records a sweep's verdict for one mailbox. It
+	// never touches the domain itself.
+	SetTrackingDomainVerified(ctx context.Context, emailAccountID uuid.UUID, verified bool, verifiedAt *time.Time) *errx.Error
 	// ListAuthCheckDue returns active mailboxes whose sending-domain auth state
 	// has not been evaluated since staleBefore (or never), oldest-first, capped
 	// at limit. Drives the background SPF/DKIM/DMARC sweep.
@@ -1003,18 +1010,22 @@ func (r *emailRepository) BulkUpdateTags(ctx context.Context, userID string, ema
 	return owned, nil
 }
 
-func (r *emailRepository) UpdateTrackingDomain(ctx context.Context, userID, emailAccountID, domain string, verified bool, verifiedAt *time.Time) *errx.Error {
+// UpdateTrackingDomain writes the tracking domain and its verdict. Scoped by
+// organization, like Get and Search: a mailbox is a workspace asset, and the
+// route already admits any member holding manage_emails, so filtering on the
+// user who happened to connect it turned that permission into a 404.
+func (r *emailRepository) UpdateTrackingDomain(ctx context.Context, orgID, emailAccountID, domain string, verified bool, verifiedAt *time.Time) *errx.Error {
 	query := `
 		UPDATE email_accounts
 		SET tracking_domain = $1, tracking_domain_verified = $2, tracking_domain_verified_at = $3
-		WHERE user_id = $4 AND id = $5
+		WHERE organization_id = $4 AND id = $5
 	`
 
 	params := []any{
 		domain,
 		verified,
 		verifiedAt,
-		userID,
+		orgID,
 		emailAccountID,
 	}
 
@@ -1029,6 +1040,60 @@ func (r *emailRepository) UpdateTrackingDomain(ctx context.Context, userID, emai
 	}
 	if cmd.RowsAffected() == 0 {
 		return errx.ErrNotFound
+	}
+	return nil
+}
+
+// ListTrackingDomainCheckDue picks the mailboxes the tracking-domain sweep
+// re-resolves next. Unverified ones sort first (their verified_at is NULL), so
+// a record that has just propagated is picked up on the next pass without
+// anybody pressing anything.
+func (r *emailRepository) ListTrackingDomainCheckDue(ctx context.Context, staleBefore time.Time, limit int) ([]models.TrackingDomainTarget, *errx.Error) {
+	query := `
+		SELECT id, tracking_domain, tracking_domain_verified
+		FROM email_accounts
+		WHERE status = 'active'
+		  AND COALESCE(tracking_domain, '') <> ''
+		  AND (tracking_domain_verified_at IS NULL OR tracking_domain_verified_at < $1)
+		ORDER BY tracking_domain_verified_at ASC NULLS FIRST
+		LIMIT $2
+	`
+
+	params := []any{staleBefore, limit}
+	rows, err := r.DB.Query(ctx, query, params...)
+	if err != nil {
+		db.CaptureError(err, query, params, "query")
+		return nil, errx.InternalError()
+	}
+	defer rows.Close()
+
+	out := []models.TrackingDomainTarget{}
+	for rows.Next() {
+		var t models.TrackingDomainTarget
+		if err := rows.Scan(&t.ID, &t.Domain, &t.Verified); err != nil {
+			db.CaptureError(err, query, params, "scan")
+			return nil, errx.InternalError()
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, query, params, "rows")
+		return nil, errx.InternalError()
+	}
+	return out, nil
+}
+
+func (r *emailRepository) SetTrackingDomainVerified(ctx context.Context, emailAccountID uuid.UUID, verified bool, verifiedAt *time.Time) *errx.Error {
+	query := `
+		UPDATE email_accounts
+		SET tracking_domain_verified = $1, tracking_domain_verified_at = $2
+		WHERE id = $3
+	`
+
+	params := []any{verified, verifiedAt, emailAccountID}
+	if _, err := r.DB.Exec(ctx, query, params...); err != nil {
+		db.CaptureError(err, query, params, "exec")
+		return errx.InternalError()
 	}
 	return nil
 }

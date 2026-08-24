@@ -481,21 +481,17 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 	}
 
-	// STEP 11: Add tracking. Resolve the tracking host once: a VERIFIED
-	// campaign-scoped override wins, otherwise the mailbox/default domain.
-	// Only a verified override is honored (an unresolved/unverified host could
-	// point tracking at a hijackable target — SSRF-adjacent), matching the
-	// webhook-safety posture.
-	trackingDomain := account.TrackingDomain
-	if campaign.TrackingDomain != "" {
-		if campaign.TrackingDomainVerified {
-			trackingDomain = campaign.TrackingDomain
-		} else if s.campaignLogRepo != nil {
+	// STEP 11: Add tracking on the host resolveTrackingHost picks, and log any
+	// override that was configured but not verified so a customer whose links
+	// are not going through their own domain can see why.
+	trackingDomain, ignored := resolveTrackingHost(config.TrackingHost(), account, campaign)
+	if s.campaignLogRepo != nil {
+		for _, ign := range ignored {
 			s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
 				CampaignID: campaign.ID,
 				EventType:  "tracking_domain_unverified",
-				Message:    "Campaign tracking domain not verified; using mailbox default",
-				Metadata:   map[string]interface{}{"tracking_domain": campaign.TrackingDomain},
+				Message:    ign.Message,
+				Metadata:   map[string]interface{}{"scope": ign.Scope, "tracking_domain": ign.Domain, "mailbox": account.Email},
 			})
 		}
 	}

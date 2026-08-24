@@ -108,7 +108,7 @@ Every emailed link (password reset, invitation, the first-run claim link) is bui
 | `CORS_ALLOW_ORIGINS` | Comma separated origins allowed to call the API. Anything not listed gets `403` on preflight | derived from `PUBLIC_HOST` under compose | yes |
 | `WEBSOCKET_URL` | The websocket URL the dashboard connects to | derived under compose | yes (container start) |
 | `PHX_HOST` | The realtime service's own hostname | `localhost` | yes |
-| `TRACKING_DOMAIN` | The domain that serves open pixels and click links. Use a separate, neutral domain in production | `localhost:3000` | no |
+| `TRACKING_DOMAIN` | The host that serves open pixels and click links, and the `CNAME` value customers point their own tracking subdomain at. Use a separate, neutral domain in production. Unset means campaign mail ships with no pixel and unwrapped links, and no custom tracking domain can verify | `localhost:3000` under compose, otherwise unset | no |
 | `TRACKING_SERVICE_URL` | Where the backend reaches the tracking service internally | unset | yes |
 
 <Callout type="warn" title="Setting PUBLIC_HOST turns localhost off">

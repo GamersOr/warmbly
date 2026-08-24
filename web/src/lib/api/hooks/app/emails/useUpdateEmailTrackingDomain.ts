@@ -30,6 +30,9 @@ export default function useUpdateEmailTrackingDomain(id: string) {
                 });
             }
 
+            // The card reads its target and diagnostic from this query.
+            queryClient.setQueryData(["emails", id, "tracking-domain"], data);
+
             queryClient.setQueryData<Inbox>(
                 ["emails", id],
                 (oldData) => {

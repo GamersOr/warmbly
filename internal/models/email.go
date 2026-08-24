@@ -127,6 +127,16 @@ type EmailAuthTarget struct {
 	Email string
 }
 
+// TrackingDomainTarget is a mailbox with a custom tracking domain that is due
+// to be re-resolved. DNS is not static: a domain verified once and never
+// re-checked keeps routing links long after its record changed, and a domain
+// that failed to verify has no other way back once it propagates.
+type TrackingDomainTarget struct {
+	ID       uuid.UUID
+	Domain   string
+	Verified bool
+}
+
 // EmailAuthTransition is a mailbox that just entered the failing state, so the
 // grace clock started on this pass. The sweep notifies its organization once
 // per transition; a domain that stays failing reports nothing on later passes
@@ -197,13 +207,39 @@ type EmailsResult struct {
 	Pagination Pagination `json:"pagination"`
 }
 
-// TrackingDomainStatus is returned after a tracking-domain update. The
-// backend resolves the CNAME on save; Verified is true once the
-// customer's subdomain points at the shared tracking host.
+// TrackingDomainStatus is the state of a custom open/click tracking domain.
+// The backend resolves the record on save and on an explicit verify; Verified
+// is true once the customer's subdomain points at this install's tracking host.
+//
+// Everything below Verified is diagnostic. A bare verified flag left the
+// customer with a "Pending DNS" badge and nothing to act on, which is what
+// issue #173 was.
 type TrackingDomainStatus struct {
 	TrackingDomain           string     `json:"tracking_domain"`
 	TrackingDomainVerified   bool       `json:"tracking_domain_verified"`
 	TrackingDomainVerifiedAt *time.Time `json:"tracking_domain_verified_at"`
+
+	// CNAMETarget is the value to put in the CNAME: this install's tracking
+	// host (TRACKING_DOMAIN). Empty means the install has no tracking host, so
+	// there is nothing to point at and nothing can verify.
+	CNAMETarget string `json:"cname_target"`
+
+	// Status is stable and machine-readable: verified, unset, no_target,
+	// not_found, wrong_target, lookup_error, or pending when the value is
+	// stored state rather than a fresh lookup.
+	Status string `json:"status"`
+
+	// Message explains Status in one sentence and is safe to show as-is.
+	Message string `json:"message"`
+
+	// Observed is what DNS actually returned, so a customer can compare it
+	// with what they typed.
+	Observed string `json:"observed,omitempty"`
+
+	// TrackingHostUnresolvable reports that the record is correct but this
+	// install's tracking host has no DNS record of its own, so nothing will be
+	// recorded. That is an operator fault, not a customer one.
+	TrackingHostUnresolvable bool `json:"tracking_host_unresolvable"`
 }
 
 type UpdateEmail struct {

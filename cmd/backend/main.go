@@ -444,6 +444,15 @@ func main() {
 			log.Fatal(err)
 		}
 
+		// Resolve the tracking host once at boot so links, the CNAME target
+		// customers are shown, and the health probe all agree. Missing is not
+		// fatal: mail still sends, it just goes out untracked.
+		if trackingHost := cfg.HydrateTrackingHost(ctx); trackingHost != "" {
+			log.Printf("Tracking host: %s (custom mailbox tracking domains CNAME to this)", trackingHost)
+		} else {
+			log.Printf("Warning: TRACKING_DOMAIN is not set, so campaign mail ships with no open pixel and unwrapped links, and no custom tracking domain can verify. Set it to the host serving the tracking service.")
+		}
+
 		mailTransport, err = notify.NewTransport(ctx, cfg, emailCfg.EmailName, emailCfg.EmailAddress)
 		if err != nil {
 			sentry.CaptureException(err)
@@ -1404,6 +1413,13 @@ func main() {
 		// enqueue the first warmup task.
 		go tasksService.StartWarmupReconciler(ctx, 10*time.Minute)
 
+		// Tracking-domain sweep: re-resolve every custom tracking domain hourly,
+		// re-checking each at most daily. Verification used to happen once on
+		// save and never again, so a record that propagated an hour later stayed
+		// "pending" until somebody pressed a button, and one that later broke
+		// kept every tracked link pointed at a host that no longer answers.
+		go emailService.StartTrackingDomainSweep(ctx, 1*time.Hour, 24*time.Hour)
+
 		// Campaign reconciler: re-seed active campaigns whose self-perpetuating
 		// task chain died (a swallowed enqueue, a worker bounce mid-tick, or a
 		// crash between send and enqueue). Campaigns have no other bootstrap once
@@ -1541,7 +1557,9 @@ func main() {
 		}
 		advisorService = advisor.NewService(advisorRepository, aiToolRegistry, advisorNarrator, auditService,
 			advisorMembers{organizationService}, advisorAgent,
-			advisor.WithTrackingHost(emailCfg.TrackingDomain),
+			// Normalized: the CNAME value the advisor hands over has to be the
+			// bare host, whatever shape TRACKING_DOMAIN was set in.
+			advisor.WithTrackingHost(config.TrackingHostname()),
 			// So the domain-auth finding reports this install's actual gate
 			// (enforced or not, and the grace window) instead of a default one.
 			advisor.WithDomainAuthPolicy(instanceSettings))

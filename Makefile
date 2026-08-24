@@ -551,7 +551,7 @@ backend:
 	AUTH_SECRET=local-dev-auth-secret-minimum-32-characters-long \
 	EMAIL_NAME='Warmbly Dev' \
 	EMAIL_ADDRESS=dev@warmbly.local \
-	TRACKING_DOMAIN=t.warmbly.com \
+	TRACKING_DOMAIN=$(INFRA_HOST):3000 \
 	MAIL_TRANSPORT=smtp \
 	SMTP_HOST=$(INFRA_HOST) \
 	SMTP_PORT=11025 \
@@ -726,7 +726,6 @@ web:
 	cd web && \
 	VITE_APP_URL=http://$(WEB_HOST):5173 \
 	VITE_API_URL=http://$(WEB_HOST):8080 \
-	VITE_TRACKING_DOMAIN=t.warmbly.com \
 	VITE_TURNSTILE_KEY=1x00000000000000000000AA \
 	VITE_TURNSTILE_BYPASS_TOKEN=warmbly-local-turnstile-bypass \
 	pnpm dev $(VITE_HOST_FLAG)

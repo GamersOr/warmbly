@@ -177,11 +177,41 @@ Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
 
 The updated mailbox object (same shape as Get a mailbox).
 
+## Get the tracking domain
+
+`GET /emails/:id/track`
+
+Returns the mailbox's stored tracking-domain state plus the `CNAME` value this install expects. Read-only: it does no DNS work, so it is safe to call on every render. Use Verify the tracking domain to re-resolve.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+```json
+{
+  "tracking_domain": "t.acme.com",
+  "tracking_domain_verified": false,
+  "tracking_domain_verified_at": null,
+  "cname_target": "t.warmbly.com",
+  "status": "pending",
+  "message": "t.acme.com has not verified yet. Check it again to see what DNS returns for it right now.",
+  "tracking_host_unresolvable": false
+}
+```
+
 ## Update the tracking domain
 
 `PATCH /emails/:id/track`
 
-Sets or clears the custom open/click tracking domain for a mailbox. The backend resolves the CNAME on save and marks it verified once the customer subdomain points at the shared tracking host (`t.warmbly.com`). DNS can lag a freshly added record, so a miss is reported as unverified (pending), not an error. Send an empty domain to clear the custom domain and fall back to the shared default.
+Sets or clears the custom open/click tracking domain for a mailbox, then resolves it once and records the verdict. The record has to point at this install's tracking host, which is returned as `cname_target` (it is the deployment's `TRACKING_DOMAIN`, not a fixed value). DNS can lag a freshly added record, so a miss is reported as unverified with a reason, not an error. Send an empty domain to clear the custom domain and fall back to the shared host.
+
+The value is normalized before it is stored: a scheme, path, trailing dot or stray case is stripped, so `https://T.Acme.com/` is stored as `t.acme.com`. Anything that is still not a bare hostname (a raw IP, a host with a port, `localhost`, a single label) is rejected with `400`.
+
+Only a verified domain is used at send time. While it is unverified, opens and clicks go through the shared tracking host, so sending is never blocked by a pending record.
 
 Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
 
@@ -196,11 +226,46 @@ Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
 {
   "tracking_domain": "t.acme.com",
   "tracking_domain_verified": true,
-  "tracking_domain_verified_at": "2026-06-11T09:20:00Z"
+  "tracking_domain_verified_at": "2026-06-11T09:20:00Z",
+  "cname_target": "t.warmbly.com",
+  "status": "verified",
+  "message": "t.acme.com points at t.warmbly.com.",
+  "observed": "t.warmbly.com",
+  "tracking_host_unresolvable": false
 }
 ```
 
-`tracking_domain_verified_at` is null until the CNAME resolves to the tracking host.
+`tracking_domain_verified_at` is null until the record resolves to the tracking host.
+
+| Field | Description |
+|-------|-------------|
+| `cname_target` | The value to put in the `CNAME`. Empty when the deployment has no tracking host, in which case nothing can verify. |
+| `status` | `verified`, `unset`, `no_target`, `not_found`, `wrong_target`, `lookup_error`, or `pending` for stored state that has not been re-resolved. |
+| `message` | One sentence explaining `status`, safe to show to an end user. |
+| `observed` | What DNS returned, when it differs from the target. |
+| `tracking_host_unresolvable` | True when the record is correct but this install's own tracking host has no DNS record, so nothing will be recorded. An operator problem, not a caller one. |
+
+A domain whose provider flattens `CNAME` records verifies on matching addresses instead, and `status` is still `verified`.
+
+## Verify the tracking domain
+
+`POST /emails/:id/track/verify`
+
+Re-resolves the mailbox's saved tracking domain and records the verdict, without changing the domain itself. This is how a record that has finished propagating starts being used, rather than waiting to be saved again.
+
+The backend also re-resolves every custom tracking domain hourly (each one at most daily), so this endpoint is the impatient path rather than the only one. A transient resolver failure never revokes a verified domain.
+
+Write-scoped on purpose: recording the verdict is what routes real links through the custom host.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+Same shape as Update the tracking domain.
 
 ## Start warmup
 

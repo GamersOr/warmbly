@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -15,6 +13,7 @@ import (
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/trackdns"
 	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/scheduler"
 	"github.com/warmbly/warmbly/internal/tasks"
@@ -499,36 +498,31 @@ func (s *campaignService) ReplaceCampaignSenders(ctx context.Context, orgID uuid
 	return s.campaignRepository.ReplaceCampaignSenders(ctx, cID, in)
 }
 
-// trackingDomainTarget is the shared host customers point their CNAME at. Kept
-// in sync with the mailbox tracking-domain resolver and the TRACKING_DOMAIN
-// default.
-const trackingDomainTarget = "t.warmbly.com"
-
-// VerifyCampaignTrackingDomain resolves the campaign-scoped tracking domain's
-// CNAME and flips verified on success. Only a verified override is honored at
-// send time, so an unresolved record stays "pending" rather than erroring.
+// VerifyCampaignTrackingDomain resolves the campaign-scoped tracking domain
+// against this install's tracking host and flips verified on success. Only a
+// verified override is honored at send time, so an unresolved record stays
+// "pending" rather than erroring, and the status carries the reason.
 func (s *campaignService) VerifyCampaignTrackingDomain(ctx context.Context, orgID uuid.UUID, campaignID string) (*models.TrackingDomainStatus, *errx.Error) {
 	campaign, cID, xerr := s.campaignForOrg(ctx, orgID, campaignID)
 	if xerr != nil {
 		return nil, xerr
 	}
 
-	status := &models.TrackingDomainStatus{TrackingDomain: campaign.TrackingDomain}
-	if campaign.TrackingDomain == "" {
-		// No override configured — nothing to verify; ensure verified is cleared.
-		if err := s.campaignRepository.SetCampaignTrackingDomainVerified(ctx, cID, false, nil); err != nil {
-			return nil, errx.InternalError()
-		}
-		return status, nil
-	}
+	target := config.TrackingHostname()
+	res := trackdns.Verify(ctx, campaign.TrackingDomain, target)
 
-	if cname, err := net.DefaultResolver.LookupCNAME(ctx, campaign.TrackingDomain); err == nil {
-		resolved := strings.TrimSuffix(strings.ToLower(cname), ".")
-		if strings.Contains(resolved, trackingDomainTarget) {
-			now := time.Now().UTC()
-			status.TrackingDomainVerified = true
-			status.TrackingDomainVerifiedAt = &now
-		}
+	status := &models.TrackingDomainStatus{
+		TrackingDomain:           res.Domain,
+		TrackingDomainVerified:   res.Verified,
+		CNAMETarget:              target,
+		Status:                   res.Code,
+		Message:                  res.Reason,
+		Observed:                 res.Observed,
+		TrackingHostUnresolvable: res.TargetUnresolvable,
+	}
+	if res.Verified {
+		now := time.Now().UTC()
+		status.TrackingDomainVerifiedAt = &now
 	}
 
 	if err := s.campaignRepository.SetCampaignTrackingDomainVerified(ctx, cID, status.TrackingDomainVerified, status.TrackingDomainVerifiedAt); err != nil {

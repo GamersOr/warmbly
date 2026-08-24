@@ -3,9 +3,8 @@ package config
 import "context"
 
 type EmailConfig struct {
-	EmailName      string
-	EmailAddress   string
-	TrackingDomain string
+	EmailName    string
+	EmailAddress string
 }
 
 func (c *Config) LoadEmailConfig(ctx context.Context) (*EmailConfig, error) {
@@ -19,14 +18,8 @@ func (c *Config) LoadEmailConfig(ctx context.Context) (*EmailConfig, error) {
 		return nil, err
 	}
 
-	trackingDomain, err := c.GetStringRaw(ctx, "TRACKING_DOMAIN", "tracking_domain")
-	if err != nil {
-		return nil, err
-	}
-
 	return &EmailConfig{
-		EmailName:      emailName,
-		EmailAddress:   emailAddress,
-		TrackingDomain: trackingDomain,
+		EmailName:    emailName,
+		EmailAddress: emailAddress,
 	}, nil
 }
