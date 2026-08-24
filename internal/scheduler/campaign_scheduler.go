@@ -134,18 +134,24 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 					"Daily new-lead cap reached; deferring remaining new leads to tomorrow",
 					map[string]interface{}{"max_new_leads_per_day": campaign.MaxNewLeadsPerDay})
 				deferTime := s.deferToNextDay(campaign)
+				// A follow-up that comes due before tomorrow must not wait for
+				// the new-lead cap to reset.
+				if recheckAt != nil && recheckAt.Before(deferTime) {
+					deferTime = *recheckAt
+				}
 				// Return a DEFERRAL, never a sendable pair: the caller only checks
 				// err for deferrals, so a nil-error here would send a new lead and
 				// blow past the cap. nil pair + sentinel = reschedule, don't send.
 				return deferTime, nil, accounts[0].ID, ErrCampaignDeferred
 			}
 		}
-		// Some contacts are waiting on a condition window (e.g. "if didn't open
-		// within 3 days"). Defer and re-check exactly when the soonest window
-		// elapses, instead of marking the campaign complete.
+		// Nothing is due yet: every remaining contact is inside a step's wait
+		// or a condition window (e.g. "if didn't open within 3 days"). Defer
+		// and re-check exactly when the soonest one elapses, instead of
+		// marking the campaign complete.
 		if recheckAt != nil {
-			s.logCampaignDecision(ctx, campaignID, "awaiting_condition_window",
-				"Waiting on a branch condition window; re-checking when it elapses",
+			s.logCampaignDecision(ctx, campaignID, "awaiting_next_step",
+				"No step is due yet; re-checking when the next wait elapses",
 				map[string]interface{}{"recheck_at": recheckAt.UTC().Format(time.RFC3339)})
 			return *recheckAt, nil, accounts[0].ID, ErrCampaignDeferred
 		}

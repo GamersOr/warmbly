@@ -731,15 +731,13 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// STEP 19: Publish events to Kafka
 	s.publishEmailSentEvent(ctx, taskRecord, account, campaign, contact, sequence)
 
-	// STEP 20: Create next campaign task
-	scheduledNext := nextTime
-	if s.advanced != nil && campaign.OrganizationID != nil {
-		if optimized, xerr := s.advanced.OptimizeSendTime(ctx, *campaign.OrganizationID, contact, nextTime); xerr == nil {
-			scheduledNext = optimized
-		}
-	}
-
-	if err := s.createCampaignTask(ctx, campaign.ID, account.ID, scheduledNext); err != nil {
+	// STEP 20: Create next campaign task. The successor serves whichever lead
+	// is due next, so it must never be shaped for the contact just emailed:
+	// send-time optimization used to push it to that contact's next preferred
+	// hour (tomorrow 09:00 by default after 17:00 UTC), leaving every other
+	// lead queued for a day. Recipient-time placement belongs in slot
+	// selection for the selected contact (issue #156), not here.
+	if err := s.createCampaignTask(ctx, campaign.ID, account.ID, nextTime); err != nil {
 		// Log but don't fail the current task
 		log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to create next campaign task")
 	}

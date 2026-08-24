@@ -77,6 +77,10 @@ Returns the `AdvancedOutreachSettings` object directly (not wrapped in an envelo
 }
 ```
 
+<Callout type="info" title="Send-time optimization is stored, not yet applied">
+The `send_time_optimization` block is accepted and returned, but campaign scheduling does not place sends by it yet. Sends follow the campaign schedule and each mailbox's own sending profile; recipient-timezone placement is planned.
+</Callout>
+
 ## Update outreach settings
 
 `PATCH /outreach/settings`
