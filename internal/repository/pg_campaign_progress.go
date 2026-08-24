@@ -611,16 +611,26 @@ func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx con
 //
 // Conditions are evaluated SEND-RELATIVE with a three-valued result: a contact
 // whose next step isn't decidable yet (an engagement window still open) is not
-// returned; instead the soonest re-check time is returned (second value) so the
-// scheduler defers and checks again exactly then. Returns (nil, nil, nil) when
-// the campaign is genuinely complete (no sendable and nothing pending).
+// returned.
+//
+// Only a pair that is DUE is returned: a new lead is due now; a routed step is
+// due wait_after days after the contact's last step (plus a wait node's
+// minutes). The first due contact in list order wins. Contacts whose next step
+// is due later never block the ones behind them: without this, the one lead
+// routed to a "wait 3 days" follow-up parks the whole campaign for 3 days while
+// every other lead's first email sits queued. When nothing is due, the second
+// value is the soonest moment something will be (a step becoming due or a
+// condition window closing) so the scheduler defers exactly until then.
+// Returns (nil, nil, nil) when the campaign is genuinely complete.
 func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool) (*ContactSequencePair, *time.Time, error) {
-	// 1. Load steps (position + branch tree) once, ordered by position.
+	// 1. Load steps (position + branch tree + wait) once, ordered by position.
 	type stepInfo struct {
-		id uuid.UUID
-		bc models.BranchConditions
+		id          uuid.UUID
+		bc          models.BranchConditions
+		waitAfter   int
+		waitMinutes int // a "wait" node's own delay, gating the step after it
 	}
-	srows, err := r.db.Query(ctx, `SELECT id, conditions FROM sequences WHERE campaign_id = $1 ORDER BY position ASC, created_at ASC`, campaignID)
+	srows, err := r.db.Query(ctx, `SELECT id, conditions, wait_after, kind, action FROM sequences WHERE campaign_id = $1 ORDER BY position ASC, created_at ASC`, campaignID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -628,13 +638,20 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 	idxByID := map[uuid.UUID]int{}
 	for srows.Next() {
 		var si stepInfo
-		var raw []byte
-		if serr := srows.Scan(&si.id, &raw); serr != nil {
+		var raw, action []byte
+		var kind string
+		if serr := srows.Scan(&si.id, &raw, &si.waitAfter, &kind, &action); serr != nil {
 			srows.Close()
 			return nil, nil, serr
 		}
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &si.bc)
+		}
+		if kind != "email" && len(action) > 0 {
+			var cfg models.ActionConfig
+			if json.Unmarshal(action, &cfg) == nil && cfg.Type == "wait" && cfg.WaitMinutes != nil && *cfg.WaitMinutes > 0 {
+				si.waitMinutes = *cfg.WaitMinutes
+			}
 		}
 		idxByID[si.id] = len(steps)
 		steps = append(steps, si)
@@ -868,7 +885,18 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		return nil, nil, err
 	}
 	defer rows.Close()
-	var earliestWait *time.Time
+	// nextDue is the soonest moment anything becomes sendable: a step whose
+	// wait elapses or a condition window that closes. Only reported when no
+	// contact is due right now.
+	var nextDue *time.Time
+	noteDue := func(at time.Time) {
+		if nextDue == nil || at.Before(*nextDue) {
+			nextDue = &at
+		}
+	}
+	// A task fires at (or a breath before) the slot it was scheduled for, so
+	// "due" tolerates the same grace the scheduler's hard-floor check does.
+	dueBy := now.Add(config.CampaignNotDueGraceSeconds * time.Second)
 	for rows.Next() {
 		var contactID uuid.UUID
 		var lastSeq *uuid.UUID
@@ -920,9 +948,7 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		if res.wait != nil {
 			// Not decidable yet — remember the soonest window so the scheduler
 			// can re-check exactly then instead of guessing or completing.
-			if earliestWait == nil || res.wait.Before(*earliestWait) {
-				earliestWait = res.wait
-			}
+			noteDue(*res.wait)
 			continue
 		}
 		if res.stop || res.target == nil {
@@ -939,14 +965,26 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		if already {
 			continue
 		}
+		// When is this step due? Skip it (but remember when) if not yet: the
+		// contacts behind this one may be sendable right now.
+		if !isNew && sentAt != nil {
+			due := sentAt.Add(24 * time.Hour * time.Duration(steps[idxByID[*res.target]].waitAfter))
+			if last, ok := idxByID[*lastSeq]; ok && steps[last].waitMinutes > 0 {
+				due = due.Add(time.Duration(steps[last].waitMinutes) * time.Minute)
+			}
+			if due.After(dueBy) {
+				noteDue(due)
+				continue
+			}
+		}
 		return &ContactSequencePair{ContactID: contactID, SequenceID: *res.target, IsNewLead: isNew}, nil, nil
 	}
 	if rerr := rows.Err(); rerr != nil {
 		return nil, nil, rerr
 	}
-	// Nobody sendable now. If contacts are waiting on a window, hand back the
-	// soonest re-check time so the scheduler defers rather than completing.
-	return nil, earliestWait, nil
+	// Nobody sendable now. Hand back the soonest moment somebody will be so the
+	// scheduler defers until then rather than completing.
+	return nil, nextDue, nil
 }
 
 // branchHasPositiveReplyCondition reports whether a branch is a "reply branch":

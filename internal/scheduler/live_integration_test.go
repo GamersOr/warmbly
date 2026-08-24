@@ -536,3 +536,130 @@ func TestLiveFollowUpWaitIsHonored(t *testing.T) {
 	}
 	t.Logf("follow-up correctly deferred to %s", at.UTC().Format("2006-01-02 15:04:05"))
 }
+
+// TestLiveWaitingFollowUpDoesNotBlockOtherLeads is the multi-lead stall from
+// issue #171: lead A got step 1 and is routed to a "wait 3 days" follow-up,
+// lead B has never been sent. B's first email is due now and must be picked,
+// instead of the campaign parking on A's follow-up with B queued behind it.
+func TestLiveWaitingFollowUpDoesNotBlockOtherLeads(t *testing.T) {
+	handle, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+	ctx := context.Background()
+
+	step2 := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sequences (id, campaign_id, organization_id, name, subject,
+			body_plain, body_html, wait_after, position, kind)
+		VALUES ($1, $2, $3, 'Step 2', 'Bump', 'Bump', '<p>Bump</p>', 3, 1, 'email')`,
+		step2, f.campaign, f.org); err != nil {
+		t.Fatalf("insert step 2: %v", err)
+	}
+	var step1, leadA uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM sequences WHERE campaign_id = $1 AND position = 0`, f.campaign).Scan(&step1); err != nil {
+		t.Fatalf("load step 1: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT contact_id FROM campaign_leads WHERE campaign_id = $1`, f.campaign).Scan(&leadA); err != nil {
+		t.Fatalf("load lead A: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE sequences SET conditions = jsonb_build_object('branches', jsonb_build_array(
+			jsonb_build_object('branch_id', 'live-else', 'target_step_id', $1::text)))
+		WHERE campaign_id = $2 AND position = 0`, step2.String(), f.campaign); err != nil {
+		t.Fatalf("connect steps: %v", err)
+	}
+
+	// Lead B joins after A (created_at ordering puts A first) and has never
+	// been sent anything.
+	leadB := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO contacts (id, user_id, organization_id, email, first_name, last_name, company, phone, custom_fields, created_at)
+		VALUES ($1, $2, $3, $4, 'Live', 'Second', '', '', '{}', NOW() + interval '1 second')`,
+		leadB, f.user, f.org, "lead-"+leadB.String()[:8]+"@test.local"); err != nil {
+		t.Fatalf("insert lead B: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO campaign_leads (campaign_id, contact_id, position) VALUES ($1, $2, 1)`,
+		f.campaign, leadB); err != nil {
+		t.Fatalf("add lead B: %v", err)
+	}
+
+	// A's step 1 went out moments ago; A now routes to the wait-gated step 2.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at)
+		VALUES ($1, $2, $3, NOW())`, f.campaign, leadA, step1); err != nil {
+		t.Fatalf("stamp A step 1: %v", err)
+	}
+
+	s := liveScheduler(t, handle, pool)
+	at, pair, _, err := s.CalculateNextCampaignTime(ctx, f.campaign)
+	if err != nil {
+		t.Fatalf("want B's first step now, got err=%v at=%s", err, at)
+	}
+	if pair == nil || pair.ContactID != leadB || pair.SequenceID != step1 || !pair.IsNewLead {
+		t.Fatalf("want lead B / step 1 as a new lead, got %+v", pair)
+	}
+
+	// Once B has had step 1 too, nothing is due for 3 days: the campaign
+	// defers to then instead of completing or sending a follow-up early.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at)
+		VALUES ($1, $2, $3, NOW())`, f.campaign, leadB, step1); err != nil {
+		t.Fatalf("stamp B step 1: %v", err)
+	}
+	at, pair, _, err = s.CalculateNextCampaignTime(ctx, f.campaign)
+	if !errors.Is(err, ErrCampaignDeferred) || pair != nil {
+		t.Fatalf("want ErrCampaignDeferred with no pair, got pair=%v err=%v", pair, err)
+	}
+	if until := time.Until(at); until < 71*time.Hour || until > 73*time.Hour {
+		t.Fatalf("deferred slot %s is not ~3 days out", at)
+	}
+}
+
+// TestLiveWaitNodeGatesTheStepAfterIt: a contact who passed through a "wait 90
+// minutes" node must not be routed onward by a tick that fires before the
+// delay elapses (multi-lead campaigns tick constantly).
+func TestLiveWaitNodeGatesTheStepAfterIt(t *testing.T) {
+	handle, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+	ctx := context.Background()
+
+	waitNode, step2 := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sequences (id, campaign_id, organization_id, name, subject,
+			body_plain, body_html, wait_after, position, kind, action, conditions)
+		VALUES ($1, $2, $3, 'Wait', '', '', '', 0, 1, 'wait',
+			'{"type":"wait","wait_minutes":90}',
+			jsonb_build_object('branches', jsonb_build_array(
+				jsonb_build_object('branch_id', 'live-else', 'target_step_id', $5::text)))),
+		       ($4, $2, $3, 'Step 2', 'Bump', 'Bump', '<p>Bump</p>', 0, 2, 'email', '{}', '{}')`,
+		waitNode, f.campaign, f.org, step2, step2.String()); err != nil {
+		t.Fatalf("insert wait node + step 2: %v", err)
+	}
+	var contact uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT contact_id FROM campaign_leads WHERE campaign_id = $1`, f.campaign).Scan(&contact); err != nil {
+		t.Fatalf("load contact: %v", err)
+	}
+	// step 1 -> wait -> step 2; the contact just passed the wait node.
+	if _, err := pool.Exec(ctx, `
+		UPDATE sequences SET conditions = jsonb_build_object('branches', jsonb_build_array(
+			jsonb_build_object('branch_id', 'live-else', 'target_step_id', $1::text)))
+		WHERE campaign_id = $2 AND position = 0`, waitNode.String(), f.campaign); err != nil {
+		t.Fatalf("connect steps: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at)
+		VALUES ($1, $2, (SELECT id FROM sequences WHERE campaign_id = $1 AND position = 0), NOW() - interval '1 minute'),
+		       ($1, $2, $3, NOW())`, f.campaign, contact, waitNode); err != nil {
+		t.Fatalf("stamp progress: %v", err)
+	}
+
+	at, pair, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(ctx, f.campaign)
+	if !errors.Is(err, ErrCampaignDeferred) || pair != nil {
+		t.Fatalf("want ErrCampaignDeferred with no pair while the wait runs, got pair=%v err=%v", pair, err)
+	}
+	if until := time.Until(at); until < 85*time.Minute || until > 95*time.Minute {
+		t.Fatalf("deferred slot %s is not ~90 minutes out", at)
+	}
+}
