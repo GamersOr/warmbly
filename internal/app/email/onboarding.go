@@ -59,12 +59,15 @@ func (s *emailService) OAuthStart(ctx context.Context, userID string, orgID *uui
 
 // guardMailboxThrottle bounds new-mailbox connection rate per org per
 // day so abuse paths (or accidents) can't connect 200 mailboxes in
-// one tab session. Caller-supplied orgID; nil means "best-effort
-// skip" (orgless flows are vanishing but still exist). The check
-// fires only on the actual create paths, not on OAuthStart, so
-// retrying a failed flow doesn't consume the day's budget.
+// one tab session. The budget is keyed by org, so a request without
+// one is refused rather than exempted. The check fires only on the
+// actual create paths, not on OAuthStart, so retrying a failed flow
+// doesn't consume the day's budget.
 func (s *emailService) guardMailboxThrottle(ctx context.Context, orgID *uuid.UUID) *errx.Error {
-	if s.throttle == nil || orgID == nil {
+	if orgID == nil {
+		return errx.ErrNoOrganization
+	}
+	if s.throttle == nil {
 		return nil
 	}
 	return s.throttle.CheckAndIncrement(ctx, *orgID, dailythrottle.ResourceMailbox, config.DailyThrottleNewMailboxes)
@@ -74,9 +77,13 @@ func (s *emailService) guardMailboxThrottle(ctx context.Context, orgID *uuid.UUI
 // Returns nil (allowed) for paid orgs and for trial orgs under the cap.
 // Trial orgs that have already connected one inbox get
 // ErrEmailOnboardInboxLimit; orgs without an active subscription or trial
-// get ErrEmailOnboardTrialExpired.
+// get ErrEmailOnboardTrialExpired. The cap is counted per org, so no org
+// means the cap cannot be applied and the connect is refused.
 func (s *emailService) guardInboxLimit(ctx context.Context, orgID *uuid.UUID) *errx.Error {
-	if s.featureGate == nil || orgID == nil {
+	if orgID == nil {
+		return errx.ErrNoOrganization
+	}
+	if s.featureGate == nil {
 		return nil
 	}
 	count, xerr := s.emailRepository.CountForOrganization(ctx, *orgID)
@@ -191,12 +198,6 @@ func (s *emailService) OnboardSMTPIMAP(ctx context.Context, userID string, orgID
 
 	if s.workerAssignment == nil {
 		return nil, errx.ErrEmailOnboardNoWorker
-	}
-
-	// Credentials are sealed with the organization DEK for the validation
-	// round-trip, so an org is required before we can onboard a mailbox.
-	if orgID == nil {
-		return nil, errx.ErrUser
 	}
 
 	// Pick any healthy worker for the one-shot validation handshake. Tier is

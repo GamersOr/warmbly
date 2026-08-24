@@ -27,6 +27,7 @@ type TokenRepository interface {
 
 	// Organization switching
 	UpdateCurrentOrganization(ctx context.Context, sessionID uuid.UUID, orgID *uuid.UUID) *errx.Error
+	DefaultOrganization(ctx context.Context, userID uuid.UUID) (*uuid.UUID, *errx.Error)
 }
 
 type tokenRepository struct {
@@ -400,4 +401,29 @@ func (r *tokenRepository) UpdateCurrentOrganization(ctx context.Context, session
 	}
 
 	return nil
+}
+
+// DefaultOrganization picks the workspace a new session starts in: the one the
+// user owns, else their earliest-joined membership. A session without one used
+// to reach org-scoped writes with no tenant, which is what let orgless rows be
+// created in the first place (issue #168). Returns nil only when the user
+// belongs to no organization at all.
+func (r *tokenRepository) DefaultOrganization(ctx context.Context, userID uuid.UUID) (*uuid.UUID, *errx.Error) {
+	const query = `
+		SELECT m.organization_id
+		FROM organization_members m
+		LEFT JOIN organizations o ON o.id = m.organization_id
+		WHERE m.user_id = $1 AND o.deletion_scheduled_for IS NULL
+		ORDER BY (o.owner_user_id = $1) DESC, m.invited_at, m.organization_id
+		LIMIT 1
+	`
+	var orgID uuid.UUID
+	if err := r.DB.QueryRow(ctx, query, userID).Scan(&orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		db.CaptureError(err, query, []any{userID}, "queryrow")
+		return nil, errx.InternalError()
+	}
+	return &orgID, nil
 }

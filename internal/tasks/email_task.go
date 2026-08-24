@@ -112,8 +112,27 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 			Msg("warmup health-check send (mailbox in active campaign, warmup off)")
 	}
 
+	// Tenancy gate: warmup entitlement, pool tier and the shared-pool safety
+	// signals are all org-scoped, so a mailbox with no workspace cannot be
+	// checked against any of them. Fail closed — it leaves the pool and stops
+	// warming rather than warming as if it were entitled.
+	if account.OrganizationID == nil {
+		if s.warmupHealth != nil {
+			// Both pools: without an org there is no reliable way to tell which
+			// one this mailbox was placed in.
+			_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, "free")
+			_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, "premium")
+		}
+		sentry.CaptureException(fmt.Errorf("email account %s reached warmup with no organization", account.ID))
+		log.Error().Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).
+			Msg("warmup blocked: mailbox has no organization, entitlement and pool policy cannot be checked")
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_no_warmup_access")
+		executionStatus = "completed"
+		return nil
+	}
+
 	// STEP 3.5: Check if organization can use warmup (only paid orgs)
-	if s.featureGate != nil && account.OrganizationID != nil {
+	if s.featureGate != nil {
 		canWarmup, _ := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
 		if !canWarmup {
 			if s.warmupHealth != nil {
@@ -646,7 +665,12 @@ func (s *tasksService) resolveWarmupPoolType(ctx context.Context, account *Email
 	if account.WarmupPoolType != "" {
 		return account.WarmupPoolType
 	}
-	if s.featureGate != nil && account.OrganizationID != nil {
+	// No organization means no entitlement to check, so the mailbox gets the
+	// lower-trust pool rather than defaulting into the paid one.
+	if account.OrganizationID == nil {
+		return "free"
+	}
+	if s.featureGate != nil {
 		isPaid, xerr := s.featureGate.IsPaidOrganization(ctx, *account.OrganizationID)
 		if xerr == nil && !isPaid {
 			return "free"

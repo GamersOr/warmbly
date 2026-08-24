@@ -76,6 +76,12 @@ func (h *Handler) PreviewCampaignTemplate(c *gin.Context) {
 func (h *Handler) CreateCampaign(c *gin.Context) {
 	userIDStr := middleware.GetUserID(c)
 	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		// A campaign with no workspace cannot be suppression-checked or
+		// entitlement-checked at send time, so it is never created.
+		errx.JSON(c, errx.ErrNoOrganization)
+		return
+	}
 
 	var data models.CreateCampaign
 

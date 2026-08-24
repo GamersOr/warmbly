@@ -130,7 +130,7 @@ func (r *sequenceRepository) Create(ctx context.Context, userID string, campaign
 	defer tx.Rollback(ctx)
 
 	query := `
-		SELECT user_id
+		SELECT user_id, organization_id
 		FROM campaigns WHERE id = $1
 	`
 
@@ -139,11 +139,12 @@ func (r *sequenceRepository) Create(ctx context.Context, userID string, campaign
 	}
 
 	var ownerID string
+	var orgID uuid.UUID
 	err = tx.QueryRow(
 		ctx,
 		query,
 		params...,
-	).Scan(&ownerID)
+	).Scan(&ownerID, &orgID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errx.ErrNotFound
@@ -160,16 +161,19 @@ func (r *sequenceRepository) Create(ctx context.Context, userID string, campaign
 	var nextPos int
 	_ = tx.QueryRow(ctx, `SELECT COALESCE(MAX(position), 0) + 1 FROM sequences WHERE campaign_id = $1`, campaignID).Scan(&nextPos)
 
+	// organization_id is inherited from the campaign: a step that lost it is
+	// invisible to every org-scoped read and skips org-scoped send gates.
 	query = fmt.Sprintf(
 		`INSERT INTO sequences (
-			campaign_id, name, subject, body_plain, body_html, position
+			campaign_id, organization_id, name, subject, body_plain, body_html, position
 		 ) VALUES (
-			$1, $2, $3, $4, $5, $6
+			$1, $2, $3, $4, $5, $6, $7
 		 ) RETURNING %s`, SequenceSelect,
 	)
 
 	params = []any{
 		campaignID,
+		orgID,
 		config.SequenceDefaultName,
 		"",
 		"",

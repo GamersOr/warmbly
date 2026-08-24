@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -108,7 +109,19 @@ func (s *tasksService) HandleUserEmailTask(task *proto.ProcessTask) *errx.Error 
 			Msg("user_email cancelled: mailbox not active")
 		return nil
 	}
-	if s.featureGate != nil && account.OrganizationID != nil {
+	// Tenancy gate: the entitlement check below is org-scoped, so a mailbox with
+	// no workspace would send without it. Fail closed.
+	if account.OrganizationID == nil {
+		sentry.CaptureException(fmt.Errorf("email account %s reached a unibox send with no organization", account.ID))
+		_ = s.taskRepo.RecordTaskFailure(ctx, taskID,
+			"Mailbox has no workspace",
+			"email account organization_id is NULL at execution time")
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+		log.Error().Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).
+			Msg("user_email cancelled: mailbox has no organization")
+		return nil
+	}
+	if s.featureGate != nil {
 		canUse, _ := s.featureGate.CanUseUnibox(ctx, *account.OrganizationID)
 		if !canUse {
 			_ = s.taskRepo.RecordTaskFailure(ctx, taskID,

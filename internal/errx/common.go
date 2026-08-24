@@ -77,6 +77,14 @@ var (
 	ErrPasskeyExists   = New(Conflict, "This passkey is already registered.")
 	ErrPasskeyNone     = New(BadRequest, "No passkey was found for this account.")
 
+	// Organization
+	//
+	// Raised where a workspace is required to scope a write or a policy check.
+	// Every entitlement, limit and suppression rule is org-scoped, so a request
+	// without one is refused rather than run unscoped.
+	ErrNoOrganization = NewWithIdentifier(BadRequest, "no_organization",
+		"No workspace selected. Pick a workspace and try again.")
+
 	// Roles
 	ErrRoleName = New(BadRequest, "Role name length must be between 3 and 100 characters.")
 

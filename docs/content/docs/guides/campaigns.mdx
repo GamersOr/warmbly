@@ -87,7 +87,7 @@ Optional **campaign dates** bound when it may send. Leave both blank to run open
 
 The play and pause buttons work from the list row or the detail view. Starting moves the campaign to **active** and begins scheduling inside your windows and limits; pausing stops new scheduling immediately and resumes from where it left off.
 
-A campaign can pause itself: **paused, no accounts** when it loses every sender, **paused, trial expired** when a trial ends, and **auto-paused** when a guardrail trips. It moves to **finished** once every contact completes the sequence or its end date passes. Configured to do so, it also stops following up with a contact the moment they reply.
+A campaign can pause itself: **paused, no accounts** when it loses every sender, **paused, trial expired** when a trial ends, **auto-paused** when a guardrail trips, and plain **paused** if it ever loses its workspace, because unsubscribes, bounces and complaints are checked per workspace and cannot be honoured without one. It moves to **finished** once every contact completes the sequence or its end date passes. Configured to do so, it also stops following up with a contact the moment they reply.
 
 A finished campaign can be started again: after extending or clearing its end date, or adding new leads, pressing play resumes it. If there is genuinely nothing left to send it finishes again immediately with a message saying so.
 

@@ -230,7 +230,12 @@ func (s *emailService) resolveWarmupPoolType(ctx context.Context, account *model
 	if account.WarmupPoolType != "" {
 		return account.WarmupPoolType
 	}
-	if account.OrganizationID != nil && s.featureGate != nil {
+	// No organization means no entitlement to check, so the mailbox gets the
+	// lower-trust pool rather than defaulting into the paid one.
+	if account.OrganizationID == nil {
+		return "free"
+	}
+	if s.featureGate != nil {
 		isPaid, err := s.featureGate.IsPaidOrganization(ctx, *account.OrganizationID)
 		if err == nil && !isPaid {
 			return "free"
