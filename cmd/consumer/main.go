@@ -417,6 +417,10 @@ func main() {
 	// Start dead worker detection (every 5 minutes)
 	go jobsService.StartDeadWorkerDetection(ctx, 5*time.Minute)
 
+	// Resolve campaign sends that were reserved and dispatched but whose worker
+	// result never came back, so a lead is never held in flight forever.
+	go jobsService.StartStuckSendReclaimer(ctx, 5*time.Minute)
+
 	// Mirror Redis heartbeats into workers.last_seen_at every 60s
 	// so the admin dashboard can render liveness without touching Redis.
 	go jobsService.StartWorkerHeartbeatSync(ctx, 60*time.Second)

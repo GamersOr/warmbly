@@ -554,6 +554,40 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			config.Domain, campaign.ID.String(), contact.ID.String())
 	}
 
+	// STEP 15.9: Reserve the send BEFORE it goes on the bus. Once the command is
+	// published the recipient's copy is committed, so the record of the attempt
+	// has to exist first: without it, a crash or a failed progress write between
+	// the dispatch and the sent_at stamp leaves the step looking "never sent"
+	// and the next tick emails the same person again (issue #169). The
+	// reservation also counts the send against the day's counters, so a lost
+	// stamp can never let the daily cap over-send either.
+	reserved, rerr := s.campaignProgressRepo.ReserveSend(ctx, campaign.ID, contact.ID, sequence.ID, taskID, nextPair.IsNewLead)
+	if rerr != nil {
+		// The attempt could not be made durable, so it must not be made at all.
+		// Retry the whole task rather than sending something nothing remembers.
+		sentry.CaptureException(rerr)
+		s.taskRepo.RecordTaskFailure(ctx, taskID, "Could not reserve the send", rerr.Error())
+		s.recordSchedulerFailure(ctx, campaign.ID, "send_reservation_failed",
+			fmt.Sprintf("Could not record the send to %s before dispatching it; retrying", contact.Email), rerr)
+		if uerr := s.taskRepo.UpdateTaskStatus(ctx, taskID, "pending"); uerr != nil {
+			sentry.CaptureException(uerr)
+		}
+		executionStatus = "failed"
+		return errx.InternalError()
+	}
+	if !reserved {
+		// Another tick already has this (contact, step) in flight or delivered.
+		// End this one instead of sending a second copy, and keep the chain
+		// alive for whoever is next.
+		log.Warn().Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).
+			Str("contact_id", contact.ID.String()).Str("sequence_id", sequence.ID.String()).
+			Msg("campaign send skipped: the step is already in flight or sent")
+		_ = s.taskRepo.UpdateTaskStatusWithLock(ctx, taskID, "skipped_duplicate")
+		_ = s.createCampaignTask(ctx, campaign.ID, accountID, nextTime)
+		executionStatus = "completed"
+		return nil
+	}
+
 	// STEP 16: Send email to worker via Kafka
 	emailMsg := EmailMessage{
 		From:           account.Email,
@@ -574,6 +608,18 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		// The send never reached a worker (none assigned, worker offline, bus
 		// or storage down). Nothing is stamped sent; the task is dead-lettered
 		// for the retry loop and the chain is re-seeded by the reconciler.
+		//
+		// Give the reservation back so the next tick retries the step — but ONLY
+		// when the command provably never left. A failure of the publish call
+		// itself is ambiguous (the bus may have taken it), so that reservation
+		// stands and is resolved by the worker's own result, or by the reclaimer
+		// if none ever comes.
+		if !errors.Is(err, ErrSendDispatchUnknown) {
+			if relErr := s.campaignProgressRepo.ReleaseSend(ctx, campaign.ID, contact.ID, sequence.ID, nextPair.IsNewLead); relErr != nil {
+				sentry.CaptureException(relErr)
+				log.Error().Err(relErr).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to release the reservation for a send that never left; the reclaimer will retry it")
+			}
+		}
 		s.taskRepo.RecordTaskFailure(ctx, taskID, "Send failed", err.Error())
 		if s.campaignLogRepo != nil {
 			s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
@@ -640,17 +686,30 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	taskRecord.MessageID = messageID
 	taskRecord.Status = "completed"
 
-	// STEP 17: Update campaign progress
-	if err := s.campaignProgressRepo.RecordEmailSent(ctx, campaign.ID, contact.ID, sequence.ID); err != nil {
-		// Log but don't fail
-		log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to record email sent")
-	}
-
-	// Bump today's per-campaign counters. newLead counts ONLY a genuinely-sent
-	// position-1 (first-step) email, so the new-lead/day cap can never under-count
-	// and over-send. Skipped/suppressed/failed tasks never reach this point.
-	if err := s.campaignRepo.IncrementCampaignDailySend(ctx, campaign.ID, nextPair.IsNewLead); err != nil {
-		log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to increment campaign daily send counter")
+	// STEP 17: Stamp the step sent. The reservation already made the attempt
+	// durable, so this is the timing stamp follow-up pacing reads, not the
+	// duplicate guard — but losing it still parks the lead, so retry it, and
+	// escalate rather than whispering when every retry fails. The worker's own
+	// EMAIL_SENT repairs it downstream if it never lands.
+	// Today's counters were bumped by the reservation, inside the same
+	// transaction, so the new-lead/day cap can never under-count.
+	if err := s.stampSendRecorded(ctx, campaign.ID, contact.ID, sequence.ID); err != nil {
+		sentry.CaptureException(err)
+		log.Error().Err(err).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Str("contact_id", contact.ID.String()).Msg("Failed to record email sent; the worker result will repair the stamp")
+		if s.campaignLogRepo != nil {
+			s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+				CampaignID: campaign.ID,
+				EventType:  "progress_write_failed",
+				Message:    fmt.Sprintf("The email to %s was sent but recording it failed; it will not be sent again", contact.Email),
+				Metadata: map[string]interface{}{
+					"level":       "error",
+					"code":        "PROGRESS_WRITE_FAILED",
+					"contact_id":  contact.ID.String(),
+					"sequence_id": sequence.ID.String(),
+					"error":       err.Error(),
+				},
+			})
+		}
 	}
 
 	// Publish campaign progress summary to Pub/Sub for real-time dashboard updates
@@ -1096,6 +1155,28 @@ func campaignOrgID(campaign *Campaign) string {
 		return ""
 	}
 	return campaign.OrganizationID.String()
+}
+
+// stampSendRecorded writes the sent_at stamp for a send already on the bus,
+// retrying a transient database error instead of tolerating it. The email
+// cannot be un-sent at this point, so a single failed write used to be enough
+// to make routing offer the same step again (issue #169); the reservation now
+// prevents that, and these retries keep the lead's pacing correct too.
+func (s *tasksService) stampSendRecorded(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
+	var err error
+	for attempt := 1; attempt <= config.CampaignSendStampAttempts; attempt++ {
+		if err = s.campaignProgressRepo.RecordEmailSent(ctx, campaignID, contactID, sequenceID); err == nil {
+			return nil
+		}
+		if attempt < config.CampaignSendStampAttempts {
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
+			}
+		}
+	}
+	return err
 }
 
 // recordSchedulerFailure writes a campaign-scoped, reviewable failure to the

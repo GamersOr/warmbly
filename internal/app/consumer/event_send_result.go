@@ -23,8 +23,12 @@ import (
 var errSendResultEarly = errors.New("send result arrived before the task was stamped; retrying")
 
 // HandleEmailSent confirms a send the worker delivered to the provider. The
-// control plane stamped the task when it handed the send over, so the only
-// thing left to persist is the Message-ID the worker actually put on the wire.
+// control plane reserves the step before it hands the send over and stamps it
+// right after, so this normally only persists the Message-ID the worker put on
+// the wire. It is also the repair path: when the stamp was lost between the
+// dispatch and the control plane's write (a crash, or a failed progress write),
+// the delivered email would otherwise leave no sent_at for follow-up pacing to
+// read, so a reserved step is stamped here from the worker's own confirmation.
 func (s *JobsService) HandleEmailSent(ctx context.Context, result models.SendEmailResult) error {
 	if s.TaskRepo == nil || result.TaskID == uuid.Nil {
 		return nil
@@ -42,17 +46,44 @@ func (s *JobsService) HandleEmailSent(ctx context.Context, result models.SendEma
 			log.Warn().Err(err).Str("task_id", task.ID.String()).Msg("could not record worker message id")
 		}
 	}
+	if task.TaskType == "campaign" {
+		s.repairCampaignSendStamp(ctx, task)
+	}
 	return nil
 }
 
+// repairCampaignSendStamp completes a reserved campaign step the control plane
+// never stamped. A no-op in the normal case, where the stamp is already there.
+func (s *JobsService) repairCampaignSendStamp(ctx context.Context, task *repository.Task) {
+	if s.CampaignProgressRepo == nil {
+		return
+	}
+	ct, err := s.TaskRepo.GetCampaignTask(ctx, task.ID)
+	if err != nil || ct == nil || ct.CampaignID == nil || ct.ContactID == nil || ct.SequenceID == nil {
+		return
+	}
+	repaired, err := s.CampaignProgressRepo.StampDispatchedSend(ctx, *ct.CampaignID, *ct.ContactID, *ct.SequenceID)
+	if err != nil {
+		log.Warn().Err(err).Str("task_id", task.ID.String()).Msg("could not repair the campaign send stamp")
+		return
+	}
+	if repaired {
+		log.Warn().
+			Str("task_id", task.ID.String()).
+			Str("campaign_id", ct.CampaignID.String()).
+			Str("contact_id", ct.ContactID.String()).
+			Msg("stamped a delivered campaign send the control plane never recorded")
+	}
+}
+
 // HandleEmailFailed walks back a send the worker could not deliver. The
-// control plane stamps a task sent the moment it hands it to a worker, so
-// without this the lead would sit at "processing" forever with no email ever
-// leaving. For a campaign send the step's sent_at is cleared so the next tick
-// retries it, the day's counters give the send back, the failure is written to
-// the campaign's activity log, and a campaign that completed while the send
-// was in flight is reopened. Once the retry cap is spent the lead is marked
-// failed and routing drops it.
+// control plane reserves a step and stamps it sent the moment it hands it to a
+// worker, so without this the lead would sit at "processing" forever with no
+// email ever leaving. For a campaign send the step's reservation and sent_at
+// are cleared so the next tick retries it, the day's counters give the send
+// back, the failure is written to the campaign's activity log, and a campaign
+// that completed while the send was in flight is reopened. Once the retry cap
+// is spent the lead is marked failed and routing drops it.
 func (s *JobsService) HandleEmailFailed(ctx context.Context, result models.SendEmailResult) error {
 	if s.TaskRepo == nil || result.TaskID == uuid.Nil {
 		return nil
@@ -92,15 +123,18 @@ func (s *JobsService) HandleEmailFailed(ctx context.Context, result models.SendE
 
 	switch task.TaskType {
 	case "campaign":
-		return s.failCampaignSend(ctx, task, reason, code)
+		return s.failCampaignSend(ctx, task, reason, code, nil)
 	case "email":
 		s.notifyUserSendFailed(ctx, task, reason)
 	}
 	return nil
 }
 
-// failCampaignSend is the campaign half of HandleEmailFailed.
-func (s *JobsService) failCampaignSend(ctx context.Context, task *repository.Task, reason, code string) error {
+// failCampaignSend is the campaign half of HandleEmailFailed. countedOn is the
+// day the send was counted against, for giving the daily counters back; nil
+// reads it off the task, which is right for a worker result but not for the
+// reclaimer, whose sends can be counted on an earlier day.
+func (s *JobsService) failCampaignSend(ctx context.Context, task *repository.Task, reason, code string, countedOn *time.Time) error {
 	ct, err := s.TaskRepo.GetCampaignTask(ctx, task.ID)
 	if err != nil {
 		return err
@@ -137,11 +171,14 @@ func (s *JobsService) failCampaignSend(ctx context.Context, task *repository.Tas
 		if has, herr := s.CampaignProgressRepo.HasSentSteps(ctx, campaignID, *ct.ContactID); herr == nil {
 			newLead = !has
 		}
-		countedOn := time.Now()
-		if task.CompletedAt != nil {
-			countedOn = *task.CompletedAt
+		day := time.Now()
+		switch {
+		case countedOn != nil:
+			day = *countedOn
+		case task.CompletedAt != nil:
+			day = *task.CompletedAt
 		}
-		if derr := s.CampaignRepo.DecrementCampaignDailySend(ctx, campaignID, countedOn, newLead); derr != nil {
+		if derr := s.CampaignRepo.DecrementCampaignDailySend(ctx, campaignID, day, newLead); derr != nil {
 			log.Warn().Err(derr).Str("campaign_id", campaignID.String()).Msg("could not give back the failed send's daily count")
 		}
 	}

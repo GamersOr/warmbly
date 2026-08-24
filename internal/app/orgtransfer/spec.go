@@ -313,7 +313,14 @@ var Tables = []Table{
 	{
 		Name: "campaign_contact_progress", Group: models.OrgDataGroupCampaigns,
 		Scope: `campaign_id IN ` + orgCampaigns,
-		Note:  "Carries per-contact step position, so a running campaign resumes instead of restarting from step one.",
+		// The send reservation names a task on the source instance. Carried
+		// over, a step still in flight at export time would arrive looking
+		// dispatched with no task and no worker result to ever resolve it, so
+		// the lead would never be emailed. Cleared, an unsent step is simply
+		// queued again; a sent one keeps its sent_at, which is what routing and
+		// follow-up pacing actually read.
+		ResetOnImport: []string{"dispatched_at", "dispatch_task_id"},
+		Note:          "Carries per-contact step position, so a running campaign resumes instead of restarting from step one.",
 	},
 	{
 		Name: "campaign_daily_sends", Group: models.OrgDataGroupCampaigns,

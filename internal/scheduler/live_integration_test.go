@@ -663,3 +663,118 @@ func TestLiveWaitNodeGatesTheStepAfterIt(t *testing.T) {
 		t.Fatalf("deferred slot %s is not ~90 minutes out", at)
 	}
 }
+
+// TestLiveInFlightSendIsNotOfferedAgain is issue #169 at the scheduler level:
+// lead A's first email is on the bus but its sent_at stamp never landed (the
+// tick died, or the progress write failed). The scheduler must move on to lead
+// B instead of handing A's step back and emailing them twice.
+func TestLiveInFlightSendIsNotOfferedAgain(t *testing.T) {
+	handle, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+	ctx := context.Background()
+
+	var step1, leadA uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM sequences WHERE campaign_id = $1 AND position = 0`, f.campaign).Scan(&step1); err != nil {
+		t.Fatalf("load step 1: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT contact_id FROM campaign_leads WHERE campaign_id = $1`, f.campaign).Scan(&leadA); err != nil {
+		t.Fatalf("load lead A: %v", err)
+	}
+
+	leadB := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO contacts (id, user_id, organization_id, email, first_name, last_name, company, phone, custom_fields, created_at)
+		VALUES ($1, $2, $3, $4, 'Live', 'Second', '', '', '{}', NOW() + interval '1 second')`,
+		leadB, f.user, f.org, "lead-"+leadB.String()[:8]+"@test.local"); err != nil {
+		t.Fatalf("insert lead B: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO campaign_leads (campaign_id, contact_id, position) VALUES ($1, $2, 1)`,
+		f.campaign, leadB); err != nil {
+		t.Fatalf("add lead B: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM campaign_leads WHERE contact_id = $1`, leadB)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM contacts WHERE id = $1`, leadB)
+	})
+
+	// A's send was reserved and dispatched; the stamp never landed.
+	progress := repository.NewCampaignProgressRepository(pool)
+	reserved, err := progress.ReserveSend(ctx, f.campaign, leadA, step1, uuid.New(), true)
+	if err != nil || !reserved {
+		t.Fatalf("reserve A's send: reserved=%v err=%v", reserved, err)
+	}
+
+	s := liveScheduler(t, handle, pool)
+	_, pair, _, err := s.CalculateNextCampaignTime(ctx, f.campaign)
+	if err != nil {
+		t.Fatalf("want lead B's first step, got err=%v", err)
+	}
+	if pair == nil || pair.ContactID != leadB {
+		t.Fatalf("want lead B, got %+v (A's in-flight send was offered again: issue #169)", pair)
+	}
+
+	// With B dispatched too, nothing is left: the campaign completes rather than
+	// re-offering either in-flight step.
+	if reserved, err := progress.ReserveSend(ctx, f.campaign, leadB, step1, uuid.New(), true); err != nil || !reserved {
+		t.Fatalf("reserve B's send: reserved=%v err=%v", reserved, err)
+	}
+	if _, pair, _, err = s.CalculateNextCampaignTime(ctx, f.campaign); !errors.Is(err, ErrCampaignCompleted) || pair != nil {
+		t.Fatalf("want ErrCampaignCompleted with no pair once both sends are in flight, got pair=%v err=%v", pair, err)
+	}
+}
+
+// TestLiveInFlightFollowUpIsNotOfferedAgain covers the same window one step
+// further in: the follow-up, not the first email, is the one whose stamp was
+// lost. Routing reaches it through the branch, so the loop guard is what has to
+// stop it.
+func TestLiveInFlightFollowUpIsNotOfferedAgain(t *testing.T) {
+	handle, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+	ctx := context.Background()
+
+	step2 := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sequences (id, campaign_id, organization_id, name, subject,
+			body_plain, body_html, wait_after, position, kind)
+		VALUES ($1, $2, $3, 'Step 2', 'Bump', 'Bump', '<p>Bump</p>', 0, 1, 'email')`,
+		step2, f.campaign, f.org); err != nil {
+		t.Fatalf("insert step 2: %v", err)
+	}
+	var step1, contact uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM sequences WHERE campaign_id = $1 AND position = 0`, f.campaign).Scan(&step1); err != nil {
+		t.Fatalf("load step 1: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT contact_id FROM campaign_leads WHERE campaign_id = $1`, f.campaign).Scan(&contact); err != nil {
+		t.Fatalf("load contact: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE sequences SET conditions = jsonb_build_object('branches', jsonb_build_array(
+			jsonb_build_object('branch_id', 'live-else', 'target_step_id', $1::text)))
+		WHERE campaign_id = $2 AND position = 0`, step2.String(), f.campaign); err != nil {
+		t.Fatalf("connect steps: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at, dispatched_at)
+		VALUES ($1, $2, $3, NOW(), NOW())`, f.campaign, contact, step1); err != nil {
+		t.Fatalf("stamp step 1 sent: %v", err)
+	}
+
+	progress := repository.NewCampaignProgressRepository(pool)
+	s := liveScheduler(t, handle, pool)
+
+	// The follow-up is due now (wait_after 0) and would be sent...
+	if _, pair, _, err := s.CalculateNextCampaignTime(ctx, f.campaign); err != nil || pair == nil || pair.SequenceID != step2 {
+		t.Fatalf("precondition: step 2 should be due, got pair=%v err=%v", pair, err)
+	}
+	// ...so dispatch it, and lose the stamp.
+	if reserved, err := progress.ReserveSend(ctx, f.campaign, contact, step2, uuid.New(), false); err != nil || !reserved {
+		t.Fatalf("reserve the follow-up: reserved=%v err=%v", reserved, err)
+	}
+	if _, pair, _, err := s.CalculateNextCampaignTime(ctx, f.campaign); !errors.Is(err, ErrCampaignCompleted) || pair != nil {
+		t.Fatalf("the in-flight follow-up was offered again: pair=%v err=%v", pair, err)
+	}
+}

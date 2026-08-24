@@ -73,13 +73,48 @@ type CampaignSequencePair struct {
 	SequenceID uuid.UUID
 }
 
+// StuckDispatch is a send that was reserved and handed to a worker but whose
+// outcome never came back: no EMAIL_SENT stamped it, no EMAIL_FAILED walked it
+// back. The reclaimer resolves these.
+type StuckDispatch struct {
+	CampaignID   uuid.UUID
+	ContactID    uuid.UUID
+	SequenceID   uuid.UUID
+	TaskID       *uuid.UUID
+	DispatchedAt time.Time
+}
+
 // CampaignProgressRepository defines methods for campaign progress tracking
 type CampaignProgressRepository interface {
+	// ReserveSend claims (campaign, contact, step) for one send BEFORE the
+	// command goes on the bus, which is what lets a later tick tell "dispatched,
+	// outcome unknown" apart from "never attempted". It stamps dispatched_at and
+	// counts the send against the day's counters in one transaction, and reports
+	// false when the step is already in flight or already sent — in which case
+	// the caller must NOT dispatch. Resolve every reservation exactly once:
+	// RecordEmailSent on a successful hand-off, ReleaseSend when the command
+	// provably never left, RecordSendFailure on a worker failure.
+	ReserveSend(ctx context.Context, campaignID, contactID, sequenceID, taskID uuid.UUID, newLead bool) (bool, error)
+	// ReleaseSend gives a reservation back when the send provably never reached
+	// the bus (no worker assigned, worker offline), so the step is retried on the
+	// next tick without spending an attempt. Only an unstamped reservation is
+	// touched, so it can never undo a real send.
+	ReleaseSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, newLead bool) error
 	// Record email status
 	RecordEmailSent(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
-	// RecordSendFailure walks back a step the worker could not send: sent_at is
-	// cleared so routing offers the step again, and the attempt is counted. It
-	// returns the attempts so far and whether the lead has now exhausted
+	// StampDispatchedSend is the repair path for a send whose reservation was
+	// written but whose sent_at stamp was lost (the control plane died, or its
+	// write failed, between the dispatch and the stamp). The worker's own
+	// EMAIL_SENT calls it, so a delivered email always ends up with the timing
+	// stamp follow-up pacing reads. Returns true when it actually repaired one.
+	StampDispatchedSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (bool, error)
+	// ListStuckDispatches returns reservations older than olderThan that no
+	// worker result ever resolved.
+	ListStuckDispatches(ctx context.Context, olderThan time.Duration, limit int) ([]StuckDispatch, error)
+	// RecordSendFailure walks back a step the worker could not send: the
+	// reservation and sent_at are cleared so routing offers the step again, and
+	// the attempt is counted. It returns the attempts so far and whether the
+	// lead has now exhausted
 	// config.CampaignSendMaxAttempts. rolledBack is false when there was
 	// nothing to walk back (a duplicate result, or the send was already retried).
 	RecordSendFailure(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string) (attempts int, exhausted bool, rolledBack bool, err error)
@@ -162,24 +197,166 @@ func NewCampaignProgressRepository(db *pgxpool.Pool) CampaignProgressRepository 
 	return &campaignProgressRepository{db: db}
 }
 
+// ReserveSend claims the step for one send before the command is published.
+// The claim and the day's counters move together because both must survive a
+// crash in the dispatch window: a reservation without its count would let the
+// daily cap over-send, and a count without its reservation would charge for a
+// send nobody ever made.
+//
+// The ON CONFLICT ... WHERE is the whole exactly-once gate: a row already in
+// flight (dispatched_at set) or already sent updates nothing and returns no
+// row, so two ticks that picked the same pair cannot both dispatch. A step
+// walked back after a worker failure has both cleared and is claimable again.
+func (r *campaignProgressRepository) ReserveSend(ctx context.Context, campaignID, contactID, sequenceID, taskID uuid.UUID, newLead bool) (bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var claimed bool
+	err = tx.QueryRow(ctx, `
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, dispatched_at, dispatch_task_id)
+		VALUES ($1, $2, $3, NOW(), $4)
+		ON CONFLICT (campaign_id, contact_id, sequence_id)
+		DO UPDATE SET dispatched_at = NOW(), dispatch_task_id = $4, failed_at = NULL, failure_reason = ''
+		WHERE campaign_contact_progress.sent_at IS NULL
+		  AND campaign_contact_progress.dispatched_at IS NULL
+		RETURNING true
+	`, campaignID, contactID, sequenceID, taskID).Scan(&claimed)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	newLeadInc := 0
+	if newLead {
+		newLeadInc = 1
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO campaign_daily_sends (campaign_id, send_date, emails_sent, new_leads_started)
+		VALUES ($1, CURRENT_DATE, 1, $2)
+		ON CONFLICT (campaign_id, send_date)
+		DO UPDATE SET emails_sent = campaign_daily_sends.emails_sent + 1,
+		              new_leads_started = campaign_daily_sends.new_leads_started + $2
+	`, campaignID, newLeadInc); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// ReleaseSend undoes a reservation whose command never left, counters included.
+// Guarded on sent_at IS NULL so a reservation that was stamped in the meantime
+// (the worker answered first) is never released.
+func (r *campaignProgressRepository) ReleaseSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, newLead bool) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var released bool
+	err = tx.QueryRow(ctx, `
+		UPDATE campaign_contact_progress
+		SET dispatched_at = NULL, dispatch_task_id = NULL
+		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
+		  AND sent_at IS NULL AND dispatched_at IS NOT NULL
+		RETURNING true
+	`, campaignID, contactID, sequenceID).Scan(&released)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+
+	newLeadDec := 0
+	if newLead {
+		newLeadDec = 1
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE campaign_daily_sends
+		SET emails_sent = GREATEST(emails_sent - 1, 0),
+		    new_leads_started = GREATEST(new_leads_started - $2, 0)
+		WHERE campaign_id = $1 AND send_date = CURRENT_DATE
+	`, campaignID, newLeadDec); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // RecordEmailSent stamps a step as handed to the worker. A retry after a
 // worker-reported failure clears the failure marker again; send_attempts is
-// kept as history so the retry cap still holds.
+// kept as history so the retry cap still holds. dispatched_at is backfilled for
+// callers that stamp without reserving first (action nodes, instant chains),
+// so "attempted" is never narrower than "sent".
 func (r *campaignProgressRepository) RecordEmailSent(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
 	query := `
-		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at)
-		VALUES ($1, $2, $3, NOW())
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at, dispatched_at)
+		VALUES ($1, $2, $3, NOW(), NOW())
 		ON CONFLICT (campaign_id, contact_id, sequence_id)
-		DO UPDATE SET sent_at = NOW(), failed_at = NULL, failure_reason = ''
+		DO UPDATE SET sent_at = NOW(),
+		              dispatched_at = COALESCE(campaign_contact_progress.dispatched_at, NOW()),
+		              failed_at = NULL, failure_reason = ''
 	`
 
 	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
 }
 
-// RecordSendFailure clears sent_at on a stamped step and counts the attempt.
-// Only a row that is currently stamped sent is touched, so a duplicate worker
-// result after the step was already walked back (or re-sent) is a no-op.
+// StampDispatchedSend stamps a reservation the control plane never got to
+// stamp itself. Guarded on dispatched_at so it can only ever complete a send
+// somebody really reserved, and on sent_at so it never moves a stamp that is
+// already there.
+func (r *campaignProgressRepository) StampDispatchedSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (bool, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE campaign_contact_progress
+		SET sent_at = NOW(), failed_at = NULL, failure_reason = ''
+		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
+		  AND sent_at IS NULL AND dispatched_at IS NOT NULL
+	`, campaignID, contactID, sequenceID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ListStuckDispatches returns reservations no worker result ever resolved,
+// oldest first.
+func (r *campaignProgressRepository) ListStuckDispatches(ctx context.Context, olderThan time.Duration, limit int) ([]StuckDispatch, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT campaign_id, contact_id, sequence_id, dispatch_task_id, dispatched_at
+		FROM campaign_contact_progress
+		WHERE sent_at IS NULL
+		  AND dispatched_at IS NOT NULL
+		  AND dispatched_at < NOW() - make_interval(secs => $1)
+		ORDER BY dispatched_at ASC
+		LIMIT $2
+	`, olderThan.Seconds(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StuckDispatch
+	for rows.Next() {
+		var s StuckDispatch
+		if err := rows.Scan(&s.CampaignID, &s.ContactID, &s.SequenceID, &s.TaskID, &s.DispatchedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// RecordSendFailure clears the reservation and sent_at on a step and counts the
+// attempt. Only a row that is currently in flight or stamped sent is touched,
+// so a duplicate worker result after the step was already walked back (or
+// re-sent) is a no-op.
 func (r *campaignProgressRepository) RecordSendFailure(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string) (int, bool, bool, error) {
 	if len(reason) > 500 {
 		reason = reason[:500]
@@ -187,11 +364,13 @@ func (r *campaignProgressRepository) RecordSendFailure(ctx context.Context, camp
 	query := `
 		UPDATE campaign_contact_progress
 		SET sent_at = NULL,
+		    dispatched_at = NULL,
+		    dispatch_task_id = NULL,
 		    send_attempts = send_attempts + 1,
 		    failed_at = NOW(),
 		    failure_reason = $4
 		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
-		  AND sent_at IS NOT NULL
+		  AND (sent_at IS NOT NULL OR dispatched_at IS NOT NULL)
 		RETURNING send_attempts
 	`
 	var attempts int
@@ -605,7 +784,11 @@ func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx con
 //
 // A contact who has never been sent starts at the entry step (position 1). A
 // step is sent only if the route reaches it, so branch-only steps are never sent
-// linearly, and a routed step that was already sent (a loop) stops the contact.
+// linearly, and a routed step that was already ATTEMPTED (a loop) stops the
+// contact. Attempted means sent_at OR dispatched_at: a step reserved before its
+// command went on the bus counts, even if the sent_at stamp was lost, which is
+// what stops a crash or a failed progress write in that window from handing the
+// same email to a worker twice.
 // A contact whose step failed in the worker more than CampaignSendMaxAttempts
 // times is dropped, the same way a bounced or suppressed contact is.
 //
@@ -857,7 +1040,8 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		LEFT JOIN LATERAL (
 			SELECT array_agg(sequence_id) AS ids
 			FROM campaign_contact_progress p2
-			WHERE p2.campaign_id = $1 AND p2.contact_id = cl.contact_id AND p2.sent_at IS NOT NULL
+			WHERE p2.campaign_id = $1 AND p2.contact_id = cl.contact_id
+			  AND (p2.sent_at IS NOT NULL OR p2.dispatched_at IS NOT NULL)
 		) ss ON true
 		WHERE cl.campaign_id = $1
 		  AND NOT EXISTS (
