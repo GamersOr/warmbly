@@ -91,9 +91,11 @@ func newSendResultFixture(t *testing.T, handle *db.DB) *sendResultFixture {
 	return f
 }
 
-// stampSend does what the backend's campaign tick does after handing a send
-// to the worker: a completed task, the progress stamp, and the day's counters.
-func (f *sendResultFixture) stampSend(t *testing.T, s *JobsService) uuid.UUID {
+// dispatch does what the backend's campaign tick does around a send: the
+// reservation (which also counts the day's send) before the command goes on
+// the bus, and nothing after it. The stamp is left to the caller so a test can
+// reproduce the crash window the reservation exists for.
+func (f *sendResultFixture) dispatch(t *testing.T, s *JobsService) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
 	taskID := uuid.New()
@@ -107,11 +109,21 @@ func (f *sendResultFixture) stampSend(t *testing.T, s *JobsService) uuid.UUID {
 	if err := s.TaskRepo.UpdateCampaignTaskTracking(ctx, taskID, f.contact, f.step); err != nil {
 		t.Fatalf("tracking: %v", err)
 	}
+	reserved, err := s.CampaignProgressRepo.ReserveSend(ctx, f.campaign, f.contact, f.step, taskID, true)
+	if err != nil || !reserved {
+		t.Fatalf("reserve send: reserved=%v err=%v", reserved, err)
+	}
+	return taskID
+}
+
+// stampSend is a full tick: the reservation, the dispatch, and the stamp that
+// follows it.
+func (f *sendResultFixture) stampSend(t *testing.T, s *JobsService) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	taskID := f.dispatch(t, s)
 	if err := s.CampaignProgressRepo.RecordEmailSent(ctx, f.campaign, f.contact, f.step); err != nil {
 		t.Fatalf("record sent: %v", err)
-	}
-	if err := s.CampaignRepo.IncrementCampaignDailySend(ctx, f.campaign, true); err != nil {
-		t.Fatalf("increment daily: %v", err)
 	}
 	if err := s.TaskRepo.UpdateTaskStatusWithLock(ctx, taskID, "completed"); err != nil {
 		t.Fatalf("complete task: %v", err)

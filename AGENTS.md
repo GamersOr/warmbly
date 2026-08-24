@@ -740,10 +740,16 @@ When extending anti-fraud logic in this repo:
 
 ## Send Outcome Loop
 
-A campaign step is stamped sent (`campaign_contact_progress.sent_at`, task `completed`, daily counters) the moment the backend hands the `SEND_EMAIL` to a worker, before anything has left the mailbox. What keeps that honest is the worker's per-task result on `jobs.worker-events`: every send is answered with exactly one `EMAIL_SENT` or `EMAIL_FAILED`, and the consumer's `HandleEmailFailed` (`internal/app/consumer/event_send_result.go`) walks the stamp back (clears `sent_at`, counts the attempt, gives back the daily counters, logs to the campaign feed, reopens a campaign that completed meanwhile). Routing retries the step on the next tick and drops the lead as `failed` after `config.CampaignSendMaxAttempts`.
+A campaign step is RESERVED before the `SEND_EMAIL` goes on the bus and stamped sent right after. `ReserveSend` (`internal/repository/pg_campaign_progress.go`) writes `campaign_contact_progress.dispatched_at` + `dispatch_task_id` and takes the day's counters in ONE transaction; the step's `sent_at` follows the dispatch and is the timing stamp follow-up pacing reads. Routing treats a step as attempted when EITHER is set, so a crash or a failed progress write between the two can no longer look like "never sent" and email the same person twice (issue #169).
+
+What resolves a reservation is the worker's per-task result on `jobs.worker-events`: every send is answered with exactly one `EMAIL_SENT` or `EMAIL_FAILED`. `HandleEmailSent` persists the Message-ID and repairs a missing `sent_at` (`StampDispatchedSend`); `HandleEmailFailed` walks the whole thing back (clears `sent_at` AND `dispatched_at`, counts the attempt, gives back the daily counters, logs to the campaign feed, reopens a campaign that completed meanwhile). Routing retries the step on the next tick and drops the lead as `failed` after `config.CampaignSendMaxAttempts`.
 
 Rules that follow from this:
 
+- never dispatch a send that is not reserved. A reservation that cannot be written means the task retries; a claim refused (`reserved == false`) means another tick already has that pair in flight, and the task ends `skipped_duplicate`
+- resolve every reservation exactly once: `RecordEmailSent` on a successful hand-off, `ReleaseSend` when the command PROVABLY never left (no worker, worker offline), `RecordSendFailure` on a worker failure. A failure of the publish call itself is ambiguous (`tasks.ErrSendDispatchUnknown`) and must NOT be released
+- a reservation nobody answers is resolved by `StartStuckSendReclaimer` in the consumer after `config.CampaignSendReclaimAfterMinutes`: it believes a task that carries a Message-ID (stamps it) and otherwise walks the step back as a failed attempt. Without it a dead worker parks a lead in flight forever
+- the day's counters belong to the reservation, not the stamp, so a lost stamp can never let the daily cap over-send
 - a worker must always answer a `SEND_EMAIL` it acked; a failure path that returns without producing `EMAIL_FAILED` leaves the lead at "processing" forever. Use `failSend` in `event_send_email.go`
 - the per-task result is always `EMAIL_FAILED`; the typed account events (`EMAIL_AUTH_ERROR` and friends) are raised in addition and carry an `EmailErrorEvent`, never a `SendEmailResult`
 - the backend refuses to publish a send to a worker that is not heartbeating (`tasks.NewWorkerLiveness`), because a command queued for a dead worker is never executed and never answered

@@ -86,6 +86,21 @@ const (
 	// follow-up early; a task that fired on time always passes.
 	CampaignNotDueGraceSeconds = 60
 
+	// CampaignSendReclaimAfterMinutes is how long a reserved-but-unresolved send
+	// (dispatched_at set, no worker result, no sent_at) is left alone before the
+	// reclaimer treats its outcome as lost and walks it back as a failed
+	// attempt. A live worker answers every SEND_EMAIL within seconds, so this
+	// only ever fires when the worker died mid-send or the result was lost, and
+	// it must stay well clear of a slow provider handshake.
+	CampaignSendReclaimAfterMinutes = 30
+
+	// CampaignSendStampAttempts is how many times the control plane retries the
+	// sent_at stamp after a send is already on the bus. The reservation is what
+	// keeps the step from being re-sent, so a lost stamp is a pacing problem,
+	// not a duplicate — but it is still worth a couple of quick retries before
+	// falling back to the worker result to repair it.
+	CampaignSendStampAttempts = 3
+
 	// Webhook/integration fan-out throttle. Caps how many events of a single
 	// type one org can fan out to its webhooks + integration sinks
 	// (Slack/Discord/CRM) per minute — the backstop against a campaign "notify"

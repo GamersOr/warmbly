@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,12 +236,37 @@ func (noopCipher) Cipher(ctx context.Context, orgID uuid.UUID) (*cipher.Cipher, 
 
 // recordingSender stands in for the worker dispatch: the tick's real side
 // effect is the stamped send, and this is what makes it observable without a
-// live worker.
-type recordingSender struct{ sent int }
+// live worker. fail makes Send behave like a dispatch that could not be
+// published, which is what the reservation tests need; the mutex is there
+// because those tests run ticks concurrently.
+type recordingSender struct {
+	mu   sync.Mutex
+	sent int
+	fail error
+}
 
 func (r *recordingSender) Send(ctx context.Context, taskID uuid.UUID, msg EmailMessage, account models.Email) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fail != nil {
+		return r.fail
+	}
 	r.sent++
 	return nil
+}
+
+// count reads the send tally under the lock.
+func (r *recordingSender) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sent
+}
+
+// setFail makes every subsequent Send return err (nil restores dispatch).
+func (r *recordingSender) setFail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fail = err
 }
 
 // liveCampaignService wires the real repositories the campaign tick uses.
@@ -387,8 +413,8 @@ func TestLiveHealthyCampaignStillSends(t *testing.T) {
 		t.Fatalf("campaign tick returned an error: %v", xerr)
 	}
 
-	if sender.sent != 1 {
-		t.Fatalf("sender saw %d sends, want 1", sender.sent)
+	if sender.count() != 1 {
+		t.Fatalf("sender saw %d sends, want 1", sender.count())
 	}
 	if n := f.sendsRecorded(t); n != 1 {
 		t.Fatalf("%d sends stamped, want 1", n)

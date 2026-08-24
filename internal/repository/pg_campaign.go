@@ -81,15 +81,13 @@ type CampaignRepository interface {
 	// AdvanceRampLevel advances the persisted ramp level once per UTC day.
 	// Idempotent and a no-op when ramp is disabled or already advanced today.
 	AdvanceRampLevel(ctx context.Context, campaignID uuid.UUID) error
-	// IncrementCampaignDailySend bumps today's send counters; newLead also
-	// increments new_leads_started (a position-1 send).
-	IncrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, newLead bool) error
 	// CountNewLeadsStartedToday returns new_leads_started for the current UTC
 	// day (0 when no row exists yet).
 	CountNewLeadsStartedToday(ctx context.Context, campaignID uuid.UUID) (int, error)
-	// DecrementCampaignDailySend gives back a counted send the worker could not
-	// deliver, against the day it was counted on (sentAt), so the new-lead cap
-	// and the campaign daily limit do not charge for mail that never left.
+	// DecrementCampaignDailySend gives back a send that never left, against the
+	// day it was counted on (sentAt), so the new-lead cap does not charge for
+	// it. The matching increment lives in CampaignProgressRepository.ReserveSend,
+	// which counts the send in the same transaction that reserves it.
 	DecrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, sentAt time.Time, newLead bool) error
 	// ReopenAfterSendFailure flips a campaign that completed while a send was
 	// still in flight back to active, so the failed step is retried instead of
@@ -1823,7 +1821,7 @@ func (r *campaignRepository) AdvanceRampLevel(ctx context.Context, campaignID uu
 	return err
 }
 
-// DecrementCampaignDailySend reverses IncrementCampaignDailySend for a send
+// DecrementCampaignDailySend reverses the count ReserveSend took for a send
 // that failed in the worker. Clamped at zero; a missing row is left alone.
 func (r *campaignRepository) DecrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, sentAt time.Time, newLead bool) error {
 	newLeadDec := 0
@@ -1852,24 +1850,6 @@ func (r *campaignRepository) ReopenAfterSendFailure(ctx context.Context, campaig
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
-}
-
-// IncrementCampaignDailySend bumps today's per-campaign send counters. newLead
-// also increments new_leads_started (a position-1 send) so the new-lead cap can
-// read it back.
-func (r *campaignRepository) IncrementCampaignDailySend(ctx context.Context, campaignID uuid.UUID, newLead bool) error {
-	newLeadInc := 0
-	if newLead {
-		newLeadInc = 1
-	}
-	_, err := r.DB.Exec(ctx, `
-		INSERT INTO campaign_daily_sends (campaign_id, send_date, emails_sent, new_leads_started)
-		VALUES ($1, CURRENT_DATE, 1, $2)
-		ON CONFLICT (campaign_id, send_date)
-		DO UPDATE SET emails_sent = campaign_daily_sends.emails_sent + 1,
-		              new_leads_started = campaign_daily_sends.new_leads_started + $2
-	`, campaignID, newLeadInc)
-	return err
 }
 
 // CountNewLeadsStartedToday returns new_leads_started for the current UTC day.

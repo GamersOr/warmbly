@@ -56,6 +56,14 @@ type WorkerLiveness interface {
 // worker and the dead-letter retry replays the task.
 var ErrWorkerOffline = errors.New("the mailbox's sending worker is offline")
 
+// ErrSendDispatchUnknown wraps a failure of the publish call itself. Every
+// other Send failure happens before anything is published and is safe to retry
+// immediately; this one is not, because the bus may have taken the command and
+// a worker may still deliver it. A campaign send that fails this way keeps its
+// reservation and is left to the worker result (or the reclaimer) rather than
+// being offered again.
+var ErrSendDispatchUnknown = errors.New("the send was not confirmed as queued and may already be on its way to a worker")
+
 type emailSender struct {
 	emailRepo repository.EmailRepository
 	publisher events.Publisher
@@ -128,7 +136,7 @@ func (s *emailSender) Send(ctx context.Context, taskID uuid.UUID, msg EmailMessa
 
 	// Publish send email event to worker
 	if err := s.publisher.PublishSendEmail(ctx, *workerID, params); err != nil {
-		return fmt.Errorf("failed to publish send email event: %w", err)
+		return fmt.Errorf("%w: %v", ErrSendDispatchUnknown, err)
 	}
 
 	return nil
