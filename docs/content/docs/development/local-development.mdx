@@ -149,6 +149,22 @@ Mostly standard ports. A few are offset because their defaults conflict too ofte
 
 The backend runs migrations automatically on boot (`internal/infrastructure/db/migrate.go`), so there's no separate migrate step. Migrations live in `internal/infrastructure/db/migrations/`.
 
+### Adding a migration
+
+Each migration is a pair of files named `<version>_<name>.up.sql` and `<version>_<name>.down.sql`, where the version is six digits and the name is snake_case. Versions are contiguous, so a new migration takes the next number after the highest one on `main`.
+
+Pick that number against `main`, not against your branch. Two branches opened around the same time will otherwise both claim the same next version, and while each one migrates cleanly on its own, the collision on `main` makes golang-migrate refuse to build its source driver. The backend then exits at boot and restart-loops, taking every service that waits on it with it.
+
+Before pushing, run:
+
+```bash
+make check-migrations
+```
+
+It reports duplicate versions, gaps, an `.up.sql` with no `.down.sql`, and filenames golang-migrate cannot parse. `make lint` runs it too, and the Migrations job in CI runs it on every pull request that touches the directory.
+
+If a duplicate does reach `main`, renumber the migration that has **not** been released yet. Deployments in the wild have already recorded the other one in `schema_migrations`, and renumbering that one makes them try to apply it a second time.
+
 ## Seeding fixtures
 
 `make seed` runs the seeder one-shot. It's idempotent, safe to re-run after schema changes.
