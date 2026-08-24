@@ -69,8 +69,11 @@ type Table struct {
 	// the rows.
 	Blobs []BlobColumn
 
-	// ResetOnImport are columns set to NULL on the way in because they name
-	// something that exists only on the source instance.
+	// ResetOnImport are columns left out of the insert because they name
+	// something that exists only on the source instance: a queue handle, a
+	// health counter, a last-seen timestamp. Omitting them is what makes the
+	// destination's own column default apply, which is the only reset that
+	// works for a NOT NULL column (writing NULL into one aborts the import).
 	ResetOnImport []string
 
 	// ImportSkip exports the table for the record but never writes it back.
@@ -196,11 +199,6 @@ var Tables = []Table{
 		Note:          "Only the key hash travels, so existing keys keep working after the move without the secret ever leaving the source.",
 	},
 	{
-		Name: "webhook_endpoints", Group: models.OrgDataGroupCore,
-		Scope:         scopeOrg,
-		ResetOnImport: []string{"last_success_at", "last_failure_at", "last_failure_reason", "consecutive_failures", "first_failure_at", "auto_disabled_at", "disabled_reason"},
-	},
-	{
 		Name: "oauth_applications", Group: models.OrgDataGroupCore,
 		Scope: scopeOrg,
 	},
@@ -208,6 +206,13 @@ var Tables = []Table{
 		Name: "oauth_access_grants", Group: models.OrgDataGroupCore,
 		Scope:         scopeOrg,
 		ResetOnImport: []string{"last_used_at"},
+	},
+	{
+		// Below oauth_applications: an endpoint owned by an OAuth app carries
+		// oauth_application_id, so the app has to exist first.
+		Name: "webhook_endpoints", Group: models.OrgDataGroupCore,
+		Scope:         scopeOrg,
+		ResetOnImport: []string{"last_success_at", "last_failure_at", "last_failure_reason", "consecutive_failures", "first_failure_at", "auto_disabled_at", "disabled_reason"},
 	},
 	{
 		Name: "outreach_settings", Group: models.OrgDataGroupCore,
@@ -246,11 +251,6 @@ var Tables = []Table{
 		Scope: scopeOrg,
 	},
 	{
-		Name: "suppressed_recipients", Group: models.OrgDataGroupContacts,
-		Scope: scopeOrg,
-		Note:  "Suppression must travel, or the destination re-mails people who already opted out.",
-	},
-	{
 		Name: "contact_research_runs", Group: models.OrgDataGroupContacts,
 		Scope: scopeOrgAlt,
 	},
@@ -263,6 +263,15 @@ var Tables = []Table{
 	{
 		Name: "campaigns", Group: models.OrgDataGroupCampaigns,
 		Scope: scopeOrg,
+	},
+	{
+		// A contacts-group table, but it sits here because campaign_id points at
+		// campaigns and the import applies this list top to bottom. Selecting
+		// contacts without campaigns is still fine: the reference is nullable,
+		// so it is cleared rather than dangling.
+		Name: "suppressed_recipients", Group: models.OrgDataGroupContacts,
+		Scope: scopeOrg,
+		Note:  "Suppression must travel, or the destination re-mails people who already opted out.",
 	},
 	{
 		Name: "campaign_folders", Group: models.OrgDataGroupCampaigns,
@@ -415,10 +424,6 @@ var Tables = []Table{
 		Name: "reply_templates", Group: models.OrgDataGroupAI,
 		Scope: scopeOrg,
 	},
-	{
-		Name: "reply_intents", Group: models.OrgDataGroupAI,
-		Scope: scopeOrg,
-	},
 
 	// ---------- warmup ----------
 	{
@@ -496,6 +501,13 @@ var Tables = []Table{
 		Scope: `email_account_id IN ` + orgMailboxes,
 		// The handle belongs to the source instance's queue.
 		ResetOnImport: []string{"cloud_task_name"},
+	},
+	{
+		// An AI-group table, but it sits here because task_id points at tasks.
+		// Selecting AI without the send pipeline is still fine: the reference is
+		// nullable, so it is cleared rather than dangling.
+		Name: "reply_intents", Group: models.OrgDataGroupAI,
+		Scope: scopeOrg,
 	},
 	{
 		Name: "email_tasks", Group: models.OrgDataGroupSending,
