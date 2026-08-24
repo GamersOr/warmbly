@@ -916,20 +916,24 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		args = append(args, data.BCC)
 		argPos++
 	}
-	if data.StartDate != nil {
-		if err := validate.CampaignStartDate(*data.StartDate); err != nil {
-			return nil, err
+	if data.StartDate.Set {
+		if data.StartDate.Value != nil {
+			if err := validate.CampaignStartDate(*data.StartDate.Value); err != nil {
+				return nil, err
+			}
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "start_date", argPos))
-		args = append(args, *data.StartDate)
+		args = append(args, data.StartDate.Value) // nil clears (start now)
 		argPos++
 	}
-	if data.EndDate != nil {
-		if err := validate.CampaignEndDate(*data.EndDate); err != nil {
-			return nil, err
+	if data.EndDate.Set {
+		if data.EndDate.Value != nil {
+			if err := validate.CampaignEndDate(*data.EndDate.Value); err != nil {
+				return nil, err
+			}
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "end_date", argPos))
-		args = append(args, *data.EndDate)
+		args = append(args, data.EndDate.Value) // nil clears (open-ended)
 		argPos++
 	}
 	if data.Timezone != nil {

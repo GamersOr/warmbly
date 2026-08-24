@@ -1,7 +1,7 @@
 import PermissionButton from "@/components/ui/PermissionButton";
 import React from "react";
 import { ArrowRightIcon, CalendarClockIcon, CalendarRangeIcon, GlobeIcon } from "lucide-react";
-import { differenceInCalendarDays, format } from "date-fns";
+import { addDays, differenceInCalendarDays, format } from "date-fns";
 import DateSelect from "@/components/app/campaigns/schedule/ScheduleDateSelect";
 import WeekScheduleGrid, { type Interval } from "@/components/app/campaigns/schedule/WeekScheduleGrid";
 import { Loading } from "@/components/loader";
@@ -246,6 +246,7 @@ export default function CampaignSchedule() {
                             title="Start date"
                             value={newData.start_date ?? null}
                             onChange={(v) => setNewData((b) => ({ ...b, start_date: v }))}
+                            minDate={new Date()}
                         />
                     </div>
                     <ArrowRightIcon className="w-4 h-4 text-slate-300 shrink-0 self-end mb-1.5 hidden sm:block" />
@@ -254,6 +255,7 @@ export default function CampaignSchedule() {
                             title="End date"
                             value={newData.end_date ?? null}
                             onChange={(v) => setNewData((b) => ({ ...b, end_date: v }))}
+                            minDate={addDays(new Date(), 1)}
                         />
                     </div>
                     <p className="text-[11px] text-slate-400 self-end mb-1 flex-1 sm:min-w-[180px]">

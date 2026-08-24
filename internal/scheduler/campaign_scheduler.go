@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 )
@@ -516,6 +517,12 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		candidateTime = *selected.BehaviorOpenAt
 	}
 
+	// hardFloor is the earliest moment this send is ALLOWED: wait_after,
+	// start date, sending windows, day capacity and workday placement so far,
+	// with the mailbox min-gap folded in below. Pacing added after this point
+	// (distribution, jitter, curve) shapes the slot but never gates a send.
+	hardFloor := candidateTime
+
 	// STEP 9: Even distribution across the candidate day's sending window. With
 	// a behaviour profile that is the mailbox's own rolled workday (lunch
 	// excluded); otherwise it is the span of the campaign's intervals for that
@@ -554,6 +561,9 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 			// Re-snap into a sending window after adjusting for min wait.
 			candidateTime = nextScheduleSlot(candidateTime, windows, campaignTZ)
 		}
+		if hardFloor.Before(earliestNext) {
+			hardFloor = nextScheduleSlot(earliestNext, windows, campaignTZ)
+		}
 	}
 
 	// STEP 11: Add jitter. Deliberately NOT rounded to a 5-minute grid — a
@@ -582,6 +592,16 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// (jitter/conflict/distribution can push into a gap between intervals, or
 	// out of the mailbox's workday). Satisfies both calendars.
 	candidateTime = s.intersectWindows(ctx, selected.Behavior, notBefore(candidateTime), windows, campaignTZ)
+
+	// STEP 14.5: A task can fire ahead of the step's hard constraints — an
+	// early successor tick, a duplicate chain, a moved slot. The task handler
+	// sends whatever pair this function returns, so returning a not-yet-due
+	// pair here is what sends a "wait 3 days" follow-up seconds after step
+	// one. Report it deferred instead: the caller reschedules at the computed
+	// slot without sending. A task that fired at its own slot always passes.
+	if time.Until(hardFloor) > config.CampaignNotDueGraceSeconds*time.Second {
+		return finalSlot(candidateTime), nil, account.ID, ErrCampaignDeferred
+	}
 
 	// STEP 15: Randomise the sub-minute component so sends never land on :00.
 	return finalSlot(candidateTime), nextPair, account.ID, nil

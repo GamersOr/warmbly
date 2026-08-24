@@ -235,12 +235,14 @@ type UpdateCampaign struct {
 	CC  []string `json:"cc"`
 	BCC []string `json:"bcc"`
 
-	StartDate *time.Time `json:"start_date"`
-	EndDate   *time.Time `json:"end_date"`
-	Timezone  *string    `json:"timezone"`
-	Days      *uint8     `json:"days"`
-	StartTime *string    `json:"start_time"`
-	EndTime   *string    `json:"end_time"`
+	// Absent leaves the stored date untouched; an explicit null clears it
+	// ("start now" / "no end date"), matching the validation error's promise.
+	StartDate NullableTime `json:"start_date"`
+	EndDate   NullableTime `json:"end_date"`
+	Timezone  *string      `json:"timezone"`
+	Days      *uint8       `json:"days"`
+	StartTime *string      `json:"start_time"`
+	EndTime   *string      `json:"end_time"`
 
 	// Authoritative per-day schedule. When sent, supersedes Days/StartTime/EndTime.
 	ScheduleWindows *ScheduleWindows `json:"schedule_windows,omitempty"`
@@ -276,6 +278,13 @@ type UpdateCampaign struct {
 	GuardrailReplyRateMin     *float64 `json:"guardrail_reply_rate_min,omitempty"`
 	GuardrailMinSample        *int     `json:"guardrail_min_sample,omitempty"`
 	GuardrailWindowDays       *int     `json:"guardrail_window_days,omitempty"`
+}
+
+// TouchesSchedule reports whether the patch changes anything the campaign's
+// next wakeup time is computed from.
+func (u *UpdateCampaign) TouchesSchedule() bool {
+	return u.StartDate.Set || u.EndDate.Set || u.Timezone != nil || u.Days != nil ||
+		u.StartTime != nil || u.EndTime != nil || u.ScheduleWindows != nil
 }
 
 // CreateCampaign is the payload accepted by POST /campaigns. Name is required;

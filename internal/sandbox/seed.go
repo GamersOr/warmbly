@@ -406,10 +406,14 @@ func seedIdentity(ctx context.Context, pool *pgxpool.Pool) error {
 // placement and the reconciler treat it as live; the real worker process adopts
 // the row on its first heartbeat.
 func seedWorker(ctx context.Context, pool *pgxpool.Pool) error {
+	// The conflict branch must also assert the tier tuple: `make seed` upserts
+	// this same UUID as free-tier, and the sandbox org is on a paid plan, so a
+	// leftover free-tier row gets its mailboxes unassigned by placement and
+	// every send fails with "no available workers".
 	_, err := pool.Exec(ctx, `
 		INSERT INTO workers (id, name, notes, ip_addr, active, worker_type, account_count, free_tier)
 		VALUES ($1, 'worker-sandbox-1', 'Sandbox worker (make sandbox / make worker)', '127.0.0.1', TRUE, 'shared', 0, FALSE)
-		ON CONFLICT (id) DO UPDATE SET active = TRUE, updated_at = NOW()`,
+		ON CONFLICT (id) DO UPDATE SET active = TRUE, worker_type = 'shared', free_tier = FALSE, updated_at = NOW()`,
 		sandboxWorker)
 	return err
 }

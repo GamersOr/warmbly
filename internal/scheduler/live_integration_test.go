@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -172,6 +173,19 @@ func liveScheduler(t *testing.T, handle *db.DB, pool *pgxpool.Pool) SchedulerSer
 	return s
 }
 
+// scheduleSlot runs a scheduling pass and returns the computed slot. A pass
+// whose slot sits beyond the not-due grace now (correctly) reports
+// ErrCampaignDeferred instead of handing back a sendable pair; for these
+// placement assertions the slot is what matters, so both outcomes pass.
+func scheduleSlot(t *testing.T, s SchedulerService, campaign uuid.UUID) (time.Time, uuid.UUID) {
+	t.Helper()
+	at, _, accountID, err := s.CalculateNextCampaignTime(context.Background(), campaign)
+	if err != nil && !errors.Is(err, ErrCampaignDeferred) {
+		t.Fatalf("schedule: %v", err)
+	}
+	return at, accountID
+}
+
 func liveProfile() models.SendingBehavior {
 	b := models.DefaultSendingBehavior(uuid.Nil)
 	b.Enabled = true
@@ -193,10 +207,7 @@ func TestLiveCampaignSendLandsInsideTheRolledWorkday(t *testing.T) {
 	b.Weekdays = models.BehaviorWeekdaysAll
 	f.setProfile(t, b)
 
-	at, _, accountID, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, accountID := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 	assertFuture(t, at)
 	if accountID != f.mailbox {
 		t.Fatalf("picked mailbox %s, want the fixture's %s", accountID, f.mailbox)
@@ -236,10 +247,7 @@ func TestLiveSendSkipsTheLunchBreak(t *testing.T) {
 	b.Weekdays = models.BehaviorWeekdaysAll
 	f.setProfile(t, b)
 
-	at, _, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, _ := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 
 	assertFuture(t, at)
 
@@ -269,10 +277,7 @@ func TestLiveNonWorkingDayRollsForward(t *testing.T) {
 	b.Weekdays = 1 << ((int(target) + 6) % 7)
 	f.setProfile(t, b)
 
-	at, _, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, _ := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 	assertFuture(t, at)
 	if at.UTC().Weekday() != target {
 		t.Fatalf("scheduled on %s, want the only working day %s (%s)",
@@ -298,10 +303,7 @@ func TestLiveTimezoneIsTheMailboxOwn(t *testing.T) {
 	b.Weekdays = models.BehaviorWeekdaysAll
 	f.setProfile(t, b)
 
-	at, _, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, _ := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 
 	assertFuture(t, at)
 
@@ -328,10 +330,7 @@ func TestLiveDisabledProfileChangesNothing(t *testing.T) {
 	b.LunchEnabled = false
 	f.setProfile(t, b)
 
-	at, _, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, _ := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 	assertFuture(t, at)
 
 	// With behaviour off the send is placed by the legacy path, which is free to
@@ -409,10 +408,7 @@ func TestLiveHourlyCeilingPushesToALaterHour(t *testing.T) {
 	now := time.Now().UTC()
 	f.bookTask(t, now)
 
-	at, _, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, _ := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 	assertFuture(t, at)
 
 	if at.UTC().Truncate(time.Hour).Equal(now.Truncate(time.Hour)) {
@@ -436,10 +432,7 @@ func TestLiveDailyCeilingPushesToTheNextDay(t *testing.T) {
 	now := time.Now().UTC()
 	f.bookTask(t, now) // spends the whole day
 
-	at, _, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, _ := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 	assertFuture(t, at)
 
 	if at.UTC().Format("2006-01-02") == now.Format("2006-01-02") {
@@ -474,10 +467,7 @@ func TestLiveGapIsDrawnFromTheProfile(t *testing.T) {
 		t.Fatalf("seed completed task: %v", err)
 	}
 
-	at, _, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(context.Background(), f.campaign)
-	if err != nil {
-		t.Fatalf("schedule: %v", err)
-	}
+	at, _ := scheduleSlot(t, liveScheduler(t, handle, pool), f.campaign)
 	assertFuture(t, at)
 
 	gap := time.Until(at)
@@ -486,4 +476,63 @@ func TestLiveGapIsDrawnFromTheProfile(t *testing.T) {
 			gap.Round(time.Second))
 	}
 	t.Logf("next send %s away — the profile's one-hour band, not the mailbox's 600s gap", gap.Round(time.Second))
+}
+
+// TestLiveFollowUpWaitIsHonored is the regression check for follow-ups riding
+// an early tick (issue #171 follow-up): once step 1 is sent, a scheduling pass
+// that runs immediately afterwards must NOT hand back the "wait 3 days" step as
+// sendable. It must report the campaign deferred, with the slot parked at the
+// follow-up's real time, so the task handler reschedules instead of sending a
+// three-day follow-up seconds after step one.
+func TestLiveFollowUpWaitIsHonored(t *testing.T) {
+	handle, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+	ctx := context.Background()
+
+	step2 := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO sequences (id, campaign_id, organization_id, name, subject,
+			body_plain, body_html, wait_after, position, kind)
+		VALUES ($1, $2, $3, 'Step 2', 'Bump', 'Bump', '<p>Bump</p>', 3, 1, 'email')`,
+		step2, f.campaign, f.org); err != nil {
+		t.Fatalf("insert step 2: %v", err)
+	}
+
+	var step1, contact uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM sequences WHERE campaign_id = $1 AND position = 0`, f.campaign).Scan(&step1); err != nil {
+		t.Fatalf("load step 1: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT contact_id FROM campaign_leads WHERE campaign_id = $1`, f.campaign).Scan(&contact); err != nil {
+		t.Fatalf("load contact: %v", err)
+	}
+
+	// Connect step 1 -> step 2 (routing has no implicit next step; the wizard
+	// writes this catch-all branch at creation).
+	if _, err := pool.Exec(ctx, `
+		UPDATE sequences SET conditions = jsonb_build_object('branches', jsonb_build_array(
+			jsonb_build_object('branch_id', 'live-else', 'target_step_id', $1::text)))
+		WHERE campaign_id = $2 AND position = 0`, step2.String(), f.campaign); err != nil {
+		t.Fatalf("connect steps: %v", err)
+	}
+
+	// Step 1 went out moments ago; routing now points at the wait-gated step 2.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at)
+		VALUES ($1, $2, $3, NOW())`, f.campaign, contact, step1); err != nil {
+		t.Fatalf("stamp step 1 sent: %v", err)
+	}
+
+	at, pair, _, err := liveScheduler(t, handle, pool).CalculateNextCampaignTime(ctx, f.campaign)
+	if !errors.Is(err, ErrCampaignDeferred) {
+		t.Fatalf("want ErrCampaignDeferred for a not-yet-due follow-up, got pair=%v err=%v at=%s", pair, err, at)
+	}
+	if pair != nil {
+		t.Fatal("a deferred result must not carry a sendable pair")
+	}
+	if time.Until(at) < 47*time.Hour {
+		t.Fatalf("deferred slot %s is too soon for a 3-day wait", at)
+	}
+	t.Logf("follow-up correctly deferred to %s", at.UTC().Format("2006-01-02 15:04:05"))
 }
