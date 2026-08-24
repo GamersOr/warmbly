@@ -23,6 +23,8 @@ Pick mailboxes in **Sending accounts** three ways, and the first two combine:
 - **Individually**: specific mailboxes by hand.
 - **All active mailboxes**: the default when you pick neither.
 
+Sending accounts always resolve inside the campaign's own workspace. If you belong to more than one workspace, a tag you reuse across them still only picks up mailboxes belonging to the workspace that owns the campaign, so one workspace's sending reputation, daily caps, and warmup are never spent on another's traffic.
+
 <Callout type="info" title="Follow-ups stay on the same mailbox">
 Each mailbox stays within its own daily limit, and follow-ups always send from the mailbox that sent the first email to that contact, so threads stay consistent.
 </Callout>

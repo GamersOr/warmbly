@@ -52,8 +52,15 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// UNION of the explicit campaign_senders pool and the tag-resolved mailboxes
 	// (one dropdown picks both — they're no longer mutually exclusive). When the
 	// campaign selects NEITHER tags nor explicit accounts, it sends from ALL of
-	// the owner's active mailboxes ("all").
-	senders, serr := s.emailRepo.GetByCampaignSenders(ctx, campaign.UserID, campaignID)
+	// the active mailboxes in the campaign's tenant ("all").
+	//
+	// Tenancy is the campaign's organization, never its owner: a user who belongs
+	// to two organizations must not have organization A's campaign pick up an
+	// organization B mailbox and burn B's reputation, caps and warmup state. A
+	// campaign with no organization resolves to no mailboxes, the same way the
+	// campaign task halts it rather than sending unchecked.
+	scope := repository.NewAccountScope(campaign.OrganizationID)
+	senders, serr := s.emailRepo.GetByCampaignSenders(ctx, scope, campaignID)
 	if serr != nil {
 		return time.Time{}, nil, uuid.Nil, serr
 	}
@@ -68,7 +75,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		}
 	}
 	if len(campaign.EmailTags) > 0 {
-		tagAccounts, terr := s.emailRepo.GetByTags(ctx, campaign.UserID, campaign.EmailTags)
+		tagAccounts, terr := s.emailRepo.GetByTags(ctx, scope, campaign.EmailTags)
 		if terr != nil {
 			return time.Time{}, nil, uuid.Nil, terr
 		}
@@ -80,7 +87,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		}
 	}
 	if len(senders) == 0 && len(campaign.EmailTags) == 0 {
-		allAccts, aerr := s.emailRepo.GetAllActiveByUser(ctx, campaign.UserID)
+		allAccts, aerr := s.emailRepo.GetAllActiveInScope(ctx, scope)
 		if aerr != nil {
 			return time.Time{}, nil, uuid.Nil, aerr
 		}
