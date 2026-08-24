@@ -33,11 +33,18 @@ func (h *Handler) EmailsSearch(c *gin.Context) {
 }
 
 func (h *Handler) GetEmail(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	// Mailboxes are workspace assets and the query behind this is scoped by
+	// organization; passing the caller's user id here made the detail endpoint
+	// 404 for everyone, including the owner who connected the mailbox.
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	emailAccountID := c.Param("id")
 
-	resp, err := h.EmailService.Get(c.Request.Context(), userID, emailAccountID)
+	resp, err := h.EmailService.Get(c.Request.Context(), orgID.String(), emailAccountID)
 	if err != nil {
 		errx.Handle(c, err)
 		return
@@ -178,13 +185,59 @@ func (h *Handler) warmupLifecycle(c *gin.Context, action string) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// GetEmailTrackingDomain serves GET /emails/:id/track: the mailbox's stored
+// tracking-domain state plus the CNAME target this install expects. Read-only,
+// so it does no DNS work; VerifyEmailTrackingDomain is the live check.
+func (h *Handler) GetEmailTrackingDomain(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	status, err := h.EmailService.GetTrackingDomain(c.Request.Context(), orgID.String(), c.Param("id"))
+	if err != nil {
+		errx.Handle(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, status)
+}
+
+// VerifyEmailTrackingDomain serves POST /emails/:id/track/verify: re-resolves
+// the stored domain and persists the verdict. Write-scoped, because recording
+// it is what routes real links through the custom host.
+func (h *Handler) VerifyEmailTrackingDomain(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	status, err := h.EmailService.VerifyTrackingDomain(c.Request.Context(), orgID.String(), c.Param("id"))
+	if err != nil {
+		errx.Handle(c, err)
+		return
+	}
+
+	if accountID, perr := uuid.Parse(c.Param("id")); perr == nil {
+		h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityEmailAccount, &accountID,
+			map[string]string{"tracking_domain_verified": strconv.FormatBool(status.TrackingDomainVerified)}, nil)
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
 func (h *Handler) UpdateEmailTrackingDomain(c *gin.Context) {
-	userIDStr := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	emailAccountID := c.Param("id")
 	domain := c.Query("domain")
 
-	status, err := h.EmailService.UpdateTrackingDomain(c.Request.Context(), userIDStr, emailAccountID, domain)
+	status, err := h.EmailService.UpdateTrackingDomain(c.Request.Context(), orgID.String(), emailAccountID, domain)
 	if err != nil {
 		errx.Handle(c, err)
 		return

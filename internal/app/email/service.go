@@ -32,7 +32,20 @@ type EmailService interface {
 	// SetWarmupLifecycle starts, pauses, resumes, or disables warmup for a
 	// mailbox. start/resume preserve ramp progress; disable turns warmup off.
 	SetWarmupLifecycle(ctx context.Context, userID, emailAccountID, action string) (*models.Email, *errx.Error)
-	UpdateTrackingDomain(ctx context.Context, userID, emailAccountID, domain string) (*models.TrackingDomainStatus, *errx.Error)
+	// UpdateTrackingDomain sets or clears the custom open/click tracking
+	// domain and resolves it once, persisting the verdict.
+	UpdateTrackingDomain(ctx context.Context, orgID, emailAccountID, domain string) (*models.TrackingDomainStatus, *errx.Error)
+	// GetTrackingDomain reports the stored state plus the CNAME target this
+	// install expects. Read-only: it does no DNS work.
+	GetTrackingDomain(ctx context.Context, orgID, emailAccountID string) (*models.TrackingDomainStatus, *errx.Error)
+	// VerifyTrackingDomain re-resolves the stored domain and PERSISTS the
+	// verdict, which is what lets a fixed record start routing links. Same
+	// read/write split as CheckDomainAuth and RefreshDomainAuth.
+	VerifyTrackingDomain(ctx context.Context, orgID, emailAccountID string) (*models.TrackingDomainStatus, *errx.Error)
+	// StartTrackingDomainSweep re-resolves every custom tracking domain on a
+	// schedule, so a record that propagates starts being used without anybody
+	// pressing anything, and one that disappears stops being used at all.
+	StartTrackingDomainSweep(ctx context.Context, interval, staleAfter time.Duration)
 	// CheckDomainAuth runs a live SPF/DKIM/DMARC lookup for a mailbox's
 	// sending domain and returns it without touching stored state.
 	CheckDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error)

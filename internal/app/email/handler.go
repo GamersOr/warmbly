@@ -2,15 +2,17 @@ package email
 
 import (
 	"context"
-	"net"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/dnsauth"
+	"github.com/warmbly/warmbly/internal/pkg/trackdns"
 	"github.com/warmbly/warmbly/internal/utils/paging"
 	"github.com/warmbly/warmbly/internal/utils/validate"
 )
@@ -78,36 +80,112 @@ func (s *emailService) SetWarmupLifecycle(ctx context.Context, userID, emailAcco
 	return account, nil
 }
 
-// trackingDomainTarget is the shared host customers point their CNAME at.
-// Keep in sync with the TRACKING_DOMAIN default (Makefile / config).
-const trackingDomainTarget = "t.warmbly.com"
-
-func (s *emailService) UpdateTrackingDomain(ctx context.Context, userID, emailAccountID, domain string) (*models.TrackingDomainStatus, *errx.Error) {
-	domain = strings.TrimSpace(strings.ToLower(domain))
-
-	status := &models.TrackingDomainStatus{TrackingDomain: domain}
-
-	// Empty clears the custom domain (back to the shared default).
+// UpdateTrackingDomain sets or clears a mailbox's custom tracking domain and
+// resolves it immediately. The host it has to point at is this install's
+// TRACKING_DOMAIN, not a hardcoded warmbly.com name: a self-hosted deployment
+// was previously told to CNAME at a host it has nothing to do with, so its
+// customers could never verify.
+func (s *emailService) UpdateTrackingDomain(ctx context.Context, orgID, emailAccountID, domain string) (*models.TrackingDomainStatus, *errx.Error) {
+	// Accept what a human pastes (a full URL, a trailing dot, stray case) and
+	// store the bare host. Anything still malformed after that is a real error
+	// with a real message, not a domain that saves and then sits at "pending"
+	// forever because it can never resolve.
+	domain = config.NormalizeTrackingHost(domain)
 	if domain != "" {
-		// Resolve the CNAME chain for the customer's subdomain and treat
-		// it as verified once it points at our tracking host. DNS can lag
-		// behind a freshly-added record, so a miss is "pending", not an
-		// error — the customer just re-verifies.
-		if cname, err := net.DefaultResolver.LookupCNAME(ctx, domain); err == nil {
-			resolved := strings.TrimSuffix(strings.ToLower(cname), ".")
-			if strings.Contains(resolved, trackingDomainTarget) {
-				status.TrackingDomainVerified = true
-				now := time.Now().UTC()
-				status.TrackingDomainVerifiedAt = &now
-			}
+		if xerr := validate.ValidateTrackingDomain(domain); xerr != nil {
+			return nil, xerr
 		}
 	}
 
-	if err := s.emailRepository.UpdateTrackingDomain(ctx, userID, emailAccountID, domain, status.TrackingDomainVerified, status.TrackingDomainVerifiedAt); err != nil {
+	status := s.resolveTrackingDomain(ctx, domain)
+
+	if err := s.emailRepository.UpdateTrackingDomain(ctx, orgID, emailAccountID, domain, status.TrackingDomainVerified, status.TrackingDomainVerifiedAt); err != nil {
 		return nil, err
 	}
 
 	return status, nil
+}
+
+// GetTrackingDomain reports a mailbox's stored tracking-domain state plus the
+// CNAME target for this install. It does no DNS work: resolving is a write
+// (the verdict gates whether real links route through the custom host), so it
+// lives behind VerifyTrackingDomain, the same split as CheckDomainAuth and
+// RefreshDomainAuth.
+func (s *emailService) GetTrackingDomain(ctx context.Context, orgID, emailAccountID string) (*models.TrackingDomainStatus, *errx.Error) {
+	account, xerr := s.Get(ctx, orgID, emailAccountID)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	target := config.TrackingHostname()
+	status := &models.TrackingDomainStatus{
+		TrackingDomain:           account.TrackingDomain,
+		TrackingDomainVerified:   account.TrackingDomainVerified,
+		TrackingDomainVerifiedAt: account.TrackingDomainVerifiedAt,
+		CNAMETarget:              target,
+	}
+
+	switch {
+	case account.TrackingDomain == "":
+		status.Status = trackdns.CodeUnset
+		status.Message = "No custom tracking domain is set, so opens and clicks go through the shared tracking host."
+	case target == "":
+		status.Status = trackdns.CodeNoTarget
+		status.Message = "This Warmbly install has no tracking host configured, so there is nothing to point a CNAME at yet. Ask your administrator to set TRACKING_DOMAIN."
+	case account.TrackingDomainVerified:
+		status.Status = trackdns.CodeVerified
+		status.Message = fmt.Sprintf("%s points at %s.", account.TrackingDomain, target)
+	default:
+		status.Status = trackingStatusPending
+		status.Message = fmt.Sprintf("%s has not verified yet. Check it again to see what DNS returns for it right now.", account.TrackingDomain)
+	}
+
+	return status, nil
+}
+
+// VerifyTrackingDomain re-resolves the stored domain and persists the verdict.
+// This is the escape hatch from "pending": a customer who fixed their record
+// gets it honored now rather than on the next save.
+func (s *emailService) VerifyTrackingDomain(ctx context.Context, orgID, emailAccountID string) (*models.TrackingDomainStatus, *errx.Error) {
+	account, xerr := s.Get(ctx, orgID, emailAccountID)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	status := s.resolveTrackingDomain(ctx, account.TrackingDomain)
+	// Re-verifying re-resolves; it never rewrites the stored value.
+	status.TrackingDomain = account.TrackingDomain
+
+	if err := s.emailRepository.UpdateTrackingDomain(ctx, orgID, emailAccountID, account.TrackingDomain, status.TrackingDomainVerified, status.TrackingDomainVerifiedAt); err != nil {
+		return nil, err
+	}
+
+	return status, nil
+}
+
+// trackingStatusPending marks stored state that has not been re-resolved, as
+// opposed to the codes a live lookup produces.
+const trackingStatusPending = "pending"
+
+// resolveTrackingDomain runs the live lookup and renders it as an API status.
+func (s *emailService) resolveTrackingDomain(ctx context.Context, domain string) *models.TrackingDomainStatus {
+	target := config.TrackingHostname()
+	res := trackdns.Verify(ctx, domain, target)
+
+	status := &models.TrackingDomainStatus{
+		TrackingDomain:           res.Domain,
+		TrackingDomainVerified:   res.Verified,
+		CNAMETarget:              target,
+		Status:                   res.Code,
+		Message:                  res.Reason,
+		Observed:                 res.Observed,
+		TrackingHostUnresolvable: res.TargetUnresolvable,
+	}
+	if res.Verified {
+		now := time.Now().UTC()
+		status.TrackingDomainVerifiedAt = &now
+	}
+	return status
 }
 
 // CheckDomainAuth runs a live SPF/DKIM/DMARC lookup for a mailbox's sending

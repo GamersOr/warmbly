@@ -18,7 +18,7 @@ Analytics rolls every send, open, click, reply, bounce, and complaint into rates
 
 Four rules govern the counts:
 
-- **Tracking must be on.** Opens and clicks need open or link tracking enabled and a tracking domain on the sender mailboxes. With tracking off they stay at zero while sends and replies still count.
+- **Tracking must be on.** Opens and clicks need open or link tracking enabled on the campaign, and a tracking host on the install. A [custom tracking domain](/guides/mailboxes/#custom-tracking-domain) per mailbox is optional; without one they go through the shared host and still count. With tracking off they stay at zero while sends and replies still count.
 - **Replies are human replies.** Out-of-office and autoresponders never count, never stamp the contact as replied, and never trip stop-on-reply.
 - **Bots are filtered.** Crawlers, CLI agents, prefetches, chat link previews, and security gateways that open every link are served normally but never counted. Otherwise one corporate scanner would "click" every link seconds after delivery.
 - **Auto-opens are labeled, not hidden.** Privacy proxies like Apple Mail Privacy Protection still count (they confirm delivery) but are tagged and shown separately (`12 auto`). A later real open upgrades them to human. **Auto-opens never trigger opened-based branches or automations.**

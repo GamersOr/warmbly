@@ -224,7 +224,7 @@ func (d Deps) setMailboxTrackingDomain(ctx context.Context, inv Invocation, args
 	if in.Domain == "" {
 		return "", ErrInvalidArgs
 	}
-	status, xerr := d.Emails.UpdateTrackingDomain(ctx, inv.UserID.String(), in.EmailAccountID, in.Domain)
+	status, xerr := d.Emails.UpdateTrackingDomain(ctx, inv.OrgID.String(), in.EmailAccountID, in.Domain)
 	if xerr != nil {
 		return "", fromErrx(xerr)
 	}

@@ -14,8 +14,9 @@ import (
 )
 
 // Pixel and click-ticket paths as injected by internal/tasks/template.go. The
-// domain in the mail is the (unresolvable) TRACKING_DOMAIN, so the simulator
-// keeps only the path and hits the local tracking service directly.
+// host in the mail is whatever TRACKING_DOMAIN is set to, which need not be
+// reachable from here, so the simulator keeps only the path and hits the local
+// tracking service directly.
 var (
 	pixelRe = regexp.MustCompile(`/t/o/([0-9a-fA-F-]{36})\.png`)
 	clickRe = regexp.MustCompile(`/c/([0-9a-fA-F-]{36})`)

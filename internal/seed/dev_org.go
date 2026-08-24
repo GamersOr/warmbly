@@ -145,7 +145,7 @@ func seedDevMailboxes(ctx context.Context, pool *pgxpool.Pool) error {
 				$1,$2,$3,$4,$5,$6,
 				'-- Dev --', '<p>-- Dev --</p>', TRUE, FALSE,
 				'smtp_imap', 'active', 50, 600, '',
-				'localhost:3000', 'UTC',
+				'', 'UTC',
 				NOW() - INTERVAL '21 days', 10, 40, 1, 30,
 				$7, '08:00', '20:00', 62,
 				'premium',

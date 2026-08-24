@@ -360,10 +360,12 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 	}
 	trackingDomain := ""
 	if data.TrackingDomain != nil {
-		if err := validate.CampaignTrackingDomain(*data.TrackingDomain); err != nil {
+		// Normalize first so a pasted URL or a trailing dot is reduced to the
+		// bare host rather than rejected.
+		trackingDomain = config.NormalizeTrackingHost(*data.TrackingDomain)
+		if err := validate.CampaignTrackingDomain(trackingDomain); err != nil {
 			return nil, err
 		}
-		trackingDomain = strings.TrimSpace(strings.ToLower(*data.TrackingDomain))
 	}
 	// An explicit-strategy campaign must ship at least one sender (the scheduler
 	// otherwise falls back to tags, but persisting an empty explicit pool is a
@@ -1073,11 +1075,12 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		argPos++
 	}
 	if data.TrackingDomain != nil {
-		if err := validate.CampaignTrackingDomain(*data.TrackingDomain); err != nil {
+		domain := config.NormalizeTrackingHost(*data.TrackingDomain)
+		if err := validate.CampaignTrackingDomain(domain); err != nil {
 			return nil, err
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "tracking_domain", argPos))
-		args = append(args, *data.TrackingDomain)
+		args = append(args, domain)
 		argPos++
 		// Any change to the override invalidates a prior verification until
 		// the CNAME is re-resolved (only a verified override is honored).

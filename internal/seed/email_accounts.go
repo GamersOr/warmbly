@@ -67,7 +67,7 @@ func seedEmailAccounts(ctx context.Context, pool *pgxpool.Pool, r *Result) error
 				$1,$2,$3,$4,$5,$6,
 				'-- Seeded sig --', '<p>-- Seeded sig --</p>', TRUE, FALSE,
 				$7, 'active', 50, 600, '',
-				'localhost:3000', 'UTC',
+				'', 'UTC',
 				CASE WHEN $8 THEN NOW() ELSE NULL END,
 				10, 40, 1, 30,
 				$9, '08:00', '20:00', 62,

@@ -567,8 +567,8 @@ A `PreflightReport` object.
       "key": "tracking_domain",
       "passed": false,
       "severity": "warning",
-      "message": "Tracking domain is not verified.",
-      "remediation": "Verify the campaign tracking domain before sending."
+      "message": "2 sender account(s) have an unverified tracking domain.",
+      "remediation": "Set a tracking domain on every sender account used by this campaign and verify its CNAME."
     }
   ],
   "recommendations": ["Verify your tracking domain to improve link attribution."],
@@ -740,7 +740,7 @@ A `data` array of the resulting sender objects (same shape as [list senders](#li
 
 `POST /campaigns/:id/tracking-domain/verify`
 
-Resolve the campaign-scoped tracking domain's CNAME and flip `tracking_domain_verified` to `true` on success. **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`.
+Resolve the campaign-scoped tracking domain against this install's tracking host and flip `tracking_domain_verified` to `true` on success. A record that does not resolve stays unverified with a reason rather than erroring, and the campaign falls back to the mailbox's domain (or the shared host). **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`.
 
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
@@ -748,13 +748,18 @@ Resolve the campaign-scoped tracking domain's CNAME and flip `tracking_domain_ve
 
 ### Response
 
-A `TrackingDomainStatus` object.
+A `TrackingDomainStatus` object, the same shape the [mailbox tracking-domain endpoints](/api/reference/mailboxes/#update-the-tracking-domain) return.
 
 ```json
 {
   "tracking_domain": "track.acme.com",
   "tracking_domain_verified": true,
-  "tracking_domain_verified_at": "2026-06-10T12:00:00Z"
+  "tracking_domain_verified_at": "2026-06-10T12:00:00Z",
+  "cname_target": "t.warmbly.com",
+  "status": "verified",
+  "message": "track.acme.com points at t.warmbly.com.",
+  "observed": "t.warmbly.com",
+  "tracking_host_unresolvable": false
 }
 ```
 

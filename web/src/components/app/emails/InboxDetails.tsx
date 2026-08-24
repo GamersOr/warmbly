@@ -52,6 +52,8 @@ import useAppealWarmupBan from "@/lib/api/hooks/app/emails/useAppealWarmupBan";
 import useAuthCheck from "@/lib/api/hooks/app/emails/useAuthCheck";
 import useRefreshAuthCheck from "@/lib/api/hooks/app/emails/useRefreshAuthCheck";
 import useUpdateEmailTrackingDomain from "@/lib/api/hooks/app/emails/useUpdateEmailTrackingDomain";
+import useEmailTrackingDomain from "@/lib/api/hooks/app/emails/useEmailTrackingDomain";
+import useVerifyEmailTrackingDomain from "@/lib/api/hooks/app/emails/useVerifyEmailTrackingDomain";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 import EmailEditor from "../EmailEditor";
@@ -998,22 +1000,59 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
 
 /* ── Tracking domain (own save + DNS verify flow) ─────────────────────── */
 
-// TRACKING_TARGET is the shared host customers point their CNAME at.
-// Keep in sync with the backend TRACKING_DOMAIN default.
-const TRACKING_TARGET = "t.warmbly.com";
+// normalizeTrackingDomain mirrors the backend: accept whatever is pasted (a
+// full URL, a trailing dot, stray case) and keep the bare host. Without this a
+// pasted link saved as-is and then sat at "Pending DNS" forever, which is what
+// made this look broken rather than wrong.
+function normalizeTrackingDomain(raw: string): string {
+    let v = raw.trim();
+    const scheme = v.indexOf("://");
+    if (scheme >= 0) v = v.slice(scheme + 3);
+    const at = v.lastIndexOf("@");
+    if (at >= 0) v = v.slice(at + 1);
+    const cut = v.search(/[/?#]/);
+    if (cut >= 0) v = v.slice(0, cut);
+    return v.trim().toLowerCase().replace(/\.+$/, "");
+}
+
+// A hostname with at least one dot and an alphabetic TLD, matching
+// validate.TrackingHostname on the backend so the error arrives before the
+// round trip instead of after it.
+function trackingDomainProblem(host: string): string | null {
+    if (!host) return null;
+    if (host.length > 253) return "That domain is too long.";
+    if (/[^a-z0-9.-]/.test(host)) return "Use a plain hostname, like track.yourdomain.com.";
+    if (!host.includes(".")) return "Use a subdomain of a domain you own, like track.yourdomain.com.";
+    if (host.split(".").some((l) => !l || l.startsWith("-") || l.endsWith("-"))) {
+        return "Use a plain hostname, like track.yourdomain.com.";
+    }
+    if (!/^[a-z]{2,}$/.test(host.split(".").pop() ?? "")) return "That does not end in a domain ending, like .com.";
+    return null;
+}
 
 function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
     const [domain, setDomain] = useState(mailbox.tracking_domain ?? "");
     const [copied, setCopied] = useState(false);
+    const status = useEmailTrackingDomain(mailbox.id);
     const mutation = useUpdateEmailTrackingDomain(mailbox.id);
+    const verify = useVerifyEmailTrackingDomain(mailbox.id);
 
-    const saved = (mailbox.tracking_domain ?? "").trim();
-    const verified = mailbox.tracking_domain_verified;
-    const dirty = domain.trim() !== saved;
+    const saved = (status.data?.tracking_domain ?? mailbox.tracking_domain ?? "").trim();
+    const verified = status.data?.tracking_domain_verified ?? mailbox.tracking_domain_verified;
+    const normalized = normalizeTrackingDomain(domain);
+    const dirty = normalized !== saved;
+    const problem = trackingDomainProblem(normalized);
+    // The target is this install's own tracking host, so a self-hosted
+    // deployment shows its own value instead of the cloud one.
+    const target = status.data?.cname_target ?? "";
+    const busy = mutation.isPending || verify.isPending;
+    // Show the diagnostic while something is wrong, not once it is fixed.
+    const message = !verified && status.data?.message && !dirty ? status.data.message : "";
 
     const copyTarget = async () => {
+        if (!target) return;
         try {
-            await navigator.clipboard.writeText(TRACKING_TARGET);
+            await navigator.clipboard.writeText(target);
             setCopied(true);
             window.setTimeout(() => setCopied(false), 1500);
         } catch {
@@ -1022,15 +1061,29 @@ function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
     };
 
     const save = async () => {
-        const next = domain.trim();
+        if (problem) return;
         try {
-            const res = await mutation.mutateAsync(next);
-            if (!next) {
+            const res = await mutation.mutateAsync(normalized);
+            setDomain(res.tracking_domain);
+            if (!normalized) {
                 toast.success("Tracking domain cleared");
             } else if (res.tracking_domain_verified) {
-                toast.success("Tracking domain verified");
+                toast.success(res.tracking_host_unresolvable ? "Saved, but the tracking host is not answering" : "Tracking domain verified");
             } else {
-                toast("Saved. DNS hasn't propagated yet, re-verify in a few minutes.", { icon: "⏳" });
+                toast(res.message || "Saved. DNS hasn't propagated yet, check again in a few minutes.", { icon: "⏳" });
+            }
+        } catch (e) {
+            toast.error(buildError(e as AppError));
+        }
+    };
+
+    const recheck = async () => {
+        try {
+            const res = await verify.mutateAsync();
+            if (res.tracking_domain_verified) {
+                toast.success(res.tracking_host_unresolvable ? "Your record is correct, but the tracking host is not answering" : "Tracking domain verified");
+            } else {
+                toast(res.message || "Still waiting on DNS.", { icon: "⏳" });
             }
         } catch (e) {
             toast.error(buildError(e as AppError));
@@ -1072,7 +1125,22 @@ function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
                 <TextInput value={domain} placeholder="track.yourdomain.com" onChange={setDomain} className="w-full h-9" />
             </FieldShell>
 
-            {domain.trim() && (
+            {problem && (
+                <div className="flex items-start gap-1.5 text-[11.5px] text-rose-600">
+                    <AlertCircleIcon className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    <span>{problem}</span>
+                </div>
+            )}
+
+            {/* Nothing to point at: the install itself has no tracking host. */}
+            {!problem && normalized && status.data && !target && (
+                <div className="flex items-start gap-1.5 text-[11.5px] text-amber-700">
+                    <AlertTriangleIcon className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    <span>This Warmbly install has no tracking host configured, so a custom domain cannot be verified yet. Ask your administrator to set TRACKING_DOMAIN.</span>
+                </div>
+            )}
+
+            {!problem && normalized && target && (
                 <div className="rounded-md border border-slate-200 bg-slate-50/70 p-3 space-y-2">
                     <div className="text-[11px] text-slate-500 leading-relaxed">
                         Add this CNAME record at your DNS provider, then save to verify:
@@ -1081,10 +1149,10 @@ function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
                         <span className="text-slate-400">Type</span>
                         <span className="font-mono text-slate-700">CNAME</span>
                         <span className="text-slate-400">Name</span>
-                        <span className="font-mono text-slate-700 truncate">{domain.trim()}</span>
+                        <span className="font-mono text-slate-700 truncate">{normalized}</span>
                         <span className="text-slate-400">Value</span>
                         <span className="font-mono text-slate-700 inline-flex items-center gap-1.5 min-w-0">
-                            <span className="truncate">{TRACKING_TARGET}</span>
+                            <span className="truncate">{target}</span>
                             <button
                                 type="button"
                                 onClick={copyTarget}
@@ -1098,19 +1166,60 @@ function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
                 </div>
             )}
 
+            {/* Why it is not verified, in the customer's own terms. */}
+            {message && (
+                <div className="flex items-start gap-1.5 text-[11.5px] text-slate-500 leading-relaxed">
+                    <AlertCircleIcon className="w-3.5 h-3.5 shrink-0 mt-px text-amber-500" />
+                    <span>
+                        {message}
+                        {status.data?.observed && status.data.status === "wrong_target" && (
+                            <> Found <span className="font-mono text-slate-600">{status.data.observed}</span>.</>
+                        )}
+                    </span>
+                </div>
+            )}
+
+            {/* Verified but dead: the customer's record is right and ours is not. */}
+            {verified && status.data?.tracking_host_unresolvable && (
+                <div className="flex items-start gap-1.5 text-[11.5px] text-amber-700 leading-relaxed">
+                    <AlertTriangleIcon className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    <span>{status.data.message}</span>
+                </div>
+            )}
+
+            {/* One primary action, whichever one applies: save what was typed,
+                re-resolve what is already saved, or nothing left to do. */}
             <div className="flex items-center gap-2">
-                <button
-                    onClick={save}
-                    disabled={mutation.isPending || (!dirty && (verified || !saved))}
-                    className="h-8 px-3.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
-                >
-                    {mutation.isPending && <Loading className="!w-3.5 h-3.5 text-white" />}
-                    {!saved || dirty ? "Save & verify" : verified ? "Verified" : "Re-verify"}
-                </button>
+                {dirty || !saved ? (
+                    <button
+                        onClick={save}
+                        disabled={busy || !!problem || (!dirty && !saved)}
+                        className="h-8 px-3.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                    >
+                        {mutation.isPending && <Loading className="!w-3.5 h-3.5 text-white" />}
+                        Save &amp; verify
+                    </button>
+                ) : verified ? (
+                    <button
+                        disabled
+                        className="h-8 px-3.5 rounded-md bg-sky-600 text-white text-[12px] font-medium inline-flex items-center gap-1.5 disabled:opacity-60"
+                    >
+                        <CheckCircle2Icon className="w-3.5 h-3.5" /> Verified
+                    </button>
+                ) : (
+                    <button
+                        onClick={recheck}
+                        disabled={busy}
+                        className="h-8 px-3.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                    >
+                        {verify.isPending ? <Loading className="!w-3.5 h-3.5 text-white" /> : <RefreshCwIcon className="w-3.5 h-3.5" />}
+                        Check again
+                    </button>
+                )}
                 {saved && !dirty && (
                     <button
                         onClick={clear}
-                        disabled={mutation.isPending}
+                        disabled={busy}
                         className="h-8 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-600 hover:text-slate-900 transition-colors disabled:opacity-60"
                     >
                         Clear
