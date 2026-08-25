@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
@@ -144,15 +148,218 @@ func (s *campaignService) rescheduleCampaignWakeup(ctx context.Context, campaign
 	_ = s.enqueueCampaignWakeup(ctx, campaignID)
 }
 
-func (s *campaignService) Delete(ctx context.Context, userID, id string) *errx.Error {
-	if err := s.campaignRepository.Delete(ctx, userID, id); err != nil {
-		if errors.Is(err, errx.ErrResourceNotFound) {
-			return errx.ErrNotFound
-		}
-		return errx.InternalError()
+func (s *campaignService) Delete(ctx context.Context, orgID uuid.UUID, campaignID string) (*models.Campaign, *errx.Error) {
+	campaign, cID, xerr := s.campaignForOrg(ctx, orgID, campaignID)
+	if xerr != nil {
+		return nil, xerr
 	}
 
-	return nil
+	// Attachment objects are not reachable once the rows cascade, so list
+	// them first and drop the bytes after the delete has committed.
+	var attachments []models.CampaignAttachment
+	if s.attachmentRepo != nil {
+		var err error
+		if attachments, err = s.attachmentRepo.ListByCampaign(ctx, cID); err != nil {
+			sentry.CaptureException(fmt.Errorf("campaign %s delete: list attachments: %w", cID, err))
+		}
+	}
+
+	if err := s.campaignRepository.Delete(ctx, cID); err != nil {
+		if errors.Is(err, errx.ErrResourceNotFound) {
+			return nil, errx.ErrNotFound
+		}
+		return nil, errx.InternalError()
+	}
+
+	if s.storage != nil {
+		for _, att := range attachments {
+			if err := s.storage.Delete(ctx, att.S3Key); err != nil {
+				sentry.CaptureException(fmt.Errorf("campaign %s delete: object %s: %w", cID, att.S3Key, err))
+			}
+		}
+	}
+
+	if s.streamingPublisher != nil {
+		s.streamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
+			BaseEvent: pubsub.BaseEvent{
+				EventType: pubsub.EventCampaignDeleted,
+				UserID:    campaign.UserID,
+			},
+			OrgID:      orgID.String(),
+			CampaignID: cID.String(),
+			Name:       campaign.Name,
+			Status:     campaign.Status,
+		})
+	}
+
+	return campaign, nil
+}
+
+func (s *campaignService) Duplicate(ctx context.Context, orgID, userID uuid.UUID, campaignID, name string) (*models.Campaign, *errx.Error) {
+	source, cID, xerr := s.campaignForOrg(ctx, orgID, campaignID)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	if name == "" {
+		name = duplicateName(source.Name)
+	}
+	if xerr := validate.CampaignName(name); xerr != nil {
+		return nil, xerr
+	}
+
+	// A copy is a new campaign, so it spends the same daily creation budget.
+	if s.throttle != nil {
+		if xerr := s.throttle.CheckAndIncrement(ctx, orgID, dailythrottle.ResourceCampaign, config.DailyThrottleNewCampaigns); xerr != nil {
+			return nil, xerr
+		}
+	}
+
+	newID := uuid.New()
+	copied, cleanup, xerr := s.copyAttachments(ctx, orgID, cID, newID)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	campaign, err := s.campaignRepository.Duplicate(ctx, repository.DuplicateCampaignInput{
+		SourceID:    cID,
+		NewID:       newID,
+		UserID:      userID,
+		Name:        name,
+		Attachments: copied,
+	})
+	if err != nil {
+		cleanup()
+		if errors.Is(err, errx.ErrResourceNotFound) {
+			return nil, errx.ErrNotFound
+		}
+		return nil, errx.InternalError()
+	}
+
+	if s.campaignLogRepo != nil {
+		_ = s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+			CampaignID: newID,
+			EventType:  "created",
+			Message:    fmt.Sprintf("Duplicated from %q", source.Name),
+			Metadata:   map[string]interface{}{"source_campaign_id": cID.String()},
+		})
+	}
+
+	if s.streamingPublisher != nil {
+		s.streamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
+			BaseEvent: pubsub.BaseEvent{
+				EventType: pubsub.EventCampaignCreated,
+				UserID:    userID.String(),
+			},
+			OrgID:      orgID.String(),
+			CampaignID: campaign.ID.String(),
+			Name:       campaign.Name,
+			Status:     campaign.Status,
+		})
+	}
+
+	return campaign, nil
+}
+
+// copyAttachments writes a copy of every attachment object of src under dst
+// and returns the rows to insert plus a best-effort undo for when the copy
+// transaction fails. The copies count against the organization's storage
+// quota exactly like an upload would. An attachment whose bytes cannot be
+// read is reported and skipped rather than failing the whole duplicate.
+func (s *campaignService) copyAttachments(ctx context.Context, orgID, src, dst uuid.UUID) ([]models.CampaignAttachment, func(), *errx.Error) {
+	noop := func() {}
+	if s.attachmentRepo == nil || s.storage == nil {
+		return nil, noop, nil
+	}
+	sources, err := s.attachmentRepo.ListByCampaign(ctx, src)
+	if err != nil {
+		return nil, noop, errx.InternalError()
+	}
+	if len(sources) == 0 {
+		return nil, noop, nil
+	}
+
+	if s.featureGate != nil {
+		limit, xerr := s.featureGate.GetStorageLimitBytes(ctx, orgID)
+		if xerr != nil {
+			return nil, noop, xerr
+		}
+		used, err := s.attachmentRepo.SumStorageUsedByOrg(ctx, orgID)
+		if err != nil {
+			return nil, noop, errx.InternalError()
+		}
+		var adding int64
+		for _, att := range sources {
+			adding += att.Size
+		}
+		if used+adding > limit {
+			const mb = 1024 * 1024
+			return nil, noop, errx.New(errx.BadRequest, fmt.Sprintf(
+				"duplicating would exceed your storage limit (%d MB of %d MB used, %d MB of attachments to copy): remove attachments or upgrade your plan",
+				used/mb, limit/mb, adding/mb))
+		}
+	}
+
+	copied := make([]models.CampaignAttachment, 0, len(sources))
+	for _, att := range sources {
+		body, err := s.storage.Get(ctx, att.S3Key)
+		if err != nil {
+			sentry.CaptureException(fmt.Errorf("campaign %s duplicate: read %s: %w", src, att.S3Key, err))
+			continue
+		}
+		key := models.AttachmentObjectKey(dst, att.Filename)
+		err = s.storage.Put(ctx, key, body, att.MimeType)
+		body.Close()
+		if err != nil {
+			sentry.CaptureException(fmt.Errorf("campaign %s duplicate: write %s: %w", src, key, err))
+			continue
+		}
+		att.S3Key = key
+		copied = append(copied, att)
+	}
+	return copied, func() {
+		for _, att := range copied {
+			if err := s.storage.Delete(ctx, att.S3Key); err != nil {
+				sentry.CaptureException(fmt.Errorf("campaign %s duplicate undo: object %s: %w", src, att.S3Key, err))
+			}
+		}
+	}, nil
+}
+
+// copySuffix matches a name that is already a copy: "X (copy)" or "X (copy 3)".
+var copySuffix = regexp.MustCompile(`^(.*?) \(copy(?: (\d+))?\)$`)
+
+// duplicateName derives the copy's name inside the 50 character cap. A copy
+// of a copy counts up ("X (copy 2)") instead of stacking suffixes.
+func duplicateName(source string) string {
+	const maxLen = 50
+	base := strings.TrimSpace(source)
+	suffix := " (copy)"
+	if m := copySuffix.FindStringSubmatch(base); m != nil {
+		n := 2
+		if m[2] != "" {
+			if parsed, err := strconv.Atoi(m[2]); err == nil {
+				n = parsed + 1
+			}
+		}
+		base = m[1]
+		suffix = fmt.Sprintf(" (copy %d)", n)
+	}
+	if len(base)+len(suffix) > maxLen {
+		base = strings.TrimSpace(truncateUTF8(base, maxLen-len(suffix)))
+	}
+	return base + suffix
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a rune.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string) *errx.Error {

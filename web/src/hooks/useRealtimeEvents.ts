@@ -5,6 +5,7 @@ import { useSocket } from './context/socket'
 import { useAppStore } from '@/stores'
 import { useUserProfile } from './context/user'
 import { markSelfMutation } from '@/lib/realtime/selfActivity'
+import { announceCampaignDeleted } from '@/lib/realtime/campaignDeleted'
 
 // Bridges realtime socket events into both the zustand store and react-query
 // cache so list pages, detail panes, counters, and workflow states stay live.
@@ -137,6 +138,19 @@ export function useRealtimeEvents() {
           ['organizations', 'limits'],
         ])
         if (contactId) invalidate([['contacts', contactId]])
+        return
+      }
+
+      // A deleted campaign: its detail caches are dropped, not refetched (a
+      // refetch only 404s). The deleter's own page has already left; a
+      // teammate's open detail page is sent back by the announcement.
+      if (event === 'CAMPAIGN_DELETED' && campaignId) {
+        if (getString('user_id') !== myId) {
+          announceCampaignDeleted({ id: campaignId, name: getString('name') ?? '' })
+        }
+        queryClient.removeQueries({ queryKey: ['campaigns', campaignId] })
+        queryClient.removeQueries({ queryKey: ['analytics', 'campaigns', campaignId] })
+        invalidate([['campaigns', 'list'], ['analytics'], ['contacts']])
         return
       }
 
@@ -394,6 +408,7 @@ export function useRealtimeEvents() {
       incrementUnseenCount,
       invalidate,
       myId,
+      queryClient,
       setSubscription,
       updateCampaign,
       updateDeal,

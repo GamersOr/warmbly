@@ -258,7 +258,7 @@ func (d Deps) deleteCampaign(ctx context.Context, inv Invocation, args json.RawM
 	if err != nil {
 		return "", err
 	}
-	if xerr := d.Campaigns.Delete(ctx, inv.UserID.String(), in.CampaignID); xerr != nil {
+	if _, xerr := d.Campaigns.Delete(ctx, inv.OrgID, in.CampaignID); xerr != nil {
 		return "", fromErrx(xerr)
 	}
 	d.logAudit(ctx, inv, models.AuditActionDelete, models.AuditEntityCampaign, &cid, nil)

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import PermissionButton from "@/components/ui/PermissionButton";
-import { Link, Outlet, useLocation, useParams } from "react-router-dom";
+import { Link, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
     ArrowLeftIcon,
@@ -19,6 +19,10 @@ import useStopCampaign from "@/lib/api/hooks/app/campaigns/useStopCampaign";
 import { CampaignContext } from "@/hooks/context/campaign";
 import { useConfirm } from "@/hooks/context/confirm";
 import LaunchCampaignDialog from "@/components/app/campaigns/LaunchCampaignDialog";
+import CampaignActionsMenu from "@/components/app/campaigns/CampaignActionsMenu";
+import { canStartCampaign } from "@/components/app/campaigns/useCampaignActions";
+import toast from "react-hot-toast";
+import { CAMPAIGN_DELETED_EVENT, type CampaignDeletedDetail } from "@/lib/realtime/campaignDeleted";
 import ResourceViewers from "@/components/app/presence/ResourceViewers";
 import { usePresenceResource } from "@/hooks/PresenceProvider";
 
@@ -40,6 +44,7 @@ const STATUS_PILL: Record<string, string> = {
 export default function CampaignLayout() {
     const { pathname } = useLocation();
     const { id } = useParams();
+    const navigate = useNavigate();
     const campaignData = useCampaign(id ?? "");
     const confirm = useConfirm();
     const startCampaign = useStartCampaign();
@@ -49,6 +54,20 @@ export default function CampaignLayout() {
     // Collaboration: claim this campaign while it's open so teammates see
     // who's already in here (header pill + the org-wide presence stack).
     usePresenceResource(id ? `campaign:${id}` : null);
+
+    // A teammate deleted the campaign this page shows: leave it with a note
+    // instead of refetching into a 404.
+    useEffect(() => {
+        if (!id) return;
+        const onDeleted = (e: Event) => {
+            const detail = (e as CustomEvent<CampaignDeletedDetail>).detail;
+            if (detail?.id !== id) return;
+            toast(`"${detail.name || "This campaign"}" was deleted by a teammate`);
+            navigate("/app/campaigns", { replace: true });
+        };
+        window.addEventListener(CAMPAIGN_DELETED_EVENT, onDeleted);
+        return () => window.removeEventListener(CAMPAIGN_DELETED_EVENT, onDeleted);
+    }, [id, navigate]);
 
     if (campaignData.isLoading) {
         return (
@@ -88,7 +107,7 @@ export default function CampaignLayout() {
     const pill = STATUS_PILL[status] ?? STATUS_PILL.draft;
 
     const isActive = status === "active";
-    const canStart = status === "draft" || status === "paused";
+    const canStart = canStartCampaign(status);
     const canToggle = isActive || canStart;
     const pending = isActive ? stopCampaign.isPending : startCampaign.isPending;
 
@@ -126,8 +145,8 @@ export default function CampaignLayout() {
                         <p className="text-[11px] text-slate-400 font-mono mt-1 truncate">{campaign.id}</p>
                     </div>
 
-                    {canToggle && (
-                        <div className="ml-auto shrink-0">
+                    <div className="ml-auto shrink-0 flex items-center gap-1.5">
+                        {canToggle && (
                             <PermissionButton
                                 permission="SEND_CAMPAIGNS"
                                 type="button"
@@ -144,8 +163,14 @@ export default function CampaignLayout() {
                                 )}
                                 {isActive ? "Pause" : "Start"}
                             </PermissionButton>
-                        </div>
-                    )}
+                        )}
+                        <CampaignActionsMenu
+                            campaign={campaign}
+                            variant="header"
+                            onToggle={canToggle ? onToggle : undefined}
+                            afterDelete={() => navigate("/app/campaigns", { replace: true })}
+                        />
+                    </div>
                 </div>
 
                 <div className="shrink-0 px-3 flex items-center gap-1 border-b border-slate-200 overflow-x-auto no-scrollbar">

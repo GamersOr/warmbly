@@ -20,6 +20,12 @@ type CampaignAttachment struct {
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
+// AttachmentObjectKey is where an attachment's bytes live in object storage.
+// Upload and duplicate both write keys through this so the layout stays one.
+func AttachmentObjectKey(campaignID uuid.UUID, filename string) string {
+	return "attachments/" + campaignID.String() + "/" + uuid.NewString() + "-" + filename
+}
+
 // AttachmentRef is the lightweight reference carried through the send pipeline
 // (backend → Kafka → worker). The worker fetches the bytes from S3 by key.
 type AttachmentRef struct {

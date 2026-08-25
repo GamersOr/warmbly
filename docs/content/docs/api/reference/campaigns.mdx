@@ -219,7 +219,11 @@ The updated `Campaign` object.
 
 `DELETE /campaigns/:id`
 
-Permanently delete a campaign. **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`.
+Permanently delete a campaign. Any member of the workspace with the permission can delete any of its campaigns, not only the ones they created. **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`.
+
+A running campaign does not need to be paused first: its pending tasks (the parked wakeup and any send not yet handed to a worker) are cancelled in the same transaction that removes the campaign, so nothing keeps sending for it. A send already in a worker's hands finishes, and its result is discarded.
+
+What is removed with the campaign: steps, leads and their progress, the activity log, senders, A/B variants, advanced settings, daily counters, preflight reports and attachment files. What stays: contacts, emails already sent (still in the inbox and in reply threads), suppression entries, deals and bookings (their campaign link is cleared), and tracked links, so a recipient who clicks a link in an email sent earlier is still redirected.
 
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
@@ -228,6 +232,36 @@ Permanently delete a campaign. **Scope** `WRITE_CAMPAIGNS` · **Org permission**
 ### Response
 
 `204 No Content` with an empty body.
+
+## Duplicate a campaign
+
+`POST /campaigns/:id/duplicate`
+
+Create a new draft campaign from an existing campaign's configuration. **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`. Counts against the same daily new-campaign throttle as [create](#create-a-campaign).
+
+Copied: name (suffixed with ` (copy)` unless you pass one), description, every sending, tracking, schedule, rotation, ramp, ESP-matching and auto-pause setting, the steps with their subjects, bodies, waits, canvas positions and branch graph (rewired onto the new step ids), email tags, folders, the explicit sender list, A/B variants, advanced settings and attachments.
+
+Not copied: leads, progress, sent/open/click/reply statistics, the activity log, daily counters, tasks, the ramp level, an auto-pause trip, and any start or end date already in the past (a past end date would finish the copy the moment it starts). Sender rotation cursors start from zero. The copy is owned by the caller and starts as `draft`; it never sends until it is started.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Campaign to copy. |
+
+### Request body
+
+Optional.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Name for the copy, 3 to 50 characters. Defaults to the source name with ` (copy)` appended. |
+
+```json
+{ "name": "Q3 outbound, subject B" }
+```
+
+### Response
+
+`201 Created` with the new `Campaign` object (see the [list](#list-campaigns) shape), including `senders`.
 
 ## Get advanced settings
 

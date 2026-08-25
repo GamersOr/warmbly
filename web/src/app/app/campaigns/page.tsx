@@ -11,6 +11,7 @@ import AdvisorRowFlag from "@/components/app/advisor/AdvisorRowFlag";
 import AdvisorSummaryBar from "@/components/app/advisor/AdvisorSummaryBar";
 import { useAdvisorEntityIndex } from "@/lib/api/hooks/app/advisor/useAdvisor";
 import LaunchCampaignDialog from "@/components/app/campaigns/LaunchCampaignDialog";
+import CampaignActionsMenu from "@/components/app/campaigns/CampaignActionsMenu";
 import toast from "react-hot-toast";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
@@ -292,6 +293,16 @@ export default function CampaignsPage() {
         }
     }
 
+    // Row start/pause: pause asks first, start opens the launch dialog.
+    function toggleRow(c: Campaign) {
+        const cstatus = c.status ?? "draft";
+        if (cstatus === "active") {
+            confirm?.show(`Pause ${c.name}?`, () => toggleCampaign(c.id, cstatus));
+        } else {
+            setLaunchTarget(c);
+        }
+    }
+
     const campaignsData = useCampaigns({ query, folder });
     // One query for the surface; a step's copy problem indexes onto its parent
     // campaign, so it flags the row even though the step has no row of its own.
@@ -563,14 +574,7 @@ export default function CampaignsPage() {
                                         onClick={(e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
-                                            if (cstatus === "active") {
-                                                confirm?.show(
-                                                    `Pause ${c.name}?`,
-                                                    () => toggleCampaign(c.id, cstatus),
-                                                );
-                                            } else {
-                                                setLaunchTarget(c);
-                                            }
+                                            toggleRow(c);
                                         }}
                                         disabled={
                                             (cstatus === "active" && stopCampaign.isPending) ||
@@ -583,6 +587,11 @@ export default function CampaignsPage() {
                                     >
                                         <StateIcon className="w-3.5 h-3.5" />
                                     </button>
+                                    <CampaignActionsMenu
+                                        campaign={c}
+                                        variant="row"
+                                        onToggle={() => toggleRow(c)}
+                                    />
                                 </Link>
                             );
                         })}

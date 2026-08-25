@@ -8,6 +8,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/feature"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
+	"github.com/warmbly/warmbly/internal/infrastructure/storage"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/scheduler"
@@ -22,7 +23,14 @@ type CampaignService interface {
 	Search(ctx context.Context, userID, query, cursor, folder, status, limit string) (*models.CampaignsResult, *errx.Error)
 	Overview(ctx context.Context, orgID string) (*models.CampaignsOverview, *errx.Error)
 	Update(ctx context.Context, userID, id string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error)
-	Delete(ctx context.Context, userID, id string) *errx.Error
+	// Delete removes an organization's campaign outright. A running campaign
+	// is stopped as part of it: its pending tasks are cancelled in the same
+	// transaction, so nothing keeps sending for a campaign that is gone.
+	// Returns the deleted campaign so callers can name it after the fact.
+	Delete(ctx context.Context, orgID uuid.UUID, campaignID string) (*models.Campaign, *errx.Error)
+	// Duplicate creates a draft copy of a campaign's configuration owned by
+	// userID. An empty name derives "<source name> (copy)".
+	Duplicate(ctx context.Context, orgID, userID uuid.UUID, campaignID, name string) (*models.Campaign, *errx.Error)
 
 	// Start/Stop
 	StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string) *errx.Error
@@ -58,6 +66,20 @@ type campaignService struct {
 	scheduler          scheduler.SchedulerService
 	tasksClient        tasksched.Scheduler
 	streamingPublisher *pubsub.StreamingPublisher
+	attachmentRepo     repository.AttachmentRepository
+	storage            storage.Store
+}
+
+// AttachmentAware is implemented by the campaign service so main can hand it
+// the attachment repository and object store once those exist. Without them
+// delete leaves attachment objects behind and duplicate skips attachments.
+type AttachmentAware interface {
+	WireAttachments(repo repository.AttachmentRepository, store storage.Store)
+}
+
+func (s *campaignService) WireAttachments(repo repository.AttachmentRepository, store storage.Store) {
+	s.attachmentRepo = repo
+	s.storage = store
 }
 
 func NewService(

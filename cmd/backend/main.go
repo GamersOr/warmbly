@@ -1176,6 +1176,11 @@ func main() {
 			aware.WireDomainAuth(instanceSettings)
 		}
 		campaignService = campaign.NewService(campaignRepostory, taskRepository, emailRepostory, campaignLogRepository, featureGateService, dailyThrottleService, schedulerService, tasksClient, streamingPublisher)
+		// Delete drops attachment objects and duplicate copies them, so the
+		// campaign service needs the store the attachment handler writes to.
+		if aware, ok := campaignService.(campaign.AttachmentAware); ok {
+			aware.WireAttachments(attachmentRepoForHandler, s3ForHandler)
+		}
 		// Attaching a lead to a running campaign has to wake that campaign's
 		// parked send chain, or the lead sits queued until the chain's next
 		// tick. Wired here because contactService is built before the scheduler
