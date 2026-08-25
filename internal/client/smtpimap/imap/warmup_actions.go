@@ -15,7 +15,7 @@ func (c *Client) MarkAsRead(ctx context.Context, mailboxName string, uid uint32)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, err := c.client.Select(mailboxName, nil).Wait(); err != nil {
+	if _, err := c.selectMailbox(mailboxName, nil); err != nil {
 		return fmt.Errorf("select %q: %w", mailboxName, err)
 	}
 
@@ -36,7 +36,7 @@ func (c *Client) MarkImportant(ctx context.Context, mailboxName string, uid uint
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, err := c.client.Select(mailboxName, nil).Wait(); err != nil {
+	if _, err := c.selectMailbox(mailboxName, nil); err != nil {
 		return fmt.Errorf("select %q: %w", mailboxName, err)
 	}
 
@@ -81,7 +81,7 @@ func (c *Client) moveUID(ctx context.Context, src, dst string, uid uint32) error
 }
 
 func (c *Client) moveUIDLocked(src, dst string, uid uint32) error {
-	if _, err := c.client.Select(src, nil).Wait(); err != nil {
+	if _, err := c.selectMailbox(src, nil); err != nil {
 		return fmt.Errorf("select %q: %w", src, err)
 	}
 

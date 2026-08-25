@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -47,6 +48,12 @@ type Client struct {
 	// Guarded by mu.
 	sentMailboxName string
 
+	// selected records whether a mailbox is currently SELECTed, so
+	// ReleaseMailbox does not send UNSELECT in authenticated state, where a
+	// strict server answers BAD. Atomic because the sync path selects without
+	// holding mu while warmup actions select under it.
+	selected atomic.Bool
+
 	// BindIP optionally pins outbound TCP to a specific local source address.
 	// When nil, WORKER_BIND_IP is consulted; when still unset, the OS default
 	// route is used.
@@ -69,6 +76,7 @@ func (c *Client) Connect() *errx.MailError {
 	}
 
 	c.client = imapclient.New(conn, nil)
+	c.selected.Store(false)
 
 	var xerr *errx.MailError
 
@@ -173,11 +181,21 @@ func (c *Client) Folders() ([]models.Mailbox, *errx.MailError) {
 }
 
 func (c *Client) Mailbox(mailbox string, uidvali, opts *imap.SelectOptions) error {
-	if _, err := c.client.Select(mailbox, opts).Wait(); err != nil {
+	if _, err := c.selectMailbox(mailbox, opts); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// selectMailbox is the single SELECT funnel: every path that changes the
+// selected mailbox goes through it so ReleaseMailbox knows whether there is
+// one to release. A failed SELECT leaves the session with no mailbox
+// selected (RFC 3501 6.3.1).
+func (c *Client) selectMailbox(mailbox string, opts *imap.SelectOptions) (*imap.SelectData, error) {
+	data, err := c.client.Select(mailbox, opts).Wait()
+	c.selected.Store(err == nil)
+	return data, err
 }
 
 // SelectForSync opens a mailbox read-only with CONDSTORE enabled and returns
@@ -186,7 +204,7 @@ func (c *Client) Mailbox(mailbox string, uidvali, opts *imap.SelectOptions) erro
 // what arms ChangedSince. The count lets the caller skip the fetch entirely
 // for an empty mailbox, where a 1:* set is a server error.
 func (c *Client) SelectForSync(mailbox string) (uint32, *errx.MailError) {
-	data, err := c.client.Select(mailbox, &imap.SelectOptions{ReadOnly: true, CondStore: true}).Wait()
+	data, err := c.selectMailbox(mailbox, &imap.SelectOptions{ReadOnly: true, CondStore: true})
 	if err != nil {
 		return 0, c.handleError(err)
 	}
@@ -197,11 +215,19 @@ func (c *Client) SelectForSync(mailbox string) (uint32, *errx.MailError) {
 // the selected mailbox with the values it held at SELECT, so a loop that keeps
 // INBOX selected never sees another change land. Servers without UNSELECT keep
 // the previous behaviour.
+//
+// It takes mu because it changes selected state, which is exactly what mu
+// exists to serialize against an in-flight warmup MOVE/STORE.
 func (c *Client) ReleaseMailbox() {
-	if c.client == nil || !c.client.Caps().Has(imap.CapUnselect) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.client == nil || !c.selected.Load() || !c.client.Caps().Has(imap.CapUnselect) {
 		return
 	}
-	_ = c.client.Unselect().Wait()
+	if err := c.client.Unselect().Wait(); err == nil {
+		c.selected.Store(false)
+	}
 }
 
 // Fetched is one message's envelope as read by FetchEnvelopes, plus what

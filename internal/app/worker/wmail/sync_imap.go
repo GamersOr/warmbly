@@ -151,7 +151,6 @@ func (w *WMail) imapIncremental(ctx context.Context, box *models.Mailbox, modSeq
 	// Newest first: when budget is short, the freshest mail lands first.
 	sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] })
 
-	complete := true
 	for lo := 0; lo < len(uids); lo += config.ImapFetchBatchSize {
 		hi := min(lo+config.ImapFetchBatchSize, len(uids))
 		fetched, err := client.FetchEnvelopes(ctx, uids[lo:hi])
@@ -162,14 +161,15 @@ func (w *WMail) imapIncremental(ctx context.Context, box *models.Mailbox, modSeq
 		if err != nil {
 			return false, err
 		}
-		if !done {
-			complete = false
-		}
-		if stats.aborted || ctx.Err() != nil {
+		// A denied lane means no later batch can be stored either, and every
+		// extra batch still counts new mail toward flood detection: a mailbox
+		// unfrozen on a long backlog would deactivate itself walking mail it
+		// cannot keep. Stop here; the held mod-sequence re-offers the rest.
+		if !done || stats.aborted || ctx.Err() != nil {
 			return false, nil
 		}
 	}
-	return complete, nil
+	return true, nil
 }
 
 // imapApply routes one fetched batch: known messages get an UPDATE_EMAIL,
