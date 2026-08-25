@@ -1,5 +1,4 @@
 import updateContact from "@/lib/api/client/app/contacts/updateContact";
-import type Contact from "@/lib/api/models/app/contacts/Contact";
 import type ContactUpdate from "@/lib/api/models/app/contacts/ContactUpdate";
 import type SearchContactsResult from "@/lib/api/models/app/contacts/SearchContactsResult";
 import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
@@ -26,10 +25,13 @@ export default function useUpdateContact(id: string) {
                 });
             }
 
-            queryClient.setQueryData<Contact>(
-                ["contacts", id],
-                data
-            );
+            // Patching rewrites rows a list already holds; campaign membership
+            // decides which lists hold the contact at all (the Leads tab is this
+            // search scoped to one campaign), so they must refetch (issue #187).
+            return Promise.all([
+                queryClient.invalidateQueries({ queryKey: ["contacts"] }),
+                queryClient.invalidateQueries({ queryKey: ["campaigns"] }),
+            ]);
         }
     })
 }

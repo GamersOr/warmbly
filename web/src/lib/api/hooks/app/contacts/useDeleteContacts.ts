@@ -1,6 +1,5 @@
 import deleteContacts from "@/lib/api/client/app/contacts/deleteContacts";
-import type SearchContactsResult from "@/lib/api/models/app/contacts/SearchContactsResult";
-import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 export default function useDeleteContacts() {
     const queryClient = useQueryClient();
@@ -8,32 +7,18 @@ export default function useDeleteContacts() {
     return useMutation({
         mutationFn: (contact_ids: string[]) => deleteContacts(contact_ids),
         onSuccess: (_, contact_ids) => {
-            const allLists = queryClient.getQueriesData<InfiniteData<SearchContactsResult>>({
-                queryKey: ["campaigns", "list"],
-            });
-
-            for (const [key, oldData] of allLists) {
-                if (!oldData) continue;
-
-                queryClient.setQueryData(key, {
-                    ...oldData,
-                    pages: oldData.pages.map((page) => ({
-                        ...page,
-                        data: page.data.filter((c) => !contact_ids.includes(c.id)),
-                    })),
-                });
-            }
-
             contact_ids.forEach(id => {
                 queryClient.invalidateQueries({
                     queryKey: ["contacts", id]
                 });
             });
             // The contacts table reads ["contacts","list",...]; refresh it so the
-            // deleted rows disappear without a manual reload.
-            queryClient.invalidateQueries({
-                queryKey: ["contacts", "list"]
-            });
+            // deleted rows disappear without a manual reload. ["campaigns"] carries
+            // the lead counts the deleted contacts were part of.
+            return Promise.all([
+                queryClient.invalidateQueries({ queryKey: ["contacts", "list"] }),
+                queryClient.invalidateQueries({ queryKey: ["campaigns"] }),
+            ]);
         }
     })
 }
