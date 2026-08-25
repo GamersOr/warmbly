@@ -38,7 +38,7 @@ type GraphData struct {
 }
 
 type SmtpImapData struct {
-	ImapClient *imap.Client
+	ImapClient ImapConn
 	SmtpClient *smtp.Client
 	Mailboxes  []*models.Mailbox
 	mailbox    uint32
@@ -76,7 +76,7 @@ type WMail struct {
 
 	// Sync fair use: the budget engine and the relayed state (governor.go,
 	// sync_state.go). Built in NewWMail from the ADD_EMAIL payload.
-	gov     *governor
+	gov     syncBudget
 	tracker *syncTracker
 	// laneCache remembers deferred messages' lanes across passes; googleTick
 	// and graphTick carry the running pass's stats into provider callbacks.
@@ -231,14 +231,15 @@ func NewWMail(
 		mail.SmtpImapData = &SmtpImapData{}
 
 		if data.ImapSync {
-			mail.SmtpImapData.ImapClient = &imap.Client{
+			conn := &imap.Client{
 				Email:       data.Email,
 				AuthType:    models.AuthPlain,
 				Credentials: data.SmtpImap.Credentials.IMAP,
 			}
-			if err := mail.SmtpImapData.ImapClient.Connect(); err != nil {
+			if err := conn.Connect(); err != nil {
 				return nil, err
 			}
+			mail.SmtpImapData.ImapClient = conn
 			// Saved folder cursors: live sync resumes from each folder's stored
 			// HIGHESTMODSEQ instead of re-baselining (and, before this, instead
 			// of re-walking every folder on every worker restart).

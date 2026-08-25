@@ -38,6 +38,19 @@ type Admission struct {
 	Until time.Time
 }
 
+// syncBudget is the fair-use engine a sync pass charges. *governor is the
+// only implementation; the interface exists so a pass can be driven against a
+// fixed budget in tests, where the governor's Redis windows are unreachable.
+type syncBudget interface {
+	Policy() models.SyncPolicy
+	SetPolicy(policy models.SyncPolicy)
+	Admit(ctx context.Context, lane SyncLane) Admission
+	ObserveLive(ctx context.Context, n int) bool
+	RecordThrottledDay(ctx context.Context) bool
+}
+
+var _ syncBudget = (*governor)(nil)
+
 // governor is the per-mailbox fair-use engine. Counters live in Redis (shared
 // across workers, so an organization budget holds even when its mailboxes sit
 // on different machines) as fixed windows: cheap INCRs with a TTL, no sorted
