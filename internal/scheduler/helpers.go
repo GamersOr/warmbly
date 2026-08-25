@@ -347,6 +347,33 @@ func remainingSendMinutes(c *AccountCandidate, at time.Time, sw models.ScheduleW
 	return dayEnd - max(currentMinutes, dayStart), true
 }
 
+// poolRemainingOn is how many cold sends the campaign's eligible mailboxes still
+// have between them on the day `at` falls on — the denominator the even-
+// distribution step paces the day across.
+//
+// Only mailboxes actually landing on that day are counted. A behaviour-profiled
+// mailbox whose today is spent has already been walked to a later day by
+// placeWithinBehavior, and counting tomorrow's allowance as if it were available
+// now would pace the campaign faster than the mailboxes that can send today can
+// keep up with. A mailbox that opened BEFORE `at` is available whatever day it
+// opened on, which is what keeps the count right when the whole pass has been
+// pushed to tomorrow because every mailbox was at capacity today.
+func poolRemainingOn(pool []AccountCandidate, at time.Time) int {
+	total := 0
+	for i := range pool {
+		c := &pool[i]
+		if c.RemainingToday <= 0 {
+			continue
+		}
+		if c.Behavior.Enabled && c.BehaviorOpenAt != nil &&
+			c.BehaviorOpenAt.After(at) && !sameLocalDay(*c.BehaviorOpenAt, at, c.Behavior.Loc) {
+			continue
+		}
+		total += c.RemainingToday
+	}
+	return total
+}
+
 // campaignRampCeiling returns the day's effective ramp ceiling. When ramp is
 // disabled it returns the campaign ceiling unchanged (the caller still min()s
 // against the per-mailbox cap). When enabled it returns the already-advanced

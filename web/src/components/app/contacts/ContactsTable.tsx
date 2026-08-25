@@ -55,6 +55,7 @@ import ContactEdit from "./ContactEdit";
 import type { ContactSlideTab } from "./contact-edit/tabs";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
 import type { ContactCampaignProgress, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
+import type { CampaignLeadCounts } from "@/lib/api/models/app/contacts/SearchContactsResult";
 import ContactsEditBulk from "./ContactsEditBulk";
 import { NewContactDialog } from "./NewContactDialog";
 import ExportDialog from "./ExportDialog";
@@ -366,6 +367,7 @@ export default function ContactsTable({
                     contacts={contacts ?? []}
                     total={total}
                     hasMore={!!contactsData.hasNextPage}
+                    serverCounts={contactsData.data?.pages[0]?.lead_counts}
                 />
                 <div className="relative">
                     {tableNode}
@@ -1020,18 +1022,36 @@ function LeadStatusPill({ lead }: { lead?: ContactCampaignProgress | null }) {
 }
 
 // Compact campaign-state strip above the Leads list: a segmented bar + per-state
-// counts derived from the loaded leads, so you can see at a glance how the
-// campaign is processing its leads.
+// counts, so you can see at a glance how the campaign is processing its leads.
+//
+// The numbers come from the server's campaign-wide `lead_counts` whenever it is
+// there. Counting the loaded rows instead made the strip lie on any campaign
+// past one page: a campaign of 57 leads showed "Queued 50, Done 0" purely
+// because those were the 50 rows on screen (issue #189). The loaded-row count
+// stays as the fallback so the strip is never blank on first paint.
 function LeadProgressStrip({
     contacts,
     total,
     hasMore,
+    serverCounts,
 }: {
     contacts: { campaign_lead?: ContactCampaignProgress | null }[];
     total: number;
     hasMore: boolean;
+    serverCounts?: CampaignLeadCounts;
 }) {
     const counts = React.useMemo(() => {
+        if (serverCounts) {
+            return {
+                pending: serverCounts.queued,
+                active: serverCounts.processing,
+                completed: serverCounts.completed,
+                replied: serverCounts.replied,
+                bounced: serverCounts.bounced,
+                failed: serverCounts.failed,
+                unsubscribed: serverCounts.unsubscribed,
+            } satisfies Record<LeadStatus, number>;
+        }
         const c: Record<LeadStatus, number> = {
             pending: 0,
             active: 0,
@@ -1043,10 +1063,12 @@ function LeadProgressStrip({
         };
         for (const ct of contacts) c[ct.campaign_lead?.status ?? "pending"]++;
         return c;
-    }, [contacts]);
+    }, [contacts, serverCounts]);
 
     const loaded = contacts.length;
     if (loaded === 0) return null;
+    // The bar's segments are shares of whatever the counts cover.
+    const barTotal = serverCounts ? Math.max(serverCounts.total, 1) : loaded;
 
     const segs: { key: LeadStatus; color: string }[] = [
         { key: "active", color: "bg-sky-500" },
@@ -1067,7 +1089,7 @@ function LeadProgressStrip({
                             <div
                                 key={s.key}
                                 className={`${s.color} transition-[width] duration-500 ease-out`}
-                                style={{ width: `${(counts[s.key] / loaded) * 100}%` }}
+                                style={{ width: `${(counts[s.key] / barTotal) * 100}%` }}
                             />
                         ) : null,
                     )}

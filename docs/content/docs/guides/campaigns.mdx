@@ -85,6 +85,10 @@ Campaigns send only inside the **weekly sending windows** you define, in the cam
 
 Within a window Warmbly spreads the day's emails evenly, adds random jitter, and rounds to natural send times so nothing arrives in obvious bursts. A mailbox with its own timezone is also kept inside its local business hours (`8am` to `8pm`).
 
+The spread covers every mailbox on the campaign, not one at a time: the day's remaining capacity across the whole sending pool is paced across the hours left in the window. Adding a second healthy mailbox roughly doubles how fast a campaign works through its leads, while each mailbox still stays inside its own daily cap, hourly ceiling and minimum gap.
+
+When nothing is due (every lead is inside a step's wait, for example), the campaign re-checks itself at least every `15` minutes rather than sleeping until the next step falls due. Leads added to a running campaign start sending straight away, without waiting for the next step or a restart.
+
 Optional **campaign dates** bound when it may send. Leave both blank to run open-ended. Picking today as the start date means "start now", and clearing a start date on a running campaign removes the wait entirely. Schedule changes on an active campaign take effect immediately: the next send is recomputed on save, so a campaign waiting on a future start date starts sending as soon as you clear or shorten it.
 
 ## Start and stop

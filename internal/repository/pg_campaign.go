@@ -54,6 +54,13 @@ type CampaignRepository interface {
 	// task — their self-perpetuating chain died and needs re-seeding. Used by the
 	// campaign reconciler.
 	ListCampaignScheduleCandidates(ctx context.Context, limit int) ([]uuid.UUID, error)
+	// ListStaleParkedCampaigns returns active campaigns whose EARLIEST pending
+	// task is parked further ahead than staleAfter, with that task. Even
+	// distribution can only push a successor to the end of the mailbox's current
+	// day, so anything beyond a day was parked by a deferral and may be holding
+	// the campaign asleep past work that has since become due (leads imported, a
+	// reply routing a contact onto a live branch). The reconciler re-checks each.
+	ListStaleParkedCampaigns(ctx context.Context, staleAfter time.Duration, limit int) ([]ParkedCampaignTask, error)
 	CountActiveForOrganization(ctx context.Context, orgID uuid.UUID) (int, error)
 	AccountHasActiveCampaign(ctx context.Context, accountID uuid.UUID) (bool, error)
 	// CountActiveCampaignsForAccount returns how many active campaigns send
@@ -1517,6 +1524,57 @@ func (r *campaignRepository) ListCampaignScheduleCandidates(ctx context.Context,
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ParkedCampaignTask is one active campaign together with the pending wakeup
+// task holding its chain, for the reconciler's stale-park check.
+type ParkedCampaignTask struct {
+	CampaignID  uuid.UUID
+	TaskID      uuid.UUID
+	ScheduledAt time.Time
+}
+
+// ListStaleParkedCampaigns implements the interface comment above. Only the
+// earliest pending task per campaign is returned: that is the one that decides
+// when the chain next wakes.
+func (r *campaignRepository) ListStaleParkedCampaigns(ctx context.Context, staleAfter time.Duration, limit int) ([]ParkedCampaignTask, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	// The staleness filter sits OUTSIDE the DISTINCT ON, so the inner query
+	// still picks each campaign's earliest pending task: filtering inside would
+	// hide a nearby wakeup and make a later one look like the one holding the
+	// chain.
+	query := `
+		SELECT p.campaign_id, p.id, p.scheduled_at
+		FROM (
+			SELECT DISTINCT ON (ct.campaign_id) ct.campaign_id, t.id, t.scheduled_at
+			FROM campaigns c
+			JOIN campaign_tasks ct ON ct.campaign_id = c.id
+			JOIN tasks t ON t.id = ct.task_id
+			WHERE c.status = 'active'
+			  AND t.status = 'pending'
+			  AND t.scheduled_at IS NOT NULL
+			ORDER BY ct.campaign_id, t.scheduled_at ASC
+		) p
+		WHERE p.scheduled_at > NOW() + $1::interval
+		LIMIT $2`
+
+	rows, err := r.DB.Query(ctx, query, staleAfter.String(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ParkedCampaignTask
+	for rows.Next() {
+		var p ParkedCampaignTask
+		if err := rows.Scan(&p.CampaignID, &p.TaskID, &p.ScheduledAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func (r *campaignRepository) CountActiveForOrganization(ctx context.Context, orgID uuid.UUID) (int, error) {

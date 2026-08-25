@@ -33,6 +33,11 @@ interface SocketContextValue {
     joinChannel: (topic: string, params?: Record<string, unknown>) => void;
     leaveChannel: (topic: string) => void;
     getChannelState: (topic: string) => ChannelState;
+    // Reactive mirror of every channel's state, keyed by topic. getChannelState
+    // reads a ref, so a component that renders it never re-renders when the
+    // channel actually joins — which is how a live campaign's panel sat on
+    // "Disconnected" forever (issue #189). Render from this.
+    channelStates: Record<string, ChannelState>;
 
     // Event handling
     subscribeToChannel: (
@@ -76,7 +81,7 @@ export function useChannel(topic: string, params?: Record<string, unknown>) {
     }, [socket, topic, params]);
 
     return {
-        state: socket.getChannelState(topic),
+        state: socket.channelStates[topic] ?? "closed",
         push: (event: string, payload: Record<string, unknown>) =>
             socket.pushToChannel(topic, event, payload),
     };

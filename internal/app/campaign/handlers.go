@@ -282,6 +282,69 @@ func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, ca
 	return nil
 }
 
+// WakeCampaigns implements the interface comment on CampaignService: after
+// leads are attached to a campaign, pull its parked wakeup forward if the
+// campaign can now act sooner than where it sits.
+//
+// It only ever moves a wakeup EARLIER, and only when the parked one is beyond
+// the deferral horizon, so a campaign already ticking on its send pacing is left
+// alone. Everything here is best effort: the reconciler and the capped deferral
+// horizon are the backstops, so a failure delays the new leads rather than
+// losing them.
+func (s *campaignService) WakeCampaigns(ctx context.Context, orgID uuid.UUID, campaignIDs []string) {
+	if s.scheduler == nil || s.tasksClient == nil || s.taskRepo == nil {
+		return
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, raw := range campaignIDs {
+		id, perr := uuid.Parse(raw)
+		if perr != nil || seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		campaign, err := s.campaignRepository.GetByID(ctx, id)
+		if err != nil || campaign == nil || campaign.Status != "active" {
+			continue
+		}
+		if campaign.OrganizationID == nil || *campaign.OrganizationID != orgID {
+			continue
+		}
+
+		pending, perr2 := s.campaignRepository.GetPendingCampaignTasks(ctx, id)
+		if perr2 != nil {
+			continue
+		}
+		var parked *time.Time
+		for i := range pending {
+			at := pending[i].ScheduledAt
+			if at != nil && (parked == nil || at.Before(*parked)) {
+				parked = at
+			}
+		}
+		// Already about to wake: leave the chain's own pacing alone.
+		if parked != nil && !parked.After(time.Now().Add(config.CampaignMaxDeferMinutes*time.Minute)) {
+			continue
+		}
+
+		nextTime, _, _, cerr := s.scheduler.CalculateNextCampaignTime(ctx, id)
+		if cerr != nil && !errors.Is(cerr, scheduler.ErrCampaignDeferred) {
+			continue
+		}
+		if errors.Is(cerr, scheduler.ErrCampaignDeferred) {
+			nextTime = scheduler.DeferSlot(nextTime)
+		}
+		if nextTime.IsZero() || (parked != nil && !nextTime.Before(*parked)) {
+			continue
+		}
+
+		for i := range pending {
+			_ = s.taskRepo.DeleteTask(ctx, pending[i].ID)
+		}
+		_ = s.enqueueCampaignWakeup(ctx, id)
+	}
+}
+
 func (s *campaignService) enqueueCampaignWakeup(ctx context.Context, campaignID uuid.UUID) *errx.Error {
 	if s.scheduler == nil || s.tasksClient == nil || s.taskRepo == nil {
 		return nil
@@ -291,6 +354,9 @@ func (s *campaignService) enqueueCampaignWakeup(ctx context.Context, campaignID 
 	// A deferral still yields a usable first-send slot (nextTime) and a nominal
 	// pool mailbox (accountID), so fall through and schedule the first wakeup at
 	// the defer time rather than failing the campaign start.
+	if errors.Is(err, scheduler.ErrCampaignDeferred) {
+		nextTime = scheduler.DeferSlot(nextTime)
+	}
 	if err != nil && !errors.Is(err, scheduler.ErrCampaignDeferred) {
 		switch {
 		// Checked before ErrNoEmailAccounts, which they wrap.

@@ -45,6 +45,11 @@ func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID
 	}
 
 	s.publishContactsReload(ctx, userID, "contacts:add")
+	var attached []string
+	for i := range contacts {
+		attached = append(attached, contacts[i].Campaigns...)
+	}
+	s.wakeCampaigns(ctx, orgID, attached)
 	return created, nil
 }
 
@@ -104,6 +109,7 @@ func (s *contactService) BulkUpdate(ctx context.Context, userID string, orgID uu
 	}
 
 	s.publishContactsReload(ctx, userID, "contacts:bulk_update")
+	s.wakeCampaigns(ctx, orgID, data.AddCampaigns)
 	return updated, nil
 }
 
@@ -114,6 +120,7 @@ func (s *contactService) Update(ctx context.Context, userID, contactID string, o
 	}
 
 	s.publishContactsReload(ctx, userID, "contacts:update:"+contactID)
+	s.wakeCampaigns(ctx, orgID, data.Campaigns)
 	return updated, nil
 }
 

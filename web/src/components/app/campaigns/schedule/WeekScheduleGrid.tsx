@@ -31,7 +31,11 @@ const hourLabel = (h: number) => {
     const h12 = hh % 12 === 0 ? 12 : hh % 12;
     return `${h12}${ampm}`;
 };
+// An interval's end is exclusive and may be 1440 (midnight, end of day), which
+// the plain h<12 test rendered as "12pm" — so a full day read as "12am-12pm"
+// and looked like sending stopped at noon.
 const fmt = (min: number) => {
+    if (min === DAY) return "midnight";
     const h = Math.floor(min / 60);
     const m = min % 60;
     const ampm = h < 12 ? "am" : "pm";

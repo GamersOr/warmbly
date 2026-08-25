@@ -86,6 +86,35 @@ const (
 	// follow-up early; a task that fired on time always passes.
 	CampaignNotDueGraceSeconds = 60
 
+	// CampaignMaxDeferMinutes bounds how far ahead a DEFERRED campaign tick may
+	// park its successor. A deferral means "nothing is sendable right now", and
+	// the reasons it says that (no lead is due, the new-lead cap is spent, no
+	// same-provider mailbox) all change from outside the chain: leads get
+	// imported, a reply routes a contact onto a live branch, a mailbox comes
+	// back under budget. A campaign is a single self-perpetuating task, so a
+	// park at the literal next-due time (days out for a "wait 3 days" step) is
+	// also the next time anything re-reads that state — which is how a campaign
+	// with freshly imported leads sits at "Queued / Not started" for days.
+	// Re-checking on this horizon costs one scheduling pass per idle campaign
+	// per interval and bounds that staleness. It applies ONLY to deferrals: a
+	// tick that actually sent parks its successor at the paced interval, which
+	// is the send spacing and must not be shortened.
+	CampaignMaxDeferMinutes = 15
+
+	// CampaignStaleParkHours is when the reconciler starts distrusting a parked
+	// wakeup. Even-distribution can only push a successor to the end of the
+	// mailbox's current day, so a pending tick further out than this was parked
+	// by a deferral (including ones written before deferrals were capped) and is
+	// re-checked against the campaign's real next-due time.
+	CampaignStaleParkHours = 24
+
+	// CampaignReparkMarginMinutes is how much earlier the recomputed slot must
+	// be before the reconciler moves a stale park. Slot selection carries
+	// jitter, so without a margin a campaign whose window genuinely is days out
+	// (a Monday-only schedule) would be re-parked a few minutes earlier on every
+	// pass forever.
+	CampaignReparkMarginMinutes = 60
+
 	// CampaignSendReclaimAfterMinutes is how long a reserved-but-unresolved send
 	// (dispatched_at set, no worker result, no sent_at) is left alone before the
 	// reclaimer treats its outcome as lost and walks it back as a failed

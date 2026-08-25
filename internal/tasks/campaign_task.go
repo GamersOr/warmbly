@@ -194,10 +194,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			// has no same-provider mailbox, or the daily new-lead cap is reached).
 			// Reschedule at the deferred slot WITHOUT sending and WITHOUT touching
 			// progress / daily counters / rotation — mirrors the daily-limit path.
-			scheduledNext := nextTime
-			if scheduledNext.IsZero() {
-				scheduledNext = time.Now().UTC().Add(1 * time.Hour)
-			}
+			// Capped: the next-due moment can be days out, and until this chain
+			// wakes nothing re-reads the campaign, so leads imported meanwhile
+			// would sit queued until then.
+			scheduledNext := scheduler.DeferSlot(nextTime)
 			if cerr := s.createCampaignTask(ctx, campaign.ID, accountID, scheduledNext); cerr != nil {
 				log.Warn().Err(cerr).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to schedule deferred campaign task")
 			}
