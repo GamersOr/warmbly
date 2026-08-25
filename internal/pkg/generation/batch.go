@@ -112,19 +112,22 @@ func (c *GenerationClient) SubmitBatch(ctx context.Context, requests []BatchRequ
 	return batch.ID, file.ID, nil
 }
 
-// GetBatch returns the current status, output file ID (when completed), and
-// request counts for a batch.
-func (c *GenerationClient) GetBatch(ctx context.Context, batchID string) (status, outputFileID string, counts BatchCounts, err error) {
+// GetBatch returns the current status, the output file ID (present when at
+// least one request succeeded), the error file ID (present when at least one
+// failed), and the request counts for a batch. A batch whose requests all
+// failed still completes, with output empty and every refusal in the error
+// file, so callers must read that one to learn why.
+func (c *GenerationClient) GetBatch(ctx context.Context, batchID string) (status, outputFileID, errorFileID string, counts BatchCounts, err error) {
 	batch, err := c.client.Batches.Get(ctx, batchID)
 	if err != nil {
-		return "", "", BatchCounts{}, err
+		return "", "", "", BatchCounts{}, err
 	}
 	counts = BatchCounts{
 		Completed: int(batch.RequestCounts.Completed),
 		Failed:    int(batch.RequestCounts.Failed),
 		Total:     int(batch.RequestCounts.Total),
 	}
-	return string(batch.Status), batch.OutputFileID, counts, nil
+	return string(batch.Status), batch.OutputFileID, batch.ErrorFileID, counts, nil
 }
 
 // CancelBatch requests cancellation of an in-flight batch.
@@ -180,7 +183,12 @@ func parseBatchOutputLine(raw string) BatchResult {
 		return res
 	}
 	if line.Response.StatusCode < 200 || line.Response.StatusCode >= 300 {
+		// An error line carries {"body":{"error":{"message":...}}}, which does
+		// not fit ChatCompletion; without this the reason is reduced to a code.
 		res.Err = fmt.Sprintf("response status %d", line.Response.StatusCode)
+		if msg := batchLineErrorMessage(raw); msg != "" {
+			res.Err += ": " + msg
+		}
 		return res
 	}
 	if len(line.Response.Body.Choices) == 0 {
@@ -204,3 +212,21 @@ type namedReader struct {
 }
 
 func (n namedReader) Name() string { return n.name }
+
+// batchLineErrorMessage pulls the provider's message out of a failed batch
+// line, whose body is an error object rather than a chat completion.
+func batchLineErrorMessage(raw string) string {
+	var line struct {
+		Response struct {
+			Body struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			} `json:"body"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(raw), &line); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(line.Response.Body.Error.Message)
+}
