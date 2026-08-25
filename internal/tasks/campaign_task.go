@@ -83,8 +83,15 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		return errx.InternalError()
 	}
 
-	if campaignTask == nil || campaignTask.CampaignID == nil {
+	if campaignTask == nil {
 		return errx.ErrNotFound
+	}
+	// campaign_tasks nulls its link when the campaign is deleted: the chain
+	// ends here rather than leaving the row claimed as active.
+	if campaignTask.CampaignID == nil {
+		s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+		executionStatus = "completed"
+		return nil
 	}
 
 	// Get campaign progress for task progress events
@@ -98,6 +105,12 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// STEP 5: Load campaign
 	campaign, err := s.campaignRepo.GetByID(ctx, *campaignTask.CampaignID)
 	if err != nil {
+		// Deleted between the pending check and here: the chain ends.
+		if errors.Is(err, errx.ErrResourceNotFound) {
+			s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+			executionStatus = "completed"
+			return nil
+		}
 		sentry.CaptureException(err)
 		return errx.InternalError()
 	}

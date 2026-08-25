@@ -424,6 +424,7 @@ func Run(
 				campaigns.GET("/:id", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.GetCampaign)
 				campaigns.PATCH("/:id", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.UpdateCampaign)
 				campaigns.DELETE("/:id", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.DeleteCampaign)
+				campaigns.POST("/:id/duplicate", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.DuplicateCampaign)
 
 				// Advanced campaign controls
 				campaigns.GET("/:id/advanced", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.GetCampaignAdvancedSettings)

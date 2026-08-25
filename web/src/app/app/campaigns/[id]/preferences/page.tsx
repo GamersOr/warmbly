@@ -19,6 +19,7 @@ import CampaignContactOrder from "@/components/app/campaigns/preferences/Campaig
 import { GuardrailsSection } from "@/components/app/campaigns/preferences/CampaignGuardrails";
 import { guardrailValidationError } from "@/lib/helper/guardrail";
 import CampaignFolderField from "@/components/app/campaigns/CampaignFolderField";
+import CampaignDangerZone from "@/components/app/campaigns/preferences/CampaignDangerZone";
 import useUpdateCampaign from "@/lib/api/hooks/app/campaigns/useUpdateCampaign";
 import toast from "react-hot-toast";
 import type { AppError } from "@/lib/api/client/normalizeError";
@@ -70,6 +71,7 @@ const SECTIONS = [
         description: "Copy extra addresses on every email sent by this campaign.",
     },
     { id: "order", label: "Contact order", description: "The order contacts are sent in." },
+    { id: "danger", label: "Delete campaign", description: "" },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
@@ -367,6 +369,8 @@ export default function CampaignPreferences() {
                 return <CcBccSection newCampaign={newData} setNewCampaign={setNewData} />;
             case "order":
                 return <CampaignContactOrder campaign={campaign} newCampaign={newData} setNewCampaign={setNewData} />;
+            case "danger":
+                return <CampaignDangerZone campaign={campaign} />;
         }
     };
 

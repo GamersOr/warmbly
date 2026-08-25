@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -186,22 +189,76 @@ func (h *Handler) UpdateCampaign(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// DeleteCampaign permanently removes a campaign of the current organization.
+// DELETE /campaigns/:id
 func (h *Handler) DeleteCampaign(c *gin.Context) {
-	userIDStr := middleware.GetUserID(c)
-
-	id := c.Param("id")
-
-	if err := h.CampaignService.Delete(c.Request.Context(), userIDStr, id); err != nil {
-		errx.JSON(c, err)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.ErrNoOrganization)
 		return
 	}
 
-	// Audit log
-	if campaignID, err := uuid.Parse(id); err == nil {
-		h.auditOrg(c, models.AuditActionDelete, models.AuditEntityCampaign, &campaignID, nil, nil)
+	id := c.Param("id")
+	campaignID, err := uuid.Parse(id)
+	if err != nil {
+		errx.JSON(c, errx.ErrUuid)
+		return
 	}
 
+	deleted, xerr := h.CampaignService.Delete(c.Request.Context(), *orgID, id)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	// The row is gone, so the name travels in the audit entry.
+	h.auditOrg(c, models.AuditActionDelete, models.AuditEntityCampaign, &campaignID, nil, map[string]string{"name": deleted.Name})
+
 	c.Status(http.StatusNoContent)
+}
+
+// duplicateCampaignRequest is the optional body of a duplicate call.
+type duplicateCampaignRequest struct {
+	Name string `json:"name"`
+}
+
+// DuplicateCampaign creates a draft copy of a campaign's configuration.
+// POST /campaigns/:id/duplicate
+func (h *Handler) DuplicateCampaign(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.ErrNoOrganization)
+		return
+	}
+	userID, err := middleware.GetUserUUID(c)
+	if err != nil {
+		errx.JSON(c, errx.ErrUser)
+		return
+	}
+	campaignID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		errx.JSON(c, errx.ErrUuid)
+		return
+	}
+
+	// The body is optional; an empty one reads as io.EOF.
+	var req duplicateCampaignRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		errx.JSON(c, errx.ErrInvalid)
+		return
+	}
+
+	campaign, xerr := h.CampaignService.Duplicate(c.Request.Context(), *orgID, userID, campaignID.String(), strings.TrimSpace(req.Name))
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionDuplicate, models.AuditEntityCampaign, &campaign.ID, nil, map[string]string{
+		"source": campaignID.String(), "name": campaign.Name,
+	})
+
+	c.JSON(http.StatusCreated, campaign)
 }
 
 // StartCampaign starts a campaign

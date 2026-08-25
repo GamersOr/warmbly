@@ -99,6 +99,14 @@ A campaign can pause itself: **paused, no accounts** when it loses every sender,
 
 A finished campaign can be started again: after extending or clearing its end date, or adding new leads, pressing play resumes it. If there is genuinely nothing left to send it finishes again immediately with a message saying so.
 
+## Duplicate and delete
+
+Every campaign has a **⋯** menu, on its row in the list and in the header of its detail view, with **Edit**, **Duplicate**, **Start** or **Pause**, and **Delete**. Both actions need the **Manage campaigns** permission; a member without it is told which permission is missing instead of the action failing later.
+
+**Duplicate** creates a new draft from the campaign's configuration and opens its settings so you can rename it (it starts as "<name> (copy)"), pick a different audience, change the copy, or adjust the schedule before starting it. The copy keeps every setting, the steps with their branching, the sending accounts, folders, tags, A/B variants and attachments. It does not keep leads, progress, statistics, activity, the ramp level, an auto-pause, or a start or end date that has already passed. The original is not touched, and the two campaigns are independent from then on. A duplicate counts as a new campaign for the daily creation limit.
+
+**Delete** asks for confirmation that spells out what goes: the campaign, its steps, lead progress and activity. Contacts and emails already sent stay. A running campaign can be deleted directly; the confirmation says so, and sending stops immediately because every task waiting for the campaign is cancelled together with it. The same action is available at the bottom of the campaign's **Settings**. Deletion cannot be undone.
+
 ## Auto-pause guardrails
 
 **Preferences** > **Auto-pause** stops a campaign the moment its rates leave the band you set, instead of waiting for a mailbox provider to react. Off by default.

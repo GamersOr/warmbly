@@ -43,7 +43,13 @@ type CampaignRepository interface {
 	Update(ctx context.Context, userID, query string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error)
 	UpdateStatus(ctx context.Context, campaignID uuid.UUID, status string) error
 	UpdateStatusWithLock(ctx context.Context, campaignID uuid.UUID, status string) error
-	Delete(ctx context.Context, userID, id string) error
+	// Delete removes the campaign, its cascading data and every pending task
+	// parked for it, in one transaction. Tenancy is the caller's job.
+	Delete(ctx context.Context, campaignID uuid.UUID) error
+	// Duplicate copies a campaign's configuration into a new draft (steps
+	// with their branch graph, tags, folders, senders, variants, advanced
+	// settings, attachment rows) and none of its execution state.
+	Duplicate(ctx context.Context, in DuplicateCampaignInput) (*models.Campaign, error)
 
 	// Campaign start/stop
 	StartCampaign(ctx context.Context, campaignID uuid.UUID) error
@@ -802,33 +808,6 @@ func (r *campaignRepository) Overview(ctx context.Context, orgID string) (*model
 	}
 
 	return &overview, nil
-}
-
-func (r *campaignRepository) Delete(ctx context.Context, userID, campaignID string) error {
-	query := `
-		DELETE FROM campaigns WHERE user_id = $1 AND id = $2
-	`
-
-	params := []any{
-		userID,
-		campaignID,
-	}
-
-	cmd, err := r.DB.Exec(
-		ctx,
-		query,
-		params...,
-	)
-	if err != nil {
-		db.CaptureError(err, query, params, "exec")
-		return err
-	}
-
-	if cmd.RowsAffected() == 0 {
-		return errx.ErrResourceNotFound
-	}
-
-	return nil
 }
 
 func (r *campaignRepository) Update(ctx context.Context, userID, campaignID string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error) {

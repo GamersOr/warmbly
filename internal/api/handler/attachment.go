@@ -133,7 +133,7 @@ func (h *Handler) UploadCampaignAttachment(c *gin.Context) {
 		mimeType = http.DetectContentType(body)
 	}
 
-	key := fmt.Sprintf("attachments/%s/%s-%s", campaignID.String(), uuid.NewString(), filename)
+	key := models.AttachmentObjectKey(campaignID, filename)
 	if err := h.Storage.Put(c.Request.Context(), key, bytes.NewReader(body), mimeType); err != nil {
 		errx.JSON(c, errx.InternalError())
 		return
