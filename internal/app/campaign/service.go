@@ -31,6 +31,14 @@ type CampaignService interface {
 	// Logs
 	GetLogs(ctx context.Context, userID, campaignID string, limit int, cursor *string) (*models.CampaignLogsResult, *errx.Error)
 
+	// WakeCampaigns pulls the parked wakeup of each listed active campaign
+	// forward when its next slot is sooner than where it is parked. Called after
+	// leads are attached to a campaign: the chain is one self-perpetuating task,
+	// so without this a campaign that had nothing to do keeps sleeping and the
+	// new leads sit at "Queued / Not started". Best effort and never an error to
+	// the caller — the lead was still added.
+	WakeCampaigns(ctx context.Context, orgID uuid.UUID, campaignIDs []string)
+
 	// Explicit sender pool (feature 1).
 	ListCampaignSenders(ctx context.Context, orgID uuid.UUID, campaignID string) ([]models.CampaignSender, *errx.Error)
 	ReplaceCampaignSenders(ctx context.Context, orgID uuid.UUID, campaignID string, in []models.CampaignSenderInput) ([]models.CampaignSender, *errx.Error)

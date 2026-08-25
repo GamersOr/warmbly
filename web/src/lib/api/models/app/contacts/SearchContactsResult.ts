@@ -18,8 +18,24 @@ export interface ContactsCounts {
     categories: ContactCategoryCount[];
 }
 
+// Per-status lead totals for one campaign's Leads view. Returned on the first
+// page when the search targets exactly one campaign, and independent of the
+// request's lead_status filter, so every chip shows the campaign's real total
+// rather than a count over the rows that happen to be loaded.
+export interface CampaignLeadCounts {
+    total: number;
+    queued: number;
+    processing: number;
+    completed: number;
+    replied: number;
+    bounced: number;
+    failed: number;
+    unsubscribed: number;
+}
+
 export default interface SearchContactsResult {
     data: Contact[];
     pagination: Pagination;
     counts?: ContactsCounts;
+    lead_counts?: CampaignLeadCounts;
 }

@@ -3,6 +3,9 @@ package scheduler
 import (
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/warmbly/warmbly/internal/config"
 )
 
 var (
@@ -56,3 +59,24 @@ var (
 	// task only (the next invocation re-evaluates selection from scratch).
 	ErrCampaignDeferred = errors.New("campaign send deferred - no eligible mailbox for this contact right now")
 )
+
+// DeferSlot is the wakeup time a caller must use after CalculateNextCampaignTime
+// returns ErrCampaignDeferred. The returned instant is the campaign's real
+// next-due moment, which is the honest answer to "when could this send" but the
+// wrong answer to "when should this chain look again": a campaign is one
+// self-perpetuating task, so parking it at a next-due three days out also means
+// nothing re-reads the campaign for three days. Leads imported in the meantime
+// sit at "Queued / Not started" until then.
+//
+// So a deferral is capped at config.CampaignMaxDeferMinutes. Anything sooner is
+// kept as-is, because a near-term defer is already a precise wakeup. Sends are
+// unaffected: a tick that fires early and still has nothing due simply defers
+// again, and a tick that DID send parks its successor at the paced interval,
+// which never goes through here.
+func DeferSlot(at time.Time) time.Time {
+	horizon := time.Now().Add(config.CampaignMaxDeferMinutes * time.Minute)
+	if at.IsZero() || at.After(horizon) {
+		return horizon
+	}
+	return at
+}

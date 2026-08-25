@@ -464,7 +464,9 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		}
 	}
 
-	// STEP 8.5: Select best account per the campaign's rotation mode.
+	// STEP 8.5: Select best account per the campaign's rotation mode. pool is
+	// the set selection actually ran over, kept for the pacing maths below.
+	pool := candidates
 	selected := selectAccountByRotationMode(campaign.RotationMode, candidates)
 	if selected == nil {
 		// ALL accounts at capacity today — push to next day and recompute with
@@ -500,6 +502,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 			}
 		}
 
+		pool = tomorrow
 		selected = selectAccountByRotationMode(campaign.RotationMode, tomorrow)
 		if selected == nil {
 			// ESP-strict with no matching mailbox at all: defer rather than
@@ -540,7 +543,15 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// a behaviour profile that is the mailbox's own rolled workday (lunch
 	// excluded); otherwise it is the span of the campaign's intervals for that
 	// weekday.
-	remainingEmails := selected.RemainingToday
+	// The day's remaining sends belong to the POOL, not to the mailbox this tick
+	// happens to have picked. A campaign is one self-perpetuating task, so this
+	// interval is the campaign's whole send rate: pacing it by the selected
+	// mailbox alone made a campaign with three mailboxes send at one mailbox's
+	// rate and leave the other two idle, however high their caps were. Every
+	// per-mailbox guard still binds afterwards — each mailbox's own daily cap
+	// and hourly ceiling gated it into this set, and the min-gap plus conflict
+	// resolution below space its own sends.
+	remainingEmails := poolRemainingOn(pool, candidateTime)
 	if remainingEmails > 0 {
 		remainingMinutes, ok := remainingSendMinutes(selected, candidateTime, windows, campaignTZ)
 		if ok && remainingMinutes > 0 {
@@ -579,10 +590,18 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		}
 	}
 
-	// STEP 11: Add jitter. Deliberately NOT rounded to a 5-minute grid — a
-	// fleet that only ever sends at :x0/:x5 marks is a detectable pattern.
-	jitter := randomJitter(-20, 20)
-	candidateTime = notBefore(candidateTime.Add(time.Minute * time.Duration(jitter)))
+	// STEP 11: Add jitter, scaled to the placement it is perturbing. A flat
+	// +/-20 minutes is wider than the interval STEP 9 just computed whenever the
+	// pool is pacing tighter than 40 minutes apart, so the negative half landed
+	// the slot in the past, notBefore clamped it to a few seconds from now, and
+	// the day's spread collapsed onto the mailbox min-gap. Half the distance to
+	// the slot, capped at the original 20 minutes, keeps the irregularity
+	// without erasing the pacing. Deliberately NOT rounded to a 5-minute grid —
+	// a fleet that only ever sends at :x0/:x5 marks is a detectable pattern.
+	if spread := min(int(time.Until(candidateTime).Minutes())/2, 20); spread > 0 {
+		candidateTime = candidateTime.Add(time.Minute * time.Duration(randomJitter(-spread, spread)))
+	}
+	candidateTime = notBefore(candidateTime)
 
 	// STEP 12: Check conflicts with other scheduled tasks
 	dateToCheck := candidateTime

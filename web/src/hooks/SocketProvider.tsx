@@ -55,6 +55,24 @@ export default function SocketProvider({
     const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const refCounterRef = useRef(0);
     const channelsRef = useRef<Map<string, ChannelInternal>>(new Map());
+    // Reactive mirror of channelsRef's per-channel state. The map itself is a
+    // ref, so a component rendering a channel's state never re-rendered when
+    // that channel actually joined and sat on its first-render value forever
+    // ("Disconnected" on a live campaign, issue #189). Every transition below
+    // goes through markChannelState so the two cannot drift.
+    const [channelStates, setChannelStates] = useState<Record<string, ChannelState>>({});
+    const markChannelState = useCallback((topic: string, state: ChannelState | null) => {
+        setChannelStates((prev) => {
+            if (state === null) {
+                if (!(topic in prev)) return prev;
+                const next = { ...prev };
+                delete next[topic];
+                return next;
+            }
+            if (prev[topic] === state) return prev;
+            return { ...prev, [topic]: state };
+        });
+    }, []);
     const pendingJoinsRef = useRef<Map<string, Record<string, unknown>>>(new Map());
     // Topics the app currently wants joined (added by joinChannel, removed by
     // leaveChannel). On reconnect we rejoin exactly these, independent of the
@@ -178,6 +196,7 @@ export default function SocketProvider({
                 } else {
                     channel.state = 'errored';
                 }
+                markChannelState(topic, channel.state);
             }
             return;
         }
@@ -187,6 +206,7 @@ export default function SocketProvider({
             const wasJoined = channel?.state === 'joined';
             if (channel) {
                 channel.state = 'errored';
+                markChannelState(topic, 'errored');
             }
             // A channel that was live crashed server-side while the socket stays
             // open (e.g. an unhandled message in the channel process). Phoenix's
@@ -209,6 +229,7 @@ export default function SocketProvider({
                         params,
                         handlers: cur?.handlers || new Map(),
                     });
+                    markChannelState(topic, 'joining');
                     sendRaw({
                         topic,
                         event: PHOENIX_EVENTS.JOIN,
@@ -225,6 +246,7 @@ export default function SocketProvider({
             const channel = channelsRef.current.get(topic);
             if (channel) {
                 channel.state = 'closed';
+                markChannelState(topic, 'closed');
             }
             return;
         }
@@ -270,7 +292,7 @@ export default function SocketProvider({
                 }
             });
         }
-    }, [setWsLatencyMs, getRef, sendRaw]);
+    }, [setWsLatencyMs, getRef, sendRaw, markChannelState]);
 
     // Join channel
     const joinChannel = useCallback((topic: string, params: Record<string, unknown> = {}) => {
@@ -293,6 +315,7 @@ export default function SocketProvider({
             handlers: existing?.handlers || new Map(),
         };
         channelsRef.current.set(topic, channel);
+        markChannelState(topic, 'joining');
 
         // If connected, send join immediately
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -307,7 +330,7 @@ export default function SocketProvider({
             // Queue for when connected
             pendingJoinsRef.current.set(topic, params);
         }
-    }, [getRef, sendRaw]);
+    }, [getRef, sendRaw, markChannelState]);
 
     // Leave channel
     const leaveChannel = useCallback((topic: string) => {
@@ -318,6 +341,7 @@ export default function SocketProvider({
         if (!channel) return;
 
         channel.state = 'leaving';
+        markChannelState(topic, 'leaving');
 
         if (wsRef.current?.readyState === WebSocket.OPEN) {
             sendRaw({
@@ -331,7 +355,8 @@ export default function SocketProvider({
 
         channelsRef.current.delete(topic);
         pendingJoinsRef.current.delete(topic);
-    }, [getRef, sendRaw]);
+        markChannelState(topic, null);
+    }, [getRef, sendRaw, markChannelState]);
 
     // Get channel state
     const getChannelState = useCallback((topic: string): ChannelState => {
@@ -441,6 +466,7 @@ export default function SocketProvider({
                 handlers: existing?.handlers || new Map(),
             };
             channelsRef.current.set(topic, channel);
+            markChannelState(topic, 'joining');
             sendRaw({
                 topic,
                 event: PHOENIX_EVENTS.JOIN,
@@ -450,7 +476,7 @@ export default function SocketProvider({
             });
         });
         pendingJoinsRef.current.clear();
-    }, [getRef, sendRaw]);
+    }, [getRef, sendRaw, markChannelState]);
 
     // Connect to WebSocket
     const connect = useCallback(async () => {
@@ -510,6 +536,7 @@ export default function SocketProvider({
                 channelsRef.current.forEach((channel) => {
                     if (channel.state === 'joined') {
                         channel.state = 'closed';
+                        markChannelState(channel.topic, 'closed');
                     }
                 });
 
@@ -556,6 +583,7 @@ export default function SocketProvider({
         stopHeartbeat,
         rejoinChannels,
         setWsLatencyMs,
+        markChannelState,
     ]);
 
     // Mount effect
@@ -629,6 +657,7 @@ export default function SocketProvider({
             joinChannel,
             leaveChannel,
             getChannelState,
+            channelStates,
             subscribeToChannel,
             pushToChannel,
             subscribe,

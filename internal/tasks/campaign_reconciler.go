@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/scheduler"
 )
 
@@ -38,6 +39,15 @@ func (s *tasksService) ReconcileCampaignSchedules(ctx context.Context, limit int
 		log.Info().Int64("cancelled", n).Msg("campaign reconcile: cancelled overdue pending tasks")
 	}
 
+	// A chain can also be alive but asleep: a deferral parked its wakeup at the
+	// campaign's next-due moment, which for a "wait 3 days" step is three days
+	// out, and nothing re-reads the campaign until then. Leads imported in the
+	// meantime sit at "Queued / Not started". Deferrals are capped now, so this
+	// only sees parks written before that or by a schedule that genuinely is
+	// days out — and it moves one only when the campaign's own next slot is
+	// meaningfully sooner.
+	s.repark(ctx, limit)
+
 	ids, err := s.campaignRepo.ListCampaignScheduleCandidates(ctx, limit)
 	if err != nil {
 		return 0, err
@@ -57,7 +67,9 @@ func (s *tasksService) ReconcileCampaignSchedules(ctx context.Context, limit int
 		switch {
 		case cerr == nil, errors.Is(cerr, scheduler.ErrCampaignDeferred):
 			schedAt := nextTime
-			if schedAt.IsZero() {
+			if errors.Is(cerr, scheduler.ErrCampaignDeferred) {
+				schedAt = scheduler.DeferSlot(schedAt)
+			} else if schedAt.IsZero() {
 				schedAt = time.Now().UTC().Add(1 * time.Minute)
 			}
 			if err := s.createCampaignTask(ctx, id, accountID, schedAt); err != nil {
@@ -78,6 +90,67 @@ func (s *tasksService) ReconcileCampaignSchedules(ctx context.Context, limit int
 		}
 	}
 	return seeded, nil
+}
+
+// repark pulls a stale parked wakeup forward. For each active campaign whose
+// earliest pending task sits further ahead than config.CampaignStaleParkHours,
+// it recomputes the campaign's next slot; when that slot is at least
+// config.CampaignReparkMarginMinutes earlier than the parked one, the parked
+// task is cancelled and the chain re-seeded at the sooner slot.
+//
+// The margin is what keeps this from fighting legitimate schedules. A campaign
+// that only sends on Mondays recomputes to next Monday too, within jitter of
+// where it is already parked, so nothing moves. A campaign parked three days out
+// with leads that became due an hour ago recomputes to now and moves.
+func (s *tasksService) repark(ctx context.Context, limit int) {
+	parked, err := s.campaignRepo.ListStaleParkedCampaigns(ctx, config.CampaignStaleParkHours*time.Hour, limit)
+	if err != nil {
+		log.Warn().Err(err).Msg("campaign reconcile: stale-park scan failed")
+		return
+	}
+
+	for _, p := range parked {
+		nextTime, _, accountID, cerr := s.scheduler.CalculateNextCampaignTime(ctx, p.CampaignID)
+		if cerr != nil && !errors.Is(cerr, scheduler.ErrCampaignDeferred) {
+			// Anything else (completed, no mailbox, a DB blip) is the re-seed
+			// loop's business, not this one's; leave the park alone.
+			continue
+		}
+		if errors.Is(cerr, scheduler.ErrCampaignDeferred) {
+			nextTime = scheduler.DeferSlot(nextTime)
+		}
+		if nextTime.IsZero() || !nextTime.Before(p.ScheduledAt.Add(-config.CampaignReparkMarginMinutes*time.Minute)) {
+			continue
+		}
+
+		// Cancel EVERY pending task on the campaign first: createCampaignTask
+		// no-ops while any is left, so cancelling only the earliest would move
+		// the chain's wakeup to a later one instead of forward.
+		pending, perr := s.campaignRepo.GetPendingCampaignTasks(ctx, p.CampaignID)
+		if perr != nil {
+			continue
+		}
+		cancelled := true
+		for i := range pending {
+			if err := s.taskRepo.UpdateTaskStatus(ctx, pending[i].ID, "cancelled"); err != nil {
+				log.Warn().Err(err).Str("campaign_id", p.CampaignID.String()).Msg("campaign reconcile: could not cancel a stale park")
+				cancelled = false
+				break
+			}
+		}
+		if !cancelled {
+			continue
+		}
+		if err := s.createCampaignTask(ctx, p.CampaignID, accountID, nextTime); err != nil {
+			log.Warn().Err(err).Str("campaign_id", p.CampaignID.String()).Msg("campaign reconcile: re-park failed")
+			continue
+		}
+		log.Info().
+			Str("campaign_id", p.CampaignID.String()).
+			Time("was", p.ScheduledAt).
+			Time("now", nextTime).
+			Msg("campaign reconcile: pulled a stale wakeup forward")
+	}
 }
 
 // StartCampaignReconciler runs ReconcileCampaignSchedules on an interval until

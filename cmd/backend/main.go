@@ -1176,6 +1176,13 @@ func main() {
 			aware.WireDomainAuth(instanceSettings)
 		}
 		campaignService = campaign.NewService(campaignRepostory, taskRepository, emailRepostory, campaignLogRepository, featureGateService, dailyThrottleService, schedulerService, tasksClient, streamingPublisher)
+		// Attaching a lead to a running campaign has to wake that campaign's
+		// parked send chain, or the lead sits queued until the chain's next
+		// tick. Wired here because contactService is built before the scheduler
+		// and Cloud Tasks client exist.
+		if contactService != nil {
+			contactService.SetCampaignWaker(campaignService)
+		}
 		emailSendService = emailsend.NewService(taskRepository, emailRepostory, userRepostory, schedulerService, tasksClient, featureGateService, dailyThrottleService)
 		composeService = compose.NewService(emailRepostory, repository.NewComposeRepository(primaryDB))
 		// uniboxService is constructed here (rather than alongside the

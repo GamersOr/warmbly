@@ -299,6 +299,8 @@ func (s *contactService) ImportCommit(
 	res.EndedAt = time.Now().UTC()
 	if res.Imported > 0 || res.Updated > 0 {
 		s.publishContactsReload(ctx, userID, "contacts:import")
+		// Covers the Google Sheets sync too: it commits through this path.
+		s.wakeCampaigns(ctx, orgID, opts.CampaignIDs)
 	}
 	return res, nil
 }

@@ -60,6 +60,20 @@ type ContactService interface {
 	// ListTimeline returns a merged, reverse-chronological feed of all
 	// engagement + CRM events for the contact.
 	ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, before *time.Time) (*models.ContactTimelineResult, *errx.Error)
+
+	// SetCampaignWaker wires the campaign service so attaching a lead to a
+	// running campaign wakes that campaign's parked send chain. Optional: with
+	// no waker the leads still send, just not until the chain's next tick.
+	SetCampaignWaker(w CampaignWaker)
+}
+
+// CampaignWaker pulls the parked wakeup of a running campaign forward when
+// leads are attached to it. A campaign is a single self-perpetuating task, so a
+// campaign that had nothing to send is parked and would otherwise not look at
+// these leads until that park fires. Satisfied structurally by
+// campaign.CampaignService, so this package needs no import of it.
+type CampaignWaker interface {
+	WakeCampaigns(ctx context.Context, orgID uuid.UUID, campaignIDs []string)
 }
 
 type contactService struct {
@@ -67,6 +81,7 @@ type contactService struct {
 	subRepo            repository.SubscriptionRepository
 	planRepo           repository.PlanRepository
 	streamingPublisher *pubsub.StreamingPublisher
+	campaignWaker      CampaignWaker
 }
 
 func NewService(
@@ -93,4 +108,17 @@ func (s *contactService) publishContactsReload(ctx context.Context, userID strin
 		return
 	}
 	s.streamingPublisher.PublishContactsReload(ctx, userID, operationID)
+}
+
+func (s *contactService) SetCampaignWaker(w CampaignWaker) { s.campaignWaker = w }
+
+// wakeCampaigns is the single place every lead-attaching path funnels through
+// (add, update, bulk edit, CSV/XLSX import and the Google Sheets sync, which
+// runs through ImportCommit). Best effort: the lead is already stored, and the
+// reconciler plus the capped deferral horizon are the backstops.
+func (s *contactService) wakeCampaigns(ctx context.Context, orgID uuid.UUID, campaignIDs []string) {
+	if s.campaignWaker == nil || len(campaignIDs) == 0 {
+		return
+	}
+	s.campaignWaker.WakeCampaigns(ctx, orgID, campaignIDs)
 }
