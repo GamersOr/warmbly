@@ -221,53 +221,46 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate changelog
-        id: changelog
+      - name: Generate release notes
+        env:
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          .github/scripts/release-notes.sh "$TAG" > /tmp/changelog.md
+          cat /tmp/changelog.md
 
-          if [[ -n "$PREV_TAG" ]]; then
-            echo "Generating changelog from $PREV_TAG to ${{ github.ref_name }}"
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..${{ github.ref_name }} | head -50)
-          else
-            echo "No previous tag found, generating from beginning"
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" | head -50)
-          fi
+      - name: Assemble release body
+        run: |
+          {
+            cat /tmp/changelog.md
+            cat <<'EOF'
 
-          # Escape for GitHub Actions
-          CHANGELOG="${CHANGELOG//'%'/'%25'}"
-          CHANGELOG="${CHANGELOG//$'\n'/'%0A'}"
-          CHANGELOG="${CHANGELOG//$'\r'/'%0D'}"
+          ## Docker Images
 
-          echo "changelog=${CHANGELOG}" >> $GITHUB_OUTPUT
+          All images are available at `ghcr.io/${{ github.repository_owner }}/warmbly`:
+
+          | Service | Image |
+          |---------|-------|
+          | Backend | `${{ env.IMAGE_PREFIX }}/backend:${{ github.ref_name }}` |
+          | Consumer | `${{ env.IMAGE_PREFIX }}/consumer:${{ github.ref_name }}` |
+          | Worker | `${{ env.IMAGE_PREFIX }}/worker:${{ github.ref_name }}` |
+          | Tracking | `${{ env.IMAGE_PREFIX }}/tracking:${{ github.ref_name }}` |
+          | Realtime | `${{ env.IMAGE_PREFIX }}/realtime:${{ github.ref_name }}` |
+          | Dashboard (web) | `${{ env.IMAGE_PREFIX }}/web:${{ github.ref_name }}` |
+          | Admin | `${{ env.IMAGE_PREFIX }}/admin:${{ github.ref_name }}` |
+
+          ## Deployment
+
+          This release will be automatically deployed to production.
+          EOF
+          } > /tmp/release-body.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
-          body: |
-            ## What's Changed
-
-            ${{ steps.changelog.outputs.changelog }}
-
-            ## Docker Images
-
-            All images are available at `ghcr.io/${{ github.repository_owner }}/warmbly`:
-
-            | Service | Image |
-            |---------|-------|
-            | Backend | `${{ env.IMAGE_PREFIX }}/backend:${{ github.ref_name }}` |
-            | Consumer | `${{ env.IMAGE_PREFIX }}/consumer:${{ github.ref_name }}` |
-            | Worker | `${{ env.IMAGE_PREFIX }}/worker:${{ github.ref_name }}` |
-            | Tracking | `${{ env.IMAGE_PREFIX }}/tracking:${{ github.ref_name }}` |
-            | Realtime | `${{ env.IMAGE_PREFIX }}/realtime:${{ github.ref_name }}` |
-            | Dashboard (web) | `${{ env.IMAGE_PREFIX }}/web:${{ github.ref_name }}` |
-            | Admin | `${{ env.IMAGE_PREFIX }}/admin:${{ github.ref_name }}` |
-
-            ## Deployment
-
-            This release will be automatically deployed to production.
+          name: ${{ github.ref_name }}
+          body_path: /tmp/release-body.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
