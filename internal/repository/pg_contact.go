@@ -83,11 +83,11 @@ func NewContactRepostory(db *db.DB) ContactRepository {
 	}
 }
 
-// parseCategoryIDs accepts string IDs from a JSON body and returns a
+// parseUUIDList accepts string IDs from a JSON body and returns a
 // deduped slice of uuid.UUIDs. Empty strings are skipped silently —
 // they're a normal artifact of clients sending [""] to "clear" a list.
 // A malformed (non-UUID) entry is a client bug worth surfacing as 400.
-func parseCategoryIDs(raw []string) ([]uuid.UUID, *errx.Error) {
+func parseUUIDList(raw []string) ([]uuid.UUID, *errx.Error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
@@ -261,7 +261,8 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 	// Link campaigns. Original code's RETURNING clause referenced a
 	// non-inserted table, which is invalid SQL; resolve by inserting
 	// first, then SELECTing the name back from `campaigns` in a
-	// separate statement. Scoped to the user's own campaigns.
+	// separate statement. Scoped to the organization's campaigns, not the
+	// caller's own: campaigns are org assets (issue #187).
 	for i, cids := range campaignIDs {
 		if len(cids) == 0 {
 			continue
@@ -270,9 +271,9 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			INSERT INTO campaign_leads (contact_id, campaign_id)
 			SELECT $1, c.id
 			FROM   campaigns c
-			WHERE  c.id = ANY($2) AND c.user_id = $3
+			WHERE  c.id = ANY($2) AND c.organization_id = $3
 			ON CONFLICT (campaign_id, contact_id) DO NOTHING
-		`, ncontacts[i].ID, cids, userID); err != nil {
+		`, ncontacts[i].ID, cids, orgID); err != nil {
 			db.CaptureError(err, "", nil, "campaign_leads insert")
 			return nil, errx.InternalError()
 		}
@@ -281,8 +282,8 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			SELECT c.id, c.name
 			FROM   campaigns c
 			JOIN   campaign_leads cl ON cl.campaign_id = c.id
-			WHERE  cl.contact_id = $1 AND c.user_id = $2
-		`, ncontacts[i].ID, userID)
+			WHERE  cl.contact_id = $1 AND c.organization_id = $2
+		`, ncontacts[i].ID, orgID)
 		if err != nil {
 			db.CaptureError(err, "", nil, "campaign_leads select")
 			return nil, errx.InternalError()
@@ -1285,17 +1286,16 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 					SELECT json_agg(json_build_object('id', cam.id, 'name', cam.name))
 					FROM campaign_leads cl2
 					JOIN campaigns cam ON cl2.campaign_id = cam.id
-					WHERE cl2.contact_id = c.id AND cam.user_id = $2
+					WHERE cl2.contact_id = c.id AND cam.organization_id = $2
 				),
 				'[]'::json
 			) AS campaigns
 		FROM contacts c
-		WHERE c.id = $1 AND c.organization_id = $3
+		WHERE c.id = $1 AND c.organization_id = $2
 		`
 
 	params := []any{
 		contactID,
-		userID,
 		orgID,
 	}
 
@@ -1420,111 +1420,99 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		updatedContact = c // No fields updated, use existing contact
 	}
 
-	// Update campaigns if provided
+	// Campaigns are organization assets: scoping membership by the caller made a
+	// teammate's add/remove a silent no-op on campaigns they did not create
+	// (issue #187).
 	if data.Campaigns != nil {
-		// Get current campaign IDs
+		want, perr := parseUUIDList(data.Campaigns)
+		if perr != nil {
+			return nil, perr
+		}
+		wantIDs := make([]string, len(want))
+		for i, id := range want {
+			wantIDs[i] = id.String()
+		}
+
 		currentCampaignIDs := make([]string, len(updatedContact.Campaigns))
 		for i, c := range updatedContact.Campaigns {
 			currentCampaignIDs[i] = c.ID
 		}
 
-		// Compute campaigns to insert and delete
-		toInsert := utils.Difference(data.Campaigns, currentCampaignIDs)
-		toDelete := utils.Difference(currentCampaignIDs, data.Campaigns)
+		toInsert := utils.Difference(wantIDs, currentCampaignIDs)
+		toDelete := utils.Difference(currentCampaignIDs, wantIDs)
 
-		// Delete removed campaigns
-		query = `
-			DELETE FROM campaign_leads
-			WHERE contact_id = $1 AND campaign_id = $2
-		`
-		for _, campaignID := range toDelete {
-			params := []any{
-				contactID,
-				campaignID,
-			}
-			_, err = tx.Exec(
-				ctx,
-				query,
-				params...,
-			)
-			if err != nil {
+		if len(toDelete) > 0 {
+			query = `
+				DELETE FROM campaign_leads cl
+				USING campaigns cam
+				WHERE cl.contact_id = $1
+				  AND cl.campaign_id = cam.id
+				  AND cam.id = ANY($2::uuid[])
+				  AND cam.organization_id = $3
+			`
+			params := []any{contactID, toDelete, orgID}
+			if _, err = tx.Exec(ctx, query, params...); err != nil {
 				db.CaptureError(err, query, params, "exec")
 				return nil, errx.InternalError()
 			}
 		}
 
-		// Insert new campaigns
-		query = `
-			INSERT INTO campaign_leads (contact_id, campaign_id)
-			SELECT $1, id
-			FROM campaigns
-			WHERE id = $2 AND user_id = $3
-			ON CONFLICT (campaign_id, contact_id) DO NOTHING
-		`
-		for _, campaignID := range toInsert {
-			params := []any{
-				contactID,
-				campaignID,
-				userID,
-			}
-			_, err = tx.Exec(
-				ctx,
-				query,
-				params...,
-			)
-			if err != nil {
+		if len(toInsert) > 0 {
+			query = `
+				INSERT INTO campaign_leads (contact_id, campaign_id)
+				SELECT $1, cam.id
+				FROM campaigns cam
+				WHERE cam.id = ANY($2::uuid[]) AND cam.organization_id = $3
+				ON CONFLICT (campaign_id, contact_id) DO NOTHING
+			`
+			params := []any{contactID, toInsert, orgID}
+			if _, err = tx.Exec(ctx, query, params...); err != nil {
 				db.CaptureError(err, query, params, "exec")
 				return nil, errx.InternalError()
 			}
 		}
+	}
 
-		// Fetch updated campaigns
-		var newCampaignsJSON []byte
+	// Always re-read campaigns so the response carries current membership even
+	// when the request touched other fields (a nil slice marshals to `null`,
+	// which the dashboard then caches and reads `.campaigns.map` off).
+	var newCampaignsJSON []byte
+	query = `
+		SELECT COALESCE(
+			(
+				SELECT json_agg(json_build_object('id', cam.id, 'name', cam.name))
+				FROM campaign_leads cl
+				JOIN campaigns cam ON cl.campaign_id = cam.id
+				WHERE cl.contact_id = $1 AND cam.organization_id = $2
+			),
+			'[]'::json
+		)
+	`
 
-		query = `
-			SELECT COALESCE(
-				(
-					SELECT json_agg(json_build_object('id', cam.id, 'name', cam.name))
-					FROM campaign_leads cl
-					JOIN campaigns cam ON cl.campaign_id = cam.id
-					WHERE cl.contact_id =$1 AND cam.user_id = $2
-				),
-				'[]'::json
-			)
-		`
+	params = []any{
+		contactID,
+		orgID,
+	}
 
-		params := []any{
-			contactID,
-			userID,
+	if err = tx.QueryRow(ctx, query, params...).Scan(&newCampaignsJSON); err != nil {
+		db.CaptureError(err, query, params, "queryrow")
+		return nil, errx.InternalError()
+	}
+	updatedContact.Campaigns = make([]models.MiniCampaign, 0)
+	if len(newCampaignsJSON) > 0 {
+		var campaigns []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
 		}
-
-		err = tx.QueryRow(
-			ctx,
-			query,
-			params...,
-		).Scan(&newCampaignsJSON)
-		if err != nil {
-			db.CaptureError(err, query, params, "queryrow")
+		if err := json.Unmarshal(newCampaignsJSON, &campaigns); err != nil {
+			sentry.CaptureException(err)
 			return nil, errx.InternalError()
 		}
-		if len(newCampaignsJSON) > 0 {
-			var campaigns []struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			}
-			if err := json.Unmarshal(newCampaignsJSON, &campaigns); err != nil {
-				sentry.CaptureException(err)
-				return nil, errx.InternalError()
-			}
-			updatedContact.Campaigns = make([]models.MiniCampaign, len(campaigns))
-			for i, c := range campaigns {
-				updatedContact.Campaigns[i] = models.MiniCampaign{
-					ID:   c.ID,
-					Name: c.Name,
-				}
-			}
-		} else {
-			updatedContact.Campaigns = make([]models.MiniCampaign, 0)
+		for _, c := range campaigns {
+			updatedContact.Campaigns = append(updatedContact.Campaigns, models.MiniCampaign{
+				ID:   c.ID,
+				Name: c.Name,
+			})
 		}
 	}
 
@@ -1534,7 +1522,7 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 	// When the absolute form is non-nil it wins; the diff is ignored.
 	categoriesChanged := false
 	if data.Categories != nil {
-		ids, perr := parseCategoryIDs(data.Categories)
+		ids, perr := parseUUIDList(data.Categories)
 		if perr != nil {
 			return nil, perr
 		}
@@ -1558,7 +1546,7 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		categoriesChanged = true
 	} else {
 		if len(data.AddCategories) > 0 {
-			ids, perr := parseCategoryIDs(data.AddCategories)
+			ids, perr := parseUUIDList(data.AddCategories)
 			if perr != nil {
 				return nil, perr
 			}
@@ -1575,7 +1563,7 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 			categoriesChanged = true
 		}
 		if len(data.RemoveCategories) > 0 {
-			ids, perr := parseCategoryIDs(data.RemoveCategories)
+			ids, perr := parseUUIDList(data.RemoveCategories)
 			if perr != nil {
 				return nil, perr
 			}
@@ -2028,11 +2016,14 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 	var campaignsJSON, categoriesJSON []byte
 	// Scope the contact row to the org so teammates can open each other's
 	// contacts. Without an org (e.g. an API key with no selected org) fall
-	// back to the legacy user scope. The campaign/category badge subselects
-	// stay user-scoped (categories has no organization_id column).
+	// back to the legacy user scope. Campaigns are org assets, so the badge
+	// subselect follows the same scope (issue #187); the category subselect
+	// stays user-scoped because categories has no organization_id column.
 	rowScope := "c.user_id = $1"
+	campScope := "cam.user_id = $1"
 	if orgID != nil {
 		rowScope = "c.organization_id = $3"
+		campScope = "cam.organization_id = $3"
 	}
 	mainQuery := fmt.Sprintf(`
 		SELECT
@@ -2043,7 +2034,7 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 					SELECT json_agg(json_build_object('id', cam.id, 'name', cam.name))
 					FROM   campaign_leads cl
 					JOIN   campaigns cam ON cam.id = cl.campaign_id
-					WHERE  cl.contact_id = c.id AND cam.user_id = $1
+					WHERE  cl.contact_id = c.id AND %s
 				), '[]'::json
 			) AS campaigns,
 			COALESCE(
@@ -2056,7 +2047,7 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 			) AS categories
 		FROM contacts c
 		WHERE c.id = $2 AND %s
-	`, rowScope)
+	`, campScope, rowScope)
 	mainArgs := []any{userID, contactID}
 	if orgID != nil {
 		mainArgs = append(mainArgs, *orgID)

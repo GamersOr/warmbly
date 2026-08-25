@@ -533,7 +533,7 @@ func optString(incoming, fallback string) *string {
 }
 
 // parseLocalCategoryIDs is the import-package twin of pg_contact's
-// parseCategoryIDs. Kept private and small so we don't depend on the
+// parseUUIDList. Kept private and small so we don't depend on the
 // repository package's internals.
 func parseLocalCategoryIDs(raw []string) ([]uuid.UUID, *errx.Error) {
 	if len(raw) == 0 {

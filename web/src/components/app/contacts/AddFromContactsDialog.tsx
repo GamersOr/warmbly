@@ -9,7 +9,6 @@
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { useQueryClient } from "@tanstack/react-query";
 import {
     AlertCircleIcon,
     CheckIcon,
@@ -46,7 +45,6 @@ function displayName(c: Contact): string {
 }
 
 export default function AddFromContactsDialog({ open, onClose, campaign }: Props) {
-    const queryClient = useQueryClient();
     const bulk = useUpdateContactsBulk();
 
     const [query, setQuery] = React.useState("");
@@ -153,8 +151,6 @@ export default function AddFromContactsDialog({ open, onClose, campaign }: Props
                 remove_campaigns: [],
                 fields: [],
             });
-            // The Leads tab is a contacts search scoped to this campaign.
-            await queryClient.invalidateQueries({ queryKey: ["contacts"] });
             toast.success(`Added ${selected.size} lead${selected.size === 1 ? "" : "s"} to ${campaign.name}`);
             onClose();
         } catch (err) {
