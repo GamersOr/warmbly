@@ -56,6 +56,18 @@ node_modules/
 # Local pnpm store created by dockerized frontend installs
 web/.pnpm-store/
 
+# Astro generated types. site/ ignores its own; this catches an astro run
+# from the repo root, which writes them here instead.
+/.astro/
+
+# Stray root-level Node install (every frontend tree owns its own manifest
+# and lockfile; there is no root workspace).
+/package.json
+/pnpm-lock.yaml
+
+# Local worktree tooling config
+/paseo.json
+
 # Temp/test output directories
 .tmp-tests/
 test-results/
