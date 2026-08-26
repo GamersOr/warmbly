@@ -1,5 +1,0 @@
-{
-  "worktree": {
-    "teardown": "make down"
-  }
-}
