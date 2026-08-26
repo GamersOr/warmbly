@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -481,7 +482,19 @@ func (s *service) ApplyInvalidTokenAttempt(ctx context.Context, accountID uuid.U
 			return nil, errx.InternalError()
 		}
 	}
-	return s.evaluateAndPersistAnyPool(ctx, accountID)
+	// The attempt and its score are already persisted, so a failed evaluation
+	// must not be reported as a failure of the whole call: the caller's
+	// degraded path records both a second time, which doubles every count the
+	// band then reads. Surface it instead and hand back the participant as it
+	// stands.
+	health, err := s.evaluateAndPersistAnyPool(ctx, accountID)
+	if err != nil {
+		log.Error().
+			Str("email_account_id", accountID.String()).
+			Msg("warmup: invalid-token health evaluation failed; the attempt is recorded but no band was applied")
+		return s.getParticipantForAnyPool(ctx, accountID)
+	}
+	return health, nil
 }
 
 func (s *service) ApplyRateLimitExceeded(ctx context.Context, accountID uuid.UUID, reason string) (*models.WarmupParticipantHealth, *errx.Error) {
