@@ -35,9 +35,59 @@ func (c *Client) AddFlag(ctx context.Context, messageID string) error {
 // RemoveFromSpam rescues a message out of Junk Email back into the Inbox.
 // Graph has no stable v1.0 "not junk" action (markAsNotJunk is retired), so the
 // move is the reliable primitive. Returns the message's new id (move is a
-// copy+delete, so the id changes).
+// copy+delete, so the id changes), or "" when the message was not in Junk and
+// nothing was moved.
+//
+// The Junk check is the point: engagementPlan runs move_to_warmbly first, so by
+// the time this runs the message is usually in the untracked Warmbly folder.
+// Moving it unconditionally would undo that foldering and drop it back into the
+// tracked Inbox under a new id, where live sync reads it as new mail. The IMAP
+// path guards the same way with IsSpamMailbox.
 func (c *Client) RemoveFromSpam(ctx context.Context, messageID string) (string, error) {
+	junkID, err := c.wellKnownFolderID(ctx, FolderJunk)
+	if err != nil {
+		return "", err
+	}
+	parentID, err := c.messageParentFolder(ctx, messageID)
+	if err != nil {
+		return "", err
+	}
+	if parentID != junkID {
+		return "", nil
+	}
 	return c.move(ctx, messageID, FolderInbox)
+}
+
+// wellKnownFolderID resolves a well-known folder name to the opaque id Graph
+// reports as a message's parentFolderId. The two are not interchangeable: the
+// name is accepted in a path, but never returned. Cached for the mailbox's life.
+func (c *Client) wellKnownFolderID(ctx context.Context, name string) (string, error) {
+	c.mu.Lock()
+	if id, ok := c.folderIDs[name]; ok {
+		c.mu.Unlock()
+		return id, nil
+	}
+	c.mu.Unlock()
+
+	var folder struct {
+		ID string `json:"id"`
+	}
+	if err := c.doJSON(ctx, "GET", graphBase+"/me/mailFolders/"+url.PathEscape(name)+"?$select=id", nil, &folder); err != nil {
+		return "", err
+	}
+	c.cacheFolder(name, folder.ID)
+	return folder.ID, nil
+}
+
+// messageParentFolder returns the id of the folder a message currently sits in.
+func (c *Client) messageParentFolder(ctx context.Context, messageID string) (string, error) {
+	var msg struct {
+		ParentFolderID string `json:"parentFolderId"`
+	}
+	if err := c.doJSON(ctx, "GET", c.messageURL(messageID)+"?$select=parentFolderId", nil, &msg); err != nil {
+		return "", err
+	}
+	return msg.ParentFolderID, nil
 }
 
 // MoveToFolder moves the message into a named folder, creating it if needed.
