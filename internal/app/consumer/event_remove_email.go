@@ -3,6 +3,8 @@ package jobs
 import (
 	"context"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
 )
@@ -18,7 +20,16 @@ import (
 func (s *JobsService) HandleRemoveEmail(ctx context.Context, e *models.JobEventRemoveEmail) error {
 	if s.WarmupRepo != nil {
 		if rec, _ := s.WarmupRepo.GetWarmupReceived(ctx, e.EmailID, e.ID); rec != nil {
-			if s.WarmupService != nil {
+			switch {
+			case s.consumeSelfMove(ctx, e.EmailID, rec.MessageID):
+				// Our own engagement foldered this message. Providers that
+				// report a move as a removal (Graph) would otherwise ban the
+				// recipient for the action we asked it to perform.
+				log.Debug().
+					Str("email_id", e.EmailID.String()).
+					Str("message_id", rec.MessageID).
+					Msg("Warmup message left its folder because we moved it; not tampering")
+			case s.WarmupService != nil:
 				health, _ := s.WarmupService.RecordTampering(ctx, e.EmailID, rec.MessageID, "deletion")
 				s.markRiskBandFromWarmupHealth(ctx, e.EmailID, health)
 			}

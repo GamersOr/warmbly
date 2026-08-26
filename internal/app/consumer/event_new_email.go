@@ -223,6 +223,11 @@ func (s *JobsService) performWarmupActions(ctx context.Context, e *models.JobEve
 	if len(immediate) > 0 {
 		act := base
 		act.Actions = immediate
+		// Mark BEFORE publishing: the move can land, and its removal be
+		// observed, before a marker written afterwards would exist.
+		if hasAction(immediate, "move_to_warmbly") {
+			s.markSelfMove(ctx, e.Message.EmailID, e.Message.MessageID)
+		}
 		s.Publisher.PublishWarmupAction(ctx, *workerID, &act)
 	}
 

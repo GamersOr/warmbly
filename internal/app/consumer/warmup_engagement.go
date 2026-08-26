@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -173,4 +174,50 @@ func humanizeFireAt(fireAt time.Time, timezone string) time.Time {
 	}
 	offset := time.Duration(rand.Intn(120))*time.Minute + time.Duration(rand.Intn(60))*time.Second
 	return morning.Add(offset)
+}
+
+// selfMoveTTL bounds how long a pending self-move marker is trusted. The move
+// is published immediately and the provider delta reports it within a sync
+// tick, so this only has to outlive that gap; keeping it short means a real
+// deletion later on is still counted.
+const selfMoveTTL = 30 * time.Minute
+
+func selfMoveKey(accountID uuid.UUID, rfcMessageID string) string {
+	return fmt.Sprintf("warmup:selfmoved:%s:%s", accountID, rfcMessageID)
+}
+
+// markSelfMove records that OUR OWN engagement is about to move this warmup
+// message out of the folder it was delivered to. Graph reports a move as a
+// removal exactly like a delete, so without this the recipient is banned from
+// the pool for foldering the platform itself asked for.
+func (s *JobsService) markSelfMove(ctx context.Context, accountID uuid.UUID, rfcMessageID string) {
+	if s.Cache == nil || rfcMessageID == "" {
+		return
+	}
+	_ = s.Cache.Set(ctx, selfMoveKey(accountID, rfcMessageID), "1", selfMoveTTL).Err()
+}
+
+// consumeSelfMove reports whether this removal is the one our own move caused,
+// clearing the marker so only the FIRST removal is excused and a later real
+// deletion still counts. A cache error answers true on purpose: a permanent
+// warmup ban is not something to hand out on a Redis hiccup.
+func (s *JobsService) consumeSelfMove(ctx context.Context, accountID uuid.UUID, rfcMessageID string) bool {
+	if s.Cache == nil || rfcMessageID == "" {
+		return false
+	}
+	n, err := s.Cache.Del(ctx, selfMoveKey(accountID, rfcMessageID)).Result()
+	if err != nil {
+		return true
+	}
+	return n > 0
+}
+
+// hasAction reports whether the leg contains a given warmup action.
+func hasAction(actions []string, want string) bool {
+	for _, a := range actions {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }

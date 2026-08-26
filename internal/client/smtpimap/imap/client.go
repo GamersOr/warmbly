@@ -54,6 +54,10 @@ type Client struct {
 	// holding mu while warmup actions select under it.
 	selected atomic.Bool
 
+	// nsPrefix caches this connection's personal-namespace prefix (nil until
+	// resolved, "" when the server puts user folders at the root). Guarded by mu.
+	nsPrefix *string
+
 	// BindIP optionally pins outbound TCP to a specific local source address.
 	// When nil, WORKER_BIND_IP is consulted; when still unset, the OS default
 	// route is used.

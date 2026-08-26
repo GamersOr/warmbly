@@ -67,11 +67,41 @@ func (c *Client) MoveToFolder(ctx context.Context, sourceMailbox, dstFolder stri
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err := c.ensureMailboxExists(dstFolder); err != nil {
+	dst := c.qualifyMailboxLocked(dstFolder)
+	if err := c.ensureMailboxExists(dst); err != nil {
 		return err
 	}
 
-	return c.moveUIDLocked(sourceMailbox, dstFolder, uid)
+	return c.moveUIDLocked(sourceMailbox, dst, uid)
+}
+
+// personalPrefixLocked is the prefix this server keeps user folders under. It
+// is "" almost everywhere, but Dovecot is commonly configured with "INBOX.",
+// where creating a folder at the root fails with "nonexistent namespace" and
+// the Warmbly foldering silently never happens. Cached per connection; a
+// server without NAMESPACE keeps the root. mu must be held.
+func (c *Client) personalPrefixLocked() string {
+	if c.nsPrefix != nil {
+		return *c.nsPrefix
+	}
+	prefix := ""
+	if c.client.Caps().Has(imap.CapNamespace) {
+		if data, err := c.client.Namespace().Wait(); err == nil && data != nil && len(data.Personal) > 0 {
+			prefix = data.Personal[0].Prefix
+		}
+	}
+	c.nsPrefix = &prefix
+	return prefix
+}
+
+// qualifyMailboxLocked puts a bare folder name inside the personal namespace,
+// leaving a name that already carries the prefix untouched. mu must be held.
+func (c *Client) qualifyMailboxLocked(name string) string {
+	prefix := c.personalPrefixLocked()
+	if prefix == "" || strings.HasPrefix(name, prefix) {
+		return name
+	}
+	return prefix + name
 }
 
 func (c *Client) moveUID(ctx context.Context, src, dst string, uid uint32) error {
