@@ -105,10 +105,12 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
-	if c.HeloHost == "" {
-		c.HeloHost = "localhost"
-	}
-	if c.MailFrom == "" {
+	// No fallback HELO name. A bare "localhost" is rejected by RFC-compliant
+	// servers, and Postfix reports that rejection on RCPT, which the prober
+	// used to read as "this recipient does not exist" (issue #200). An
+	// unconfigured verifier declines to probe instead of guessing.
+	c.HeloHost = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.HeloHost)), ".")
+	if c.MailFrom == "" && isFQDN(c.HeloHost) {
 		c.MailFrom = "verify@" + c.HeloHost
 	}
 	if c.DialTimeout <= 0 {
@@ -130,6 +132,9 @@ func (c Config) withDefaults() Config {
 type SMTPVerifier struct {
 	cfg      Config
 	resolver *net.Resolver
+	// smtpPort is always "25" in production (MX hosts listen nowhere else);
+	// it exists so tests can point probe() at a local server.
+	smtpPort string
 }
 
 // New constructs the in-house SMTP verifier. The resolver mirrors dnsauth's
@@ -138,6 +143,7 @@ func New(cfg Config) *SMTPVerifier {
 	return &SMTPVerifier{
 		cfg:      cfg.withDefaults(),
 		resolver: &net.Resolver{},
+		smtpPort: "25",
 	}
 }
 
@@ -182,6 +188,14 @@ func (v *SMTPVerifier) Verify(ctx context.Context, email string) Result {
 	res.HasMX = true
 
 	// 3. SMTP RCPT probe against the lowest-preference (highest priority) MX.
+	// Refused outright without a real HELO identity: a probe that announces a
+	// bare or reserved name gets the SESSION rejected, and that rejection
+	// arrives on RCPT looking exactly like a dead mailbox.
+	if !isFQDN(v.cfg.HeloHost) {
+		res.Status = StatusUnknown
+		res.Reason = "smtp probe skipped: set EMAIL_VERIFY_HELO_HOST to a public fully-qualified hostname for this instance"
+		return res
+	}
 	probe := v.probe(ctx, hosts[0], localpart, domain)
 	switch probe.outcome {
 	case probeAccepted:
@@ -270,11 +284,12 @@ type probeResult struct {
 // detect catch-all behaviour. Interpretation:
 //
 //	250          -> accepted
-//	550 (5xx)    -> rejected (hard invalid)
+//	5xx          -> rejected ONLY when the reply names the recipient; a 5xx
+//	               that rejects our HELO / sender / IP / relay policy is unknown
 //	4xx / timeout/ dial error -> unknown (greylist, blocked :25, transient)
 func (v *SMTPVerifier) probe(ctx context.Context, host, localpart, domain string) probeResult {
 	dialer := net.Dialer{Timeout: v.cfg.DialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, "25"))
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, v.smtpPort))
 	if err != nil {
 		// Most commonly: outbound :25 blocked by the cloud provider, or the MX is
 		// firewalled/tarpitting. Either way we cannot conclude invalid.
@@ -319,8 +334,10 @@ func (v *SMTPVerifier) probe(ctx context.Context, host, localpart, domain string
 }
 
 // classifyRcpt maps the error from smtp.Client.Rcpt to a probe outcome. The
-// stdlib surfaces the SMTP reply code on *textproto.Error; 5xx is a hard
-// rejection, 4xx is transient (unknown), and a nil error is acceptance.
+// stdlib surfaces the SMTP reply code on *textproto.Error; 4xx is transient
+// (unknown), a nil error is acceptance, and 5xx is handed to
+// classifyPermanentRcpt, which only calls it a rejection when the reply talks
+// about the recipient rather than about our probe.
 func classifyRcpt(err error) (probeOutcome, string) {
 	if err == nil {
 		return probeAccepted, "recipient accepted"
@@ -330,7 +347,9 @@ func classifyRcpt(err error) (probeOutcome, string) {
 		code := protoErr.Code
 		switch {
 		case code >= 500 && code < 600:
-			return probeRejected, "recipient rejected (" + strconv.Itoa(code) + "): " + protoErr.Msg
+			// A 5xx here may reject the RECIPIENT or reject our probe; only the
+			// former may become a permanent "invalid" verdict.
+			return classifyPermanentRcpt(code, protoErr.Msg)
 		case code >= 400 && code < 500:
 			return probeUnknown, "transient/greylisted (" + strconv.Itoa(code) + "): " + protoErr.Msg
 		}

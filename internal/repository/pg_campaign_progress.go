@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -186,6 +187,11 @@ type CampaignProgressRepository interface {
 	// nil, is the soonest time a waiting contact's condition window elapses — the
 	// scheduler should defer and re-check then rather than completing.
 	FindNextRoutedPair(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool) (*ContactSequencePair, *time.Time, error)
+
+	// CountUndeliverableLeads counts the leads FindNextRoutedPair excludes
+	// because address verification refused them. Reported when a campaign
+	// finishes, so "completed" never silently means "skipped everybody".
+	CountUndeliverableLeads(ctx context.Context, campaignID uuid.UUID) (int, error)
 }
 
 type campaignProgressRepository struct {
@@ -772,6 +778,23 @@ func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx con
 	return out, nil
 }
 
+// undeliverableClause is the ONE definition of "the campaign will never send to
+// this lead": address verification marked it invalid, or marked it risky while
+// the campaign's "send to risky emails" toggle is off. Routing excludes these
+// (see FindNextRoutedPair), the campaign task's pre-send gates refuse them, and
+// the Leads view reports them as undeliverable, so all three read the same rule
+// rather than three copies that can drift apart.
+//
+// cp is the SQL placeholder holding the campaign id. The caller must alias
+// contacts as `c`.
+func undeliverableClause(cp string) string {
+	return fmt.Sprintf(
+		"(c.verification_status = 'invalid' OR (c.verification_status = 'risky' "+
+			"AND NOT COALESCE((SELECT rc.risky_emails FROM campaigns rc WHERE rc.id = %[1]s), true)))",
+		cp,
+	)
+}
+
 // FindNextRoutedPair selects the next (contact, step) to send by FOLLOWING THE
 // FLOW graph. For each contact, the next step is the route out of their
 // last-sent step:
@@ -790,7 +813,11 @@ func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx con
 // what stops a crash or a failed progress write in that window from handing the
 // same email to a worker twice.
 // A contact whose step failed in the worker more than CampaignSendMaxAttempts
-// times is dropped, the same way a bounced or suppressed contact is.
+// times is dropped, the same way a bounced or suppressed contact is. So is a
+// contact the pre-send gates would refuse: an address verification marked
+// invalid, or marked risky while the campaign's "send to risky" toggle is off.
+// Those gates skip WITHOUT recording progress, so leaving such a contact in the
+// candidate set wedges the whole campaign on it forever (issue #200).
 //
 // Conditions are evaluated SEND-RELATIVE with a three-valued result: a contact
 // whose next step isn't decidable yet (an engagement window still open) is not
@@ -1061,6 +1088,13 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		      AND LOWER(sr.email) = LOWER(c.email)
 		      AND (sr.expires_at IS NULL OR sr.expires_at > NOW())
 		  )
+		  -- Addresses the pre-send gates in the campaign task would refuse.
+		  -- Without this the finder keeps handing back the same undeliverable
+		  -- contact, the task skips it, and the campaign never reaches the
+		  -- healthy leads behind it (issue #200). Read from the contact's
+		  -- CURRENT verification state, so re-verifying an address puts it
+		  -- straight back into routing.
+		  AND NOT ` + undeliverableClause("$1") + `
 		ORDER BY ` + orderPrefix + contactOrder + ` ` + dir + `
 	`
 
@@ -1184,4 +1218,20 @@ func branchHasPositiveReplyCondition(b *models.Branch) bool {
 		}
 	}
 	return false
+}
+
+// CountUndeliverableLeads counts the leads FindNextRoutedPair excludes, using
+// the same predicate it filters on.
+func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context, campaignID uuid.UUID) (int, error) {
+	var n int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM campaign_leads cl
+		JOIN contacts c ON c.id = cl.contact_id
+		WHERE cl.campaign_id = $1
+		  AND `+undeliverableClause("$1"), campaignID).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }

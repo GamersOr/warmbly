@@ -92,13 +92,18 @@ const (
 	LeadStatusBounced      = "bounced"
 	LeadStatusFailed       = "failed"
 	LeadStatusUnsubscribed = "unsubscribed"
+	// LeadStatusUndeliverable is a lead routing will never send to because
+	// address verification refused it (invalid, or risky with the campaign's
+	// "send to risky emails" toggle off). Distinct from pending, which is a
+	// lead still waiting its turn.
+	LeadStatusUndeliverable = "undeliverable"
 )
 
 // ValidLeadStatus reports whether s is one of the derived lead-status values.
 // Used to gate the single-campaign Leads-view `lead_status` search filter.
 func ValidLeadStatus(s string) bool {
 	switch s {
-	case LeadStatusPending, LeadStatusActive, LeadStatusCompleted, LeadStatusReplied, LeadStatusBounced, LeadStatusFailed, LeadStatusUnsubscribed:
+	case LeadStatusPending, LeadStatusActive, LeadStatusCompleted, LeadStatusReplied, LeadStatusBounced, LeadStatusFailed, LeadStatusUnsubscribed, LeadStatusUndeliverable:
 		return true
 	default:
 		return false
@@ -123,8 +128,8 @@ type ContactsResult struct {
 
 // CampaignLeadCounts are per-status lead totals within a single campaign,
 // derived the same way as ContactCampaignProgress.Status (unsubscribed >
-// bounced > replied > failed > completed > processing > queued). Drives the
-// Leads-view scope chips.
+// bounced > replied > failed > completed > processing > undeliverable >
+// queued). Drives the Leads-view scope chips.
 type CampaignLeadCounts struct {
 	Total        int `json:"total"`
 	Queued       int `json:"queued"`     // pending: a lead, no email sent yet
@@ -134,6 +139,8 @@ type CampaignLeadCounts struct {
 	Bounced      int `json:"bounced"`
 	Failed       int `json:"failed"` // a step could not be sent after every retry
 	Unsubscribed int `json:"unsubscribed"`
+	// Undeliverable: address verification refused it, so routing skips it.
+	Undeliverable int `json:"undeliverable"`
 }
 
 // ContactsCounts are org-wide contact facet totals for the browse sidebar.

@@ -31,6 +31,8 @@ export interface CampaignLeadCounts {
     bounced: number;
     failed: number;
     unsubscribed: number;
+    // Leads the campaign will never send to: address verification refused them.
+    undeliverable: number;
 }
 
 export default interface SearchContactsResult {

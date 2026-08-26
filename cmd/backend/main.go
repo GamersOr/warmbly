@@ -1506,8 +1506,14 @@ func main() {
 		// contacts each tick so hard-bouncing addresses are dropped before any
 		// worker sends. CONTROL-PLANE ONLY — the SMTP RCPT probe dials remote MX
 		// on :25 from this backend host (a non-sending IP), never a worker.
+		// The HELO name must be a real, public FQDN: servers reject a bare or
+		// reserved greeting, and Postfix reports that rejection on RCPT, where
+		// the prober used to read it as a dead mailbox (issue #200). APP_URL's
+		// host is the instance's own public name, so it is the right fallback;
+		// when neither is usable the verifier declines to probe instead of
+		// inventing verdicts.
 		emailVerifier := emailverify.New(emailverify.Config{
-			HeloHost: os.Getenv("EMAIL_VERIFY_HELO_HOST"), // e.g. verify.warmbly.com
+			HeloHost: emailVerifyHeloHost(),               // e.g. verify.warmbly.com
 			MailFrom: os.Getenv("EMAIL_VERIFY_MAIL_FROM"), // e.g. verify@warmbly.com
 		})
 		emailVerifyService = emailverifyapp.NewService(contactRepostory, emailVerifier)
@@ -1835,6 +1841,20 @@ func main() {
 	}
 
 	log.Println("Backend stopped")
+}
+
+// emailVerifyHeloHost resolves the hostname the pre-send verifier announces in
+// EHLO/HELO: the explicit setting first, else the host of APP_URL. Returns ""
+// when neither is set, which makes the verifier skip the SMTP probe rather than
+// greet remote servers with a name they will reject.
+func emailVerifyHeloHost() string {
+	if h := strings.TrimSpace(os.Getenv("EMAIL_VERIFY_HELO_HOST")); h != "" {
+		return h
+	}
+	if u, err := url.Parse(strings.TrimSpace(os.Getenv("APP_URL"))); err == nil {
+		return u.Hostname()
+	}
+	return ""
 }
 
 func getenvDefault(key, def string) string {
