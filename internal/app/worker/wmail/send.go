@@ -223,9 +223,11 @@ func (w *WMail) sendViaGmail(ctx context.Context, req *SendRequest, bodyHTML str
 	return result
 }
 
-// sendViaGraph sends an email through Microsoft Graph (RAW MIME sendMail).
-// sendMail returns 202 with no provider id, so ProviderMsgID is the RFC
-// Message-ID we minted, mirroring the SMTP path.
+// sendViaGraph sends an email through Microsoft Graph. Graph re-stamps the
+// Message-ID we mint, so the client creates the message as a draft, reads the
+// id Exchange assigned, and sends that; the result carries that id rather than
+// ours so warmup verification and campaign reply threading match what the
+// recipient actually received.
 func (w *WMail) sendViaGraph(ctx context.Context, req *SendRequest, bodyHTML string) *SendResult {
 	result := &SendResult{
 		Success: false,
@@ -249,12 +251,14 @@ func (w *WMail) sendViaGraph(ctx context.Context, req *SendRequest, bodyHTML str
 	// and no local thread record.
 	parent := parentReference(req)
 
-	// Warmup token + RFC 8058 one-click unsubscribe headers; RAW MIME carries
-	// them verbatim (the JSON message shape cannot).
+	// Warmup token + RFC 8058 one-click unsubscribe headers. RAW MIME is the
+	// only Graph shape that can carry them, though Exchange still drops
+	// custom headers in transit, which is why warmup verification does not
+	// depend on the token header arriving.
 	customHeaders := buildSendHeaders(req)
 	attachments := toGraphAttachments(req.Attachments)
 
-	err := w.GraphData.Client.SendMessage(
+	sentMessageID, err := w.GraphData.Client.SendMessage(
 		ctx,
 		req.To,
 		req.Cc,
@@ -282,9 +286,14 @@ func (w *WMail) sendViaGraph(ctx context.Context, req *SendRequest, bodyHTML str
 		return result
 	}
 
+	// Report the id Exchange stamped, not the one we minted: it is the only
+	// value that matches what the recipient received.
+	if sentMessageID == "" {
+		sentMessageID = req.MessageID
+	}
 	result.Success = true
-	result.MessageID = req.MessageID
-	result.ProviderMsgID = req.MessageID // Graph sendMail returns no id
+	result.MessageID = sentMessageID
+	result.ProviderMsgID = sentMessageID // Graph send returns no separate provider id
 	return result
 }
 

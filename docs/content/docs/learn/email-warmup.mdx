@@ -37,6 +37,8 @@ Warmup recipients should be other warmed, healthy mailboxes: not free trial mail
 
 Every warmup message Warmbly sends carries a verification token. Missing, malformed or replayed tokens are tracked per mailbox and feed a rolling spam score. Above the threshold, the mailbox is removed from the pool until it requalifies.
 
+A token carried in a header only works if the header survives delivery, and not every provider passes custom headers through. Warmbly records the subject and the provider-assigned message identifier for each send as well, so a warmup email whose header was stripped in transit is still recognized at the recipient rather than being treated as ordinary mail.
+
 ## What bad warmup looks like
 
 - **Synthetic blasting**: sending 200 identical messages a day to the same handful of recipients. Looks great on a vendor dashboard. Looks awful to Gmail.

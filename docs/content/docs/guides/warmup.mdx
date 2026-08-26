@@ -19,6 +19,8 @@ With warmup enabled, Warmbly repeatedly picks a partner mailbox (avoiding recent
 
 Every warmup send carries a hidden verification token so the receiver can confirm it is genuine warmup traffic. Warmup mail is plaintext and never carries open or click pixels, because it needs to look like ordinary personal email.
 
+The token travels in a message header, and some providers do not pass custom headers on to the recipient. Microsoft in particular strips them in transit and replaces the message identifier, so a warmup email sent from an Outlook or Microsoft 365 mailbox arrives carrying no header at all. Warmbly therefore also records what each send was addressed to, and the message identifier the provider assigned to it, and matches an incoming warmup email on those when the header is gone. Verification does not depend on any one provider behaving well, so warmup from every mailbox type counts, stays out of your unibox, and gets the same engagement.
+
 Enabling warmup controls **outbound** scheduling only. An active mailbox with warmup off stays available as a recipient-only participant, and never starts sending just because it received something.
 
 ### Where the content comes from

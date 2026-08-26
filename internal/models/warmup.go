@@ -19,10 +19,16 @@ type WarmupToken struct {
 	ContentSource  string     `json:"content_source"`
 	ConversationID *uuid.UUID `json:"conversation_id,omitempty"`
 	// ConversationTurn is zero for the opening and increments for each reply.
-	ConversationTurn int        `json:"conversation_turn"`
-	CreatedAt        time.Time  `json:"created_at"`
-	ConsumedAt       *time.Time `json:"consumed_at,omitempty"`
-	ExpiresAt        time.Time  `json:"expires_at"`
+	ConversationTurn int `json:"conversation_turn"`
+	// Subject is what was actually sent, and SentMessageID is the Message-ID
+	// the provider put on the wire (which is not the one we minted on Graph).
+	// Both exist so the recipient can still resolve this token when the verify
+	// header did not survive delivery.
+	Subject       string     `json:"subject"`
+	SentMessageID string     `json:"sent_message_id"`
+	CreatedAt     time.Time  `json:"created_at"`
+	ConsumedAt    *time.Time `json:"consumed_at,omitempty"`
+	ExpiresAt     time.Time  `json:"expires_at"`
 }
 
 // WarmupEmailAction represents actions to perform on a detected warmup email.
