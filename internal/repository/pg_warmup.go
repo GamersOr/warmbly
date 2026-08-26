@@ -3,9 +3,12 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/warmbly/warmbly/internal/models"
 )
@@ -138,6 +141,13 @@ type WarmupRepository interface {
 	GetWarmupToken(ctx context.Context, tokenID uuid.UUID) (*models.WarmupToken, error)
 	FindWarmupToken(ctx context.Context, tokenID uuid.UUID) (*models.WarmupToken, error)
 	ConsumeWarmupToken(ctx context.Context, tokenID uuid.UUID) error
+	// RecordWarmupTokenDelivery stamps the Message-ID the provider actually put
+	// on the wire onto the send's token, which is what the recipient can match
+	// when the verify header did not survive delivery.
+	RecordWarmupTokenDelivery(ctx context.Context, taskID uuid.UUID, messageID string) error
+	// FindDeliveredWarmupToken resolves the pending token for an inbound
+	// message that carries no verify header.
+	FindDeliveredWarmupToken(ctx context.Context, recipientAccountID uuid.UUID, senderAddress, messageID, subject string) (*models.WarmupToken, error)
 	RecordInvalidTokenAttempt(ctx context.Context, accountID uuid.UUID, attemptedToken string) error
 	CountRecentInvalidAttempts(ctx context.Context, accountID uuid.UUID, since time.Time) (int, error)
 
@@ -788,8 +798,8 @@ func (r *warmupRepository) GetOrCreateDailyStats(ctx context.Context, accountID 
 // CreateWarmupToken creates a warmup verification token
 func (r *warmupRepository) CreateWarmupToken(ctx context.Context, token *models.WarmupToken) error {
 	query := `
-		INSERT INTO warmup_tokens (token, task_id, sender_account_id, recipient_account_id, conversation_theme, content_source, conversation_id, conversation_turn, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO warmup_tokens (token, task_id, sender_account_id, recipient_account_id, conversation_theme, content_source, conversation_id, conversation_turn, subject, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
 	_, err := r.db.Exec(ctx, query,
 		token.Token,
@@ -800,6 +810,7 @@ func (r *warmupRepository) CreateWarmupToken(ctx context.Context, token *models.
 		token.ContentSource,
 		token.ConversationID,
 		token.ConversationTurn,
+		token.Subject,
 		token.ExpiresAt,
 	)
 	return err
@@ -807,61 +818,17 @@ func (r *warmupRepository) CreateWarmupToken(ctx context.Context, token *models.
 
 // GetWarmupToken retrieves a valid (unconsumed, unexpired) warmup token
 func (r *warmupRepository) GetWarmupToken(ctx context.Context, tokenID uuid.UUID) (*models.WarmupToken, error) {
-	query := `
-		SELECT token, task_id, sender_account_id, recipient_account_id, COALESCE(conversation_theme, ''), COALESCE(content_source, ''), conversation_id, conversation_turn, created_at, consumed_at, expires_at
+	query := `SELECT ` + warmupTokenColumns + `
 		FROM warmup_tokens
-		WHERE token = $1 AND consumed_at IS NULL AND expires_at > NOW()
-	`
-
-	t := &models.WarmupToken{}
-	err := r.db.QueryRow(ctx, query, tokenID).Scan(
-		&t.Token,
-		&t.TaskID,
-		&t.SenderAccountID,
-		&t.RecipientAccountID,
-		&t.ConversationTheme,
-		&t.ContentSource,
-		&t.ConversationID,
-		&t.ConversationTurn,
-		&t.CreatedAt,
-		&t.ConsumedAt,
-		&t.ExpiresAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-
-	return t, err
+		WHERE token = $1 AND consumed_at IS NULL AND expires_at > NOW()`
+	return scanWarmupToken(r.db.QueryRow(ctx, query, tokenID))
 }
 
 func (r *warmupRepository) FindWarmupToken(ctx context.Context, tokenID uuid.UUID) (*models.WarmupToken, error) {
-	query := `
-		SELECT token, task_id, sender_account_id, recipient_account_id, COALESCE(conversation_theme, ''), COALESCE(content_source, ''), conversation_id, conversation_turn, created_at, consumed_at, expires_at
+	query := `SELECT ` + warmupTokenColumns + `
 		FROM warmup_tokens
-		WHERE token = $1
-	`
-
-	t := &models.WarmupToken{}
-	err := r.db.QueryRow(ctx, query, tokenID).Scan(
-		&t.Token,
-		&t.TaskID,
-		&t.SenderAccountID,
-		&t.RecipientAccountID,
-		&t.ConversationTheme,
-		&t.ContentSource,
-		&t.ConversationID,
-		&t.ConversationTurn,
-		&t.CreatedAt,
-		&t.ConsumedAt,
-		&t.ExpiresAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-
-	return t, err
+		WHERE token = $1`
+	return scanWarmupToken(r.db.QueryRow(ctx, query, tokenID))
 }
 
 // ConsumeWarmupToken marks a warmup token as consumed
@@ -869,6 +836,97 @@ func (r *warmupRepository) ConsumeWarmupToken(ctx context.Context, tokenID uuid.
 	query := `UPDATE warmup_tokens SET consumed_at = NOW() WHERE token = $1`
 	_, err := r.db.Exec(ctx, query, tokenID)
 	return err
+}
+
+// warmupTokenColumns is the shared select list for a warmup token row.
+const warmupTokenColumns = `token, task_id, sender_account_id, recipient_account_id,
+	COALESCE(conversation_theme, ''), COALESCE(content_source, ''), conversation_id,
+	conversation_turn, COALESCE(subject, ''), COALESCE(sent_message_id, ''),
+	created_at, consumed_at, expires_at`
+
+func scanWarmupToken(row pgx.Row) (*models.WarmupToken, error) {
+	t := &models.WarmupToken{}
+	err := row.Scan(
+		&t.Token,
+		&t.TaskID,
+		&t.SenderAccountID,
+		&t.RecipientAccountID,
+		&t.ConversationTheme,
+		&t.ContentSource,
+		&t.ConversationID,
+		&t.ConversationTurn,
+		&t.Subject,
+		&t.SentMessageID,
+		&t.CreatedAt,
+		&t.ConsumedAt,
+		&t.ExpiresAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// RecordWarmupTokenDelivery stamps the delivered Message-ID onto the send's
+// token. Graph re-stamps the Message-ID we mint, so on Outlook this is the
+// only value a recipient can match the send against.
+func (r *warmupRepository) RecordWarmupTokenDelivery(ctx context.Context, taskID uuid.UUID, messageID string) error {
+	if messageID == "" {
+		return nil
+	}
+	_, err := r.db.Exec(ctx,
+		`UPDATE warmup_tokens SET sent_message_id = $2 WHERE task_id = $1`,
+		taskID, messageID)
+	return err
+}
+
+// FindDeliveredWarmupToken resolves the token for warmup mail that arrived
+// without its verify header, which is every send from a Microsoft mailbox
+// (Graph strips custom headers in transit).
+//
+// Two keys: the Message-ID the provider stamped on the send, and the pending
+// token for this exact sender/recipient pair whose subject matches. Both are
+// scoped to unconsumed, unexpired tokens addressed to this recipient, of which
+// there are only ever a handful, so this is one indexed lookup on a path every
+// inbound message takes.
+//
+// The pair key is deliberately narrow. Warmup partners are other Warmbly
+// mailboxes, so without the subject and the two-day window a real email
+// between two pool members could claim a pending token and vanish from the
+// recipient's unibox.
+func (r *warmupRepository) FindDeliveredWarmupToken(ctx context.Context, recipientAccountID uuid.UUID, senderAddress, messageID, subject string) (*models.WarmupToken, error) {
+	messageID = strings.Trim(strings.TrimSpace(messageID), "<>")
+	senderAddress = strings.TrimSpace(senderAddress)
+	subject = strings.TrimSpace(subject)
+	if messageID == "" && (senderAddress == "" || subject == "") {
+		return nil, nil
+	}
+
+	const matchesMessageID = `($2 <> '' AND wt.sent_message_id <> '' AND btrim(wt.sent_message_id, '<>') = $2)`
+	query := `SELECT ` + warmupTokenColumns + `
+		FROM warmup_tokens wt
+		WHERE wt.recipient_account_id = $1
+		  AND wt.consumed_at IS NULL
+		  AND wt.expires_at > NOW()
+		  AND (
+		    ` + matchesMessageID + `
+		    OR (
+		      $3 <> '' AND $4 <> ''
+		      AND wt.created_at > NOW() - INTERVAL '2 days'
+		      AND wt.subject <> ''
+		      AND lower(btrim(wt.subject)) = lower($4)
+		      AND EXISTS (
+		          SELECT 1 FROM email_accounts ea
+		          WHERE ea.id = wt.sender_account_id AND lower(ea.email) = lower($3)
+		      )
+		    )
+		  )
+		ORDER BY ` + matchesMessageID + ` DESC, wt.created_at DESC
+		LIMIT 1`
+	return scanWarmupToken(r.db.QueryRow(ctx, query, recipientAccountID, messageID, senderAddress, subject))
 }
 
 // RecordInvalidTokenAttempt records an invalid warmup token attempt

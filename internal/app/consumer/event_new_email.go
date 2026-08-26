@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/mail"
 	"slices"
 	"strings"
 	"time"
@@ -39,6 +40,11 @@ func (s *JobsService) HandleNewEmail(ctx context.Context, e *models.JobEventNewE
 		if handled {
 			return nil // Don't add to unibox
 		}
+	} else if s.handleUnmarkedWarmupEmail(ctx, e) {
+		// Warmup whose verify header did not survive delivery. Every Microsoft
+		// mailbox sends this way, so without this branch its warmup mail is
+		// filed as ordinary inbox mail at every recipient.
+		return nil
 	}
 
 	// Normal email processing
@@ -146,8 +152,73 @@ func (s *JobsService) handleWarmupEmail(ctx context.Context, e *models.JobEventN
 		return false, nil
 	}
 
-	// Valid! Consume the token
-	s.WarmupRepo.ConsumeWarmupToken(ctx, tokenUUID)
+	s.acceptWarmupEmail(ctx, e, token)
+	return true, nil
+}
+
+// handleUnmarkedWarmupEmail verifies warmup mail that arrived without its
+// verify header. Microsoft Graph drops custom headers in transit (and
+// re-stamps the Message-ID), so mail sent from an Outlook or Microsoft 365
+// mailbox reaches every recipient carrying no marker at all; matched only on
+// the header it would count for nobody and be filed as ordinary inbox mail.
+//
+// Unlike the header path a miss here is not suspicious — almost every message
+// that reaches this point is simply ordinary mail — so nothing is recorded as
+// an invalid attempt.
+func (s *JobsService) handleUnmarkedWarmupEmail(ctx context.Context, e *models.JobEventNewEmail) bool {
+	if s.WarmupRepo == nil || e.Message == nil {
+		return false
+	}
+	token, err := s.WarmupRepo.FindDeliveredWarmupToken(
+		ctx,
+		e.Message.EmailID,
+		firstSenderAddress(e.Message.FromAddr),
+		e.Message.MessageID,
+		e.Message.Subject,
+	)
+	if err != nil {
+		CaptureError(e.UserID, e.Message.EmailID, fmt.Errorf("unmarked warmup lookup: %w", err))
+		return false
+	}
+	if token == nil {
+		return false
+	}
+	log.Debug().
+		Str("token", token.Token.String()).
+		Str("email_account_id", e.Message.EmailID.String()).
+		Msg("verified warmup mail that arrived without its verify header")
+	s.acceptWarmupEmail(ctx, e, token)
+	return true
+}
+
+// firstSenderAddress pulls the bare address out of the first From value
+// ("Name <addr>" or a bare address).
+func firstSenderAddress(from []string) string {
+	for _, raw := range from {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if addr, err := mail.ParseAddress(raw); err == nil {
+			return strings.TrimSpace(addr.Address)
+		}
+		if i := strings.LastIndex(raw, "<"); i >= 0 {
+			if j := strings.Index(raw[i:], ">"); j > 0 {
+				return strings.TrimSpace(raw[i+1 : i+j])
+			}
+		}
+		if strings.Contains(raw, "@") {
+			return raw
+		}
+	}
+	return ""
+}
+
+// acceptWarmupEmail consumes a verified token and runs everything that follows
+// from a warmup email having arrived. Shared by both verification paths so the
+// header and the header-less route cannot drift apart.
+func (s *JobsService) acceptWarmupEmail(ctx context.Context, e *models.JobEventNewEmail, token *models.WarmupToken) {
+	s.WarmupRepo.ConsumeWarmupToken(ctx, token.Token)
 
 	// Record the receipt so a later deletion or spam-flag of THIS message can be
 	// attributed back to warmup and to the sender. Verified warmup mail is not
@@ -172,7 +243,6 @@ func (s *JobsService) handleWarmupEmail(ctx context.Context, e *models.JobEventN
 
 	// Perform warmup actions
 	s.performWarmupActions(ctx, e)
-	return true, nil
 }
 
 // performWarmupActions publishes warmup action events to the worker. Action

@@ -41,13 +41,27 @@ func (s *JobsService) HandleEmailSent(ctx context.Context, result models.SendEma
 		log.Warn().Str("task_id", result.TaskID.String()).Msg("email sent result for unknown task")
 		return nil
 	}
-	if result.MessageID != "" && task.MessageID == "" {
+	// The worker reports the Message-ID the provider put on the wire, which is
+	// not always the one the control plane minted: Graph re-stamps it. Take the
+	// worker's answer whenever it differs, because everything that matches a
+	// send back to us later (campaign reply threading, warmup reply candidates)
+	// keys on what the recipient actually received.
+	if result.MessageID != "" && result.MessageID != task.MessageID {
 		if err := s.TaskRepo.UpdateTaskMessageID(ctx, task.ID, result.MessageID); err != nil {
 			log.Warn().Err(err).Str("task_id", task.ID.String()).Msg("could not record worker message id")
 		}
 	}
-	if task.TaskType == "campaign" {
+	switch task.TaskType {
+	case "campaign":
 		s.repairCampaignSendStamp(ctx, task)
+	case "warmup":
+		// Without this the recipient has nothing to match a warmup email
+		// against when the verify header did not survive delivery.
+		if s.WarmupRepo != nil && result.MessageID != "" {
+			if err := s.WarmupRepo.RecordWarmupTokenDelivery(ctx, task.ID, result.MessageID); err != nil {
+				log.Warn().Err(err).Str("task_id", task.ID.String()).Msg("could not record the delivered warmup message id")
+			}
+		}
 	}
 	return nil
 }

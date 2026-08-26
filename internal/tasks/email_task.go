@@ -333,7 +333,10 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 		ContentSource:      contentSource,
 		ConversationID:     conversationID,
 		ConversationTurn:   conversationTurn,
-		ExpiresAt:          time.Now().Add(7 * 24 * time.Hour),
+		// The recipient falls back to matching on the subject when the verify
+		// header does not survive delivery (Graph strips it).
+		Subject:   subject,
+		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
 	}
 	if err := s.warmupRepo.CreateWarmupToken(ctx, tokenRecord); err != nil {
 		log.Warn().Err(err).Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("Failed to create warmup token")
