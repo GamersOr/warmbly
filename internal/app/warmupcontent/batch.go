@@ -168,7 +168,7 @@ func (s *service) PollBatches(ctx context.Context) error {
 
 // pollBatchJob reconciles a single batch job.
 func (s *service) pollBatchJob(ctx context.Context, job *models.WarmupGenerationJob) error {
-	status, outputFileID, counts, err := s.gen.GetBatch(ctx, job.BatchID)
+	status, outputFileID, errorFileID, counts, err := s.gen.GetBatch(ctx, job.BatchID)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,14 @@ func (s *service) pollBatchJob(ctx context.Context, job *models.WarmupGeneration
 	switch status {
 	case "completed":
 		job.BatchOutputFileID = outputFileID
-		return s.ingestBatch(ctx, job, outputFileID, counts)
+		// A batch whose requests all failed completes with no output file; the
+		// refusals are in the error file, which has the same JSONL shape. Read
+		// it instead of failing on the empty id, or the reason is never seen.
+		resultsFileID := outputFileID
+		if resultsFileID == "" {
+			resultsFileID = errorFileID
+		}
+		return s.ingestBatch(ctx, job, resultsFileID, counts)
 	case "failed", "expired", "cancelled":
 		now := time.Now()
 		job.Status = "failed"
@@ -287,6 +294,11 @@ func (s *service) ingestBatch(ctx context.Context, job *models.WarmupGenerationJ
 		job.Status = "failed"
 		if job.Error == "" {
 			job.Error = fmt.Sprintf("all %d batch results failed", job.FailedCount)
+			// One line's reason is worth more than the count: when every
+			// request is refused it is the same reason for all of them.
+			if reason := firstResultError(results); reason != "" {
+				job.Error += ": " + reason
+			}
 		}
 	}
 	if err := s.repo.UpdateGenerationJob(ctx, job); err != nil {
@@ -354,4 +366,15 @@ func (s *service) CancelBatch(ctx context.Context, jobID uuid.UUID) error {
 		job.Error = "cancelled by admin"
 	}
 	return s.repo.UpdateGenerationJob(ctx, job)
+}
+
+// firstResultError returns the first non-empty per-line error in a batch's
+// results, used to name the reason a fully failed batch produced nothing.
+func firstResultError(results []generation.BatchResult) string {
+	for i := range results {
+		if results[i].Err != "" {
+			return results[i].Err
+		}
+	}
+	return ""
 }
