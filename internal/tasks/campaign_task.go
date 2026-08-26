@@ -226,6 +226,11 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			if errors.Is(err, scheduler.ErrCampaignEnded) {
 				reason = "Campaign ended: reached its end date"
 			}
+			// Leads verification refused are never routed, so say so here
+			// rather than letting "all emails sent" cover for them.
+			if n, cerr := s.campaignProgressRepo.CountUndeliverableLeads(ctx, campaign.ID); cerr == nil && n > 0 {
+				reason = fmt.Sprintf("%s (%d lead(s) skipped: address verification refused them)", reason, n)
+			}
 			s.campaignRepo.UpdateStatus(ctx, campaign.ID, "completed")
 			if s.campaignLogRepo != nil {
 				s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{

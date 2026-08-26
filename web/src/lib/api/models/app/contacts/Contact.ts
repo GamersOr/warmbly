@@ -4,7 +4,8 @@ import type MiniCategory from "./MiniCategory";
 // LeadStatus mirrors models.ContactCampaignProgress.Status, a contact's
 // processing state inside a single campaign. "completed" = every step sent, no
 // reply (done); "active" = some but not all steps sent (still processing);
-// "failed" = the mailbox could not send a step after every retry.
+// "failed" = the mailbox could not send a step after every retry;
+// "undeliverable" = address verification refused it, so the campaign skips it.
 export type LeadStatus =
     | "pending"
     | "active"
@@ -12,7 +13,8 @@ export type LeadStatus =
     | "replied"
     | "bounced"
     | "failed"
-    | "unsubscribed";
+    | "unsubscribed"
+    | "undeliverable";
 
 // ContactCampaignProgress is set only on contacts returned by a single-campaign
 // (Leads view) search; it summarises how far the lead is through the campaign.

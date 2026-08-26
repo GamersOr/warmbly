@@ -994,6 +994,7 @@ const LEAD_META: Record<
     bounced: { label: "Bounced", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
     failed: { label: "Failed", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
     unsubscribed: { label: "Unsubscribed", dot: "bg-slate-300", text: "text-slate-400", Icon: BanIcon },
+    undeliverable: { label: "Undeliverable", dot: "bg-amber-500", text: "text-amber-600", Icon: AlertTriangleIcon },
 };
 
 function LeadStatusPill({ lead }: { lead?: ContactCampaignProgress | null }) {
@@ -1005,7 +1006,9 @@ function LeadStatusPill({ lead }: { lead?: ContactCampaignProgress | null }) {
     const title =
         status === "failed" && lead?.failure_reason
             ? `Could not send: ${lead.failure_reason}`
-            : undefined;
+            : status === "undeliverable"
+                ? "Address verification refused this recipient, so the campaign skips it"
+                : undefined;
     return (
         <span
             className={`inline-flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] ${meta.text}`}
@@ -1050,6 +1053,7 @@ function LeadProgressStrip({
                 bounced: serverCounts.bounced,
                 failed: serverCounts.failed,
                 unsubscribed: serverCounts.unsubscribed,
+                undeliverable: serverCounts.undeliverable ?? 0,
             } satisfies Record<LeadStatus, number>;
         }
         const c: Record<LeadStatus, number> = {
@@ -1060,6 +1064,7 @@ function LeadProgressStrip({
             bounced: 0,
             failed: 0,
             unsubscribed: 0,
+            undeliverable: 0,
         };
         for (const ct of contacts) c[ct.campaign_lead?.status ?? "pending"]++;
         return c;
@@ -1078,6 +1083,7 @@ function LeadProgressStrip({
         { key: "bounced", color: "bg-rose-400" },
         { key: "failed", color: "bg-rose-500" },
         { key: "unsubscribed", color: "bg-slate-200" },
+        { key: "undeliverable", color: "bg-amber-500" },
     ];
 
     return (
@@ -1102,6 +1108,9 @@ function LeadProgressStrip({
                 <StripChip dot="bg-slate-300" label="Queued" n={counts.pending} />
                 <StripChip dot="bg-rose-400" label="Bounced" n={counts.bounced} />
                 {counts.failed > 0 && <StripChip dot="bg-rose-500" label="Failed" n={counts.failed} />}
+                {counts.undeliverable > 0 && (
+                    <StripChip dot="bg-amber-500" label="Undeliverable" n={counts.undeliverable} />
+                )}
                 <StripChip dot="bg-slate-300" label="Unsub" n={counts.unsubscribed} />
             </div>
             <div className="ml-auto flex items-center gap-2 text-[10.5px] text-slate-400 tabular-nums">

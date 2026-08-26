@@ -204,6 +204,21 @@ docker compose -p warmbly logs backend | grep -B2 -A12 "MAIL_TRANSPORT=log"
 The backend refuses to start without `EMAIL_ADDRESS` and `EMAIL_NAME`. The consumer logs a warning and silently disables all notification and digest email, so an instance can look healthy while sending nothing. Set both on every process.
 </Callout>
 
+## Pre-send verification
+
+Before a campaign sends to an address, the backend can check it: syntax, then `MX`, then an `SMTP` `RCPT` probe against the recipient's mail server. An address that comes back `invalid` is skipped rather than sent to, which turns a would-be hard bounce into a silent drop. The probe runs from the backend, never from a worker, because workers are your sending IPs.
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `EMAIL_VERIFY_HELO_HOST` | The hostname the probe announces in `EHLO`/`HELO`. Must be a public, fully-qualified name that belongs to this instance | the host of `APP_URL` | yes |
+| `EMAIL_VERIFY_MAIL_FROM` | The envelope sender the probe uses in `MAIL FROM` | `verify@` plus the `HELO` host | yes |
+
+<Callout type="warn" title="An unqualified HELO name gets the whole session rejected">
+Mail servers refuse a greeting that is not a real hostname (`localhost`, a bare name, or anything under a reserved suffix such as `.local`, `.internal` or `.lan`). Postfix in particular applies that rejection at `RCPT` time rather than at `HELO`, so it arrives looking exactly like `504 5.5.2 <localhost>: Helo command rejected: need fully-qualified hostname` on the recipient's address. Warmbly reads a reply like that as a rejected probe, not as a dead mailbox, so it never marks the contact invalid. If neither `EMAIL_VERIFY_HELO_HOST` nor a usable `APP_URL` host is set, the probe is skipped entirely and every address stays `unknown`, which still sends.
+</Callout>
+
+`EMAIL_VERIFY_HELO_HOST` is not `SMTP_EHLO_NAME`. `SMTP_EHLO_NAME` is the greeting your platform mail relay sees in [platform mail](#platform-mail); this one is the greeting recipients' servers see from the verifier.
+
 ## Encryption
 
 | Variable | What it does | Default | Restart needed |
