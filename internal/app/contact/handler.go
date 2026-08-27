@@ -2,6 +2,7 @@ package contact
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -13,30 +14,46 @@ import (
 	"github.com/warmbly/warmbly/internal/utils/validate"
 )
 
+// checkContactLimit enforces the plan's contact ceiling for a batch about to
+// be created. Callers that write in chunks (the importer) must ask once for
+// the whole batch, or a rejected chunk turns one plan problem into one error
+// per row.
+//
+// This path reads the plan directly instead of going through the feature
+// gate, so it never saw the self-host short-circuit: every self-hosted org
+// was capped at the seeded Free Trial plan's 100 contacts even though
+// BILLING_PROVIDER=none unlocks every other limit.
+func (s *contactService) checkContactLimit(ctx context.Context, userID string, adding int) *errx.Error {
+	if config.SelfHosted() || s.subRepo == nil || s.planRepo == nil || adding <= 0 {
+		return nil
+	}
+	uid, parseErr := uuid.Parse(userID)
+	if parseErr != nil {
+		return nil
+	}
+	sub, err := s.subRepo.GetByUserID(ctx, uid)
+	if err != nil || sub == nil {
+		return nil
+	}
+	plan, err := s.planRepo.GetByID(ctx, sub.PlanID)
+	if err != nil || plan == nil || plan.MaxContacts <= 0 {
+		return nil
+	}
+	currentCount, xerr := s.contactRepository.GetContactCount(ctx, userID)
+	if xerr != nil {
+		return nil
+	}
+	if currentCount+adding > int(plan.MaxContacts) {
+		return errx.New(errx.Forbidden, fmt.Sprintf(
+			"adding %d contacts would put you over your plan's limit of %d (you have %d)",
+			adding, plan.MaxContacts, currentCount))
+	}
+	return nil
+}
+
 func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID, contacts []models.AddContact) ([]models.Contact, *errx.Error) {
-	// Enforce contact limit if subscription repos are available.
-	//
-	// This path reads the plan directly instead of going through the feature
-	// gate, so it never saw the self-host short-circuit: every self-hosted org
-	// was capped at the seeded Free Trial plan's 100 contacts even though
-	// BILLING_PROVIDER=none unlocks every other limit.
-	if !config.SelfHosted() && s.subRepo != nil && s.planRepo != nil {
-		uid, parseErr := uuid.Parse(userID)
-		if parseErr == nil {
-			sub, err := s.subRepo.GetByUserID(ctx, uid)
-			if err == nil && sub != nil {
-				plan, err := s.planRepo.GetByID(ctx, sub.PlanID)
-				if err == nil && plan != nil && plan.MaxContacts > 0 {
-					currentCount, xerr := s.contactRepository.GetContactCount(ctx, userID)
-					if xerr == nil {
-						newTotal := currentCount + len(contacts)
-						if newTotal > int(plan.MaxContacts) {
-							return nil, errx.New(errx.Forbidden, "contact limit reached for your plan")
-						}
-					}
-				}
-			}
-		}
+	if xerr := s.checkContactLimit(ctx, userID, len(contacts)); xerr != nil {
+		return nil, xerr
 	}
 
 	created, xerr := s.contactRepository.Add(ctx, userID, orgID, contacts)
