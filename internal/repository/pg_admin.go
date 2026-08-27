@@ -869,9 +869,9 @@ func (r *adminRepository) GetWorkerEmails(ctx context.Context, workerID uuid.UUI
 		args = append(args, *cursor)
 	}
 
-	// Health lives on warmup_pool_participants; an account can be in more than
-	// one pool, so we pick its WORST state via a CASE rank (same ordering as the
-	// risk rebalancer). risk_band is the mailbox's resolved reputation tier.
+	// Health lives on warmup_pool_participants, one row per mailbox. The CASE
+	// rank keeps the worst state winning if that ever stops being true (same
+	// ordering as the risk rebalancer). risk_band is the resolved tier.
 	query := `
 		SELECT ea.id, ea.email, ea.user_id::uuid, ea.organization_id,
 			ea.status, ea.provider, ea.warmup IS NOT NULL, ea.last_synced_at,

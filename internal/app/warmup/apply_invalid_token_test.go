@@ -42,6 +42,13 @@ func (r *stubWarmupRepo) GetParticipantHealth(_ context.Context, _ uuid.UUID, _ 
 	return r.health, nil
 }
 
+func (r *stubWarmupRepo) GetParticipantHealthForAccount(_ context.Context, _ uuid.UUID) (*models.WarmupParticipantHealth, error) {
+	if r.getHealthErr != nil {
+		return nil, r.getHealthErr
+	}
+	return r.health, nil
+}
+
 func (r *stubWarmupRepo) UpdateParticipantHealth(_ context.Context, _ uuid.UUID, _ models.WarmupHealthState, _ *time.Time, _ string, _ float64) error {
 	return r.updateErr
 }
@@ -142,13 +149,17 @@ func (r *failingRecordRepo) RecordInvalidTokenAttempt(_ context.Context, _ uuid.
 	return errors.New("write failed")
 }
 
-// The evaluation runs whether or not the account is in the first pool probed.
-// Probing "premium" first and treating "not in that pool" as a hard failure is
-// what stopped the band ever firing for a free-pool account.
-func TestEvaluateAnyPoolFallsThroughToTheSecondPool(t *testing.T) {
-	repo := &secondPoolRepo{
+// The evaluation runs on the mailbox's own pool row. Probing "premium" first
+// and treating "not in that pool" as a hard failure is what stopped the band
+// ever firing for a free-pool account (#195); membership is now read per
+// account, which is exact because a mailbox is in exactly one pool (#211).
+func TestEvaluateAnyPoolEvaluatesTheMailboxesOwnPool(t *testing.T) {
+	repo := &ownPoolRepo{
 		stubWarmupRepo: stubWarmupRepo{
-			health: &models.WarmupParticipantHealth{HealthState: models.WarmupHealthHealthy},
+			health: &models.WarmupParticipantHealth{
+				PoolType:    "free",
+				HealthState: models.WarmupHealthHealthy,
+			},
 		},
 	}
 
@@ -162,21 +173,26 @@ func TestEvaluateAnyPoolFallsThroughToTheSecondPool(t *testing.T) {
 	if !repo.updated {
 		t.Fatal("the evaluation never persisted a decision")
 	}
+	if repo.readBackPool != "free" {
+		t.Fatalf("read the decision back from pool %q, want the pool the mailbox is actually in", repo.readBackPool)
+	}
 }
 
-type secondPoolRepo struct {
+type ownPoolRepo struct {
 	stubWarmupRepo
-	updated bool
+	updated      bool
+	readBackPool string
 }
 
-func (r *secondPoolRepo) GetParticipantHealth(_ context.Context, _ uuid.UUID, poolType string) (*models.WarmupParticipantHealth, error) {
-	if poolType == "premium" {
+func (r *ownPoolRepo) GetParticipantHealth(_ context.Context, _ uuid.UUID, poolType string) (*models.WarmupParticipantHealth, error) {
+	r.readBackPool = poolType
+	if poolType != "free" {
 		return nil, nil // absent, not broken
 	}
 	return r.health, nil
 }
 
-func (r *secondPoolRepo) UpdateParticipantHealth(_ context.Context, _ uuid.UUID, _ models.WarmupHealthState, _ *time.Time, _ string, _ float64) error {
+func (r *ownPoolRepo) UpdateParticipantHealth(_ context.Context, _ uuid.UUID, _ models.WarmupHealthState, _ *time.Time, _ string, _ float64) error {
 	r.updated = true
 	return nil
 }
