@@ -15,7 +15,7 @@
 // where it meets the chrome's inner corner. Reads as one continuous
 // frame around a clean work surface.
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { SkyChrome } from "./SkyChrome";
 import { AppHeader } from "./AppHeader";
@@ -41,6 +41,13 @@ export function AppShell() {
     // The page content's scroll container, anchor for the global cursor layer.
     const scrollRef = useRef<HTMLDivElement>(null);
 
+    // Pages scroll this inner container, not the window, so nothing resets the
+    // offset between routes: navigating from halfway down a long list used to
+    // land mid-page on the next one. Reset before paint so it never flashes.
+    useLayoutEffect(() => {
+        scrollRef.current?.scrollTo({ top: 0, left: 0 });
+    }, [pathname]);
+
     return (
         <div className="fixed inset-0 flex flex-col">
             <SkyChrome />
@@ -64,7 +71,15 @@ export function AppShell() {
                         <GlobalCursorsProvider scrollRef={scrollRef}>
                             <div ref={scrollRef} className="h-full overflow-auto">
                                 <RouteBoundary>
-                                    <Outlet />
+                                    {/* Router navigations run inside a
+                                        transition, so a page that suspends with
+                                        no boundary above it commits an empty
+                                        content area and stays that way until
+                                        the query lands (only a reload fixes
+                                        it). This is that boundary. */}
+                                    <Suspense fallback={<RouteFallback />}>
+                                        <Outlet />
+                                    </Suspense>
                                 </RouteBoundary>
                             </div>
                         </GlobalCursorsProvider>
@@ -76,6 +91,18 @@ export function AppShell() {
             <CommandPalette />
             {/* Right-side AI assistant, persistent across routes. */}
             <AgentPanel />
+        </div>
+    );
+}
+
+// RouteFallback is what a suspending page shows while its data loads. Same
+// hairline chrome as the pages themselves so the panel never goes blank.
+function RouteFallback() {
+    return (
+        <div className="px-5 pt-5 space-y-4" role="status" aria-label="Loading">
+            <div className="h-6 w-56 bg-slate-100 rounded-md animate-pulse" />
+            <div className="h-3 w-40 bg-slate-100 rounded animate-pulse" />
+            <div className="h-56 bg-slate-100 rounded-md animate-pulse" />
         </div>
     );
 }
