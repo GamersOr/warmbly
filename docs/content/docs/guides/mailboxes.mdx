@@ -126,6 +126,8 @@ The detail drawer runs a live `SPF`, `DKIM`, and `DMARC` check on your sending d
 
 Underneath, health moves through `healthy`, `watch`, `throttled`, `quarantined`, and `blocked`. These feed warmup pool selection, which only picks healthy mailboxes as partners, so an unhealthy one can be lowered in volume, removed from the pool, or blocked entirely. A blocked mailbox shows the reason and any appeal option on the Warmup tab, and must requalify on a fresh probation sample rather than waiting out the clock.
 
+Health is judged only on what happened while the mailbox was in the pool: signals recorded before it joined are never counted against it.
+
 <Callout type="info" title="Health protects the pool">
   These controls act earlier than the point where providers start penalizing senders. Low complaint rate and low spam placement matter more than maximum throughput.
 </Callout>

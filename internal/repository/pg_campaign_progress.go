@@ -523,7 +523,7 @@ func (r *campaignProgressRepository) GetResolvedAIVariables(ctx context.Context,
 	`
 	var raw []byte
 	err := r.db.QueryRow(ctx, query, campaignID, contactID, sequenceID).Scan(&raw)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return map[string]string{}, nil
 	}
 	if err != nil {
@@ -567,7 +567,7 @@ func (r *campaignProgressRepository) GetLatestReplyClass(ctx context.Context, co
 	`
 	var class string
 	err := r.db.QueryRow(ctx, query, contactID, campaignID).Scan(&class)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return class, err
@@ -641,7 +641,7 @@ func (r *campaignProgressRepository) GetCampaignProgress(ctx context.Context, ca
 		&progress.EmailsComplained,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return &CampaignProgress{}, nil
 	}
 
@@ -662,7 +662,7 @@ func (r *campaignProgressRepository) GetCampaignRollingRates(ctx context.Context
 	`
 	out := &CampaignRollingRates{}
 	err := r.db.QueryRow(ctx, query, campaignID, since).Scan(&out.Sent, &out.Bounced, &out.Complained)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return &CampaignRollingRates{}, nil
 	}
 	return out, err
@@ -719,7 +719,7 @@ func (r *campaignProgressRepository) GetContactLastSequenceTime(ctx context.Cont
 	var lastTime *time.Time
 	err := r.db.QueryRow(ctx, query, contactID, campaignID).Scan(&lastTime)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 
@@ -770,7 +770,7 @@ func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx con
 	`
 	out := &CampaignSequencePair{}
 	if err := r.db.QueryRow(ctx, query, contactID).Scan(&out.CampaignID, &out.SequenceID); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err

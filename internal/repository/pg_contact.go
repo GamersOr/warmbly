@@ -1698,8 +1698,12 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 	for _, p := range data.Fields {
 		switch p.Type {
 		case models.BulkAddField:
+			// jsonb_build_object is variadic "any", so it gives Postgres nothing
+			// to infer $1/$2 from and the statement is refused before it runs.
+			// to_jsonb($2::text) also matches BulkEditField, which stores the
+			// value as a JSON string rather than a bare literal.
 			b.Queue(`UPDATE contacts
-			         SET custom_fields = custom_fields || jsonb_build_object($1,$2),
+			         SET custom_fields = custom_fields || jsonb_build_object($1::text, to_jsonb($2::text)),
 			             updated_at = NOW()
 			         WHERE organization_id = $3 AND id = ANY($4)`,
 				p.Key, p.Value, orgID, data.Contacts)
@@ -1717,10 +1721,10 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 				p.Key, orgID, data.Contacts)
 		case models.BulkRenameField:
 			b.Queue(`UPDATE contacts
-			         SET custom_fields = (custom_fields - $1) || jsonb_build_object($2, custom_fields->$1),
+			         SET custom_fields = (custom_fields - $1::text) || jsonb_build_object($2::text, custom_fields -> ($1::text)),
 			             updated_at = NOW()
 			         WHERE organization_id = $3 AND id = ANY($4)
-			           AND custom_fields ? $1`,
+			           AND custom_fields ? ($1::text)`,
 				p.Key, p.Value, orgID, data.Contacts)
 		}
 	}

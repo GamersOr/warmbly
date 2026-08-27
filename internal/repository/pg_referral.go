@@ -294,7 +294,10 @@ func (r *referralRepository) applyAttributionLedger(ctx context.Context, attr *m
 	var balanceAfter int64
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO referral_earnings_ledger (org_id, balance_cents, lifetime_earned_cents, currency)
-		VALUES ($1, $2, GREATEST($2, 0), $3)
+		-- $2 is pinned to bigint: the balance_cents column made Postgres deduce
+		-- bigint while GREATEST($2, 0) against an integer literal deduced
+		-- integer, and the conflict meant this upsert never ran at all.
+		VALUES ($1, $2::bigint, GREATEST($2::bigint, 0), $3)
 		ON CONFLICT (org_id) DO UPDATE SET
 			balance_cents = referral_earnings_ledger.balance_cents + EXCLUDED.balance_cents,
 			lifetime_earned_cents = referral_earnings_ledger.lifetime_earned_cents + GREATEST(EXCLUDED.balance_cents, 0),

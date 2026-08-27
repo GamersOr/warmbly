@@ -82,6 +82,11 @@ type WarmupParticipantHealth struct {
 	LastHealthScore       float64           `json:"last_health_score"`
 	LastHealthReason      *string           `json:"last_health_reason,omitempty"`
 	LastHealthEvaluatedAt *time.Time        `json:"last_health_evaluated_at,omitempty"`
+	// Health signals older than this are not counted against the mailbox: its
+	// join time for a new participant, the #195 fix deploy for one that predates
+	// it. Keeps the first evaluation from judging a mailbox on a period nothing
+	// was evaluating.
+	HealthSignalsFrom time.Time `json:"health_signals_from"`
 }
 
 // WarmupBanStatus is the user-facing view of a mailbox's warmup standing,
