@@ -19,7 +19,6 @@ export function RealtimeManager({ children }: { children: React.ReactNode }) {
   const setUnseenCount = useAppStore((s) => s.setUnseenCount)
 
   const queryClient = useQueryClient()
-  const prevOrgIdRef = useRef<string | null>(null)
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastHeartbeatRef = useRef<number>(Date.now())
   const hadConnectionRef = useRef(false)
@@ -87,26 +86,19 @@ export function RealtimeManager({ children }: { children: React.ReactNode }) {
     }
   }, [isConnected, user?.id, joinChannel, leaveChannel, addJoinedChannel, removeJoinedChannel])
 
-  // Auto-join/leave org channel on org switch
+  // Auto-join/leave org channel on org switch. Needs the cleanup: the effect
+  // re-runs on every reconnect, so without one the join never gets its leave.
   useEffect(() => {
-    if (!isConnected) return
+    if (!isConnected || !currentOrg?.id) return
 
-    const prevOrgId = prevOrgIdRef.current
-    const newOrgId = currentOrg?.id
+    const topic = `org:${currentOrg.id}`
+    joinChannel(topic)
+    addJoinedChannel(topic)
 
-    if (prevOrgId && prevOrgId !== newOrgId) {
-      const prevTopic = `org:${prevOrgId}`
-      leaveChannel(prevTopic)
-      removeJoinedChannel(prevTopic)
+    return () => {
+      leaveChannel(topic)
+      removeJoinedChannel(topic)
     }
-
-    if (newOrgId) {
-      const topic = `org:${newOrgId}`
-      joinChannel(topic)
-      addJoinedChannel(topic)
-    }
-
-    prevOrgIdRef.current = newOrgId ?? null
   }, [isConnected, currentOrg?.id, joinChannel, leaveChannel, addJoinedChannel, removeJoinedChannel])
 
   // Connection quality monitoring
