@@ -142,7 +142,7 @@ A JSON array of contact objects (at least one, up to the per-request maximum; an
 | `phone` | string | No | Phone number. |
 | `campaigns` | string[] | No | Campaign IDs to add the contact to. |
 | `categories` | string[] | No | Category IDs to assign. |
-| `custom_fields` | object | No | Arbitrary string key/value custom fields. |
+| `custom_fields` | object | No | String key/value custom fields. Keys may use letters, numbers, underscores, spaces, and dashes. |
 
 ```json
 [
@@ -345,7 +345,7 @@ Send `multipart/form-data` with a `file` field and an `options` field containing
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `mapping` | array | Yes | Column mappings: `{ "index", "target", "custom_key" }`. `target` is `ignore`, `email`, `first_name`, `last_name`, `company`, `phone`, `subscribed`, `categories`, or `custom:<key>`. |
+| `mapping` | array | Yes | Column mappings: `{ "index", "target", "custom_key" }`. `target` is `ignore`, `email`, `first_name`, `last_name`, `company`, `phone`, `subscribed`, `categories`, or `custom` with the name in `custom_key`. `custom:<key>` is still accepted as the older spelling. Exactly one column must map to `email`. |
 | `dedup` | string | Yes | `skip`, `update`, or `create_duplicate` for rows whose email matches an existing contact. |
 | `has_header` | boolean | Yes | Whether the first row is a header. |
 | `category_ids` | string[] | No | Categories to assign to imported contacts. |
@@ -357,7 +357,7 @@ Send `multipart/form-data` with a `file` field and an `options` field containing
   "mapping": [
     { "index": 0, "target": "email" },
     { "index": 1, "target": "first_name" },
-    { "index": 3, "target": "custom:company_size", "custom_key": "company_size" }
+    { "index": 3, "target": "custom", "custom_key": "Company Mobile" }
   ],
   "dedup": "update",
   "has_header": true,
@@ -383,7 +383,9 @@ Send `multipart/form-data` with a `file` field and an `options` field containing
 }
 ```
 
-Imports are capped at 50,000 rows.
+Imports are capped at 50,000 rows. `errors` carries at most the first 1,000 failed rows; when more rows failed, `errors_truncated` is `true` and `failed` still holds the real count.
+
+A custom-field name may use letters, numbers, underscores, spaces, and dashes (`Company Mobile`, `first-name`, `plan_tier`). Anything else is a `400` on the whole request, raised before any row is written, along with a mapping that names no `email` column or a `custom` column with no `custom_key`. Per-row `errors` are reserved for problems with the data itself.
 
 ## Look up a contact by email
 
