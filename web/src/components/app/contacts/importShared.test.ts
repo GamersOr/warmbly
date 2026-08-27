@@ -1,0 +1,70 @@
+// Issue #207: a 1,000-row import failed every row with "invalid custom field
+// key: Company Mobile". The client now enforces the same rule the API does, so
+// a name it cannot use is caught on the mapping screen. These cases mirror
+// internal/utils/json.go — if that rule moves, this is where it shows up.
+
+import { describe, it, expect } from "vitest";
+import {
+    isValidCustomKey,
+    mappingProblem,
+    normalizeCustomKey,
+    suggestCustomKey,
+} from "./importShared";
+import type { ImportColumnMapping } from "@/lib/api/client/app/contacts/importContacts";
+
+describe("custom field names", () => {
+    it("accepts what the template engine can resolve", () => {
+        for (const key of ["role", "Job_Title", "Company Mobile", "first-name", "plan tier 2"]) {
+            expect(isValidCustomKey(key)).toBe(true);
+        }
+    });
+
+    it("rejects names nothing could merge into an email", () => {
+        for (const key of ["", "   ", "Company/Mobile", "Revenue ($)", "a.b", "тест"]) {
+            expect(isValidCustomKey(key)).toBe(false);
+        }
+    });
+
+    it("collapses stray whitespace so one column is one field", () => {
+        expect(normalizeCustomKey("  Company   Mobile ")).toBe("Company Mobile");
+        expect(isValidCustomKey("  Company   Mobile ")).toBe(true);
+    });
+
+    it("turns a spreadsheet header into a usable name", () => {
+        expect(suggestCustomKey("Company Mobile")).toBe("Company Mobile");
+        expect(suggestCustomKey("Revenue ($)")).toBe("Revenue");
+        expect(suggestCustomKey("Annual Revenue (USD)")).toBe("Annual Revenue USD");
+        expect(suggestCustomKey("###")).toBe("");
+    });
+});
+
+describe("mappingProblem", () => {
+    const email: ImportColumnMapping = { index: 0, target: "email" };
+
+    it("passes a mapping the API would accept", () => {
+        expect(
+            mappingProblem([email, { index: 5, target: "custom", custom_key: "Company Mobile" }]),
+        ).toBeNull();
+    });
+
+    it("names the column when a custom field has no name", () => {
+        expect(mappingProblem([email, { index: 5, target: "custom", custom_key: "  " }])).toBe(
+            "Column 6 needs a custom field name.",
+        );
+    });
+
+    it("explains an unusable name instead of letting the import fail row by row", () => {
+        const msg = mappingProblem([email, { index: 5, target: "custom", custom_key: "Company/Mobile" }]);
+        expect(msg).toContain("Company/Mobile");
+        expect(msg).toContain("letters");
+    });
+
+    it("still requires an email column", () => {
+        expect(mappingProblem([{ index: 1, target: "first_name" }])).toBe("Map a column to Email.");
+    });
+
+    it("understands the legacy custom:<key> spelling", () => {
+        expect(mappingProblem([email, { index: 2, target: "custom:plan_tier" }])).toBeNull();
+        expect(mappingProblem([email, { index: 2, target: "custom:plan/tier" }])).toContain("plan/tier");
+    });
+});
