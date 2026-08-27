@@ -599,7 +599,8 @@ func main() {
 		// and record redemptions at checkout), and the discount service audits
 		// management actions through the admin service.
 		adminRepository := repository.NewAdminRepository(primaryDB.Pool)
-		adminService = admin.NewService(adminRepository)
+		campaignLogRepository := repository.NewCampaignLogRepository(primaryDB)
+		adminService = admin.NewService(adminRepository, campaignLogRepository)
 		discountCodeRepository := repository.NewDiscountCodeRepository(primaryDB.Pool)
 		discountRedemptionRepository := repository.NewDiscountRedemptionRepository(primaryDB.Pool)
 		discountService = discount.NewService(discountCodeRepository, discountRedemptionRepository, planRepository, adminService)
@@ -692,7 +693,6 @@ func main() {
 		})
 		go webhookWorker.Run(ctx)
 		campaignProgressRepository := repository.NewCampaignProgressRepository(primaryDB.Pool)
-		campaignLogRepository := repository.NewCampaignLogRepository(primaryDB)
 		warmupService = warmupapp.NewService(warmupRepository)
 		// Fan out warmup health transitions to customer webhooks.
 		warmupService.WireWebhooks(webhookService, emailRepostory)
