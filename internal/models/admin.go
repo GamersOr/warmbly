@@ -179,14 +179,15 @@ type AdminUpdateWorker struct {
 // the per-mailbox health signals (risk band + worst warmup health state) so the
 // admin worker view can show how healthy the inboxes on a worker are.
 type AdminWorkerEmail struct {
-	ID              uuid.UUID  `json:"id"`
-	Email           string     `json:"email"`
-	UserID          uuid.UUID  `json:"user_id"`
-	OrganizationID  *uuid.UUID `json:"organization_id,omitempty"`
-	Status          string     `json:"status"`
-	Provider        string     `json:"provider"`
-	WarmupEnabled   bool       `json:"warmup_enabled"`
-	LastSyncedAt    time.Time  `json:"last_synced_at"`
+	ID             uuid.UUID  `json:"id"`
+	Email          string     `json:"email"`
+	UserID         uuid.UUID  `json:"user_id"`
+	OrganizationID *uuid.UUID `json:"organization_id,omitempty"`
+	Status         string     `json:"status"`
+	Provider       string     `json:"provider"`
+	WarmupEnabled  bool       `json:"warmup_enabled"`
+	// NULL until the mailbox syncs for the first time.
+	LastSyncedAt    *time.Time `json:"last_synced_at"`
 	RiskBand        string     `json:"risk_band"` // clean | risky | quarantine
 	RiskEvaluatedAt *time.Time `json:"risk_evaluated_at,omitempty"`
 	WarmupHealth    string     `json:"warmup_health,omitempty"` // worst warmup health_state, "" if not in a pool
@@ -287,6 +288,12 @@ type AdminCampaignDetail struct {
 	// Joined data
 	User         *AdminUserSummary `json:"user,omitempty"`
 	Organization *Organization     `json:"organization,omitempty"`
+}
+
+// AdminStopCampaignRequest carries the operator's reason for a force-stop. It
+// is required: it is what the audit trail and the owner's campaign feed show.
+type AdminStopCampaignRequest struct {
+	Reason string `json:"reason" binding:"required"`
 }
 
 // AdminCampaignsResult represents paginated campaign listing
@@ -643,24 +650,74 @@ type GrantAdminRequest struct {
 	Permissions AdminPermission `json:"permissions" binding:"required"`
 }
 
-// AdminUserRateLimits represents rate limits for a specific user
+// AdminUserRateLimits is one user's row in user_rate_limits: the API and
+// realtime throughput this user is allowed. Every column is NOT NULL with a
+// default, so a row that exists is a complete set of explicit overrides.
+// Outbound mail volume is deliberately absent — it is a per-mailbox budget
+// (email_accounts.campaign_limit) and a plan entitlement, not a rate limit.
 type AdminUserRateLimits struct {
-	UserID           uuid.UUID `json:"user_id"`
-	LimitWSMessagePM *int      `json:"limit_ws_message_pm,omitempty"`
-	LimitWSJoinPM    *int      `json:"limit_ws_join_pm,omitempty"`
-	LimitWSEventPM   *int      `json:"limit_ws_event_pm,omitempty"`
-	MaxConnections   *int      `json:"max_connections,omitempty"`
-	DailyEmailLimit  *int      `json:"daily_email_limit,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	UserID uuid.UUID `json:"user_id"`
+
+	LimitReadPM      int `json:"limit_read_pm"`
+	LimitWritePM     int `json:"limit_write_pm"`
+	LimitBulkPM      int `json:"limit_bulk_pm"`
+	LimitUniboxPM    int `json:"limit_unibox_pm"`
+	LimitAnalyticsPM int `json:"limit_analytics_pm"`
+
+	LimitAPICallsDaily int `json:"limit_api_calls_daily"`
+	LimitBulkOpsDaily  int `json:"limit_bulk_ops_daily"`
+
+	LimitWSMessagePM int `json:"limit_ws_message_pm"`
+	LimitWSJoinPM    int `json:"limit_ws_join_pm"`
+	LimitWSEventPM   int `json:"limit_ws_event_pm"`
+	MaxConnections   int `json:"max_connections"`
+
+	Notes     *string    `json:"notes,omitempty"`
+	UpdatedBy *uuid.UUID `json:"updated_by,omitempty"`
+	// Absent when the user has no override row and these are the defaults.
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
-// UpdateUserRateLimitsRequest represents the request to update user rate limits
+// UpdateUserRateLimitsRequest patches user_rate_limits. An omitted field is
+// left as it is; there is no null state to fall back to, so clearing an
+// override means setting it back to the default value.
 type UpdateUserRateLimitsRequest struct {
+	LimitReadPM      *int `json:"limit_read_pm,omitempty"`
+	LimitWritePM     *int `json:"limit_write_pm,omitempty"`
+	LimitBulkPM      *int `json:"limit_bulk_pm,omitempty"`
+	LimitUniboxPM    *int `json:"limit_unibox_pm,omitempty"`
+	LimitAnalyticsPM *int `json:"limit_analytics_pm,omitempty"`
+
+	LimitAPICallsDaily *int `json:"limit_api_calls_daily,omitempty"`
+	LimitBulkOpsDaily  *int `json:"limit_bulk_ops_daily,omitempty"`
+
 	LimitWSMessagePM *int `json:"limit_ws_message_pm,omitempty"`
 	LimitWSJoinPM    *int `json:"limit_ws_join_pm,omitempty"`
 	LimitWSEventPM   *int `json:"limit_ws_event_pm,omitempty"`
 	MaxConnections   *int `json:"max_connections,omitempty"`
-	DailyEmailLimit  *int `json:"daily_email_limit,omitempty"`
+
+	Notes *string `json:"notes,omitempty"`
+}
+
+// DefaultAdminUserRateLimits is what the enforcement path applies to a user with
+// no user_rate_limits row, so the admin editor shows the limits actually in
+// force instead of an empty form.
+func DefaultAdminUserRateLimits(userID uuid.UUID) *AdminUserRateLimits {
+	d := DefaultRateLimits()
+	return &AdminUserRateLimits{
+		UserID:             userID,
+		LimitReadPM:        d.LimitReadPM,
+		LimitWritePM:       d.LimitWritePM,
+		LimitBulkPM:        d.LimitBulkPM,
+		LimitUniboxPM:      d.LimitUniboxPM,
+		LimitAnalyticsPM:   d.LimitAnalyticsPM,
+		LimitAPICallsDaily: d.LimitAPICallsDaily,
+		LimitBulkOpsDaily:  d.LimitBulkOpsDaily,
+		LimitWSMessagePM:   d.LimitWSMessagePM,
+		LimitWSJoinPM:      d.LimitWSJoinPM,
+		LimitWSEventPM:     d.LimitWSEventPM,
+		MaxConnections:     d.MaxConnections,
+	}
 }
 
 // AdminUserPreview represents a full preview of a user's account

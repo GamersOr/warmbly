@@ -407,8 +407,9 @@ function StopCampaignDialog({
                     <DialogTitle>Force-stop campaign</DialogTitle>
                     <DialogDescription>
                         Stopping <span className="font-mono">{campaign.name}</span>.
-                        This is logged to the audit trail and the campaign owner
-                        will see the campaign status change to stopped.
+                        The campaign is paused, so the owner can see why and
+                        restart it once it is fixed. The reason is written to the
+                        audit trail and to the campaign's own activity feed.
                     </DialogDescription>
                 </DialogHeader>
                 <div>

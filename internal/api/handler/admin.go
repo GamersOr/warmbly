@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -217,13 +218,13 @@ func (h *Handler) AdminUpdateUserRateLimits(c *gin.Context) {
 		return
 	}
 
-	xerr := h.AdminService.UpdateUserRateLimits(c.Request.Context(), *adminID, userID, &req, c.ClientIP(), c.GetHeader("User-Agent"))
+	limits, xerr := h.AdminService.UpdateUserRateLimits(c.Request.Context(), *adminID, userID, &req, c.ClientIP(), c.GetHeader("User-Agent"))
 	if xerr != nil {
 		errx.JSON(c, xerr)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "rate limits updated successfully"})
+	c.JSON(http.StatusOK, limits)
 }
 
 // Worker Management Handlers
@@ -605,7 +606,18 @@ func (h *Handler) AdminStopCampaign(c *gin.Context) {
 		return
 	}
 
-	xerr := h.AdminService.StopCampaign(c.Request.Context(), *adminID, campaignID, c.ClientIP(), c.GetHeader("User-Agent"))
+	var req models.AdminStopCampaignRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "a reason is required to force-stop a campaign"))
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		errx.JSON(c, errx.New(errx.BadRequest, "a reason is required to force-stop a campaign"))
+		return
+	}
+
+	xerr := h.AdminService.StopCampaign(c.Request.Context(), *adminID, campaignID, reason, c.ClientIP(), c.GetHeader("User-Agent"))
 	if xerr != nil {
 		errx.JSON(c, xerr)
 		return

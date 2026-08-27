@@ -1,7 +1,8 @@
-// User rate-limit override editor. Same "0 = inherit, positive = explicit
-// override" convention as the org limit overrides — leaving a field
-// blank means "don't touch it" on the PATCH, and the GET endpoint
-// already returns null for any unset value.
+// User rate-limit override editor. user_rate_limits has no null state: every
+// column is NOT NULL with a default, so a user with no row reads back the
+// product defaults and saving any field writes a full row. Leaving a field
+// blank means "don't touch it" on the PATCH; there is no way to clear an
+// override other than typing the default back in.
 
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -24,14 +25,26 @@ import type {
 } from "@/lib/api/models/admin";
 
 type FieldKey =
-    | "daily_email_limit"
+    | "limit_read_pm"
+    | "limit_write_pm"
+    | "limit_bulk_pm"
+    | "limit_unibox_pm"
+    | "limit_analytics_pm"
+    | "limit_api_calls_daily"
+    | "limit_bulk_ops_daily"
     | "max_connections"
     | "limit_ws_message_pm"
     | "limit_ws_join_pm"
     | "limit_ws_event_pm";
 
 const FIELDS: { key: FieldKey; label: string; hint: string }[] = [
-    { key: "daily_email_limit", label: "Daily emails", hint: "Outbound mail per day" },
+    { key: "limit_read_pm", label: "Reads / min", hint: "GET-style API calls per minute" },
+    { key: "limit_write_pm", label: "Writes / min", hint: "Mutating API calls per minute" },
+    { key: "limit_bulk_pm", label: "Bulk / min", hint: "Bulk import and export calls per minute" },
+    { key: "limit_unibox_pm", label: "Unibox / min", hint: "Unified inbox calls per minute" },
+    { key: "limit_analytics_pm", label: "Analytics / min", hint: "Analytics calls per minute" },
+    { key: "limit_api_calls_daily", label: "API calls / day", hint: "Total API calls per day" },
+    { key: "limit_bulk_ops_daily", label: "Bulk ops / day", hint: "Bulk operations per day" },
     { key: "max_connections", label: "Max connections", hint: "Concurrent websocket sessions" },
     { key: "limit_ws_message_pm", label: "WS messages / min", hint: "Realtime messages per minute" },
     { key: "limit_ws_join_pm", label: "WS joins / min", hint: "Realtime channel joins per minute" },
@@ -52,11 +65,12 @@ export function UserRateLimitsDialog({
     onOpenChange: (v: boolean) => void;
 }) {
     const qc = useQueryClient();
-    const [form, setForm] = useState<Record<FieldKey, string>>(() => seedForm(current));
+    const [form, setForm] = useState<Record<FieldKey, string>>(blankForm);
 
+    // Reset on open only: refetching `current` mid-edit must not wipe the form.
     useEffect(() => {
-        if (open) setForm(seedForm(current));
-    }, [open, current]);
+        if (open) setForm(blankForm());
+    }, [open]);
 
     const mutation = useMutation({
         mutationFn: (req: UpdateUserRateLimitsRequest) => updateUserRateLimits(userId, req),
@@ -97,9 +111,10 @@ export function UserRateLimitsDialog({
                     <DialogTitle>Rate limit overrides</DialogTitle>
                     <DialogDescription>
                         Per-user overrides for{" "}
-                        <span className="font-mono">{userEmail}</span>. Leave blank
-                        to keep the current value, set to <strong>0</strong> to
-                        clear the override (back to plan default).
+                        <span className="font-mono">{userEmail}</span>. Leave a
+                        field blank to keep its current value. There is no null
+                        state here, so <strong>0</strong> means zero, not
+                        "inherit".
                     </DialogDescription>
                 </DialogHeader>
 
@@ -154,20 +169,11 @@ export function UserRateLimitsDialog({
     );
 }
 
-function seedForm(current: AdminUserRateLimits | null | undefined): Record<FieldKey, string> {
-    const blank: Record<FieldKey, string> = {
-        daily_email_limit: "",
-        max_connections: "",
-        limit_ws_message_pm: "",
-        limit_ws_join_pm: "",
-        limit_ws_event_pm: "",
-    };
-    if (!current) return blank;
-    return {
-        daily_email_limit: current.daily_email_limit != null ? String(current.daily_email_limit) : "",
-        max_connections: current.max_connections != null ? String(current.max_connections) : "",
-        limit_ws_message_pm: current.limit_ws_message_pm != null ? String(current.limit_ws_message_pm) : "",
-        limit_ws_join_pm: current.limit_ws_join_pm != null ? String(current.limit_ws_join_pm) : "",
-        limit_ws_event_pm: current.limit_ws_event_pm != null ? String(current.limit_ws_event_pm) : "",
-    };
+// The form starts empty on purpose: a blank field is "leave this alone", and
+// the current value is shown beside the input rather than pre-filled into it.
+function blankForm(): Record<FieldKey, string> {
+    return FIELDS.reduce(
+        (acc, f) => ({ ...acc, [f.key]: "" }),
+        {} as Record<FieldKey, string>,
+    );
 }

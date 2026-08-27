@@ -62,7 +62,7 @@ export interface AdminWorkerEmail {
     status: string;
     provider: string;
     warmup_enabled: boolean;
-    last_synced_at: string;
+    last_synced_at: string | null; // null until the mailbox syncs for the first time
     risk_band: string; // clean | risky | quarantine
     risk_evaluated_at?: string | null;
     warmup_health?: string; // worst warmup health_state, "" if not in a pool
@@ -735,22 +735,41 @@ export interface UserBan {
     unbanned_by_user?: AdminUserSummary | null;
 }
 
+// One user's row in user_rate_limits: the API and realtime throughput this user
+// is allowed. Every value is set, because every column is NOT NULL with a
+// default; a user with no row gets the product defaults back. Outbound mail
+// volume is not here, it is a per-mailbox budget and a plan entitlement.
 export interface AdminUserRateLimits {
     user_id: string;
-    limit_ws_message_pm?: number | null;
-    limit_ws_join_pm?: number | null;
-    limit_ws_event_pm?: number | null;
-    max_connections?: number | null;
-    daily_email_limit?: number | null;
-    updated_at: string;
+    limit_read_pm: number;
+    limit_write_pm: number;
+    limit_bulk_pm: number;
+    limit_unibox_pm: number;
+    limit_analytics_pm: number;
+    limit_api_calls_daily: number;
+    limit_bulk_ops_daily: number;
+    limit_ws_message_pm: number;
+    limit_ws_join_pm: number;
+    limit_ws_event_pm: number;
+    max_connections: number;
+    notes?: string | null;
+    updated_by?: string | null;
+    updated_at?: string | null; // absent when these are the defaults
 }
 
 export interface UpdateUserRateLimitsRequest {
+    limit_read_pm?: number;
+    limit_write_pm?: number;
+    limit_bulk_pm?: number;
+    limit_unibox_pm?: number;
+    limit_analytics_pm?: number;
+    limit_api_calls_daily?: number;
+    limit_bulk_ops_daily?: number;
     limit_ws_message_pm?: number;
     limit_ws_join_pm?: number;
     limit_ws_event_pm?: number;
     max_connections?: number;
-    daily_email_limit?: number;
+    notes?: string;
 }
 
 export interface BanUserRequest {
