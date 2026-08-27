@@ -1,8 +1,5 @@
-// User rate-limit override editor. user_rate_limits has no null state: every
-// column is NOT NULL with a default, so a user with no row reads back the
-// product defaults and saving any field writes a full row. Leaving a field
-// blank means "don't touch it" on the PATCH; there is no way to clear an
-// override other than typing the default back in.
+// User rate-limit override editor. user_rate_limits has no null state, so a
+// blank field means "leave it alone" and clearing means typing the default back.
 
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -169,8 +166,7 @@ export function UserRateLimitsDialog({
     );
 }
 
-// The form starts empty on purpose: a blank field is "leave this alone", and
-// the current value is shown beside the input rather than pre-filled into it.
+// Blank on purpose: the current value is shown beside the input, not in it.
 function blankForm(): Record<FieldKey, string> {
     return FIELDS.reduce(
         (acc, f) => ({ ...acc, [f.key]: "" }),

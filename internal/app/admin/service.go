@@ -91,8 +91,7 @@ type AdminService interface {
 
 type adminService struct {
 	repo repository.AdminRepository
-	// campaignLogRepo writes to the owner-visible campaign activity feed, so an
-	// operator action shows up where the customer will look for it.
+	// The owner-visible campaign activity feed.
 	campaignLogRepo repository.CampaignLogRepository
 }
 
@@ -176,8 +175,7 @@ func (s *adminService) GetUserPreview(ctx context.Context, userID uuid.UUID) (*m
 	if preview == nil {
 		return nil, errx.ErrNotFound
 	}
-	// Same answer as GET /users/:id/rate-limits: no override row means the
-	// product defaults are what is enforced.
+	// Same answer as GET /users/:id/rate-limits: no row means the defaults.
 	if preview.RateLimits == nil {
 		preview.RateLimits = models.DefaultAdminUserRateLimits(userID)
 	}
@@ -283,8 +281,7 @@ func (s *adminService) GetUserRateLimits(ctx context.Context, userID uuid.UUID) 
 		sentry.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get rate limits")
 	}
-	// No row means no override, and the enforcement path falls back to the
-	// product defaults. Answer with those rather than nothing.
+	// No row means the enforcement path falls back to the product defaults.
 	if limits == nil {
 		return models.DefaultAdminUserRateLimits(userID), nil
 	}
@@ -484,17 +481,6 @@ func (s *adminService) GetCampaignDetail(ctx context.Context, campaignID uuid.UU
 	return campaign, nil
 }
 
-// stoppableCampaignStatuses are the statuses a force-stop can act on. A draft
-// has never sent and a completed campaign never will, so stopping either is a
-// no-op the operator should hear about rather than a silent success.
-var stoppableCampaignStatuses = map[string]bool{
-	"active":               true,
-	"paused":               true,
-	"paused_no_accounts":   true,
-	"paused_trial_expired": true,
-	"paused_guardrail":     true,
-}
-
 func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uuid.UUID, reason, ipAddress, userAgent string) *errx.Error {
 	campaign, err := s.repo.GetCampaignDetail(ctx, campaignID)
 	if err != nil {
@@ -504,17 +490,19 @@ func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uui
 	if campaign == nil {
 		return errx.ErrNotFound
 	}
-	if !stoppableCampaignStatuses[campaign.Status] {
-		return errx.New(errx.BadRequest, "campaign is not running")
-	}
 
-	if err := s.repo.StopCampaign(ctx, campaignID); err != nil {
+	// The repository decides: a draft has never sent and a completed campaign
+	// never will, and either can become true between here and the UPDATE.
+	stopped, err := s.repo.StopCampaign(ctx, campaignID)
+	if err != nil {
 		sentry.CaptureException(err)
 		return errx.New(errx.Internal, "failed to stop campaign")
 	}
+	if !stopped {
+		return errx.New(errx.BadRequest, "campaign is not running")
+	}
 
-	// The owner sees the stop in the campaign activity feed; without the reason
-	// the campaign simply appears paused with nothing to explain it.
+	// Without the reason the owner just sees a campaign that went quiet.
 	if s.campaignLogRepo != nil {
 		if err := s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
 			CampaignID: campaignID,
@@ -618,9 +606,8 @@ func (s *adminService) SearchPlansForAdmin(ctx context.Context, search *models.A
 	return result, nil
 }
 
-// resolveDuration maps the billing period the API speaks in ("month", "year")
-// onto the durations row plans.duration_id points at. An unknown period is the
-// caller's mistake, not an internal error.
+// resolveDuration maps the API's billing period onto a durations row. An
+// unknown period is the caller's mistake, not an internal error.
 func (s *adminService) resolveDuration(ctx context.Context, d models.Duration) (*uuid.UUID, *errx.Error) {
 	if d == "" {
 		return nil, errx.New(errx.BadRequest, "duration is required")

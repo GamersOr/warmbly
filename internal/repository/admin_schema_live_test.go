@@ -154,13 +154,17 @@ func TestLiveAdminForceStopPausesCampaign(t *testing.T) {
 	repo := NewAdminRepository(pool)
 	ctx := context.Background()
 
-	if err := repo.StopCampaign(ctx, f.campaign); err != nil {
+	stopped, err := repo.StopCampaign(ctx, f.campaign)
+	if err != nil {
 		t.Fatalf("StopCampaign: %v", err)
+	}
+	if !stopped {
+		t.Fatal("StopCampaign refused an active campaign")
 	}
 
 	var status string
 	var changedAt *time.Time
-	if err := pool.QueryRow(ctx,
+	if err = pool.QueryRow(ctx,
 		`SELECT status::text, last_status_change_at FROM campaigns WHERE id = $1`, f.campaign,
 	).Scan(&status, &changedAt); err != nil {
 		t.Fatalf("read campaign back: %v", err)
@@ -180,6 +184,39 @@ func TestLiveAdminForceStopPausesCampaign(t *testing.T) {
 	}
 	if detail == nil || detail.Status != "paused" {
 		t.Fatalf("campaign detail reports %v, want a paused campaign", detail)
+	}
+}
+
+// A campaign that reaches a terminal state while the operator is deciding must
+// not be dragged back out of it, so the eligibility test lives in the UPDATE.
+func TestLiveAdminForceStopLeavesTerminalCampaignsAlone(t *testing.T) {
+	_, pool := liveContactDB(t)
+	f := newAdminFixture(t, pool)
+	repo := NewAdminRepository(pool)
+	ctx := context.Background()
+
+	for _, status := range []string{"completed", "draft"} {
+		if _, err := pool.Exec(ctx,
+			`UPDATE campaigns SET status = $2::campaign_status WHERE id = $1`, f.campaign, status,
+		); err != nil {
+			t.Fatalf("park campaign at %s: %v", status, err)
+		}
+
+		stopped, err := repo.StopCampaign(ctx, f.campaign)
+		if err != nil {
+			t.Fatalf("StopCampaign on a %s campaign: %v", status, err)
+		}
+		if stopped {
+			t.Fatalf("StopCampaign reported that it stopped a %s campaign", status)
+		}
+
+		var got string
+		if err := pool.QueryRow(ctx, `SELECT status::text FROM campaigns WHERE id = $1`, f.campaign).Scan(&got); err != nil {
+			t.Fatalf("read campaign back: %v", err)
+		}
+		if got != status {
+			t.Fatalf("a %s campaign is now %q; the stop overwrote a state it had no business touching", status, got)
+		}
 	}
 }
 

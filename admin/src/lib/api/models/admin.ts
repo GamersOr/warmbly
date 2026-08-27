@@ -735,10 +735,8 @@ export interface UserBan {
     unbanned_by_user?: AdminUserSummary | null;
 }
 
-// One user's row in user_rate_limits: the API and realtime throughput this user
-// is allowed. Every value is set, because every column is NOT NULL with a
-// default; a user with no row gets the product defaults back. Outbound mail
-// volume is not here, it is a per-mailbox budget and a plan entitlement.
+// One user's row in user_rate_limits: the API and realtime throughput they are
+// allowed. Every value is set; a user with no row reads back the defaults.
 export interface AdminUserRateLimits {
     user_id: string;
     limit_read_pm: number;

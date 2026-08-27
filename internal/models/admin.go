@@ -290,8 +290,8 @@ type AdminCampaignDetail struct {
 	Organization *Organization     `json:"organization,omitempty"`
 }
 
-// AdminStopCampaignRequest carries the operator's reason for a force-stop. It
-// is required: it is what the audit trail and the owner's campaign feed show.
+// AdminStopCampaignRequest carries the reason the audit trail and the owner's
+// campaign feed show, so it is required.
 type AdminStopCampaignRequest struct {
 	Reason string `json:"reason" binding:"required"`
 }
@@ -651,10 +651,7 @@ type GrantAdminRequest struct {
 }
 
 // AdminUserRateLimits is one user's row in user_rate_limits: the API and
-// realtime throughput this user is allowed. Every column is NOT NULL with a
-// default, so a row that exists is a complete set of explicit overrides.
-// Outbound mail volume is deliberately absent — it is a per-mailbox budget
-// (email_accounts.campaign_limit) and a plan entitlement, not a rate limit.
+// realtime throughput they are allowed. Mail volume is not a rate limit.
 type AdminUserRateLimits struct {
 	UserID uuid.UUID `json:"user_id"`
 
@@ -678,9 +675,8 @@ type AdminUserRateLimits struct {
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
-// UpdateUserRateLimitsRequest patches user_rate_limits. An omitted field is
-// left as it is; there is no null state to fall back to, so clearing an
-// override means setting it back to the default value.
+// UpdateUserRateLimitsRequest patches user_rate_limits. An omitted field is left
+// alone; there is no null state, so clearing means typing the default back in.
 type UpdateUserRateLimitsRequest struct {
 	LimitReadPM      *int `json:"limit_read_pm,omitempty"`
 	LimitWritePM     *int `json:"limit_write_pm,omitempty"`
@@ -700,8 +696,7 @@ type UpdateUserRateLimitsRequest struct {
 }
 
 // DefaultAdminUserRateLimits is what the enforcement path applies to a user with
-// no user_rate_limits row, so the admin editor shows the limits actually in
-// force instead of an empty form.
+// no override row, so the editor shows the limits actually in force.
 func DefaultAdminUserRateLimits(userID uuid.UUID) *AdminUserRateLimits {
 	d := DefaultRateLimits()
 	return &AdminUserRateLimits{

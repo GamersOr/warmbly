@@ -56,7 +56,7 @@ type AdminRepository interface {
 	// Campaign Management
 	SearchCampaigns(ctx context.Context, search *models.AdminCampaignSearch) (*models.AdminCampaignsResult, error)
 	GetCampaignDetail(ctx context.Context, campaignID uuid.UUID) (*models.AdminCampaignDetail, error)
-	StopCampaign(ctx context.Context, campaignID uuid.UUID) error
+	StopCampaign(ctx context.Context, campaignID uuid.UUID) (bool, error)
 
 	// Audit Logs
 	CreateAuditLog(ctx context.Context, log *models.AdminAuditLog) error
@@ -341,10 +341,8 @@ func (r *adminRepository) GetUserDetail(ctx context.Context, userID uuid.UUID) (
 	return &u, nil
 }
 
-// GetUserPreview gets a complete preview of a user's account. Every section is
-// load-bearing for the operator reading it, so a failed section is an error
-// rather than an empty list: the email-account query silently returned nothing
-// for years because it compared the uuid column against a text parameter.
+// GetUserPreview gets a complete preview of a user's account. A section that
+// fails is an error, not an empty list: that is what hid the mailbox bug.
 func (r *adminRepository) GetUserPreview(ctx context.Context, userID uuid.UUID) (*models.AdminUserPreview, error) {
 	user, err := r.GetUserDetail(ctx, userID)
 	if err != nil {
@@ -617,8 +615,7 @@ func (r *adminRepository) GetUserEmails(ctx context.Context, userID uuid.UUID, c
 	}
 
 	args := []interface{}{userID, limit + 1}
-	// email_accounts.user_id is uuid. Casting it to text here made every call
-	// fail with "operator does not exist: uuid = text" (issue #209).
+	// email_accounts.user_id is uuid; casting it to text made every call fail.
 	whereClause := "WHERE ea.user_id = $1"
 	if cursor != nil {
 		whereClause += " AND ea.id < $3"
@@ -1600,18 +1597,21 @@ func (r *adminRepository) GetCampaignDetail(ctx context.Context, campaignID uuid
 	return &c, nil
 }
 
-// StopCampaign force-stops a campaign. There is no "stopped" campaign_status:
-// a stop parks the campaign at 'paused', exactly like the owner-facing stop, so
-// the owner can inspect it and restart it once whatever tripped it is fixed.
-// The scheduler cancels the parked task on its next tick because it refuses to
-// run anything that is no longer 'active'.
-func (r *adminRepository) StopCampaign(ctx context.Context, campaignID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `
+// StopCampaign parks a running campaign at 'paused' (campaign_status has no
+// 'stopped'), and reports false when it was not in a stoppable state. The status
+// test belongs in the UPDATE: a campaign that completes concurrently must not be
+// resurrected by a stop that read it as active a moment earlier.
+func (r *adminRepository) StopCampaign(ctx context.Context, campaignID uuid.UUID) (bool, error) {
+	tag, err := r.db.Exec(ctx, `
 		UPDATE campaigns
 		SET status = 'paused', last_status_change_at = NOW(), updated_at = NOW()
 		WHERE id = $1
+		  AND status IN ('active', 'paused', 'paused_no_accounts', 'paused_trial_expired', 'paused_guardrail')
 	`, campaignID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // CreateAuditLog creates an audit log entry
@@ -2111,10 +2111,8 @@ func (r *adminRepository) SearchPlansForAdmin(ctx context.Context, search *model
 	return result, nil
 }
 
-// DurationIDByTitle resolves a durations.title ("month", "year") to its id.
-// plans.duration_id is a NOT NULL foreign key, so a plan write has to resolve
-// the title the API speaks in before it can insert; an unknown title returns
-// (nil, nil) so the caller can answer 400 rather than a constraint violation.
+// DurationIDByTitle resolves a durations.title to its id, or (nil, nil) when
+// there is no such period, so the caller can answer 400 not a NOT NULL violation.
 func (r *adminRepository) DurationIDByTitle(ctx context.Context, title string) (*uuid.UUID, error) {
 	var id uuid.UUID
 	err := r.db.QueryRow(ctx, `SELECT id FROM durations WHERE title = $1`, title).Scan(&id)
@@ -2127,8 +2125,7 @@ func (r *adminRepository) DurationIDByTitle(ctx context.Context, title string) (
 	return &id, nil
 }
 
-// CreatePlan creates a new plan. plans stores the billing period as
-// duration_id (FK to durations), not as a duration string.
+// CreatePlan creates a new plan. The billing period is duration_id, an FK.
 func (r *adminRepository) CreatePlan(ctx context.Context, plan *models.Plan, durationID uuid.UUID) error {
 	query := `
 		INSERT INTO plans (id, name, max_contacts, daily_emails, ai_generation, account_limit,
@@ -2469,10 +2466,8 @@ func (r *adminRepository) UpdateEnterpriseInquiry(ctx context.Context, id uuid.U
 	return err
 }
 
-// GetUserRateLimits gets rate limits for a user. There is no daily email limit
-// here: user_rate_limits governs API and realtime throughput, and outbound mail
-// volume is a per-mailbox budget (email_accounts.campaign_limit) plus the plan's
-// daily_emails, neither of which lives in this table.
+// GetUserRateLimits gets a user's API and realtime throughput limits. Mail
+// volume is not one of them: that is a per-mailbox budget and a plan entitlement.
 func (r *adminRepository) GetUserRateLimits(ctx context.Context, userID uuid.UUID) (*models.AdminUserRateLimits, error) {
 	query := `
 		SELECT user_id, limit_read_pm, limit_write_pm, limit_bulk_pm, limit_unibox_pm,
@@ -2500,10 +2495,8 @@ func (r *adminRepository) GetUserRateLimits(ctx context.Context, userID uuid.UUI
 	return &limits, nil
 }
 
-// UpdateUserRateLimits updates rate limits for a user. Every column is NOT NULL
-// with a default, so the row is created first and then patched field by field:
-// an INSERT carrying the unset fields as NULL would violate those constraints
-// the first time an operator overrides a single limit.
+// UpdateUserRateLimits patches a user's limits. Every column is NOT NULL, so the
+// row is created first: an INSERT with the unset fields as NULL would be refused.
 func (r *adminRepository) UpdateUserRateLimits(ctx context.Context, userID, adminID uuid.UUID, update *models.UpdateUserRateLimitsRequest) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
