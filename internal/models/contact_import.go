@@ -112,8 +112,8 @@ type ContactImportRowError struct {
 	Reason string   `json:"reason"`
 }
 
-// MaxContactImportReportedErrors caps how many per-row failures travel back
-// in the response. Failed still counts every one; without the cap a 50k-row
+// MaxContactImportReportedErrors caps how many per-row entries travel back in
+// the response. The counters still count every row; without the cap a 50k-row
 // file of bad addresses would echo the whole file back as JSON.
 const MaxContactImportReportedErrors = 1000
 
@@ -126,8 +126,10 @@ type ContactImportResult struct {
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at"`
 
+	// Errors holds per-row failures and per-row notes, capped at
+	// MaxContactImportReportedErrors entries.
 	Errors []ContactImportRowError `json:"errors,omitempty"`
-	// ErrorsTruncated is true when Failed exceeds the reported-error cap, so
-	// the UI can say "showing the first N of M".
+	// ErrorsTruncated is true when that cap was reached, so the UI can say
+	// "showing the first N of M" instead of implying it listed everything.
 	ErrorsTruncated bool `json:"errors_truncated,omitempty"`
 }

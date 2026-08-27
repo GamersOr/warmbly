@@ -143,6 +143,9 @@ A JSON array of contact objects (at least one, up to the per-request maximum; an
 | `campaigns` | string[] | No | Campaign IDs to add the contact to. |
 | `categories` | string[] | No | Category IDs to assign. |
 | `custom_fields` | object | No | String key/value custom fields. Keys may use letters, numbers, underscores, spaces, and dashes. |
+| `subscribed` | boolean | No | Marketing-consent flag. Omit it to let a new contact default to subscribed and an existing one keep whatever it already had. |
+
+An address you already have is matched (lowercased) and enriched rather than duplicated: fields you send replace what is stored, fields you omit or send empty are left alone, and `custom_fields` is merged key by key. Use `PATCH /contacts/:id` to clear a value.
 
 ```json
 [
@@ -383,7 +386,7 @@ Send `multipart/form-data` with a `file` field and an `options` field containing
 }
 ```
 
-Imports are capped at 50,000 rows. `errors` carries at most the first 1,000 failed rows; when more rows failed, `errors_truncated` is `true` and `failed` still holds the real count.
+Imports are capped at 50,000 rows. `errors` carries at most the first 1,000 entries; past that `errors_truncated` is `true` and the counters, not the list, are the real totals. Every row lands in exactly one of `imported`, `updated`, `skipped`, or `failed`, so those four always sum to `total`.
 
 A custom-field name may use letters, numbers, underscores, spaces, and dashes (`Company Mobile`, `first-name`, `plan_tier`). Anything else is a `400` on the whole request, raised before any row is written, along with a mapping that names no `email` column or a `custom` column with no `custom_key`. Per-row `errors` are reserved for problems with the data itself.
 
