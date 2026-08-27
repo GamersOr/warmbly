@@ -18,6 +18,7 @@ defmodule RealtimeWeb.AdminChannel do
 
   alias Realtime.Auth
   alias Realtime.RateLimiter
+  alias RealtimeWeb.ChannelGuard
 
   @topic "admin:platform"
 
@@ -28,10 +29,17 @@ defmodule RealtimeWeb.AdminChannel do
 
   @impl true
   def join("admin:platform", _params, socket) do
+    case ChannelGuard.check_join(socket) do
+      {:error, payload} -> {:error, payload}
+      :ok -> authorize_join(socket)
+    end
+  end
+
+  defp authorize_join(socket) do
     user_id = socket.assigns.user_id
 
     if Map.get(socket.assigns, :auth_type) != :jwt do
-      {:error, %{reason: "jwt_required"}}
+      ChannelGuard.join_error("jwt_required")
     else
       case Auth.check_admin(user_id) do
         {:ok, admin} ->
@@ -48,7 +56,7 @@ defmodule RealtimeWeb.AdminChannel do
 
         {:error, reason} ->
           Logger.warning("Admin channel join rejected for #{user_id}: #{inspect(reason)}")
-          {:error, %{reason: "not_an_admin"}}
+          ChannelGuard.join_error("not_an_admin")
       end
     end
   end

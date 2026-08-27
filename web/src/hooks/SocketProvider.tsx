@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type SocketProviderProps from "@/lib/socket/models/SocketProviderProps";
 import getSocket from '@/lib/api/client/app/socket/getSocket';
 import type { AppError } from '@/lib/api/client/normalizeError';
@@ -20,6 +20,20 @@ const HEARTBEAT_TIMEOUT = 8000; // drop + reconnect if a heartbeat isn't answere
 // blip is invisible. Indexed by attempt; clamps at the last entry. Each delay
 // gets ±25% jitter so many clients don't reconnect in lockstep after an outage.
 const RECONNECT_SCHEDULE = [120, 350, 800, 1500, 3000, 5000, 10000];
+// Backoff for rejoining ONE channel while the socket stays up: a channel that
+// crashed server-side, or a join the server refused for a transient reason.
+// Indexed by consecutive attempt; clamps at the last entry. Without this a
+// crash-looping channel was rejoined every second forever.
+const CHANNEL_REJOIN_SCHEDULE = [1000, 2000, 5000, 10000, 20000, 30000];
+const CHANNEL_REJOIN_MAX_ATTEMPTS = 8;
+// A topic that has not needed a rejoin for this long starts its backoff over.
+// Resetting on a successful join instead would make the backoff useless against
+// the case it exists for — a channel that joins, crashes, joins, crashes —
+// because every crash is preceded by a success.
+const CHANNEL_REJOIN_RESET_MS = 30000;
+// Bounds for a server-supplied retry_after_ms, in case it is missing or absurd.
+const JOIN_RETRY_MIN_MS = 1000;
+const JOIN_RETRY_MAX_MS = 60000;
 const PHOENIX_EVENTS = {
     JOIN: 'phx_join',
     LEAVE: 'phx_leave',
@@ -74,6 +88,12 @@ export default function SocketProvider({
         });
     }, []);
     const pendingJoinsRef = useRef<Map<string, Record<string, unknown>>>(new Map());
+    // Pending single-channel rejoin, plus how many consecutive attempts it has
+    // taken and when the last one was scheduled. A successful join cancels the
+    // timer; the attempt count decays on its own (CHANNEL_REJOIN_RESET_MS).
+    const rejoinRef = useRef<
+        Map<string, { timer: ReturnType<typeof setTimeout> | null; attempts: number; lastAttemptAt: number }>
+    >(new Map());
     // Topics the app currently wants joined (added by joinChannel, removed by
     // leaveChannel). On reconnect we rejoin exactly these, independent of the
     // per-channel live state — the close handler downgrades joined channels to
@@ -111,6 +131,84 @@ export default function SocketProvider({
         wsRef.current.send(JSON.stringify(msg));
         return true;
     }, []);
+
+    // Drop any pending rejoin for a topic and reset its backoff.
+    const clearRejoin = useCallback((topic: string) => {
+        const pending = rejoinRef.current.get(topic);
+        if (pending?.timer) clearTimeout(pending.timer);
+        rejoinRef.current.delete(topic);
+    }, []);
+
+    // Drop a pending rejoin but keep the backoff position, so a join that
+    // succeeds and immediately crashes again does not start from zero.
+    const cancelRejoinTimer = useCallback((topic: string) => {
+        const pending = rejoinRef.current.get(topic);
+        if (pending?.timer) {
+            clearTimeout(pending.timer);
+            rejoinRef.current.set(topic, { ...pending, timer: null });
+        }
+    }, []);
+
+    const clearAllRejoins = useCallback(() => {
+        rejoinRef.current.forEach((pending) => {
+            if (pending.timer) clearTimeout(pending.timer);
+        });
+        rejoinRef.current.clear();
+    }, []);
+
+    // Rejoin ONE topic later, on a backoff, while the socket stays open. Used
+    // for a channel that crashed server-side and for a join the server refused
+    // transiently (a throttled join carries its own retry_after_ms). Gives up
+    // after CHANNEL_REJOIN_MAX_ATTEMPTS so a permanently unhappy channel cannot
+    // become a slow join loop of its own.
+    const scheduleRejoin = useCallback((topic: string, delayMs?: number) => {
+        if (!desiredTopicsRef.current.has(topic)) return;
+
+        const pending = rejoinRef.current.get(topic);
+        if (pending?.timer) return;
+
+        const now = Date.now();
+        const attempts =
+            pending && now - pending.lastAttemptAt < CHANNEL_REJOIN_RESET_MS ? pending.attempts : 0;
+        if (attempts >= CHANNEL_REJOIN_MAX_ATTEMPTS) return;
+
+        const base =
+            delayMs ??
+            CHANNEL_REJOIN_SCHEDULE[Math.min(attempts, CHANNEL_REJOIN_SCHEDULE.length - 1)];
+        // Jitter upward only: retrying early just spends another refusal.
+        const delay = Math.round(base * (1 + Math.random() * 0.25));
+
+        const timer = setTimeout(() => {
+            const current = rejoinRef.current.get(topic);
+            if (current) rejoinRef.current.set(topic, { ...current, timer: null });
+
+            if (!desiredTopicsRef.current.has(topic)) return;
+            if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+            const existing = channelsRef.current.get(topic);
+            if (existing && (existing.state === 'joined' || existing.state === 'joining')) return;
+
+            const params = desiredTopicsRef.current.get(topic) || {};
+            const joinRef = getRef();
+            channelsRef.current.set(topic, {
+                topic,
+                state: 'joining',
+                joinRef,
+                params,
+                handlers: existing?.handlers || new Map(),
+            });
+            markChannelState(topic, 'joining');
+            sendRaw({
+                topic,
+                event: PHOENIX_EVENTS.JOIN,
+                payload: params,
+                ref: joinRef,
+                join_ref: joinRef,
+            });
+        }, delay);
+
+        rejoinRef.current.set(topic, { timer, attempts: attempts + 1, lastAttemptAt: now });
+    }, [getRef, sendRaw, markChannelState]);
 
     // Heartbeat roundtrip tracking. We record send time keyed by ref,
     // and when phx_reply with that ref lands we compute the delta and
@@ -190,11 +288,29 @@ export default function SocketProvider({
         if (event === PHOENIX_EVENTS.REPLY) {
             const channel = channelsRef.current.get(topic);
             if (channel && ref === channel.joinRef) {
-                const status = (payload as { status?: string }).status;
-                if (status === 'ok') {
+                const reply = payload as {
+                    status?: string;
+                    response?: { reason?: string; retry_after_ms?: number };
+                };
+                if (reply.status === 'ok') {
                     channel.state = 'joined';
+                    cancelRejoinTimer(topic);
                 } else {
                     channel.state = 'errored';
+                    // A throttled join is transient and the server says when
+                    // budget is back; retry then. Every other refusal (not a
+                    // member, no such campaign) is final, so stay errored rather
+                    // than hammering a door that will not open.
+                    const response = reply.response ?? {};
+                    if (response.reason === 'rate_limited') {
+                        const hint = Number(response.retry_after_ms);
+                        const delay = Number.isFinite(hint)
+                            ? Math.min(Math.max(hint, JOIN_RETRY_MIN_MS), JOIN_RETRY_MAX_MS)
+                            : JOIN_RETRY_MIN_MS;
+                        scheduleRejoin(topic, delay);
+                    } else {
+                        clearRejoin(topic);
+                    }
                 }
                 markChannelState(topic, channel.state);
             }
@@ -214,30 +330,8 @@ export default function SocketProvider({
             // — no events, no presence — until a full socket reconnect. Only
             // retry a channel that HAD joined, so a genuinely refused join
             // (returns errored) doesn't spin in a loop.
-            if (wasJoined && desiredTopicsRef.current.has(topic)) {
-                setTimeout(() => {
-                    if (!desiredTopicsRef.current.has(topic)) return;
-                    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
-                    const cur = channelsRef.current.get(topic);
-                    if (cur && (cur.state === 'joined' || cur.state === 'joining')) return;
-                    const params = desiredTopicsRef.current.get(topic) || {};
-                    const joinRef = getRef();
-                    channelsRef.current.set(topic, {
-                        topic,
-                        state: 'joining',
-                        joinRef,
-                        params,
-                        handlers: cur?.handlers || new Map(),
-                    });
-                    markChannelState(topic, 'joining');
-                    sendRaw({
-                        topic,
-                        event: PHOENIX_EVENTS.JOIN,
-                        payload: params,
-                        ref: joinRef,
-                        join_ref: joinRef,
-                    });
-                }, 1000);
+            if (wasJoined) {
+                scheduleRejoin(topic);
             }
             return;
         }
@@ -292,7 +386,7 @@ export default function SocketProvider({
                 }
             });
         }
-    }, [setWsLatencyMs, getRef, sendRaw, markChannelState]);
+    }, [setWsLatencyMs, markChannelState, scheduleRejoin, clearRejoin, cancelRejoinTimer]);
 
     // Join channel
     const joinChannel = useCallback((topic: string, params: Record<string, unknown> = {}) => {
@@ -336,6 +430,7 @@ export default function SocketProvider({
     const leaveChannel = useCallback((topic: string) => {
         // No longer want this topic — don't let a reconnect rejoin it.
         desiredTopicsRef.current.delete(topic);
+        clearRejoin(topic);
 
         const channel = channelsRef.current.get(topic);
         if (!channel) return;
@@ -356,7 +451,7 @@ export default function SocketProvider({
         channelsRef.current.delete(topic);
         pendingJoinsRef.current.delete(topic);
         markChannelState(topic, null);
-    }, [getRef, sendRaw, markChannelState]);
+    }, [getRef, sendRaw, markChannelState, clearRejoin]);
 
     // Get channel state
     const getChannelState = useCallback((topic: string): ChannelState => {
@@ -532,6 +627,11 @@ export default function SocketProvider({
                 pendingPingRef.current.clear();
                 onClose?.(ev);
 
+                // A pending per-channel rejoin is now redundant and would
+                // double-join: rejoinChannels covers every desired topic when
+                // the socket comes back.
+                clearAllRejoins();
+
                 // Mark all channels as closed
                 channelsRef.current.forEach((channel) => {
                     if (channel.state === 'joined') {
@@ -584,6 +684,7 @@ export default function SocketProvider({
         rejoinChannels,
         setWsLatencyMs,
         markChannelState,
+        clearAllRejoins,
     ]);
 
     // Mount effect
@@ -645,13 +746,19 @@ export default function SocketProvider({
             if (heartbeatTimeoutRef.current) {
                 clearTimeout(heartbeatTimeoutRef.current);
             }
+            clearAllRejoins();
             stopHeartbeat();
             wsRef.current?.close();
         };
-    }, [connect, stopHeartbeat]);
+    }, [connect, stopHeartbeat, clearAllRejoins]);
 
-    return (
-        <SocketContext.Provider value={{
+    // Memoised: an inline object is a new identity on every render, and
+    // channelStates re-renders this provider on every join. useChannel's effect
+    // depends on the context value, so the two together tore the channel down
+    // and rejoined it on every render (~400 joins/second on one open campaign
+    // page, enough to saturate the realtime service).
+    const value = useMemo(
+        () => ({
             isConnected,
             reconnectAttempt,
             joinChannel,
@@ -662,7 +769,23 @@ export default function SocketProvider({
             pushToChannel,
             subscribe,
             sendMessage,
-        }}>
+        }),
+        [
+            isConnected,
+            reconnectAttempt,
+            joinChannel,
+            leaveChannel,
+            getChannelState,
+            channelStates,
+            subscribeToChannel,
+            pushToChannel,
+            subscribe,
+            sendMessage,
+        ]
+    );
+
+    return (
+        <SocketContext.Provider value={value}>
             {children}
         </SocketContext.Provider>
     );

@@ -55,6 +55,7 @@ if config_env() == :prod do
       String.to_integer(System.get_env("MAX_CONNECTIONS_GLOBAL") || "100000"),
     # Rate limits (per minute)
     rate_limit_ws_message: String.to_integer(System.get_env("RATE_LIMIT_WS_MESSAGE") || "120"),
+    rate_limit_ws_connect: String.to_integer(System.get_env("RATE_LIMIT_WS_CONNECT") || "30"),
     rate_limit_ws_join: String.to_integer(System.get_env("RATE_LIMIT_WS_JOIN") || "30"),
     rate_limit_ws_event: String.to_integer(System.get_env("RATE_LIMIT_WS_EVENT") || "60")
 

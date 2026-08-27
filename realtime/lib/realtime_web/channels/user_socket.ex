@@ -43,8 +43,8 @@ defmodule RealtimeWeb.UserSocket do
 
       {:ok, socket}
     else
-      # The join rate limiter returns a 3-tuple carrying the cooldown; match it
-      # before the generic 2-tuple clause and surface a Retry-After style hint.
+      # The handshake rate limiter returns a 3-tuple carrying the cooldown; match
+      # it before the generic 2-tuple clause and surface a Retry-After style hint.
       {:error, :rate_limited, retry_after_ms} ->
         reject(:rate_limited, retry_after_ms: retry_after_ms)
 
@@ -110,10 +110,14 @@ defmodule RealtimeWeb.UserSocket do
     end
   end
 
+  # Handshake throttle. This spends the `ws_connect` budget, NOT `ws_join`:
+  # channel joins have their own bucket (RealtimeWeb.ChannelGuard) so a
+  # reconnect storm cannot eat the budget a client then needs to rejoin its
+  # topics with.
   defp check_rate_limit(user_id, limits) do
     limit = Map.get(limits, :limit_ws_join_pm, 30)
 
-    case RateLimiter.check(user_id, :ws_join, limit) do
+    case RateLimiter.check(user_id, :ws_connect, limit) do
       {:ok, _remaining} -> :ok
       {:error, :rate_limited, retry_after_ms} -> {:error, :rate_limited, retry_after_ms}
     end
