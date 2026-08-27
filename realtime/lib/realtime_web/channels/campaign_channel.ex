@@ -12,9 +12,19 @@ defmodule RealtimeWeb.CampaignChannel do
 
   alias Realtime.Auth
   alias Realtime.RateLimiter
+  alias RealtimeWeb.ChannelGuard
 
   @impl true
   def join("campaign:" <> campaign_id, _params, socket) do
+    # Throttle before the access lookup: that query is what a rejoin loop turns
+    # into database load.
+    case ChannelGuard.check_join(socket) do
+      {:error, payload} -> {:error, payload}
+      :ok -> authorize_join(campaign_id, socket)
+    end
+  end
+
+  defp authorize_join(campaign_id, socket) do
     if valid_uuid?(campaign_id) do
       user_id = socket.assigns.user_id
 
@@ -32,20 +42,20 @@ defmodule RealtimeWeb.CampaignChannel do
           {:ok, socket}
 
         {:error, :not_found} ->
-          {:error, %{reason: "campaign_not_found"}}
+          ChannelGuard.join_error("campaign_not_found")
 
         {:error, :forbidden} ->
-          {:error, %{reason: "forbidden"}}
+          ChannelGuard.join_error("forbidden")
 
         {:error, :not_a_member} ->
-          {:error, %{reason: "not_a_member"}}
+          ChannelGuard.join_error("not_a_member")
 
         {:error, reason} ->
           Logger.warning("Failed to join campaign channel: #{inspect(reason)}")
-          {:error, %{reason: to_string(reason)}}
+          ChannelGuard.join_error(to_string(reason))
       end
     else
-      {:error, %{reason: "invalid_campaign_id"}}
+      ChannelGuard.join_error("invalid_campaign_id", :invalid_topic)
     end
   end
 

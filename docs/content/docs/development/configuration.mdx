@@ -408,7 +408,8 @@ The Elixir websocket service. Its runtime configuration is read only when the re
 | `MAX_CONNECTIONS_PER_IP` | Concurrent sockets from one address | `50` |
 | `MAX_CONNECTIONS_GLOBAL` | Concurrent sockets on this node | `100000` |
 | `RATE_LIMIT_WS_MESSAGE` | Websocket messages per minute | `120` |
-| `RATE_LIMIT_WS_JOIN` | Channel joins per minute | `30` |
+| `RATE_LIMIT_WS_CONNECT` | Socket handshakes per minute | `30` |
+| `RATE_LIMIT_WS_JOIN` | Channel joins per minute, counted per `phx_join` on an open socket | `30` |
 | `RATE_LIMIT_WS_EVENT` | Client events per minute, which is what bounds presence updates | `60` |
 | `SENTRY_DSN` | Error reporting. An empty string is treated as unset on purpose, because the library rejects `""` hard enough to take the node down | unset |
 

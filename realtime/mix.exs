@@ -8,9 +8,15 @@ defmodule Realtime.MixProject do
       elixir: "~> 1.18",
       listeners: [Phoenix.CodeReloader],
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps()
     ]
   end
+
+  # test/support holds the in-memory stand-ins (rate-limit counter, channel
+  # case) that let the suite run with no Redis and no Postgres.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   def application do
     [
