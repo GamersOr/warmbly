@@ -71,7 +71,8 @@ export function unbanUser(id: string, body: UnbanUserRequest): Promise<void> {
     });
 }
 
-export function getUserRateLimits(id: string): Promise<AdminUserRateLimits | null> {
+// Always resolves: a user with no override row reads back the product defaults.
+export function getUserRateLimits(id: string): Promise<AdminUserRateLimits> {
     return Request({
         method: "GET",
         url: `/admin/users/${id}/rate-limits`,

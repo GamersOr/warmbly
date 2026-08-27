@@ -493,11 +493,34 @@ func (r *workerRepository) ClearEmailAccountWorker(ctx context.Context, emailAcc
 	return err
 }
 
-// UpdateEmailAccountWarmupPoolType updates the warmup pool type for an email account
+// UpdateEmailAccountWarmupPoolType writes the tier and moves the mailbox's pool membership to
+// match in one transaction: they record the same fact, and updating only the column left
+// downgraded mailboxes in the premium pool (issue #211). A mailbox in no pool stays in none.
 func (r *workerRepository) UpdateEmailAccountWarmupPoolType(ctx context.Context, emailAccountID uuid.UUID, poolType string) error {
-	query := `UPDATE email_accounts SET warmup_pool_type = $1, updated_at = NOW() WHERE id = $2`
-	_, err := r.db.Exec(ctx, query, poolType, emailAccountID)
-	return err
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE email_accounts SET warmup_pool_type = $1, updated_at = NOW() WHERE id = $2`,
+		poolType, emailAccountID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE warmup_pool_participants wpp
+		SET pool_id = wp.id
+		FROM warmup_pools wp
+		WHERE wp.pool_type = $1::warmup_pool_type
+		  AND wpp.email_account_id = $2::uuid
+		  AND wpp.pool_id <> wp.id`,
+		poolType, emailAccountID); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 // GetEmailAccountWorkerInfo retrieves worker info for an email account

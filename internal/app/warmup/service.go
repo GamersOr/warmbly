@@ -69,9 +69,14 @@ const (
 )
 
 type Service interface {
-	EnsurePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) *errx.Error
+	// EnsurePoolMembershipWithRole puts the mailbox in exactly one pool, moving it (with its
+	// reputation) rather than adding a second membership (issue #211).
 	EnsurePoolMembershipWithRole(ctx context.Context, accountID uuid.UUID, poolType, role string) *errx.Error
-	RemovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) *errx.Error
+	// MovePoolMembership corrects an existing member's pool, keeping its role. Reports whether it moved.
+	MovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) (bool, *errx.Error)
+	// RemoveFromAllPools takes the mailbox out of warmup; a caller that knows it is not entitled
+	// does not know which pool it is in.
+	RemoveFromAllPools(ctx context.Context, accountID uuid.UUID) *errx.Error
 	CanParticipate(ctx context.Context, accountID uuid.UUID, poolType string) (bool, string, *errx.Error)
 	ApplySpamReport(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, reportType string) (*models.WarmupParticipantHealth, *errx.Error)
 	// RecordSpamPlacement records that a warmup message landed in the
@@ -193,10 +198,6 @@ func (s *service) dispatchHealthEvent(ctx context.Context, accountID uuid.UUID, 
 	}
 }
 
-func (s *service) EnsurePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) *errx.Error {
-	return s.EnsurePoolMembershipWithRole(ctx, accountID, poolType, "sender_receiver")
-}
-
 func (s *service) EnsurePoolMembershipWithRole(ctx context.Context, accountID uuid.UUID, poolType, role string) *errx.Error {
 	if role != "sender_receiver" && role != "recipient_only" {
 		return errx.New(errx.BadRequest, "invalid warmup participant role")
@@ -209,24 +210,29 @@ func (s *service) EnsurePoolMembershipWithRole(ctx context.Context, accountID uu
 	if pool == nil {
 		return errx.New(errx.BadRequest, "warmup pool not found")
 	}
-	if err := s.repo.JoinPool(ctx, pool.ID, accountID); err != nil {
-		return errx.InternalError()
-	}
-	if err := s.repo.SetParticipantRole(ctx, pool.ID, accountID, role); err != nil {
+	if err := s.repo.MoveToPool(ctx, pool.ID, accountID, role); err != nil {
 		return errx.InternalError()
 	}
 	return nil
 }
 
-func (s *service) RemovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) *errx.Error {
+func (s *service) MovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) (bool, *errx.Error) {
 	pool, err := s.repo.GetPoolByType(ctx, poolType)
 	if err != nil {
-		return errx.InternalError()
+		return false, errx.InternalError()
 	}
 	if pool == nil {
-		return nil
+		return false, errx.New(errx.BadRequest, "warmup pool not found")
 	}
-	if err := s.repo.LeavePool(ctx, pool.ID, accountID); err != nil {
+	moved, err := s.repo.MoveExistingToPool(ctx, pool.ID, accountID)
+	if err != nil {
+		return false, errx.InternalError()
+	}
+	return moved, nil
+}
+
+func (s *service) RemoveFromAllPools(ctx context.Context, accountID uuid.UUID) *errx.Error {
+	if err := s.repo.LeaveAllPools(ctx, accountID); err != nil {
 		return errx.InternalError()
 	}
 	return nil
@@ -506,40 +512,28 @@ func (s *service) ApplyRateLimitExceeded(ctx context.Context, accountID uuid.UUI
 }
 
 func (s *service) evaluateAndPersistAnyPool(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, *errx.Error) {
-	for _, poolType := range []string{"premium", "free"} {
-		health, err := s.repo.GetParticipantHealth(ctx, accountID, poolType)
-		if err != nil {
-			log.Error().
-				Err(err).
-				Str("email_account_id", accountID.String()).
-				Str("pool_type", poolType).
-				Msg("warmup: pool membership probe failed; health evaluation skipped")
-			return nil, errx.InternalError()
-		}
-		if health == nil {
-			continue
-		}
-		return s.evaluateAndPersist(ctx, accountID, poolType, health)
+	health, xerr := s.getParticipantForAnyPool(ctx, accountID)
+	if xerr != nil {
+		return nil, xerr
 	}
-	return nil, nil
+	if health == nil {
+		return nil, nil
+	}
+	return s.evaluateAndPersist(ctx, accountID, health.PoolType, health)
 }
 
+// getParticipantForAnyPool reads the row from whichever pool the mailbox is in: one query, not
+// one per pool, so there is no probe order to bias toward premium.
 func (s *service) getParticipantForAnyPool(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, *errx.Error) {
-	for _, poolType := range []string{"premium", "free"} {
-		health, err := s.repo.GetParticipantHealth(ctx, accountID, poolType)
-		if err != nil {
-			log.Error().
-				Err(err).
-				Str("email_account_id", accountID.String()).
-				Str("pool_type", poolType).
-				Msg("warmup: pool membership probe failed")
-			return nil, errx.InternalError()
-		}
-		if health != nil {
-			return health, nil
-		}
+	health, err := s.repo.GetParticipantHealthForAccount(ctx, accountID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("email_account_id", accountID.String()).
+			Msg("warmup: pool membership probe failed")
+		return nil, errx.InternalError()
 	}
-	return nil, nil
+	return health, nil
 }
 
 func (s *service) evaluateAndPersist(ctx context.Context, accountID uuid.UUID, poolType string, participant *models.WarmupParticipantHealth) (*models.WarmupParticipantHealth, *errx.Error) {

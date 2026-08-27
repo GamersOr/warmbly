@@ -153,8 +153,8 @@ func (r *workerRepository) ListRiskCandidates(ctx context.Context, limit int) ([
 	if limit <= 0 {
 		limit = 500
 	}
-	// Health lives on warmup_pool_participants; an account can be in more
-	// than one pool, so we pick its WORST state via a CASE rank.
+	// Health lives on warmup_pool_participants, one row per mailbox. The CASE
+	// rank keeps the worst state winning if that ever stops being true.
 	rows, err := r.db.Query(ctx, `
 		SELECT
 			ea.id,

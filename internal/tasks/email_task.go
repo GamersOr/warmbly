@@ -90,14 +90,17 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 	if account.Status != "active" || (!activelyWarming && !inCampaign) {
 		if s.warmupHealth != nil {
 			if account.Status == "active" && account.OrganizationID != nil && s.featureGate != nil {
-				canWarmup, _ := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
-				if canWarmup {
+				canWarmup, xerr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
+				switch {
+				case xerr != nil:
+					// Entitlement unknown: leave the membership alone rather than let a blip evict.
+				case canWarmup:
 					_ = s.warmupHealth.EnsurePoolMembershipWithRole(ctx, account.ID, s.resolveWarmupPoolType(ctx, account), "recipient_only")
-				} else {
-					_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, s.resolveWarmupPoolType(ctx, account))
+				default:
+					_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
 				}
 			} else {
-				_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, s.resolveWarmupPoolType(ctx, account))
+				_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
 			}
 		}
 		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
@@ -118,10 +121,7 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 	// warming rather than warming as if it were entitled.
 	if account.OrganizationID == nil {
 		if s.warmupHealth != nil {
-			// Both pools: without an org there is no reliable way to tell which
-			// one this mailbox was placed in.
-			_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, "free")
-			_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, "premium")
+			_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
 		}
 		sentry.CaptureException(fmt.Errorf("email account %s reached warmup with no organization", account.ID))
 		log.Error().Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).
@@ -133,10 +133,11 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 
 	// STEP 3.5: Check if organization can use warmup (only paid orgs)
 	if s.featureGate != nil {
-		canWarmup, _ := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
+		canWarmup, entitlementErr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
 		if !canWarmup {
-			if s.warmupHealth != nil {
-				_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, s.resolveWarmupPoolType(ctx, account))
+			// Only a definite "not entitled" evicts; the send is skipped either way.
+			if s.warmupHealth != nil && entitlementErr == nil {
+				_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
 			}
 			// Organization cannot use warmup - skip this task
 			s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_no_warmup_access")

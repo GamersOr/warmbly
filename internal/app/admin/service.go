@@ -26,7 +26,7 @@ type AdminService interface {
 	GetUserCampaigns(ctx context.Context, userID uuid.UUID, cursor *uuid.UUID, limit int) (*models.AdminCampaignsResult, *errx.Error)
 	GetUserEmails(ctx context.Context, userID uuid.UUID, cursor *uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error)
 	GetUserRateLimits(ctx context.Context, userID uuid.UUID) (*models.AdminUserRateLimits, *errx.Error)
-	UpdateUserRateLimits(ctx context.Context, adminID, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest, ipAddress, userAgent string) *errx.Error
+	UpdateUserRateLimits(ctx context.Context, adminID, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest, ipAddress, userAgent string) (*models.AdminUserRateLimits, *errx.Error)
 
 	// Worker Management
 	ListWorkers(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminWorkersResult, *errx.Error)
@@ -51,7 +51,7 @@ type AdminService interface {
 	// Campaign Management
 	SearchCampaigns(ctx context.Context, search *models.AdminCampaignSearch) (*models.AdminCampaignsResult, *errx.Error)
 	GetCampaignDetail(ctx context.Context, campaignID uuid.UUID) (*models.AdminCampaignDetail, *errx.Error)
-	StopCampaign(ctx context.Context, adminID, campaignID uuid.UUID, ipAddress, userAgent string) *errx.Error
+	StopCampaign(ctx context.Context, adminID, campaignID uuid.UUID, reason, ipAddress, userAgent string) *errx.Error
 
 	// Analytics
 	GetPlatformOverview(ctx context.Context) (*models.PlatformOverview, *errx.Error)
@@ -91,11 +91,13 @@ type AdminService interface {
 
 type adminService struct {
 	repo repository.AdminRepository
+	// The owner-visible campaign activity feed.
+	campaignLogRepo repository.CampaignLogRepository
 }
 
 // NewService creates a new admin service
-func NewService(repo repository.AdminRepository) AdminService {
-	return &adminService{repo: repo}
+func NewService(repo repository.AdminRepository, campaignLogRepo repository.CampaignLogRepository) AdminService {
+	return &adminService{repo: repo, campaignLogRepo: campaignLogRepo}
 }
 
 // logAction logs an admin action
@@ -172,6 +174,10 @@ func (s *adminService) GetUserPreview(ctx context.Context, userID uuid.UUID) (*m
 	}
 	if preview == nil {
 		return nil, errx.ErrNotFound
+	}
+	// Same answer as GET /users/:id/rate-limits: no row means the defaults.
+	if preview.RateLimits == nil {
+		preview.RateLimits = models.DefaultAdminUserRateLimits(userID)
 	}
 	return preview, nil
 }
@@ -275,17 +281,21 @@ func (s *adminService) GetUserRateLimits(ctx context.Context, userID uuid.UUID) 
 		sentry.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get rate limits")
 	}
+	// No row means the enforcement path falls back to the product defaults.
+	if limits == nil {
+		return models.DefaultAdminUserRateLimits(userID), nil
+	}
 	return limits, nil
 }
 
-func (s *adminService) UpdateUserRateLimits(ctx context.Context, adminID, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest, ipAddress, userAgent string) *errx.Error {
-	if err := s.repo.UpdateUserRateLimits(ctx, userID, update); err != nil {
+func (s *adminService) UpdateUserRateLimits(ctx context.Context, adminID, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest, ipAddress, userAgent string) (*models.AdminUserRateLimits, *errx.Error) {
+	if err := s.repo.UpdateUserRateLimits(ctx, userID, adminID, update); err != nil {
 		sentry.CaptureException(err)
-		return errx.New(errx.Internal, "failed to update rate limits")
+		return nil, errx.New(errx.Internal, "failed to update rate limits")
 	}
 
 	s.logAction(ctx, adminID, "update_rate_limits", "user", userID, map[string]any{"limits": update}, ipAddress, userAgent)
-	return nil
+	return s.GetUserRateLimits(ctx, userID)
 }
 
 // Worker Management
@@ -471,7 +481,7 @@ func (s *adminService) GetCampaignDetail(ctx context.Context, campaignID uuid.UU
 	return campaign, nil
 }
 
-func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uuid.UUID, ipAddress, userAgent string) *errx.Error {
+func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uuid.UUID, reason, ipAddress, userAgent string) *errx.Error {
 	campaign, err := s.repo.GetCampaignDetail(ctx, campaignID)
 	if err != nil {
 		sentry.CaptureException(err)
@@ -481,12 +491,33 @@ func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uui
 		return errx.ErrNotFound
 	}
 
-	if err := s.repo.StopCampaign(ctx, campaignID); err != nil {
+	// The repository decides: a draft has never sent and a completed campaign
+	// never will, and either can become true between here and the UPDATE.
+	stopped, err := s.repo.StopCampaign(ctx, campaignID)
+	if err != nil {
 		sentry.CaptureException(err)
 		return errx.New(errx.Internal, "failed to stop campaign")
 	}
+	if !stopped {
+		return errx.New(errx.BadRequest, "campaign is not running")
+	}
 
-	s.logAction(ctx, adminID, "force_stop_campaign", "campaign", campaignID, map[string]any{"user_id": campaign.UserID}, ipAddress, userAgent)
+	// Without the reason the owner just sees a campaign that went quiet.
+	if s.campaignLogRepo != nil {
+		if err := s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+			CampaignID: campaignID,
+			EventType:  "stopped",
+			Message:    "Campaign force-stopped by platform staff: " + reason,
+			Metadata:   map[string]interface{}{"reason": reason},
+		}); err != nil {
+			sentry.CaptureException(err)
+		}
+	}
+
+	s.logAction(ctx, adminID, "force_stop_campaign", "campaign", campaignID, map[string]any{
+		"user_id": campaign.UserID,
+		"reason":  reason,
+	}, ipAddress, userAgent)
 	return nil
 }
 
@@ -575,6 +606,23 @@ func (s *adminService) SearchPlansForAdmin(ctx context.Context, search *models.A
 	return result, nil
 }
 
+// resolveDuration maps the API's billing period onto a durations row. An
+// unknown period is the caller's mistake, not an internal error.
+func (s *adminService) resolveDuration(ctx context.Context, d models.Duration) (*uuid.UUID, *errx.Error) {
+	if d == "" {
+		return nil, errx.New(errx.BadRequest, "duration is required")
+	}
+	id, err := s.repo.DurationIDByTitle(ctx, string(d))
+	if err != nil {
+		sentry.CaptureException(err)
+		return nil, errx.New(errx.Internal, "failed to resolve plan duration")
+	}
+	if id == nil {
+		return nil, errx.New(errx.BadRequest, "unknown plan duration")
+	}
+	return id, nil
+}
+
 func (s *adminService) CreatePlan(ctx context.Context, adminID uuid.UUID, req *models.CreatePlanRequest, ipAddress, userAgent string) (*models.Plan, *errx.Error) {
 	plan := &models.Plan{
 		ID:                 uuid.New(),
@@ -595,7 +643,12 @@ func (s *adminService) CreatePlan(ctx context.Context, adminID uuid.UUID, req *m
 		MaxEmailAccounts:   req.MaxEmailAccounts,
 	}
 
-	if err := s.repo.CreatePlan(ctx, plan); err != nil {
+	durationID, xerr := s.resolveDuration(ctx, plan.Duration)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	if err := s.repo.CreatePlan(ctx, plan, *durationID); err != nil {
 		sentry.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to create plan")
 	}
@@ -673,7 +726,12 @@ func (s *adminService) UpdatePlan(ctx context.Context, adminID, planID uuid.UUID
 		plan.MaxEmailAccounts = req.MaxEmailAccounts
 	}
 
-	if err := s.repo.UpdatePlan(ctx, plan); err != nil {
+	durationID, xerr := s.resolveDuration(ctx, plan.Duration)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	if err := s.repo.UpdatePlan(ctx, plan, *durationID); err != nil {
 		sentry.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to update plan")
 	}

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -55,7 +56,7 @@ type AdminRepository interface {
 	// Campaign Management
 	SearchCampaigns(ctx context.Context, search *models.AdminCampaignSearch) (*models.AdminCampaignsResult, error)
 	GetCampaignDetail(ctx context.Context, campaignID uuid.UUID) (*models.AdminCampaignDetail, error)
-	StopCampaign(ctx context.Context, campaignID uuid.UUID) error
+	StopCampaign(ctx context.Context, campaignID uuid.UUID) (bool, error)
 
 	// Audit Logs
 	CreateAuditLog(ctx context.Context, log *models.AdminAuditLog) error
@@ -73,9 +74,10 @@ type AdminRepository interface {
 	// Plans
 	ListPlans(ctx context.Context, includePrivate bool) ([]models.Plan, error)
 	SearchPlansForAdmin(ctx context.Context, search *models.AdminPlanSearch) (*models.AdminPlansResult, error)
-	CreatePlan(ctx context.Context, plan *models.Plan) error
+	DurationIDByTitle(ctx context.Context, title string) (*uuid.UUID, error)
+	CreatePlan(ctx context.Context, plan *models.Plan, durationID uuid.UUID) error
 	GetPlan(ctx context.Context, planID uuid.UUID) (*models.Plan, error)
-	UpdatePlan(ctx context.Context, plan *models.Plan) error
+	UpdatePlan(ctx context.Context, plan *models.Plan, durationID uuid.UUID) error
 	DeletePlan(ctx context.Context, planID uuid.UUID) error
 	IsPlanInUse(ctx context.Context, planID uuid.UUID) (bool, error)
 
@@ -86,7 +88,7 @@ type AdminRepository interface {
 
 	// User Rate Limits
 	GetUserRateLimits(ctx context.Context, userID uuid.UUID) (*models.AdminUserRateLimits, error)
-	UpdateUserRateLimits(ctx context.Context, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest) error
+	UpdateUserRateLimits(ctx context.Context, userID, adminID uuid.UUID, update *models.UpdateUserRateLimitsRequest) error
 
 	// Mailboxes (platform-wide). Joins email_accounts → users → orgs
 	// so the admin table can answer "whose mailbox is this and where
@@ -339,7 +341,8 @@ func (r *adminRepository) GetUserDetail(ctx context.Context, userID uuid.UUID) (
 	return &u, nil
 }
 
-// GetUserPreview gets a complete preview of a user's account
+// GetUserPreview gets a complete preview of a user's account. A section that
+// fails is an error, not an empty list: that is what hid the mailbox bug.
 func (r *adminRepository) GetUserPreview(ctx context.Context, userID uuid.UUID) (*models.AdminUserPreview, error) {
 	user, err := r.GetUserDetail(ctx, userID)
 	if err != nil {
@@ -361,14 +364,19 @@ func (r *adminRepository) GetUserPreview(ctx context.Context, userID uuid.UUID) 
 		WHERE om.user_id = $1
 	`
 	orgRows, err := r.db.Query(ctx, orgQuery, userID)
-	if err == nil {
-		defer orgRows.Close()
-		for orgRows.Next() {
-			var org models.Organization
-			if err := orgRows.Scan(&org.ID, &org.Name, &org.Slug, &org.OwnerUserID, &org.CreatedAt, &org.UpdatedAt); err == nil {
-				preview.Organizations = append(preview.Organizations, org)
-			}
+	if err != nil {
+		return nil, err
+	}
+	defer orgRows.Close()
+	for orgRows.Next() {
+		var org models.Organization
+		if err := orgRows.Scan(&org.ID, &org.Name, &org.Slug, &org.OwnerUserID, &org.CreatedAt, &org.UpdatedAt); err != nil {
+			return nil, err
 		}
+		preview.Organizations = append(preview.Organizations, org)
+	}
+	if err := orgRows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Get subscriptions
@@ -383,53 +391,71 @@ func (r *adminRepository) GetUserPreview(ctx context.Context, userID uuid.UUID) 
 		WHERE s.user_id = $1
 	`
 	subRows, err := r.db.Query(ctx, subQuery, userID)
-	if err == nil {
-		defer subRows.Close()
-		for subRows.Next() {
-			var sub models.Subscription
-			if err := subRows.Scan(
-				&sub.ID, &sub.UserID, &sub.OrganizationID, &sub.PlanID, &sub.StripeCustomerID,
-				&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
-				&sub.CurrentPeriodStart, &sub.CurrentPeriodEnd, &sub.CancelAtPeriodEnd,
-				&sub.CanceledAt, &sub.TrialStart, &sub.TrialEnd,
-				&sub.FreeTrialStartedAt, &sub.FreeTrialEndsAt, &sub.IsEnterprise,
-				&sub.CreatedAt, &sub.UpdatedAt,
-			); err == nil {
-				preview.Subscriptions = append(preview.Subscriptions, sub)
-			}
+	if err != nil {
+		return nil, err
+	}
+	defer subRows.Close()
+	for subRows.Next() {
+		var sub models.Subscription
+		if err := subRows.Scan(
+			&sub.ID, &sub.UserID, &sub.OrganizationID, &sub.PlanID, &sub.StripeCustomerID,
+			&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
+			&sub.CurrentPeriodStart, &sub.CurrentPeriodEnd, &sub.CancelAtPeriodEnd,
+			&sub.CanceledAt, &sub.TrialStart, &sub.TrialEnd,
+			&sub.FreeTrialStartedAt, &sub.FreeTrialEndsAt, &sub.IsEnterprise,
+			&sub.CreatedAt, &sub.UpdatedAt,
+		); err != nil {
+			return nil, err
 		}
+		preview.Subscriptions = append(preview.Subscriptions, sub)
+	}
+	if err := subRows.Err(); err != nil {
+		return nil, err
 	}
 
-	// Get email accounts
+	// Get email accounts. user_id is uuid, not text.
 	emailQuery := `
 		SELECT id, email, user_id, organization_id, status, provider,
 			warmup IS NOT NULL as warmup_enabled, last_synced_at
 		FROM email_accounts
-		WHERE user_id = $1::text
+		WHERE user_id = $1
+		ORDER BY created_at DESC
 	`
 	emailRows, err := r.db.Query(ctx, emailQuery, userID)
-	if err == nil {
-		defer emailRows.Close()
-		for emailRows.Next() {
-			var email models.AdminWorkerEmail
-			if err := emailRows.Scan(
-				&email.ID, &email.Email, &email.UserID, &email.OrganizationID,
-				&email.Status, &email.Provider, &email.WarmupEnabled, &email.LastSyncedAt,
-			); err == nil {
-				preview.EmailAccounts = append(preview.EmailAccounts, email)
-			}
+	if err != nil {
+		return nil, err
+	}
+	defer emailRows.Close()
+	for emailRows.Next() {
+		var email models.AdminWorkerEmail
+		if err := emailRows.Scan(
+			&email.ID, &email.Email, &email.UserID, &email.OrganizationID,
+			&email.Status, &email.Provider, &email.WarmupEnabled, &email.LastSyncedAt,
+		); err != nil {
+			return nil, err
 		}
+		preview.EmailAccounts = append(preview.EmailAccounts, email)
+	}
+	if err := emailRows.Err(); err != nil {
+		return nil, err
 	}
 
 	// Get recent bans
-	bans, _ := r.GetUserBans(ctx, userID)
+	bans, err := r.GetUserBans(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 	if len(bans) > 5 {
 		bans = bans[:5]
 	}
 	preview.RecentBans = bans
 
 	// Get rate limits
-	preview.RateLimits, _ = r.GetUserRateLimits(ctx, userID)
+	limits, err := r.GetUserRateLimits(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	preview.RateLimits = limits
 
 	return preview, nil
 }
@@ -589,14 +615,15 @@ func (r *adminRepository) GetUserEmails(ctx context.Context, userID uuid.UUID, c
 	}
 
 	args := []interface{}{userID, limit + 1}
-	whereClause := "WHERE ea.user_id = $1::text"
+	// email_accounts.user_id is uuid; casting it to text made every call fail.
+	whereClause := "WHERE ea.user_id = $1"
 	if cursor != nil {
 		whereClause += " AND ea.id < $3"
 		args = append(args, *cursor)
 	}
 
 	query := `
-		SELECT ea.id, ea.email, ea.user_id::uuid, ea.organization_id,
+		SELECT ea.id, ea.email, ea.user_id, ea.organization_id,
 			ea.status, ea.provider, ea.warmup IS NOT NULL, ea.last_synced_at
 		FROM email_accounts ea
 		` + whereClause + `
@@ -842,9 +869,9 @@ func (r *adminRepository) GetWorkerEmails(ctx context.Context, workerID uuid.UUI
 		args = append(args, *cursor)
 	}
 
-	// Health lives on warmup_pool_participants; an account can be in more than
-	// one pool, so we pick its WORST state via a CASE rank (same ordering as the
-	// risk rebalancer). risk_band is the mailbox's resolved reputation tier.
+	// Health lives on warmup_pool_participants, one row per mailbox. The CASE
+	// rank keeps the worst state winning if that ever stops being true (same
+	// ordering as the risk rebalancer). risk_band is the resolved tier.
 	query := `
 		SELECT ea.id, ea.email, ea.user_id::uuid, ea.organization_id,
 			ea.status, ea.provider, ea.warmup IS NOT NULL, ea.last_synced_at,
@@ -1570,13 +1597,21 @@ func (r *adminRepository) GetCampaignDetail(ctx context.Context, campaignID uuid
 	return &c, nil
 }
 
-// StopCampaign force-stops a campaign
-func (r *adminRepository) StopCampaign(ctx context.Context, campaignID uuid.UUID) error {
-	_, err := r.db.Exec(ctx, `
-		UPDATE campaigns SET status = 'stopped', stopped_at = NOW(), updated_at = NOW()
+// StopCampaign parks a running campaign at 'paused' (campaign_status has no
+// 'stopped'), and reports false when it was not in a stoppable state. The status
+// test belongs in the UPDATE: a campaign that completes concurrently must not be
+// resurrected by a stop that read it as active a moment earlier.
+func (r *adminRepository) StopCampaign(ctx context.Context, campaignID uuid.UUID) (bool, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE campaigns
+		SET status = 'paused', last_status_change_at = NOW(), updated_at = NOW()
 		WHERE id = $1
+		  AND status IN ('active', 'paused', 'paused_no_accounts', 'paused_trial_expired', 'paused_guardrail')
 	`, campaignID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // CreateAuditLog creates an audit log entry
@@ -2076,22 +2111,36 @@ func (r *adminRepository) SearchPlansForAdmin(ctx context.Context, search *model
 	return result, nil
 }
 
-// CreatePlan creates a new plan
-func (r *adminRepository) CreatePlan(ctx context.Context, plan *models.Plan) error {
+// DurationIDByTitle resolves a durations.title to its id, or (nil, nil) when
+// there is no such period, so the caller can answer 400 not a NOT NULL violation.
+func (r *adminRepository) DurationIDByTitle(ctx context.Context, title string) (*uuid.UUID, error) {
+	var id uuid.UUID
+	err := r.db.QueryRow(ctx, `SELECT id FROM durations WHERE title = $1`, title).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+// CreatePlan creates a new plan. The billing period is duration_id, an FK.
+func (r *adminRepository) CreatePlan(ctx context.Context, plan *models.Plan, durationID uuid.UUID) error {
 	query := `
 		INSERT INTO plans (id, name, max_contacts, daily_emails, ai_generation, account_limit,
-			price, discounted_price, duration, savings, public, dedicated_workers, daily_campaign_limit,
+			price, discounted_price, duration_id, savings, public, dedicated_workers, daily_campaign_limit,
 			max_campaigns, max_active_campaigns, max_team_members, max_email_accounts,
-			created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			monthly_credits, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 	`
 	now := time.Now()
 	_, err := r.db.Exec(ctx, query,
 		plan.ID, plan.Name, plan.MaxContacts, plan.DailyEmails, plan.AIGeneration, plan.AccountLimit,
-		plan.Price, plan.DiscountedPrice, plan.Duration, plan.Savings, plan.Public,
+		plan.Price, plan.DiscountedPrice, durationID, plan.Savings, plan.Public,
 		plan.DedicatedWorkers, plan.DailyCampaignLimit,
 		plan.MaxCampaigns, plan.MaxActiveCampaigns, plan.MaxTeamMembers, plan.MaxEmailAccounts,
-		now, now,
+		plan.MonthlyCredits, now, now,
 	)
 	return err
 }
@@ -2099,36 +2148,44 @@ func (r *adminRepository) CreatePlan(ctx context.Context, plan *models.Plan) err
 // GetPlan gets a plan by ID
 func (r *adminRepository) GetPlan(ctx context.Context, planID uuid.UUID) (*models.Plan, error) {
 	query := `
-		SELECT id, name, max_contacts, daily_emails, ai_generation, account_limit,
-			price, discounted_price, duration, savings, public,
-			stripe_price_id, stripe_product_id, dedicated_workers, daily_campaign_limit,
-			max_campaigns, max_active_campaigns, max_team_members, max_email_accounts,
-			updated_at, created_at
-		FROM plans WHERE id = $1
+		SELECT p.id, p.name, p.max_contacts, p.daily_emails, p.ai_generation, p.account_limit,
+			p.price, p.discounted_price, d.title, p.savings, p.public,
+			p.stripe_price_id, p.stripe_price_id_yearly, p.stripe_product_id,
+			p.dedicated_workers, p.daily_campaign_limit,
+			p.max_campaigns, p.max_active_campaigns, p.max_team_members, p.max_email_accounts,
+			p.monthly_credits, p.referral_reward_percent, p.updated_at, p.created_at
+		FROM plans p
+		LEFT JOIN durations d ON d.id = p.duration_id
+		WHERE p.id = $1
 	`
 
 	var p models.Plan
+	var duration *string
 	err := r.db.QueryRow(ctx, query, planID).Scan(
 		&p.ID, &p.Name, &p.MaxContacts, &p.DailyEmails, &p.AIGeneration, &p.AccountLimit,
-		&p.Price, &p.DiscountedPrice, &p.Duration, &p.Savings, &p.Public,
-		&p.StripePriceID, &p.StripeProductID, &p.DedicatedWorkers, &p.DailyCampaignLimit,
+		&p.Price, &p.DiscountedPrice, &duration, &p.Savings, &p.Public,
+		&p.StripePriceID, &p.StripePriceIDYearly, &p.StripeProductID,
+		&p.DedicatedWorkers, &p.DailyCampaignLimit,
 		&p.MaxCampaigns, &p.MaxActiveCampaigns, &p.MaxTeamMembers, &p.MaxEmailAccounts,
-		&p.UpdatedAt, &p.CreatedAt,
+		&p.MonthlyCredits, &p.ReferralRewardPercent, &p.UpdatedAt, &p.CreatedAt,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	if duration != nil {
+		p.Duration = models.Duration(*duration)
+	}
 	return &p, nil
 }
 
-// UpdatePlan updates a plan
-func (r *adminRepository) UpdatePlan(ctx context.Context, plan *models.Plan) error {
+// UpdatePlan updates a plan.
+func (r *adminRepository) UpdatePlan(ctx context.Context, plan *models.Plan, durationID uuid.UUID) error {
 	query := `
 		UPDATE plans SET name = $2, max_contacts = $3, daily_emails = $4, ai_generation = $5,
-			account_limit = $6, price = $7, discounted_price = $8, duration = $9, public = $10,
+			account_limit = $6, price = $7, discounted_price = $8, duration_id = $9, public = $10,
 			dedicated_workers = $11, daily_campaign_limit = $12, max_campaigns = $13,
 			max_active_campaigns = $14, max_team_members = $15, max_email_accounts = $16,
 			updated_at = $17
@@ -2136,7 +2193,7 @@ func (r *adminRepository) UpdatePlan(ctx context.Context, plan *models.Plan) err
 	`
 	_, err := r.db.Exec(ctx, query,
 		plan.ID, plan.Name, plan.MaxContacts, plan.DailyEmails, plan.AIGeneration,
-		plan.AccountLimit, plan.Price, plan.DiscountedPrice, plan.Duration, plan.Public,
+		plan.AccountLimit, plan.Price, plan.DiscountedPrice, durationID, plan.Public,
 		plan.DedicatedWorkers, plan.DailyCampaignLimit, plan.MaxCampaigns,
 		plan.MaxActiveCampaigns, plan.MaxTeamMembers, plan.MaxEmailAccounts,
 		time.Now(),
@@ -2409,21 +2466,27 @@ func (r *adminRepository) UpdateEnterpriseInquiry(ctx context.Context, id uuid.U
 	return err
 }
 
-// GetUserRateLimits gets rate limits for a user
+// GetUserRateLimits gets a user's API and realtime throughput limits. Mail
+// volume is not one of them: that is a per-mailbox budget and a plan entitlement.
 func (r *adminRepository) GetUserRateLimits(ctx context.Context, userID uuid.UUID) (*models.AdminUserRateLimits, error) {
 	query := `
-		SELECT user_id, limit_ws_message_pm, limit_ws_join_pm, limit_ws_event_pm,
-			max_connections, daily_email_limit, updated_at
+		SELECT user_id, limit_read_pm, limit_write_pm, limit_bulk_pm, limit_unibox_pm,
+			limit_analytics_pm, limit_api_calls_daily, limit_bulk_ops_daily,
+			limit_ws_message_pm, limit_ws_join_pm, limit_ws_event_pm, max_connections,
+			notes, updated_by, updated_at
 		FROM user_rate_limits
 		WHERE user_id = $1
 	`
 
 	var limits models.AdminUserRateLimits
 	err := r.db.QueryRow(ctx, query, userID).Scan(
-		&limits.UserID, &limits.LimitWSMessagePM, &limits.LimitWSJoinPM, &limits.LimitWSEventPM,
-		&limits.MaxConnections, &limits.DailyEmailLimit, &limits.UpdatedAt,
+		&limits.UserID, &limits.LimitReadPM, &limits.LimitWritePM, &limits.LimitBulkPM,
+		&limits.LimitUniboxPM, &limits.LimitAnalyticsPM, &limits.LimitAPICallsDaily,
+		&limits.LimitBulkOpsDaily, &limits.LimitWSMessagePM, &limits.LimitWSJoinPM,
+		&limits.LimitWSEventPM, &limits.MaxConnections,
+		&limits.Notes, &limits.UpdatedBy, &limits.UpdatedAt,
 	)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -2432,25 +2495,49 @@ func (r *adminRepository) GetUserRateLimits(ctx context.Context, userID uuid.UUI
 	return &limits, nil
 }
 
-// UpdateUserRateLimits updates rate limits for a user
-func (r *adminRepository) UpdateUserRateLimits(ctx context.Context, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest) error {
-	query := `
-		INSERT INTO user_rate_limits (user_id, limit_ws_message_pm, limit_ws_join_pm, limit_ws_event_pm,
-			max_connections, daily_email_limit, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
-		ON CONFLICT (user_id) DO UPDATE SET
-			limit_ws_message_pm = COALESCE($2, user_rate_limits.limit_ws_message_pm),
-			limit_ws_join_pm = COALESCE($3, user_rate_limits.limit_ws_join_pm),
-			limit_ws_event_pm = COALESCE($4, user_rate_limits.limit_ws_event_pm),
-			max_connections = COALESCE($5, user_rate_limits.max_connections),
-			daily_email_limit = COALESCE($6, user_rate_limits.daily_email_limit),
+// UpdateUserRateLimits patches a user's limits. Every column is NOT NULL, so the
+// row is created first: an INSERT with the unset fields as NULL would be refused.
+func (r *adminRepository) UpdateUserRateLimits(ctx context.Context, userID, adminID uuid.UUID, update *models.UpdateUserRateLimitsRequest) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_rate_limits (user_id) VALUES ($1)
+		ON CONFLICT (user_id) DO NOTHING
+	`, userID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE user_rate_limits SET
+			limit_read_pm = COALESCE($2, limit_read_pm),
+			limit_write_pm = COALESCE($3, limit_write_pm),
+			limit_bulk_pm = COALESCE($4, limit_bulk_pm),
+			limit_unibox_pm = COALESCE($5, limit_unibox_pm),
+			limit_analytics_pm = COALESCE($6, limit_analytics_pm),
+			limit_api_calls_daily = COALESCE($7, limit_api_calls_daily),
+			limit_bulk_ops_daily = COALESCE($8, limit_bulk_ops_daily),
+			limit_ws_message_pm = COALESCE($9, limit_ws_message_pm),
+			limit_ws_join_pm = COALESCE($10, limit_ws_join_pm),
+			limit_ws_event_pm = COALESCE($11, limit_ws_event_pm),
+			max_connections = COALESCE($12, max_connections),
+			notes = COALESCE($13, notes),
+			updated_by = $14,
 			updated_at = NOW()
-	`
-	_, err := r.db.Exec(ctx, query, userID,
-		update.LimitWSMessagePM, update.LimitWSJoinPM, update.LimitWSEventPM,
-		update.MaxConnections, update.DailyEmailLimit,
-	)
-	return err
+		WHERE user_id = $1
+	`,
+		userID, update.LimitReadPM, update.LimitWritePM, update.LimitBulkPM,
+		update.LimitUniboxPM, update.LimitAnalyticsPM, update.LimitAPICallsDaily,
+		update.LimitBulkOpsDaily, update.LimitWSMessagePM, update.LimitWSJoinPM,
+		update.LimitWSEventPM, update.MaxConnections, update.Notes, adminID,
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 // SearchMailboxesForAdmin lists connected mailboxes platform-wide with
