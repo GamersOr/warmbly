@@ -22,7 +22,9 @@ const tree = [
 
 const lines = [
   { kind: 'cmd', text: 'git clone https://github.com/warmbly/warmbly.git' },
-  { kind: 'cmd', text: 'make up' },
+  // cd is part of the command: without it make up runs in the parent
+  // directory, finds no Makefile, and self-host startup fails.
+  { kind: 'cmd', text: 'cd warmbly && make up' },
   { kind: 'ok', text: 'Warmbly is live on http://localhost:8080' },
   { kind: 'caret' },
 ];
