@@ -2,10 +2,15 @@ defmodule Realtime.RateLimiter do
   @moduledoc """
   Redis-backed rate limiting with sliding window algorithm.
 
-  Supports three categories:
+  Supports four categories:
   - `ws_message`: Messages sent to client (120/min default)
+  - `ws_connect`: Socket handshakes (30/min default)
   - `ws_join`: Channel join attempts (30/min default)
   - `ws_event`: Client-sent events (60/min default)
+
+  `ws_connect` and `ws_join` are separate buckets on purpose: they used to share
+  one, so a reconnect storm spent the budget a client then needed to rejoin its
+  topics with (and vice versa).
 
   Implements fail-open behavior - if Redis is unavailable,
   rate limiting is bypassed to prevent service disruption.
@@ -17,6 +22,7 @@ defmodule Realtime.RateLimiter do
 
   @categories %{
     ws_message: 120,
+    ws_connect: 30,
     ws_join: 30,
     ws_event: 60
   }
@@ -41,7 +47,7 @@ defmodule Realtime.RateLimiter do
     burst_limit = trunc(limit * @burst_multiplier)
     key = rate_limit_key(user_id, category)
 
-    case Redis.incr_with_ttl(key, @window_seconds) do
+    case counter().incr_with_ttl(key, @window_seconds) do
       nil ->
         # Redis unavailable, fail open
         Logger.debug("Rate limiter: Redis unavailable, allowing request")
@@ -50,10 +56,8 @@ defmodule Realtime.RateLimiter do
       count when count <= burst_limit ->
         {:ok, burst_limit - count}
 
-      count ->
-        # Calculate retry after based on how far over the limit we are
-        retry_after_ms = calculate_retry_after(count, burst_limit)
-        {:error, :rate_limited, retry_after_ms}
+      _count ->
+        {:error, :rate_limited, retry_after_ms()}
     end
   end
 
@@ -101,6 +105,7 @@ defmodule Realtime.RateLimiter do
     config_key =
       case category do
         :ws_message -> :rate_limit_ws_message
+        :ws_connect -> :rate_limit_ws_connect
         :ws_join -> :rate_limit_ws_join
         :ws_event -> :rate_limit_ws_event
         _ -> nil
@@ -124,19 +129,23 @@ defmodule Realtime.RateLimiter do
 
   # Private functions
 
+  # The counter backend is swappable so the limiting logic can be exercised
+  # without a live Redis (tests, and any future in-memory single-node mode).
+  defp counter, do: Application.get_env(:realtime, :rate_limit_counter, Redis)
+
   defp rate_limit_key(user_id, category) do
-    # Use minute-based bucket for sliding window
+    # Fixed window: the bucket is the wall-clock minute.
     minute = div(System.system_time(:second), 60)
     "rl:ws:#{user_id}:#{category}:#{minute}"
   end
 
-  defp calculate_retry_after(current_count, burst_limit) do
-    # Calculate time until the oldest request expires
-    # In a sliding window, we wait until the window shifts
-    overage = current_count - burst_limit
-    base_wait = @window_seconds * 1000
-
-    # Scale wait time based on overage (more overage = longer wait)
-    min(base_wait, div(base_wait, max(1, overage)))
+  # Milliseconds until the current bucket rolls over, which is exactly when
+  # budget is available again. The old version scaled the wait by how far over
+  # the limit the caller was and got it backwards: the worst offender was told
+  # to come back SOONEST (60s/overage), so a client honouring the hint retried
+  # hardest at the moment it was least welcome.
+  defp retry_after_ms do
+    window_ms = @window_seconds * 1000
+    window_ms - rem(System.system_time(:millisecond), window_ms)
   end
 end

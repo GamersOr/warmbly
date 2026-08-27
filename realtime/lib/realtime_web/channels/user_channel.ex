@@ -14,16 +14,23 @@ defmodule RealtimeWeb.UserChannel do
 
   alias Realtime.Connections
   alias Realtime.RateLimiter
+  alias RealtimeWeb.ChannelGuard
 
   @impl true
   def join("user:" <> user_id, _params, socket) do
-    # Users can only join their own channel
-    if socket.assigns.user_id == user_id do
-      Logger.debug("User #{user_id} joined user channel")
-      send(self(), :after_join)
-      {:ok, socket}
-    else
-      {:error, %{reason: "unauthorized"}}
+    case ChannelGuard.check_join(socket) do
+      {:error, payload} ->
+        {:error, payload}
+
+      :ok ->
+        # Users can only join their own channel
+        if socket.assigns.user_id == user_id do
+          Logger.debug("User #{user_id} joined user channel")
+          send(self(), :after_join)
+          {:ok, socket}
+        else
+          ChannelGuard.join_error("unauthorized")
+        end
     end
   end
 

@@ -39,7 +39,7 @@ After connecting, join one or more topics with a `phx_join` message:
 | `org:<org_id>` | Organization-wide events | Requires membership; events are filtered by your member permissions |
 | `campaign:<campaign_id>` | One campaign's activity | Requires `view_campaigns` |
 | `account:<account_id>` | One mailbox's sync and warmup events | Requires `manage_emails` |
-| `bulk:<operation_id>` | Progress of one bulk operation | Import/export progress |
+| `bulk:<operation_id>` | Progress of one bulk operation | Import/export progress; only the user who started the operation receives its events |
 
 Events arrive as channel messages whose event name is the event type, for example `EMAIL_SENT`, `EMAIL_OPENED`, `EMAIL_REPLIED`, `EMAIL_RECEIVED`, `AI_DRAFT_READY`, `CAMPAIGN_COMPLETED`, `TASK_PROGRESS`, `ACCOUNT_HEALTH_CHANGED`, `ACCOUNT_SYNC_STATE`, `AUDIT_CREATED`, `AUTOMATION_RUN`, `MEETING_BOOKED`, `NOTIFICATION_CREATED`. Payloads always include `event_type` and a timestamp, plus the relevant ids (`campaign_id`, `contact_id`, `thread_id`, and so on).
 
@@ -290,11 +290,30 @@ The realtime service protects itself against connection spam. All limits are per
 | --- | --- |
 | Concurrent connections | 10 (plan-dependent) |
 | Concurrent connections per IP | 50 |
+| Socket handshakes | 30/minute |
 | Channel joins | 30/minute |
 | Client-sent events (including `presence:update`) | 60/minute |
 | Server-to-client messages | 120/minute |
 
+Handshakes and channel joins draw on separate budgets, so a reconnect storm does not spend the allowance a client then needs to rejoin its topics with. Every limit allows a burst of 1.5x its per-minute figure before refusing.
+
 When a client-sent event is throttled you receive an error reply with `reason: "rate_limited"` and a `retry_after_ms` hint. When outbound delivery is throttled the channel pushes a `rate_limited` message instead of the event.
+
+A `phx_join` over the join budget is refused the same way, with `code: 4007` and its own `retry_after_ms`:
+
+```json
+{
+  "status": "error",
+  "response": {
+    "code": 4007,
+    "reason": "rate_limited",
+    "category": "ws_join",
+    "retry_after_ms": 21400
+  }
+}
+```
+
+The socket stays open, so the right response is to wait out `retry_after_ms` and send the join again, not to reconnect. `retry_after_ms` is the time until the current minute's budget resets, so retrying earlier only spends another refusal. Treat every other refusal reason as final and stop retrying that topic.
 
 Ephemeral [live-collaboration](#live-collaboration) frames (`live:cursor`, `live:node`, `live:select`, `live:patch`) are exempt from the client-event budget above: they are bounded by a separate small per-socket burst limit, and over-budget frames are dropped silently rather than rejected.
 
@@ -303,7 +322,7 @@ Ephemeral [live-collaboration](#live-collaboration) frames (`live:cursor`, `live
 A connection can be refused at two points, and the two surface differently today:
 
 - **Connect-level** (authentication, the realtime permission, the IP allowlist, the rate limit, the connection cap): the WebSocket upgrade is refused at the HTTP layer. The handshake returns an **HTTP 403** carrying the reason, and the client observes a failed upgrade rather than an application close frame.
-- **Post-join** (a `phx_join` that fails after the socket is open, for example a channel you may not see): the join reply comes back with `status: "error"` and a structured error object `{ code, reason }` in its `response`.
+- **Post-join** (a `phx_join` that fails after the socket is open, for example a channel you may not see): the join reply comes back with `status: "error"` and a structured error object `{ code, reason }` in its `response`. `reason` is a stable slug naming the specific refusal (`not_a_member`, `campaign_not_found`, `rate_limited`, ...); `code` is the coarse class to branch on.
 
 Both paths use the same reason codes:
 
@@ -311,9 +330,10 @@ Both paths use the same reason codes:
 | --- | --- | --- |
 | 4003 | Not authenticated (token missing) | Add a valid `token` to the connection URL |
 | 4004 | Authentication failed: token expired, or invalid key | Re-mint the token (or check the key), then reconnect |
-| 4007 | Rate limited | Back off and retry |
+| 4005 | Malformed topic, for example an id that is not a UUID | Fix the topic; retrying will not help |
+| 4007 | Rate limited | Wait out `retry_after_ms`, then retry |
 | 4009 | Connection limit exceeded | Reduce concurrent sockets |
-| 4010 | Permission denied, or IP not allowed | Grant `REALTIME_SUBSCRIBE` (or the realtime scope), or fix the IP allowlist |
+| 4010 | Permission denied, not a member, or no such record | Do not retry this topic |
 
 Because connect-level rejections are an HTTP 403 and not a WebSocket close frame today, a client cannot branch on the connect-level code programmatically: treat any failed upgrade as "re-mint the token if it expired, otherwise back off". Post-join rejections are already machine-readable through `{ code, reason }`. Surfacing connect-level reasons as application close codes too is planned.
 
@@ -328,5 +348,6 @@ The buffer is not an infinite log. It holds roughly the most recent events per o
 - Reuse one connection per process and multiplex channels over it instead of opening one socket per topic.
 - Pass `intents` so you only receive (and pay the message-rate budget for) the events you act on.
 - Reconnect with exponential backoff; the limits above treat reconnect storms the same as connection spam.
+- Back off on rejoins too, and hold one subscription per topic rather than one per component. A client that tears a channel down and rejoins it on every render will exhaust the join budget in seconds.
 - After a reconnect, resume with your last `seq` instead of refetching everything; only fall back to a full REST resync on `resume_failed`.
 - Treat event payloads as invalidation signals (they carry ids, not full state) and refetch the resource over the REST API when you need its current contents.

@@ -24,6 +24,7 @@ defmodule RealtimeWeb.OrgChannel do
   alias Realtime.Auth
   alias Realtime.Connections
   alias Realtime.RateLimiter
+  alias RealtimeWeb.ChannelGuard
   alias RealtimeWeb.Presence
 
   @presence_actions ~w(viewing editing replying idle)
@@ -41,6 +42,15 @@ defmodule RealtimeWeb.OrgChannel do
 
   @impl true
   def join("org:" <> org_id, params, socket) do
+    # Throttle before the membership lookup: that query is what a rejoin loop
+    # turns into database load.
+    case ChannelGuard.check_join(socket) do
+      {:error, payload} -> {:error, payload}
+      :ok -> authorize_join(org_id, params, socket)
+    end
+  end
+
+  defp authorize_join(org_id, params, socket) do
     user_id = socket.assigns.user_id
 
     case Auth.check_org_membership(user_id, org_id) do
@@ -94,9 +104,7 @@ defmodule RealtimeWeb.OrgChannel do
   # Structured join rejection the client can branch on: a numeric `code`
   # (Auth.error_code/1) plus a human-readable `reason` (Auth.error_message/1),
   # mirroring the socket-level auth error shape.
-  defp join_error(reason) do
-    {:error, %{code: Auth.error_code(reason), reason: Auth.error_message(reason)}}
-  end
+  defp join_error(reason), do: ChannelGuard.join_error(reason)
 
   @impl true
   def handle_info(:after_join, socket) do

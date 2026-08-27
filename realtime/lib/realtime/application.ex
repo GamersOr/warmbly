@@ -50,7 +50,7 @@ defmodule Realtime.Application do
     )
 
     Logger.info(
-      "Rate limits: message=#{Application.get_env(:realtime, :rate_limit_ws_message, 120)}/min, join=#{Application.get_env(:realtime, :rate_limit_ws_join, 30)}/min, event=#{Application.get_env(:realtime, :rate_limit_ws_event, 60)}/min"
+      "Rate limits: message=#{Application.get_env(:realtime, :rate_limit_ws_message, 120)}/min, connect=#{Application.get_env(:realtime, :rate_limit_ws_connect, 30)}/min, join=#{Application.get_env(:realtime, :rate_limit_ws_join, 30)}/min, event=#{Application.get_env(:realtime, :rate_limit_ws_event, 60)}/min"
     )
 
     Supervisor.start_link(children, opts)

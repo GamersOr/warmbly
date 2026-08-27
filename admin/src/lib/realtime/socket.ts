@@ -28,7 +28,18 @@ interface PhoenixMessage {
 const TOPIC = "admin:platform";
 const HEARTBEAT_INTERVAL = 25_000; // under typical 60s idle proxy timeouts
 const HEARTBEAT_TIMEOUT = 8_000; // drop + reconnect if a heartbeat isn't answered
-const REJOIN_DELAY = 1_000; // channel crashed but socket lives: rejoin after a beat
+// Channel crashed, or its join was refused transiently, but the socket lives:
+// rejoin on a backoff. Indexed by consecutive attempt; clamps at the last entry.
+const REJOIN_SCHEDULE = [1_000, 2_000, 5_000, 10_000, 20_000, 30_000];
+const REJOIN_MAX_ATTEMPTS = 8;
+// A channel that has not needed a rejoin for this long starts its backoff over.
+// Resetting it on a successful join instead would make the backoff useless
+// against the case it exists for — a channel that joins, crashes, joins,
+// crashes — because every crash is preceded by a success.
+const REJOIN_RESET_MS = 30_000;
+// Bounds for a server-supplied retry_after_ms, in case it is missing or absurd.
+const JOIN_RETRY_MIN_MS = 1_000;
+const JOIN_RETRY_MAX_MS = 60_000;
 // Retry almost immediately first, then ramp; each delay gets ±25% jitter.
 const RECONNECT_SCHEDULE = [120, 350, 800, 1500, 3000, 5000, 10000];
 
@@ -59,6 +70,8 @@ let status: RealtimeStatus = "disconnected";
 let refCounter = 0;
 let joinRef = "";
 let reconnectAttempt = 0;
+let rejoinAttempt = 0;
+let lastRejoinAt = 0;
 let connecting = false; // guards the async URL fetch window before ws exists
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let rejoinTimer: ReturnType<typeof setTimeout> | null = null;
@@ -157,13 +170,26 @@ function scheduleReconnect() {
     }, delay);
 }
 
-function scheduleRejoin() {
+function scheduleRejoin(delayMs?: number) {
     if (!started || rejoinTimer) return;
+    const now = Date.now();
+    if (now - lastRejoinAt >= REJOIN_RESET_MS) rejoinAttempt = 0;
+    if (rejoinAttempt >= REJOIN_MAX_ATTEMPTS) {
+        // Give up rather than become a join loop of our own; `wake()` (focus or
+        // network back) is the way out.
+        setStatus("disconnected");
+        return;
+    }
+    const base = delayMs ?? REJOIN_SCHEDULE[Math.min(rejoinAttempt, REJOIN_SCHEDULE.length - 1)];
+    // Jitter upward only: retrying early just spends another refusal.
+    const delay = Math.round(base * (1 + Math.random() * 0.25));
+    rejoinAttempt += 1;
+    lastRejoinAt = now;
     rejoinTimer = setTimeout(() => {
         rejoinTimer = null;
         if (ws?.readyState === WebSocket.OPEN) joinChannel();
         else scheduleReconnect();
-    }, REJOIN_DELAY);
+    }, delay);
 }
 
 function handleMessage(raw: string) {
@@ -184,15 +210,39 @@ function handleMessage(raw: string) {
                 heartbeatWatchdog = null;
             }
         } else if (topic === TOPIC && msg.ref === joinRef) {
-            const st = (payload as { status?: string }).status;
-            if (st !== "ok") {
-                // Refused join (likely an expired token URL): reconnect with a
-                // freshly minted URL instead of spinning on the dead socket.
-                try {
-                    ws?.close();
-                } catch {
-                    /* ignore */
-                }
+            const reply = payload as {
+                status?: string;
+                response?: { reason?: string; retry_after_ms?: number };
+            };
+
+            if (reply.status === "ok") {
+                // A joined channel is what "connected" means here. Resetting the
+                // backoff on socket open alone turned a join the server keeps
+                // refusing into an endless ~120ms connect/refuse/close loop.
+                reconnectAttempt = 0;
+                setStatus("connected");
+                return;
+            }
+
+            const response = reply.response ?? {};
+            if (response.reason === "rate_limited") {
+                // Throttled: the socket is fine, so wait out the server's hint
+                // and rejoin instead of tearing the connection down.
+                const hint = Number(response.retry_after_ms);
+                scheduleRejoin(
+                    Number.isFinite(hint)
+                        ? Math.min(Math.max(hint, JOIN_RETRY_MIN_MS), JOIN_RETRY_MAX_MS)
+                        : JOIN_RETRY_MIN_MS,
+                );
+                return;
+            }
+
+            // Anything else is most likely an expired token URL: reconnect with
+            // a freshly minted one instead of spinning on the dead socket.
+            try {
+                ws?.close();
+            } catch {
+                /* ignore */
             }
         }
         return;
@@ -276,8 +326,7 @@ async function connect(): Promise<void> {
 
     socket.onopen = () => {
         if (socket !== ws) return;
-        reconnectAttempt = 0;
-        setStatus("connected");
+        // Stay "connecting" until the channel is actually joined.
         startHeartbeat();
         joinChannel();
     };
@@ -319,6 +368,8 @@ function wake() {
         reconnectTimer = null;
     }
     reconnectAttempt = 0;
+    rejoinAttempt = 0;
+    lastRejoinAt = 0;
     void connect();
 }
 
@@ -327,6 +378,8 @@ export function startRealtime() {
     started = true;
     epoch += 1;
     reconnectAttempt = 0;
+    rejoinAttempt = 0;
+    lastRejoinAt = 0;
     window.addEventListener("online", wake);
     window.addEventListener("focus", wake);
     void connect();

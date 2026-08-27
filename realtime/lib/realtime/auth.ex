@@ -118,6 +118,7 @@ defmodule Realtime.Auth do
   def error_code(:ip_not_allowed), do: 4010
   def error_code(:not_a_member), do: 4010
   def error_code(:forbidden), do: 4010
+  def error_code(:invalid_topic), do: 4005
   def error_code(:rate_limited), do: 4007
   def error_code(:limit_exceeded), do: 4009
   def error_code(_), do: 4004
@@ -139,6 +140,7 @@ defmodule Realtime.Auth do
   def error_message(:database_error), do: "Authentication failed"
   def error_message(:permission_denied), do: "Permission denied"
   def error_message(:ip_not_allowed), do: "IP address not allowed"
+  def error_message(:invalid_topic), do: "Invalid channel topic"
   def error_message(:rate_limited), do: "Rate limited"
   def error_message(:limit_exceeded), do: "Connection limit exceeded"
   def error_message(:not_a_member), do: "Not a member of this organization"

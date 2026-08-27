@@ -12,9 +12,19 @@ defmodule RealtimeWeb.AccountChannel do
 
   alias Realtime.Auth
   alias Realtime.RateLimiter
+  alias RealtimeWeb.ChannelGuard
 
   @impl true
   def join("account:" <> account_id, _params, socket) do
+    # Throttle before the access lookup: that query is what a rejoin loop turns
+    # into database load.
+    case ChannelGuard.check_join(socket) do
+      {:error, payload} -> {:error, payload}
+      :ok -> authorize_join(account_id, socket)
+    end
+  end
+
+  defp authorize_join(account_id, socket) do
     if valid_uuid?(account_id) do
       user_id = socket.assigns.user_id
 
@@ -32,20 +42,20 @@ defmodule RealtimeWeb.AccountChannel do
           {:ok, socket}
 
         {:error, :not_found} ->
-          {:error, %{reason: "account_not_found"}}
+          ChannelGuard.join_error("account_not_found")
 
         {:error, :forbidden} ->
-          {:error, %{reason: "forbidden"}}
+          ChannelGuard.join_error("forbidden")
 
         {:error, :not_a_member} ->
-          {:error, %{reason: "not_a_member"}}
+          ChannelGuard.join_error("not_a_member")
 
         {:error, reason} ->
           Logger.warning("Failed to join account channel: #{inspect(reason)}")
-          {:error, %{reason: to_string(reason)}}
+          ChannelGuard.join_error(to_string(reason))
       end
     else
-      {:error, %{reason: "invalid_account_id"}}
+      ChannelGuard.join_error("invalid_account_id", :invalid_topic)
     end
   end
 
