@@ -26,14 +26,14 @@ const { class: className = '', showWaitlist = true } = Astro.props;
     <div class="min-w-0">
       <div class="text-[10.5px] uppercase tracking-[0.18em] font-mono text-muted-foreground mb-1.5">Self-hosting and the warmup pool</div>
       <p class="text-[14px] text-foreground/80 leading-relaxed">
-        The shared warmup pool runs on Warmbly Cloud. It works because a large base of vetted mailboxes send and reply to each other, and any mailbox that starts landing in spam gets quarantined. A self-hosted instance starts with an empty pool, so warmup has no healthy partners to exchange mail with. To run your own pool you need many real, monitored mailboxes and the ongoing work to keep them clean.
+        The shared warmup pool runs on Warmbly Cloud, and self-hosted instances connect to it too. It works because a large base of vetted mailboxes send and reply to each other, and any mailbox that starts landing in spam gets quarantined, so pool quality holds no matter where your instance runs.
       </p>
       <p class="mt-2.5 text-[14px] text-foreground/80 leading-relaxed">
-        Everything else runs on your own infrastructure: sending, sequences, the unified inbox, CRM, tracking, and the API.
+        There is a free tier to start warming, and everything else runs on your own infrastructure: sending, sequences, the unified inbox, CRM, tracking, and the API.
       </p>
       {showWaitlist && (
         <a href="https://app.warmbly.com" class="mt-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-[#0369a1] hover:text-[#075985]">
-          Want the pool without running the mailboxes? Join the cloud waitlist
+          Connect your instance to the pool
           <Icon name="arrowRight" size={12} />
         </a>
       )}
