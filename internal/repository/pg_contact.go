@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,6 +112,26 @@ func parseUUIDList(raw []string) ([]uuid.UUID, *errx.Error) {
 	return out, nil
 }
 
+// normalizeCustomFields trims and collapses whitespace in every custom-field
+// key, then rejects the map if any key is still unusable. Keys are user data
+// (CSV headers, API payloads) so " Company Mobile" and "Company Mobile" must
+// land on the same JSONB key instead of splitting the field in two.
+func normalizeCustomFields(in map[string]string) (map[string]string, *errx.Error) {
+	if len(in) == 0 {
+		return map[string]string{}, nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		key := utils.NormalizeJSONKey(k)
+		if !utils.IsValidJSONKey(key) {
+			return nil, errx.New(errx.BadRequest,
+				"invalid custom field name "+strconv.Quote(k)+": "+utils.JSONKeyRules)
+		}
+		out[key] = v
+	}
+	return out, nil
+}
+
 func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.UUID, contacts []models.AddContact) ([]models.Contact, *errx.Error) {
 	// Validate userID up front. The handler should have caught a
 	// malformed JWT subject, but a defensive check here keeps any
@@ -141,11 +162,11 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		if lead.CustomFields == nil {
 			lead.CustomFields = map[string]string{}
 		}
-		for key := range lead.CustomFields {
-			if !utils.IsValidJSONKey(key) {
-				return nil, errx.ErrJSONKey
-			}
+		fields, xerr := normalizeCustomFields(lead.CustomFields)
+		if xerr != nil {
+			return nil, xerr
 		}
+		lead.CustomFields = fields
 
 		// Approximate size check using JSON payload.
 		data, jerr := json.Marshal(lead)
@@ -613,7 +634,8 @@ func (r *contactRepository) Search(
 	// Custom field filters (JSONB)
 	// -----------------------------
 	for _, f := range filters.CustomFieldFilters {
-		if f.Name == "" || f.Value == "" || !utils.IsValidJSONKey(f.Name) {
+		name := utils.NormalizeJSONKey(f.Name)
+		if name == "" || f.Value == "" || !utils.IsValidJSONKey(name) {
 			continue
 		}
 		var op, val string
@@ -634,9 +656,11 @@ func (r *contactRepository) Search(
 			op = "ILIKE"
 			val = "%" + f.Value + "%"
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf(`c.custom_fields ->> '%s' %s $%d`, f.Name, op, argIndex))
-		args = append(args, val)
-		argIndex++
+		// The key is a bound parameter, never interpolated: custom-field
+		// names are user data and now legitimately contain spaces.
+		whereClauses = append(whereClauses, fmt.Sprintf(`c.custom_fields ->> $%d::text %s $%d`, argIndex, op, argIndex+1))
+		args = append(args, name, val)
+		argIndex += 2
 	}
 
 	// -----------------------------
@@ -1384,17 +1408,16 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		argIndex++
 	}
 	if data.CustomFields != nil {
-		for key := range *data.CustomFields {
-			if !utils.IsValidJSONKey(key) {
-				return nil, errx.ErrJSONKey
-			}
+		incoming, xerr := normalizeCustomFields(*data.CustomFields)
+		if xerr != nil {
+			return nil, xerr
 		}
 		// Merge existing custom_fields with updates
 		mergedFields := make(map[string]string)
 		for k, v := range c.CustomFields {
 			mergedFields[k] = v
 		}
-		for k, v := range *data.CustomFields {
+		for k, v := range incoming {
 			if v == "" {
 				delete(mergedFields, k) // Remove key if value is empty
 			} else {
@@ -1696,6 +1719,21 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 	}
 
 	for _, p := range data.Fields {
+		// Keys arrive from the UI's bulk field editor; normalize + reject the
+		// same way the single-contact writes do so a bulk edit cannot mint a
+		// field name nothing else in the product can address.
+		p.Key = utils.NormalizeJSONKey(p.Key)
+		if !utils.IsValidJSONKey(p.Key) {
+			return nil, errx.New(errx.BadRequest,
+				"invalid custom field name "+strconv.Quote(p.Key)+": "+utils.JSONKeyRules)
+		}
+		if p.Type == models.BulkRenameField {
+			p.Value = utils.NormalizeJSONKey(p.Value)
+			if !utils.IsValidJSONKey(p.Value) {
+				return nil, errx.New(errx.BadRequest,
+					"invalid custom field name "+strconv.Quote(p.Value)+": "+utils.JSONKeyRules)
+			}
+		}
 		switch p.Type {
 		case models.BulkAddField:
 			// jsonb_build_object is variadic "any", so it gives Postgres nothing
