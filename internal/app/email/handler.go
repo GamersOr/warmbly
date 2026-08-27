@@ -287,9 +287,7 @@ func (s *emailService) removeFromAllWarmupPools(ctx context.Context, account *mo
 		return
 	}
 
-	for _, poolType := range []string{"premium", "free"} {
-		_ = s.warmupService.RemovePoolMembership(ctx, account.ID, poolType)
-	}
+	_ = s.warmupService.RemoveFromAllPools(ctx, account.ID)
 }
 
 func (s *emailService) canUseWarmupPool(ctx context.Context, account *models.Email) bool {

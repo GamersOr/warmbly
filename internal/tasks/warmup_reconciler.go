@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
@@ -38,10 +39,12 @@ func (s *tasksService) ReconcileWarmupSchedules(ctx context.Context, limit int) 
 			continue
 		}
 		if s.featureGate != nil {
-			canWarmup, _ := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
+			canWarmup, xerr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
 			if !canWarmup {
-				if s.warmupHealth != nil {
-					_ = s.warmupHealth.RemovePoolMembership(ctx, account.ID, s.resolveWarmupPoolType(ctx, account))
+				// Only a definite "not entitled" evicts; an unreadable
+				// subscription leaves the membership alone.
+				if s.warmupHealth != nil && xerr == nil {
+					_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
 				}
 				continue
 			}
@@ -86,9 +89,97 @@ func (s *tasksService) reconcileOnce(ctx context.Context) {
 	seeded, err := s.ReconcileWarmupSchedules(rctx, warmupReconcileBatch)
 	if err != nil {
 		log.Warn().Err(err).Msg("warmup reconcile pass failed")
-		return
-	}
-	if seeded > 0 {
+	} else if seeded > 0 {
 		log.Info().Int("seeded", seeded).Msg("warmup reconcile seeded chains")
 	}
+
+	moved, removed, err := s.ReconcileWarmupPoolMembership(rctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("warmup pool membership reconcile pass failed")
+		return
+	}
+	if moved > 0 || removed > 0 {
+		log.Info().Int("moved", moved).Int("removed", removed).Msg("warmup pool membership reconciled")
+	}
+}
+
+// ReconcileWarmupPoolMembership walks every warmup pool participant and makes
+// its membership agree with the mailbox's entitlement: a mailbox that may no
+// longer warm leaves warmup, and one whose tier changed is moved to the pool
+// that tier belongs to.
+//
+// The warmup task fixes membership too, but only for mailboxes it still runs
+// for. A mailbox that stops warming (warmup switched off, campaign finished,
+// subscription lapsed) has no chain and is not a schedule candidate, so nothing
+// would ever revisit it and its row would sit in the pool forever (issue #211).
+// This is the pass that ends that.
+//
+// Roles are left alone: a mailbox demoted to recipient_only (failing domain
+// auth, say) must not be quietly promoted back by a sweep that knows nothing
+// about why it was demoted.
+func (s *tasksService) ReconcileWarmupPoolMembership(ctx context.Context) (moved int, removed int, err error) {
+	if s.warmupRepo == nil || s.warmupHealth == nil {
+		return 0, 0, nil
+	}
+
+	ids, err := s.warmupRepo.GetAllParticipantAccountIDs(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// One subscription lookup per organization, not per mailbox: a workspace
+	// with fifty inboxes is one question asked fifty times otherwise.
+	entitled := map[uuid.UUID]bool{}
+
+	for _, id := range ids {
+		account, xerr := s.emailRepo.GetByID(ctx, id)
+		if xerr != nil {
+			continue
+		}
+		if account == nil || account.Status != "active" || account.OrganizationID == nil {
+			// No mailbox, no active mailbox, or no workspace to check an
+			// entitlement against: it does not belong in a shared pool.
+			if xerr := s.warmupHealth.RemoveFromAllPools(ctx, id); xerr == nil {
+				removed++
+			}
+			continue
+		}
+
+		if s.featureGate != nil {
+			ok, cached := entitled[*account.OrganizationID]
+			if !cached {
+				canWarmup, xerr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
+				if xerr != nil {
+					// Entitlement unknown: leave this mailbox exactly as it is.
+					continue
+				}
+				ok = canWarmup
+				entitled[*account.OrganizationID] = ok
+			}
+			if !ok {
+				if xerr := s.warmupHealth.RemoveFromAllPools(ctx, account.ID); xerr == nil {
+					removed++
+					log.Info().
+						Str("email_account_id", account.ID.String()).
+						Msg("warmup reconcile: mailbox left warmup, organization is no longer entitled")
+				}
+				continue
+			}
+		}
+
+		poolType := s.resolveWarmupPoolType(ctx, account)
+		didMove, xerr := s.warmupHealth.MovePoolMembership(ctx, account.ID, poolType)
+		if xerr != nil {
+			continue
+		}
+		if didMove {
+			moved++
+			log.Info().
+				Str("email_account_id", account.ID.String()).
+				Str("pool_type", poolType).
+				Msg("warmup reconcile: mailbox moved to the pool its tier belongs to")
+		}
+	}
+
+	return moved, removed, nil
 }
