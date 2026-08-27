@@ -86,10 +86,8 @@ export function RealtimeManager({ children }: { children: React.ReactNode }) {
     }
   }, [isConnected, user?.id, joinChannel, leaveChannel, addJoinedChannel, removeJoinedChannel])
 
-  // Auto-join/leave org channel on org switch. Balanced with a cleanup, like
-  // the user channel above: the effect re-runs on every disconnect/reconnect
-  // and on every org switch, so without one the join outnumbered the leave and
-  // the provider's holder count for a workspace never came back to zero.
+  // Auto-join/leave org channel on org switch. Needs the cleanup: the effect
+  // re-runs on every reconnect, so without one the join never gets its leave.
   useEffect(() => {
     if (!isConnected || !currentOrg?.id) return
 

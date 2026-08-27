@@ -117,10 +117,8 @@ describe('RealtimeManager channel lifecycle', () => {
     })
 
     it('rejoins the org channel once per reconnect and keeps its subscribers', async () => {
-        // Regression: the org effect joined with no cleanup, so its leave never
-        // balanced the join. Giving it one means a drop now leaves the channel
-        // while the socket is down, which must not strand the rejoin or take
-        // other surfaces' handlers with it.
+        // The cleanup leaves while the socket is down; that must not strand the
+        // rejoin or take other surfaces' handlers with it.
         const onEvent = vi.fn()
         await mount(<OrgListener orgId={ORG_A} onEvent={onEvent} />)
         await ackPendingJoins()
@@ -158,9 +156,8 @@ describe('RealtimeManager channel lifecycle', () => {
     })
 
     it('really leaves the previous workspace after any number of reconnects', async () => {
-        // The join refcount is what makes a switch actually leave, so an
-        // unbalanced join on every reconnect would pin the old org's channel
-        // open and keep feeding the user another workspace's events.
+        // An unbalanced join per reconnect would pin the old org's channel open
+        // and keep feeding the user another workspace's events.
         await mount()
         await ackPendingJoins()
 
@@ -178,10 +175,8 @@ describe('RealtimeManager channel lifecycle', () => {
     })
 
     it('joins the org channel once when the reconnect batches with the drop', async () => {
-        // The org channel comes back one of two ways depending on whether React
-        // flushed the disconnected render before the socket reopened: through
-        // rejoinChannels (it did not) or through the effect (it did). Either way
-        // it must be exactly one join, never zero and never two.
+        // Comes back via rejoinChannels or via the effect depending on whether
+        // React flushed the disconnected render; either way, exactly one join.
         const onEvent = vi.fn()
         await mount(<OrgListener orgId={ORG_A} onEvent={onEvent} />)
         await ackPendingJoins()
@@ -220,9 +215,7 @@ describe('RealtimeManager channel lifecycle', () => {
     })
 
     it('rejoins a page-owned channel alongside the org channel', async () => {
-        // The org and user channels come back through their effects; a channel
-        // owned by a page comes back through rejoinChannels. Both paths run on
-        // the same reconnect and must not double-join or lose handlers.
+        // Effect-driven rejoin and rejoinChannels both run on the same reconnect.
         const onEvent = vi.fn()
         await mount(<CampaignPanel onEvent={onEvent} />)
         await ackPendingJoins()

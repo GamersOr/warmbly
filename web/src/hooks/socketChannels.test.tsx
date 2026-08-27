@@ -181,9 +181,7 @@ describe('two surfaces holding the same topic', () => {
     })
 
     it('survives a drop while both hold it, then a single holder leaving', async () => {
-        // The concrete case: a campaign row and its detail drawer both hold the
-        // topic, the network blips, and then the drawer closes. The row must
-        // still be joined and still receiving.
+        // A campaign row and its drawer both hold the topic across a blip.
         const onRow = vi.fn()
         const onDrawer = vi.fn()
         function Wrapper({ drawer }: { drawer: boolean }) {
@@ -199,8 +197,7 @@ describe('two surfaces holding the same topic', () => {
         env.ackJoin(env.lastJoin(TOPIC))
         await tick(1)
 
-        // Network blip: the socket dies, the provider brings a new one up and
-        // rejoins every topic the app still wants.
+        // The socket dies; the provider rejoins every topic still wanted.
         await act(async () => {
             env.instances[env.instances.length - 1].close()
         })
@@ -228,9 +225,8 @@ describe('two surfaces holding the same topic', () => {
     })
 
     it("keeps a listener's handler when a different surface leaves the topic", async () => {
-        // Regression: leaveChannel dropped the whole channel entry, and the
-        // entry owns the handler map, so every other subscriber on that topic
-        // was silently deafened and its unsubscribe closure orphaned.
+        // Regression: leaveChannel dropped the entry, and with it every other
+        // subscriber's handlers on that topic.
         const onEvent = vi.fn()
         function Wrapper({ joined }: { joined: boolean }) {
             return (

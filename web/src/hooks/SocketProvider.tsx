@@ -100,11 +100,9 @@ export default function SocketProvider({
     // 'closed', so a state-filtered rejoin skipped them all and the socket came
     // back with zero subscriptions (no events, no presence) until a reload.
     const desiredTopicsRef = useRef<Map<string, Record<string, unknown>>>(new Map());
-    // How many callers currently want each topic joined. Two surfaces can hold
-    // the same topic (a campaign row and its detail drawer), and the first to
-    // unmount must not take the channel out from under the second, so only the
-    // last holder out actually leaves. Kept beside the channel map rather than
-    // inside the entry because that entry is rebuilt on every join and rejoin.
+    // Holders per topic, so the first of two surfaces to unmount doesn't take
+    // the channel out from under the second. Kept outside the channel entry
+    // because that entry is rebuilt on every join and rejoin.
     const holdersRef = useRef<Map<string, number>>(new Map());
     // Distinguishes a close we caused (logout / unmount — don't reconnect) from
     // every other close (server idle-close, channel crash, network drop — do
@@ -396,9 +394,8 @@ export default function SocketProvider({
 
     // Join channel
     const joinChannel = useCallback((topic: string, params: Record<string, unknown> = {}) => {
-        // Count the holder BEFORE the already-joined bail-out below, or the
-        // second surface to ask for a live topic is never counted and the first
-        // one to unmount leaves the channel while it is still wanted.
+        // Must count before the already-joined bail-out below, or a second
+        // holder asking for a live topic is never counted at all.
         holdersRef.current.set(topic, (holdersRef.current.get(topic) ?? 0) + 1);
 
         // Remember the intent so a reconnect rejoins this topic even after its
@@ -468,9 +465,8 @@ export default function SocketProvider({
             });
         }
 
-        // Handlers belong to subscribeToChannel, not to the join: dropping the
-        // entry here took every other subscriber's registrations with it. Reset
-        // it in place and discard it only once nothing is listening either.
+        // The entry owns the handler map, so dropping it here took every other
+        // subscriber's registrations with it. Reset in place while any remain.
         if (channel.handlers.size === 0) {
             channelsRef.current.delete(topic);
         } else {
@@ -515,9 +511,9 @@ export default function SocketProvider({
             handlers?.delete(handler);
             if (handlers?.size !== 0) return;
             channel?.handlers.delete(event);
-            // Nothing listening and nobody holding the join: drop the entry
-            // leaveChannel kept alive for us. Read the live one — a join or a
-            // rejoin rebuilds the entry around the same handlers map.
+            // Nothing listening and nobody holding: drop the entry leaveChannel
+            // kept for us. Read the live one; a rejoin rebuilds it around the
+            // same handlers map.
             const current = channelsRef.current.get(topic);
             if (
                 current &&
