@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 )
 
@@ -178,7 +177,7 @@ func (c *Client) FetchMessage(ctx context.Context, folder, id string) (*GraphMes
 	u := graphBase + "/me/messages/" + url.PathEscape(id) + "?$select=" + url.QueryEscape(msgSelect)
 	resp, err := c.do(ctx, "GET", u, "", nil)
 	if err != nil {
-		return nil, errx.ErrMailServerUnreachable
+		return nil, transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {

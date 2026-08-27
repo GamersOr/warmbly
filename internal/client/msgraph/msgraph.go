@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -117,7 +118,7 @@ func (c *Client) doJSON(ctx context.Context, method, url string, in, out any) er
 
 	resp, err := c.do(ctx, method, url, contentType, body)
 	if err != nil {
-		return errx.ErrMailServerUnreachable
+		return transportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -129,4 +130,20 @@ func (c *Client) doJSON(ctx context.Context, method, url string, in, out any) er
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// transportError classifies a failure of the HTTP call itself. The client's
+// token source runs inside it, so a refresh token the provider has revoked
+// arrives here rather than as a status code; reporting that as "the mail server
+// could not be established" points the operator at the network and promises a
+// retry that can never succeed.
+func transportError(err error) *errx.MailError {
+	var retrieve *oauth2.RetrieveError
+	if errors.As(err, &retrieve) {
+		if retrieve.Response != nil && retrieve.Response.StatusCode >= 500 {
+			return errx.ErrMailServerUnreachable
+		}
+		return errx.ErrMailAuthenticationFailed
+	}
+	return errx.ErrMailServerUnreachable
 }
