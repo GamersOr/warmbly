@@ -202,7 +202,7 @@ func (r *warmupRepository) GetPoolByType(ctx context.Context, poolType string) (
 		&pool.CreatedAt,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 
@@ -378,7 +378,7 @@ func (r *warmupRepository) GetHealthState(ctx context.Context, accountID uuid.UU
 	var state string
 	var blockedUntil *time.Time
 	err := r.db.QueryRow(ctx, query, accountID).Scan(&state, &blockedUntil)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return models.WarmupHealthHealthy, nil, nil
 	}
 	if err != nil {
@@ -487,7 +487,8 @@ func (r *warmupRepository) GetParticipantHealth(ctx context.Context, accountID u
 			wpp.health_state,
 			wpp.last_health_score,
 			wpp.last_health_reason,
-			wpp.last_health_evaluated_at
+			wpp.last_health_evaluated_at,
+			wpp.health_signals_from
 		FROM warmup_pool_participants wpp
 		JOIN warmup_pools wp ON wp.id = wpp.pool_id
 		WHERE wpp.email_account_id = $1
@@ -510,8 +511,9 @@ func (r *warmupRepository) GetParticipantHealth(ctx context.Context, accountID u
 		&out.LastHealthScore,
 		&out.LastHealthReason,
 		&out.LastHealthEvaluatedAt,
+		&out.HealthSignalsFrom,
 	); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
@@ -521,25 +523,31 @@ func (r *warmupRepository) GetParticipantHealth(ctx context.Context, accountID u
 }
 
 func (r *warmupRepository) UpdateParticipantHealth(ctx context.Context, accountID uuid.UUID, state models.WarmupHealthState, blockedUntil *time.Time, reason string, score float64) error {
+	// Every parameter is cast explicitly. Left bare, Postgres deduced $1 as
+	// `character varying` from the health_state assignment and as `text` from the
+	// equality tests, and could not deduce $2 at all from IS NULL / IS DISTINCT
+	// FROM. It refused the whole statement with 42P08, so this UPDATE never ran
+	// for any account in any pool and no warmup health state was ever persisted
+	// (issue #195). Keep the casts.
 	query := `
 		UPDATE warmup_pool_participants
 		SET
-			health_state = $1,
-			blocked_until = $2,
+			health_state = $1::text,
+			blocked_until = $2::timestamptz,
 			blocked_at = CASE
-				WHEN $2 IS NOT NULL AND (blocked_at IS NULL OR blocked_until IS DISTINCT FROM $2) THEN NOW()
-				WHEN $2 IS NULL AND blocked_until IS NOT NULL THEN NULL
+				WHEN $2::timestamptz IS NOT NULL AND (blocked_at IS NULL OR blocked_until IS DISTINCT FROM $2::timestamptz) THEN NOW()
+				WHEN $2::timestamptz IS NULL AND blocked_until IS NOT NULL THEN NULL
 				ELSE blocked_at
 			END,
 			blocked_reason = CASE
-				WHEN $2 IS NOT NULL OR $1 = 'blocked' THEN $3
-				WHEN $1 = 'healthy' THEN NULL
-				ELSE COALESCE($3, blocked_reason)
+				WHEN $2::timestamptz IS NOT NULL OR $1::text = 'blocked' THEN $3::text
+				WHEN $1::text = 'healthy' THEN NULL
+				ELSE COALESCE($3::text, blocked_reason)
 			END,
-			last_health_score = $4,
-			last_health_reason = NULLIF($3, ''),
+			last_health_score = $4::double precision,
+			last_health_reason = NULLIF($3::text, ''),
 			last_health_evaluated_at = NOW()
-		WHERE email_account_id = $5
+		WHERE email_account_id = $5::uuid
 		  AND NOT (blocked_at IS NOT NULL AND blocked_until IS NULL AND health_state = 'blocked')
 	`
 	_, err := r.db.Exec(ctx, query, state, blockedUntil, reason, score, accountID)
@@ -1035,7 +1043,7 @@ func (r *warmupRepository) GetWarmupReceived(ctx context.Context, accountID, int
 	err := r.db.QueryRow(ctx, query, accountID, internalID).Scan(
 		&w.EmailAccountID, &w.InternalID, &w.MessageID, &w.SenderAccountID, &w.CreatedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1260,7 +1268,7 @@ func (r *warmupRepository) GetLatestReplyCandidate(ctx context.Context, senderAc
 		&candidate.ConversationID,
 		&candidate.ConversationTurn,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

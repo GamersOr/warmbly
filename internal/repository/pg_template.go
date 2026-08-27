@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -89,7 +90,7 @@ func (r *templateRepository) GetByID(ctx context.Context, orgID, templateID uuid
 		&t.UpdatedAt,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 
@@ -198,7 +199,7 @@ func (r *templateRepository) Update(ctx context.Context, orgID, templateID uuid.
 		&t.UpdatedAt,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 

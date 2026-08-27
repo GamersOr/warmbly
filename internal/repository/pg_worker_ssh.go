@@ -151,15 +151,19 @@ func (r *workerRepository) GetWorkerSSHCredentials(ctx context.Context, id uuid.
 }
 
 func (r *workerRepository) UpdateInstallState(ctx context.Context, id uuid.UUID, state models.WorkerInstallState, lastError string) error {
+	// $2 is pinned to text at every use and cast to the enum only at the
+	// assignment. Left bare, Postgres deduced worker_install_state from the
+	// column and text from the comparisons, refused the statement, and no
+	// install state was ever recorded.
 	_, err := r.db.Exec(ctx, `
 		UPDATE workers
-		SET install_state = $2,
-		    last_error = NULLIF($3, ''),
-		    active = CASE WHEN $2 = 'installed' THEN true
-		                  WHEN $2 IN ('uninstalled', 'error') THEN false
+		SET install_state = ($2::text)::worker_install_state,
+		    last_error = NULLIF($3::text, ''),
+		    active = CASE WHEN $2::text = 'installed' THEN true
+		                  WHEN $2::text IN ('uninstalled', 'error') THEN false
 		                  ELSE active END,
 		    updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1::uuid
 	`, id, state, lastError)
 	return err
 }
