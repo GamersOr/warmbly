@@ -96,17 +96,12 @@ type WarmupRepository interface {
 	GetPoolByType(ctx context.Context, poolType string) (*WarmupPool, error)
 	GetPoolParticipants(ctx context.Context, poolType string, excludeBlocked bool) ([]uuid.UUID, error)
 	GetPoolRecipientParticipants(ctx context.Context, poolType string, excludeBlocked bool) ([]uuid.UUID, error)
-	// MoveToPool puts the mailbox in exactly this pool: it joins, or moves an
-	// existing membership over, carrying the mailbox's reputation with it.
-	// One row per mailbox is a database invariant (migration 000097).
+	// MoveToPool joins this pool, or moves an existing membership over.
 	MoveToPool(ctx context.Context, poolID, accountID uuid.UUID, role string) error
-	// MoveExistingToPool moves a mailbox that is already a participant into
-	// this pool without changing its role, and does nothing for a mailbox that
-	// is in no pool. Reports whether a row actually moved.
+	// MoveExistingToPool moves an existing member, keeping its role; a mailbox in no pool stays out.
 	MoveExistingToPool(ctx context.Context, poolID, accountID uuid.UUID) (bool, error)
-	// LeaveAllPools removes the mailbox from warmup entirely. Removal is never
-	// pool-scoped: the caller cannot know which pool a mailbox whose
-	// entitlement just changed is actually sitting in (issue #211).
+	// LeaveAllPools removes the mailbox from warmup. Removal is never pool-scoped: the caller
+	// cannot know which pool a mailbox whose entitlement just changed is sitting in (issue #211).
 	LeaveAllPools(ctx context.Context, accountID uuid.UUID) error
 	BlockFromPool(ctx context.Context, accountID uuid.UUID, reason string) error
 	// GetHealthState returns the account's warmup health state plus its
@@ -117,8 +112,7 @@ type WarmupRepository interface {
 	UnblockFromPool(ctx context.Context, accountID uuid.UUID) error
 	IsInPool(ctx context.Context, accountID uuid.UUID, poolType string) (bool, error)
 	GetParticipantHealth(ctx context.Context, accountID uuid.UUID, poolType string) (*models.WarmupParticipantHealth, error)
-	// GetParticipantHealthForAccount returns the mailbox's participant row
-	// whatever pool it is in, or nil when it is in none.
+	// GetParticipantHealthForAccount returns the participant row whatever pool it is in.
 	GetParticipantHealthForAccount(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, error)
 	UpdateParticipantHealth(ctx context.Context, accountID uuid.UUID, state models.WarmupHealthState, blockedUntil *time.Time, reason string, score float64) error
 	CountSpamReportsSince(ctx context.Context, accountID uuid.UUID, since time.Time) (int, error)
@@ -317,13 +311,9 @@ func (r *warmupRepository) GetPoolRecipientParticipants(ctx context.Context, poo
 	return accountIDs, rows.Err()
 }
 
-// MoveToPool puts the mailbox in exactly this pool. The unique index on
-// email_account_id (migration 000097) makes the account the conflict target, so
-// a mailbox already in the other pool MOVES rather than gaining a second
-// membership: pool_id and role are overwritten and every reputation column
-// (spam score, health state, block, signal floor) rides along untouched.
-// Joining a pool can therefore never launder a penalty, and a mailbox whose
-// entitlement changed can never sit in two pools at once.
+// MoveToPool conflicts on the account, not the pool (unique index, migration 000097), so a
+// mailbox in the other pool moves and keeps every reputation column: changing pool cannot
+// launder a penalty, and no mailbox can hold two memberships.
 func (r *warmupRepository) MoveToPool(ctx context.Context, poolID, accountID uuid.UUID, role string) error {
 	query := `
 		INSERT INTO warmup_pool_participants (pool_id, email_account_id, joined_at, spam_score, participant_role)
@@ -337,9 +327,8 @@ func (r *warmupRepository) MoveToPool(ctx context.Context, poolID, accountID uui
 	return err
 }
 
-// MoveExistingToPool corrects the pool of a mailbox that is already a
-// participant, leaving its role alone. Used by the reconciler to repair drift
-// without promoting a mailbox that was deliberately demoted to recipient_only.
+// MoveExistingToPool corrects a member's pool and leaves its role alone, so the reconciler
+// cannot promote a mailbox that was deliberately demoted to recipient_only.
 func (r *warmupRepository) MoveExistingToPool(ctx context.Context, poolID, accountID uuid.UUID) (bool, error) {
 	query := `
 		UPDATE warmup_pool_participants
@@ -384,9 +373,8 @@ func (r *warmupRepository) BlockFromPool(ctx context.Context, accountID uuid.UUI
 	return err
 }
 
-// GetHealthState returns the account's current warmup health state and its
-// blocked_until, without the caller having to name a pool. A mailbox has one
-// participant row; the ordering keeps the worst state winning regardless.
+// GetHealthState returns the account's warmup health state and blocked_until without the
+// caller naming a pool. The ordering keeps the worst state winning.
 func (r *warmupRepository) GetHealthState(ctx context.Context, accountID uuid.UUID) (models.WarmupHealthState, *time.Time, error) {
 	query := `
 		SELECT health_state, blocked_until
@@ -487,9 +475,8 @@ func (r *warmupRepository) RecordSpamReport(ctx context.Context, report *SpamRep
 	return cmd.RowsAffected() > 0, nil
 }
 
-// GetSpamScore retrieves the spam score for an account. MAX, not SUM: the
-// score is the mailbox's, not the pool row's, and every writer of it is
-// account-scoped. Summing counted it once per membership (issue #211).
+// GetSpamScore reads the account's spam score. MAX, not SUM: the score is the mailbox's and
+// every writer of it is account-scoped, so summing counted it once per membership (issue #211).
 func (r *warmupRepository) GetSpamScore(ctx context.Context, accountID uuid.UUID) (int, error) {
 	query := `
 		SELECT COALESCE(MAX(spam_score), 0)
@@ -502,8 +489,7 @@ func (r *warmupRepository) GetSpamScore(ctx context.Context, accountID uuid.UUID
 	return score, err
 }
 
-// participantHealthSelect is the participant row every health read returns.
-// The two readers below differ only in whether the pool is pinned.
+// participantHealthSelect: the two readers below differ only in whether the pool is pinned.
 const participantHealthSelect = `
 		SELECT
 			wpp.pool_id,
@@ -523,10 +509,8 @@ const participantHealthSelect = `
 		JOIN warmup_pools wp ON wp.id = wpp.pool_id
 		WHERE wpp.email_account_id = $1`
 
-// GetParticipantHealthForAccount returns the mailbox's participant row from
-// whichever pool it is in. A mailbox is in at most one (migration 000097), so
-// this replaces probing the pools in turn and biasing toward whichever was
-// probed first.
+// GetParticipantHealthForAccount returns the participant row from whichever pool the mailbox
+// is in. Exact because a mailbox is in at most one (migration 000097).
 func (r *warmupRepository) GetParticipantHealthForAccount(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, error) {
 	return r.scanParticipantHealth(r.db.QueryRow(ctx, participantHealthSelect, accountID))
 }
@@ -691,11 +675,9 @@ func (r *warmupRepository) CountDeliveredByAccount(ctx context.Context, accountI
 	return count, err
 }
 
-// IncrementSpamScore increments the spam score for an account. Clamped to the
-// column's CHECK ceiling, or an already-noisy mailbox would fail the constraint
-// and silently keep its old score. A mailbox in no pool has no score to raise,
-// which is not an error: late signals about a mailbox that just left warmup are
-// normal.
+// IncrementSpamScore raises the account's spam score, clamped to the column's CHECK ceiling
+// (past it the UPDATE failed and every caller ignores that error). A mailbox in no pool has no
+// score to raise, which is normal for a late signal, not a failure.
 func (r *warmupRepository) IncrementSpamScore(ctx context.Context, accountID uuid.UUID, amount int) (int, error) {
 	query := `
 		UPDATE warmup_pool_participants

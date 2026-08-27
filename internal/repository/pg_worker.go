@@ -493,13 +493,9 @@ func (r *workerRepository) ClearEmailAccountWorker(ctx context.Context, emailAcc
 	return err
 }
 
-// UpdateEmailAccountWarmupPoolType updates the warmup pool type for an email
-// account and moves its warmup pool membership to match, in one transaction.
-// The column and the warmup_pool_participants row record the same fact, and a
-// tier move that updated only the column left the mailbox sitting in the pool
-// it used to belong to: a downgraded mailbox went on being handed to paying
-// customers as a warmup partner (issue #211). A mailbox that is in no pool
-// stays in none; joining is the warmup task's job, not this one's.
+// UpdateEmailAccountWarmupPoolType writes the tier and moves the mailbox's pool membership to
+// match in one transaction: they record the same fact, and updating only the column left
+// downgraded mailboxes in the premium pool (issue #211). A mailbox in no pool stays in none.
 func (r *workerRepository) UpdateEmailAccountWarmupPoolType(ctx context.Context, emailAccountID uuid.UUID, poolType string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {

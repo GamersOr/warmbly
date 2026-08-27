@@ -93,9 +93,7 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 				canWarmup, xerr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
 				switch {
 				case xerr != nil:
-					// Entitlement unknown. Leave the membership as it is: an
-					// unreadable subscription is not evidence of anything, and
-					// evicting on it would empty the pool during a blip.
+					// Entitlement unknown: leave the membership alone rather than let a blip evict.
 				case canWarmup:
 					_ = s.warmupHealth.EnsurePoolMembershipWithRole(ctx, account.ID, s.resolveWarmupPoolType(ctx, account), "recipient_only")
 				default:
@@ -137,8 +135,7 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 	if s.featureGate != nil {
 		canWarmup, entitlementErr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
 		if !canWarmup {
-			// Only a definite "not entitled" removes the mailbox from warmup.
-			// The send is skipped either way.
+			// Only a definite "not entitled" evicts; the send is skipped either way.
 			if s.warmupHealth != nil && entitlementErr == nil {
 				_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
 			}

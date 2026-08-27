@@ -184,6 +184,37 @@ func TestLiveMovingPoolsCarriesTheMailboxReputation(t *testing.T) {
 	}
 }
 
+// An indefinite block (tampering, appeal only) has no blocked_until at all.
+// It has to survive a pool move as an indefinite block, not become an expiry.
+func TestLiveMovingPoolsKeepsAnIndefiniteBlockIndefinite(t *testing.T) {
+	repo, handle := liveWarmupRepo(t)
+	f := newPoolMailbox(t, handle, "premium")
+	ctx := context.Background()
+
+	if _, err := handle.Pool.Exec(ctx, `
+		UPDATE warmup_pool_participants
+		SET health_state = 'blocked', blocked_at = NOW(), blocked_until = NULL,
+		    blocked_reason = 'tampering'
+		WHERE email_account_id = $1`, f.account); err != nil {
+		t.Fatalf("block the mailbox: %v", err)
+	}
+
+	if err := repo.MoveToPool(ctx, poolID(t, handle, "free"), f.account, "sender_receiver"); err != nil {
+		t.Fatalf("move to free: %v", err)
+	}
+
+	health, err := repo.GetParticipantHealthForAccount(ctx, f.account)
+	if err != nil || health == nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if health.HealthState != models.WarmupHealthBlocked {
+		t.Fatalf("health %q after the move, want it still blocked", health.HealthState)
+	}
+	if health.BlockedUntil != nil {
+		t.Fatalf("blocked_until %v after the move, want an indefinite block", health.BlockedUntil)
+	}
+}
+
 // The invariant is the database's, not the caller's: a second membership cannot
 // be written even by SQL that asks for one.
 func TestLiveASecondPoolMembershipIsRejected(t *testing.T) {

@@ -38,7 +38,17 @@ FROM (
         MIN(joined_at)           OVER (PARTITION BY email_account_id) AS joined_at,
         MIN(health_signals_from) OVER (PARTITION BY email_account_id) AS health_signals_from,
         MIN(blocked_at)          OVER (PARTITION BY email_account_id) AS blocked_at,
-        MAX(blocked_until)       OVER (PARTITION BY email_account_id) AS blocked_until,
+        -- A blocked row with no blocked_until is blocked indefinitely (appeal
+        -- only), which is the longest block there is, not a missing value that
+        -- MAX may skip over in favour of a sibling's expiry.
+        CASE
+            WHEN BOOL_OR(
+                health_state = 'blocked'
+                AND blocked_at IS NOT NULL
+                AND blocked_until IS NULL
+            ) OVER (PARTITION BY email_account_id) THEN NULL
+            ELSE MAX(blocked_until) OVER (PARTITION BY email_account_id)
+        END AS blocked_until,
         MAX(last_health_score)   OVER (PARTITION BY email_account_id) AS last_health_score,
         -- 'recipient_only' sorts before 'sender_receiver': the quieter role wins.
         MIN(participant_role)    OVER (PARTITION BY email_account_id) AS participant_role,

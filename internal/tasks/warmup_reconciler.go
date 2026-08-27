@@ -41,8 +41,7 @@ func (s *tasksService) ReconcileWarmupSchedules(ctx context.Context, limit int) 
 		if s.featureGate != nil {
 			canWarmup, xerr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
 			if !canWarmup {
-				// Only a definite "not entitled" evicts; an unreadable
-				// subscription leaves the membership alone.
+				// Only a definite "not entitled" evicts.
 				if s.warmupHealth != nil && xerr == nil {
 					_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
 				}
@@ -103,20 +102,11 @@ func (s *tasksService) reconcileOnce(ctx context.Context) {
 	}
 }
 
-// ReconcileWarmupPoolMembership walks every warmup pool participant and makes
-// its membership agree with the mailbox's entitlement: a mailbox that may no
-// longer warm leaves warmup, and one whose tier changed is moved to the pool
-// that tier belongs to.
-//
-// The warmup task fixes membership too, but only for mailboxes it still runs
-// for. A mailbox that stops warming (warmup switched off, campaign finished,
-// subscription lapsed) has no chain and is not a schedule candidate, so nothing
-// would ever revisit it and its row would sit in the pool forever (issue #211).
-// This is the pass that ends that.
-//
-// Roles are left alone: a mailbox demoted to recipient_only (failing domain
-// auth, say) must not be quietly promoted back by a sweep that knows nothing
-// about why it was demoted.
+// ReconcileWarmupPoolMembership makes every participant's membership agree with its
+// entitlement: no longer entitled leaves warmup, changed tier moves pool. The warmup task does
+// this too, but only for mailboxes it still runs for, and one that stopped warming has no chain
+// and is not a schedule candidate, so nothing else would ever revisit it (issue #211).
+// Roles are left alone so a domain-auth demotion is not quietly promoted back.
 func (s *tasksService) ReconcileWarmupPoolMembership(ctx context.Context) (moved int, removed int, err error) {
 	if s.warmupRepo == nil || s.warmupHealth == nil {
 		return 0, 0, nil
@@ -127,8 +117,7 @@ func (s *tasksService) ReconcileWarmupPoolMembership(ctx context.Context) (moved
 		return 0, 0, err
 	}
 
-	// One subscription lookup per organization, not per mailbox: a workspace
-	// with fifty inboxes is one question asked fifty times otherwise.
+	// One subscription lookup per organization, not per mailbox.
 	entitled := map[uuid.UUID]bool{}
 
 	for _, id := range ids {
@@ -137,8 +126,7 @@ func (s *tasksService) ReconcileWarmupPoolMembership(ctx context.Context) (moved
 			continue
 		}
 		if account == nil || account.Status != "active" || account.OrganizationID == nil {
-			// No mailbox, no active mailbox, or no workspace to check an
-			// entitlement against: it does not belong in a shared pool.
+			// Nothing left to check an entitlement against, so it does not belong in a shared pool.
 			if xerr := s.warmupHealth.RemoveFromAllPools(ctx, id); xerr == nil {
 				removed++
 			}

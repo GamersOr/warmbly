@@ -69,18 +69,13 @@ const (
 )
 
 type Service interface {
-	// EnsurePoolMembershipWithRole puts the mailbox in exactly one pool: it
-	// joins, or moves an existing membership across, carrying the mailbox's
-	// reputation with it. Membership is never additive, so an entitlement
-	// change cannot leave the mailbox in both pools (issue #211).
+	// EnsurePoolMembershipWithRole puts the mailbox in exactly one pool, moving it (with its
+	// reputation) rather than adding a second membership (issue #211).
 	EnsurePoolMembershipWithRole(ctx context.Context, accountID uuid.UUID, poolType, role string) *errx.Error
-	// MovePoolMembership corrects the pool of a mailbox that is already a
-	// participant, without changing its role and without joining a mailbox
-	// that is in no pool. Reports whether anything moved.
+	// MovePoolMembership corrects an existing member's pool, keeping its role. Reports whether it moved.
 	MovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) (bool, *errx.Error)
-	// RemoveFromAllPools takes the mailbox out of warmup entirely. Removal is
-	// deliberately not pool-scoped: a caller asking "is this mailbox still
-	// entitled?" knows the answer is no, not which pool it is sitting in.
+	// RemoveFromAllPools takes the mailbox out of warmup; a caller that knows it is not entitled
+	// does not know which pool it is in.
 	RemoveFromAllPools(ctx context.Context, accountID uuid.UUID) *errx.Error
 	CanParticipate(ctx context.Context, accountID uuid.UUID, poolType string) (bool, string, *errx.Error)
 	ApplySpamReport(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, reportType string) (*models.WarmupParticipantHealth, *errx.Error)
@@ -527,10 +522,8 @@ func (s *service) evaluateAndPersistAnyPool(ctx context.Context, accountID uuid.
 	return s.evaluateAndPersist(ctx, accountID, health.PoolType, health)
 }
 
-// getParticipantForAnyPool reads the mailbox's participant row from whichever
-// pool it is in. One query, not one per pool: a mailbox is in at most one pool
-// (migration 000097), so there is nothing to probe in order and no premium bias
-// to get wrong.
+// getParticipantForAnyPool reads the row from whichever pool the mailbox is in: one query, not
+// one per pool, so there is no probe order to bias toward premium.
 func (s *service) getParticipantForAnyPool(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, *errx.Error) {
 	health, err := s.repo.GetParticipantHealthForAccount(ctx, accountID)
 	if err != nil {
