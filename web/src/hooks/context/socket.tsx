@@ -72,18 +72,27 @@ export const useSocket = (): SocketContextValue => {
 // Hook to join a channel and subscribe to events
 export function useChannel(topic: string, params?: Record<string, unknown>) {
     const socket = useSocket();
+    const { joinChannel, leaveChannel, pushToChannel, channelStates } = socket;
+
+    // Depend on the two stable callbacks, never on the context value itself:
+    // channelStates re-renders the provider on every join, so an effect keyed on
+    // the whole socket left and rejoined the channel on every render.
+    // params is an object literal at its call sites, so key on its value.
+    const paramsKey = params ? JSON.stringify(params) : "";
+    const paramsRef = useRef(params);
+    paramsRef.current = params;
 
     useEffect(() => {
-        socket.joinChannel(topic, params);
+        joinChannel(topic, paramsRef.current);
         return () => {
-            socket.leaveChannel(topic);
+            leaveChannel(topic);
         };
-    }, [socket, topic, params]);
+    }, [joinChannel, leaveChannel, topic, paramsKey]);
 
     return {
-        state: socket.channelStates[topic] ?? "closed",
+        state: channelStates[topic] ?? "closed",
         push: (event: string, payload: Record<string, unknown>) =>
-            socket.pushToChannel(topic, event, payload),
+            pushToChannel(topic, event, payload),
     };
 }
 
@@ -94,7 +103,7 @@ export function useChannelEvent(
     handler: ChannelEventHandler,
     deps: React.DependencyList = []
 ) {
-    const socket = useSocket();
+    const { subscribeToChannel } = useSocket();
     const handlerRef = useRef(handler);
 
     // Update handler ref when it changes
@@ -102,15 +111,17 @@ export function useChannelEvent(
         handlerRef.current = handler;
     }, [handler]);
 
+    // Same reason as useChannel: subscribeToChannel is stable, the context value
+    // is not, so depending on the whole socket resubscribed on every render.
     useEffect(() => {
         const wrappedHandler: ChannelEventHandler = (payload) => {
             handlerRef.current(payload);
         };
 
-        const unsubscribe = socket.subscribeToChannel(topic, event, wrappedHandler);
+        const unsubscribe = subscribeToChannel(topic, event, wrappedHandler);
         return unsubscribe;
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [socket, topic, event, ...deps]);
+    }, [subscribeToChannel, topic, event, ...deps]);
 }
 
 // Convenience hook combining channel join and event subscription

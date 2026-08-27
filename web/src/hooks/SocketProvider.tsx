@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import type SocketProviderProps from "@/lib/socket/models/SocketProviderProps";
 import getSocket from '@/lib/api/client/app/socket/getSocket';
 import type { AppError } from '@/lib/api/client/normalizeError';
@@ -650,8 +650,13 @@ export default function SocketProvider({
         };
     }, [connect, stopHeartbeat]);
 
-    return (
-        <SocketContext.Provider value={{
+    // Memoised: an inline object is a new identity on every render, and
+    // channelStates re-renders this provider on every join. useChannel's effect
+    // depends on the context value, so the two together tore the channel down
+    // and rejoined it on every render (~400 joins/second on one open campaign
+    // page, enough to saturate the realtime service).
+    const value = useMemo(
+        () => ({
             isConnected,
             reconnectAttempt,
             joinChannel,
@@ -662,7 +667,23 @@ export default function SocketProvider({
             pushToChannel,
             subscribe,
             sendMessage,
-        }}>
+        }),
+        [
+            isConnected,
+            reconnectAttempt,
+            joinChannel,
+            leaveChannel,
+            getChannelState,
+            channelStates,
+            subscribeToChannel,
+            pushToChannel,
+            subscribe,
+            sendMessage,
+        ]
+    );
+
+    return (
+        <SocketContext.Provider value={value}>
             {children}
         </SocketContext.Provider>
     );
