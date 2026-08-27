@@ -60,6 +60,9 @@ export interface ImportResult {
     started_at: string;
     ended_at: string;
     errors?: ImportRowError[];
+    // Set when more rows failed than the API reports back; `errors` then holds
+    // the first slice of them and `failed` is the true count.
+    errors_truncated?: boolean;
 }
 
 async function authHeader(): Promise<Record<string, string>> {

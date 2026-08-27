@@ -53,7 +53,16 @@ import {
 import { Label, TextInput } from "@/components/ui/field";
 import CategoryPicker from "./CategoryPicker";
 import { downloadBlob } from "@/lib/api/client/app/contacts/exportContacts";
-import { DEDUP_OPTIONS, STANDARD_TARGETS, describeError } from "./importShared";
+import {
+    CUSTOM_KEY_RULES,
+    DEDUP_OPTIONS,
+    STANDARD_TARGETS,
+    describeError,
+    isCustomTarget,
+    isValidCustomKey,
+    mappingProblem,
+    suggestCustomKey,
+} from "./importShared";
 
 interface Props {
     open: boolean;
@@ -137,9 +146,10 @@ export default function ImportWizard({ open, onClose, lockedCampaign }: Props) {
         }
     }
 
-    function emailIsMapped(): boolean {
-        return mapping.some((m) => m.target === "email");
-    }
+    // Any reason the mapping can't be committed (missing email, an unnamed or
+    // unusable custom-field name). Caught here so a mistyped field name costs
+    // one glance instead of a whole import.
+    const mapProblem = mappingProblem(mapping);
 
     return (
         <AnimatePresence>
@@ -244,16 +254,16 @@ export default function ImportWizard({ open, onClose, lockedCampaign }: Props) {
                                         <ArrowLeftIcon className="w-3 h-3" />
                                         Re-upload
                                     </button>
-                                    {!emailIsMapped() && (
+                                    {mapProblem && (
                                         <span className="text-[11px] text-amber-700 inline-flex items-center gap-1">
-                                            <AlertTriangleIcon className="w-3 h-3" />
-                                            Map a column to Email
+                                            <AlertTriangleIcon className="w-3 h-3 shrink-0" />
+                                            {mapProblem}
                                         </span>
                                     )}
                                     <button
                                         type="button"
                                         onClick={() => setStep("options")}
-                                        disabled={!emailIsMapped()}
+                                        disabled={!!mapProblem}
                                         className="ml-auto h-7 px-3 rounded-md bg-slate-900 hover:bg-slate-800 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
                                     >
                                         Continue
@@ -453,6 +463,30 @@ export function MapStep({
         return mapping.find((m) => m.index === idx) ?? { index: idx, target: "ignore" };
     }
 
+    // Columns we didn't recognise default to Ignore, which means a CRM export
+    // with a dozen extra columns is a dozen dropdowns. Offer the obvious bulk
+    // action for the ones whose header is already a usable field name.
+    // Only with a real header row: without one the columns are synthesised
+    // ("Column 4"), which is a legal field name but never the one you want.
+    const claimable = !hasHeader
+        ? []
+        : preview.columns
+              .map((header, idx) => ({ idx, key: suggestCustomKey(header) }))
+              .filter(({ idx, key }) => key !== "" && getMapping(idx).target === "ignore");
+
+    function claimAllAsCustom() {
+        setMapping((cur) => {
+            const next = [...cur];
+            for (const { idx, key } of claimable) {
+                const at = next.findIndex((m) => m.index === idx);
+                const entry: ImportColumnMapping = { index: idx, target: "custom", custom_key: key };
+                if (at >= 0) next[at] = entry;
+                else next.push(entry);
+            }
+            return next;
+        });
+    }
+
     return (
         <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -462,6 +496,15 @@ export function MapStep({
                         {preview.format.toUpperCase()} · {preview.total_rows.toLocaleString()} rows · {preview.columns.length} columns
                     </p>
                 </div>
+                {claimable.length > 0 && (
+                    <button
+                        type="button"
+                        onClick={claimAllAsCustom}
+                        className="h-7 px-2.5 rounded-md border border-slate-200 hover:border-slate-300 text-slate-700 hover:text-slate-900 text-[11.5px] font-medium transition-colors shrink-0"
+                    >
+                        Keep {claimable.length} more as custom fields
+                    </button>
+                )}
                 <label className="inline-flex items-center gap-1.5 text-[11.5px] text-slate-700 cursor-pointer">
                     <input
                         type="checkbox"
@@ -499,6 +542,7 @@ export function MapStep({
                                     <td className="px-3 py-2">
                                         <TargetPicker
                                             value={m}
+                                            header={col}
                                             onChange={(next) => updateMapping(idx, next)}
                                         />
                                     </td>
@@ -515,17 +559,20 @@ export function MapStep({
 export function TargetPicker({
     value,
     onChange,
+    header,
 }: {
     value: ImportColumnMapping;
     onChange: (next: ImportColumnMapping) => void;
+    /** The column's header, used to pre-fill the custom-field name. */
+    header?: string;
 }) {
     // Custom-field rows are tagged with target="custom" (sentinel); the
     // user-typed name lives in custom_key. We also accept the legacy
     // "custom:<key>" form in case a saved mapping comes in that shape.
-    const isCustom =
-        value.target === "custom" || value.target.toString().startsWith("custom:");
+    const isCustom = isCustomTarget(value.target.toString());
     const stdLabel = STANDARD_TARGETS.find((t) => t.id === value.target)?.label;
     const customKey = value.custom_key ?? "";
+    const keyInvalid = isCustom && customKey.trim() !== "" && !isValidCustomKey(customKey);
     const label = isCustom
         ? customKey
             ? `Custom: ${customKey}`
@@ -558,7 +605,10 @@ export function TargetPicker({
                             onChange({
                                 index: value.index,
                                 target: "custom",
-                                custom_key: customKey,
+                                // Start from the column header: "Company Mobile"
+                                // is a valid field name, so there is nothing to
+                                // type in the common case.
+                                custom_key: customKey || suggestCustomKey(header ?? ""),
                             })
                         }
                     >
@@ -573,6 +623,8 @@ export function TargetPicker({
                         onChange({ index: value.index, target: "custom", custom_key: v })
                     }
                     placeholder="field name"
+                    invalid={keyInvalid}
+                    title={keyInvalid ? CUSTOM_KEY_RULES : undefined}
                     className="w-24 md:w-32"
                 />
             )}
@@ -708,7 +760,9 @@ export function ResultStep({ result, filename }: { result: ImportResult; filenam
                             Errors
                         </span>
                         <span className="text-[11px] text-slate-500">
-                            {result.errors.length}
+                            {result.errors_truncated
+                                ? `${result.errors.length.toLocaleString()} of ${result.failed.toLocaleString()}`
+                                : result.errors.length.toLocaleString()}
                         </span>
                         <button
                             type="button"

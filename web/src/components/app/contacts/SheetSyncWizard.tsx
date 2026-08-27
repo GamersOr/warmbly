@@ -30,7 +30,7 @@ import {
 import toast from "react-hot-toast";
 
 import { MapStep, ResultStep } from "./ImportWizard";
-import { DEDUP_OPTIONS, announceResult, describeError } from "./importShared";
+import { DEDUP_OPTIONS, announceResult, describeError, mappingProblem } from "./importShared";
 import CategoryPicker from "./CategoryPicker";
 import { Label, TextInput } from "@/components/ui/field";
 import {
@@ -199,7 +199,9 @@ export default function SheetSyncWizard({ open, onClose, lockedCampaign, onSaved
         }
     }
 
-    const emailMapped = mapping.some((m) => m.target === "email");
+    // Same gate as the file importer: a saved source with an unusable custom
+    // field name is rejected by the API, so catch it on the mapping screen.
+    const mapProblem = mappingProblem(mapping);
 
     async function save(runSync: boolean) {
         if (!connectionId || !meta) return;
@@ -376,16 +378,16 @@ export default function SheetSyncWizard({ open, onClose, lockedCampaign, onSaved
                                         <ArrowLeftIcon className="w-3 h-3" />
                                         Back
                                     </button>
-                                    {!emailMapped && (
+                                    {mapProblem && (
                                         <span className="text-[11px] text-amber-700 inline-flex items-center gap-1">
-                                            <AlertTriangleIcon className="w-3 h-3" />
-                                            Map a column to Email
+                                            <AlertTriangleIcon className="w-3 h-3 shrink-0" />
+                                            {mapProblem}
                                         </span>
                                     )}
                                     <button
                                         type="button"
                                         onClick={() => setStep("options")}
-                                        disabled={!emailMapped}
+                                        disabled={!!mapProblem}
                                         className="ml-auto h-7 px-3 rounded-md bg-slate-900 hover:bg-slate-800 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
                                     >
                                         Continue

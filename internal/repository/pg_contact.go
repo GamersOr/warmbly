@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,10 @@ type ContactRepository interface {
 	// block sending.
 	SetContactESP(ctx context.Context, contactID uuid.UUID, provider string) error
 	GetByEmailsAndUser(ctx context.Context, userID uuid.UUID, emails []string) (map[string]models.Contact, *errx.Error)
+	// ResolveCategoryNames maps category titles (as typed in an imported file)
+	// to the caller's category IDs, creating the ones that don't exist yet.
+	// Keys of the returned map are the lowercased titles.
+	ResolveCategoryNames(ctx context.Context, userID uuid.UUID, names []string) (map[string]uuid.UUID, *errx.Error)
 	Search(ctx context.Context, userID string, category, cursor *string, filters models.SearchContacts, limit int32) (*models.ContactsResult, *errx.Error)
 	// SearchCounts returns org-wide contact facet totals for the browse
 	// sidebar (independent of any search filters), mirroring campaigns-overview.
@@ -111,6 +116,26 @@ func parseUUIDList(raw []string) ([]uuid.UUID, *errx.Error) {
 	return out, nil
 }
 
+// normalizeCustomFields trims and collapses whitespace in every custom-field
+// key, then rejects the map if any key is still unusable. Keys are user data
+// (CSV headers, API payloads) so " Company Mobile" and "Company Mobile" must
+// land on the same JSONB key instead of splitting the field in two.
+func normalizeCustomFields(in map[string]string) (map[string]string, *errx.Error) {
+	if len(in) == 0 {
+		return map[string]string{}, nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		key := utils.NormalizeJSONKey(k)
+		if !utils.IsValidJSONKey(key) {
+			return nil, errx.New(errx.BadRequest,
+				"invalid custom field name "+strconv.Quote(k)+": "+utils.JSONKeyRules)
+		}
+		out[key] = v
+	}
+	return out, nil
+}
+
 func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.UUID, contacts []models.AddContact) ([]models.Contact, *errx.Error) {
 	// Validate userID up front. The handler should have caught a
 	// malformed JWT subject, but a defensive check here keeps any
@@ -141,11 +166,11 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		if lead.CustomFields == nil {
 			lead.CustomFields = map[string]string{}
 		}
-		for key := range lead.CustomFields {
-			if !utils.IsValidJSONKey(key) {
-				return nil, errx.ErrJSONKey
-			}
+		fields, xerr := normalizeCustomFields(lead.CustomFields)
+		if xerr != nil {
+			return nil, xerr
 		}
+		lead.CustomFields = fields
 
 		// Approximate size check using JSON payload.
 		data, jerr := json.Marshal(lead)
@@ -211,21 +236,29 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 	insertBatch := pgx.Batch{}
 	for _, lead := range normalized {
 		insertBatch.Queue(
+			// $9 and $10 are the same value: a parameter used both as an
+			// INSERT value and inside the DO UPDATE set gives Postgres two
+			// inference sites for one placeholder, so it is passed twice with
+			// explicit casts. NULL means "leave the flag alone".
 			`INSERT INTO contacts (
-			 id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields
+			 id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields, subscribed
 			 ) VALUES (
-			  gen_random_uuid(), $1, $2, $3, $4, LOWER($5), $6, $7, $8
+			  gen_random_uuid(), $1, $2, $3, $4, LOWER($5), $6, $7, $8, COALESCE($9::boolean, TRUE)
 			 )
 			 ON CONFLICT (user_id, (LOWER(email))) DO UPDATE SET
 			  organization_id = COALESCE(contacts.organization_id, EXCLUDED.organization_id),
-			  first_name = EXCLUDED.first_name,
-			  last_name = EXCLUDED.last_name,
-			  company = EXCLUDED.company,
-			  phone = EXCLUDED.phone,
+			  -- Enrich, never erase: a blank cell in a re-imported file must
+			  -- not wipe a name we already have.
+			  first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), contacts.first_name),
+			  last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), contacts.last_name),
+			  company = COALESCE(NULLIF(EXCLUDED.company, ''), contacts.company),
+			  phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
 			  custom_fields = contacts.custom_fields || EXCLUDED.custom_fields,
+			  subscribed = COALESCE($10::boolean, contacts.subscribed),
 			  updated_at = NOW()
 			 RETURNING id, first_name, last_name, email, company, phone, custom_fields, subscribed, updated_at, created_at`,
 			userID, orgID, lead.FirstName, lead.LastName, lead.Email, lead.Company, lead.Phone, lead.CustomFields,
+			lead.Subscribed, lead.Subscribed,
 		)
 	}
 
@@ -613,7 +646,8 @@ func (r *contactRepository) Search(
 	// Custom field filters (JSONB)
 	// -----------------------------
 	for _, f := range filters.CustomFieldFilters {
-		if f.Name == "" || f.Value == "" || !utils.IsValidJSONKey(f.Name) {
+		name := utils.NormalizeJSONKey(f.Name)
+		if name == "" || f.Value == "" || !utils.IsValidJSONKey(name) {
 			continue
 		}
 		var op, val string
@@ -634,9 +668,11 @@ func (r *contactRepository) Search(
 			op = "ILIKE"
 			val = "%" + f.Value + "%"
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf(`c.custom_fields ->> '%s' %s $%d`, f.Name, op, argIndex))
-		args = append(args, val)
-		argIndex++
+		// The key is a bound parameter, never interpolated: custom-field
+		// names are user data and now legitimately contain spaces.
+		whereClauses = append(whereClauses, fmt.Sprintf(`c.custom_fields ->> $%d::text %s $%d`, argIndex, op, argIndex+1))
+		args = append(args, name, val)
+		argIndex += 2
 	}
 
 	// -----------------------------
@@ -1384,17 +1420,16 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		argIndex++
 	}
 	if data.CustomFields != nil {
-		for key := range *data.CustomFields {
-			if !utils.IsValidJSONKey(key) {
-				return nil, errx.ErrJSONKey
-			}
+		incoming, xerr := normalizeCustomFields(*data.CustomFields)
+		if xerr != nil {
+			return nil, xerr
 		}
 		// Merge existing custom_fields with updates
 		mergedFields := make(map[string]string)
 		for k, v := range c.CustomFields {
 			mergedFields[k] = v
 		}
-		for k, v := range *data.CustomFields {
+		for k, v := range incoming {
 			if v == "" {
 				delete(mergedFields, k) // Remove key if value is empty
 			} else {
@@ -1696,6 +1731,21 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 	}
 
 	for _, p := range data.Fields {
+		// Keys arrive from the UI's bulk field editor; normalize + reject the
+		// same way the single-contact writes do so a bulk edit cannot mint a
+		// field name nothing else in the product can address.
+		p.Key = utils.NormalizeJSONKey(p.Key)
+		if !utils.IsValidJSONKey(p.Key) {
+			return nil, errx.New(errx.BadRequest,
+				"invalid custom field name "+strconv.Quote(p.Key)+": "+utils.JSONKeyRules)
+		}
+		if p.Type == models.BulkRenameField {
+			p.Value = utils.NormalizeJSONKey(p.Value)
+			if !utils.IsValidJSONKey(p.Value) {
+				return nil, errx.New(errx.BadRequest,
+					"invalid custom field name "+strconv.Quote(p.Value)+": "+utils.JSONKeyRules)
+			}
+		}
 		switch p.Type {
 		case models.BulkAddField:
 			// jsonb_build_object is variadic "any", so it gives Postgres nothing
@@ -1889,6 +1939,98 @@ func (r *contactRepository) Delete(ctx context.Context, userID string, orgID uui
 // the given list, scoped to a single user. Used by the import path to
 // detect collisions before doing the bulk upsert. The map is keyed by
 // lowercased email so the caller doesn't have to normalize again.
+// MaxImportCategoryNames bounds how many distinct category titles one import
+// may introduce. A column of free text mapped to Categories by mistake would
+// otherwise mint a category per row.
+const MaxImportCategoryNames = 100
+
+func (r *contactRepository) ResolveCategoryNames(ctx context.Context, userID uuid.UUID, names []string) (map[string]uuid.UUID, *errx.Error) {
+	out := make(map[string]uuid.UUID, len(names))
+	wanted := make([]string, 0, len(names))
+	seen := make(map[string]string, len(names)) // lowered -> original casing
+	for _, raw := range names {
+		title := strings.TrimSpace(raw)
+		if title == "" {
+			continue
+		}
+		if len(title) > 50 {
+			return nil, errx.New(errx.BadRequest,
+				"category name "+strconv.Quote(title)+" is longer than 50 characters")
+		}
+		lower := strings.ToLower(title)
+		if _, dup := seen[lower]; dup {
+			continue
+		}
+		seen[lower] = title
+		wanted = append(wanted, lower)
+	}
+	if len(wanted) == 0 {
+		return out, nil
+	}
+	if len(wanted) > MaxImportCategoryNames {
+		return nil, errx.New(errx.BadRequest, fmt.Sprintf(
+			"the categories column has %d distinct values; at most %d can be created in one import",
+			len(wanted), MaxImportCategoryNames))
+	}
+
+	rows, err := r.DB.Query(ctx, `
+		SELECT id, LOWER(title) FROM categories
+		WHERE user_id = $1 AND LOWER(title) = ANY($2::text[])
+	`, userID, wanted)
+	if err != nil {
+		db.CaptureError(err, "", nil, "ResolveCategoryNames query")
+		return nil, errx.InternalError()
+	}
+	for rows.Next() {
+		var id uuid.UUID
+		var lower string
+		if err := rows.Scan(&id, &lower); err != nil {
+			rows.Close()
+			db.CaptureError(err, "", nil, "ResolveCategoryNames scan")
+			return nil, errx.InternalError()
+		}
+		out[lower] = id
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, "", nil, "ResolveCategoryNames rows")
+		return nil, errx.InternalError()
+	}
+
+	missing := make([]string, 0, len(wanted))
+	for _, lower := range wanted {
+		if _, ok := out[lower]; !ok {
+			missing = append(missing, lower)
+		}
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+
+	// Positions continue after whatever the user already has, so the new
+	// categories land at the end of their list instead of colliding.
+	var nextPos int32
+	if err := r.DB.QueryRow(ctx,
+		`SELECT COALESCE(MAX(position), -1) + 1 FROM categories WHERE user_id = $1`,
+		userID).Scan(&nextPos); err != nil {
+		db.CaptureError(err, "", nil, "ResolveCategoryNames position")
+		return nil, errx.InternalError()
+	}
+	for _, lower := range missing {
+		id := uuid.New()
+		if _, err := r.DB.Exec(ctx, `
+			INSERT INTO categories (id, user_id, title, color, position)
+			VALUES ($1, $2, $3, $4, $5)
+		`, id, userID, seen[lower], defaultGroupColor(nextPos), nextPos); err != nil {
+			db.CaptureError(err, "", nil, "ResolveCategoryNames insert")
+			return nil, errx.InternalError()
+		}
+		out[lower] = id
+		nextPos++
+	}
+	return out, nil
+}
+
 func (r *contactRepository) GetByEmailsAndUser(ctx context.Context, userID uuid.UUID, emails []string) (map[string]models.Contact, *errx.Error) {
 	out := make(map[string]models.Contact, len(emails))
 	if len(emails) == 0 {

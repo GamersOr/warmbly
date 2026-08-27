@@ -42,6 +42,10 @@ const (
 	ContactImportTargetPhone      ContactImportColumnTarget = "phone"
 	ContactImportTargetSubscribed ContactImportColumnTarget = "subscribed"
 	ContactImportTargetCategories ContactImportColumnTarget = "categories"
+	// ContactImportTargetCustom routes the column into Contact.CustomFields
+	// under ContactImportColumnMapping.CustomKey. "custom:<key>" is accepted
+	// as an equivalent legacy spelling.
+	ContactImportTargetCustom ContactImportColumnTarget = "custom"
 )
 
 // ContactImportColumnMapping says "the column at this index maps to
@@ -108,6 +112,11 @@ type ContactImportRowError struct {
 	Reason string   `json:"reason"`
 }
 
+// MaxContactImportReportedErrors caps how many per-row entries travel back in
+// the response. The counters still count every row; without the cap a 50k-row
+// file of bad addresses would echo the whole file back as JSON.
+const MaxContactImportReportedErrors = 1000
+
 type ContactImportResult struct {
 	Total     int       `json:"total"`
 	Imported  int       `json:"imported"`
@@ -117,5 +126,10 @@ type ContactImportResult struct {
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at"`
 
+	// Errors holds per-row failures and per-row notes, capped at
+	// MaxContactImportReportedErrors entries.
 	Errors []ContactImportRowError `json:"errors,omitempty"`
+	// ErrorsTruncated is true when that cap was reached, so the UI can say
+	// "showing the first N of M" instead of implying it listed everything.
+	ErrorsTruncated bool `json:"errors_truncated,omitempty"`
 }

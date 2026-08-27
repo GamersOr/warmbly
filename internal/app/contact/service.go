@@ -33,6 +33,12 @@ type ContactService interface {
 	// the columns + first N rows + suggested mapping — no DB writes.
 	ImportPreview(ctx context.Context, file io.Reader, filename string) (*models.ContactImportPreview, *errx.Error)
 
+	// ValidateImportMapping reports whether a column mapping is usable:
+	// exactly the checks ImportCommit runs before it touches a row. Callers
+	// that persist a mapping for later (the Google Sheets sync sources) use
+	// it so a bad mapping is caught when it is saved, not on the next sync.
+	ValidateImportMapping(mapping []models.ContactImportColumnMapping) *errx.Error
+
 	// ImportCommit re-parses the uploaded file with the chosen mapping
 	// and performs the upsert / skip / dedup work. Returns per-row
 	// result counts plus a list of rows that failed (with reasons).

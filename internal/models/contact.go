@@ -321,6 +321,12 @@ type AddContact struct {
 	Categories []string `json:"categories"`
 
 	CustomFields map[string]string `json:"custom_fields"`
+
+	// Subscribed is the marketing-consent flag to store. nil means "don't
+	// decide": a new contact defaults to subscribed, an existing one keeps
+	// whatever it already had. Set explicitly by the importer when the file
+	// carries a subscribed column.
+	Subscribed *bool `json:"subscribed,omitempty"`
 }
 
 type SearchContactsFilterType string

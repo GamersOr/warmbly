@@ -145,7 +145,7 @@ func (s *service) Create(ctx context.Context, orgID, userID uuid.UUID, in *model
 	if xerr := validateDedup(in.Dedup); xerr != nil {
 		return nil, xerr
 	}
-	if xerr := validateMappingHasEmail(in.ColumnMapping); xerr != nil {
+	if xerr := s.contacts.ValidateImportMapping(in.ColumnMapping); xerr != nil {
 		return nil, xerr
 	}
 
@@ -221,7 +221,7 @@ func (s *service) Update(ctx context.Context, orgID, id uuid.UUID, in *models.Up
 		if len(*in.ColumnMapping) == 0 {
 			return nil, errx.New(errx.BadRequest, "column_mapping cannot be empty")
 		}
-		if xerr := validateMappingHasEmail(*in.ColumnMapping); xerr != nil {
+		if xerr := s.contacts.ValidateImportMapping(*in.ColumnMapping); xerr != nil {
 			return nil, xerr
 		}
 		src.ColumnMapping = *in.ColumnMapping
@@ -369,17 +369,6 @@ func validateDedup(d models.ContactImportDedupStrategy) *errx.Error {
 		return nil
 	}
 	return errx.New(errx.BadRequest, "unknown dedup strategy: "+string(d))
-}
-
-// validateMappingHasEmail enforces that at least one column maps to the email
-// target — without it ImportCommit would reject every row as "missing email".
-func validateMappingHasEmail(mapping []models.ContactImportColumnMapping) *errx.Error {
-	for _, m := range mapping {
-		if m.Target == models.ContactImportTargetEmail {
-			return nil
-		}
-	}
-	return errx.New(errx.BadRequest, "column_mapping must map one column to 'email'")
 }
 
 // normalizeHeaders trims the header row and synthesises a name for any blank

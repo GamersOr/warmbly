@@ -1117,7 +1117,7 @@ Auth: **Scope** `WRITE_CONTACTS` · **Org permission** `manage_contacts`.
 | `sheet_title` | string | No | Spreadsheet title (for display). |
 | `tab_title` | string | No | Tab to read. |
 | `has_header` | boolean | No | Whether the first row is a header. |
-| `column_mapping` | array | Yes | Column-to-target mappings (same shape as contact import). |
+| `column_mapping` | array | Yes | Column-to-target mappings ([same shape as contact import](/api/reference/contacts/)). Validated on save, not on the next sync: a mapping with no `email` column, or a custom field whose name Warmbly cannot use, is a `400` here. |
 | `dedup` | string | No | Collision strategy: `skip`, `update`, or `create_duplicate`. |
 | `target_campaign_id` | uuid | No | Enrol new/updated leads into this campaign on each sync. |
 | `category_ids` | string[] | No | Categories to assign to synced leads. |

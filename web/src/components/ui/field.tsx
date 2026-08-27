@@ -27,6 +27,8 @@ export function TextInput({
     className,
     onKeyDown,
     onBlur,
+    invalid,
+    title,
 }: {
     value: string;
     onChange: (v: string) => void;
@@ -42,6 +44,10 @@ export function TextInput({
     // text into something else (a clock value, a number) so the parse happens
     // once the user settles rather than on every keystroke.
     onBlur?: () => void;
+    // Marks the value as rejected: red hairline + aria-invalid for screen
+    // readers. Pair it with `title` (or nearby text) saying what is wrong.
+    invalid?: boolean;
+    title?: string;
 }) {
     return (
         <input
@@ -54,7 +60,14 @@ export function TextInput({
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
             onBlur={onBlur}
-            className={cn(base, "min-w-0", className)}
+            aria-invalid={invalid || undefined}
+            title={title}
+            className={cn(
+                base,
+                "min-w-0",
+                invalid && "border-red-300 focus:border-red-400 focus:ring-red-100",
+                className,
+            )}
         />
     );
 }

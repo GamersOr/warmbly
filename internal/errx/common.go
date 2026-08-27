@@ -20,7 +20,6 @@ var (
 	ErrTimezone  = New(BadRequest, "Timezone doesn't exists.")
 	ErrTime      = New(BadRequest, "Invalid time format.")
 	ErrNotEnough = New(BadRequest, "Not enough data to perform this action.")
-	ErrJSONKey   = New(BadRequest, "JSON key can only contain characters and underscore.")
 	ErrLimit     = New(BadRequest, "Limit must be between 10 and 200.")
 
 	// Authorization
