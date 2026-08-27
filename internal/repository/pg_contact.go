@@ -232,21 +232,29 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 	insertBatch := pgx.Batch{}
 	for _, lead := range normalized {
 		insertBatch.Queue(
+			// $9 and $10 are the same value: a parameter used both as an
+			// INSERT value and inside the DO UPDATE set gives Postgres two
+			// inference sites for one placeholder, so it is passed twice with
+			// explicit casts. NULL means "leave the flag alone".
 			`INSERT INTO contacts (
-			 id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields
+			 id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields, subscribed
 			 ) VALUES (
-			  gen_random_uuid(), $1, $2, $3, $4, LOWER($5), $6, $7, $8
+			  gen_random_uuid(), $1, $2, $3, $4, LOWER($5), $6, $7, $8, COALESCE($9::boolean, TRUE)
 			 )
 			 ON CONFLICT (user_id, (LOWER(email))) DO UPDATE SET
 			  organization_id = COALESCE(contacts.organization_id, EXCLUDED.organization_id),
-			  first_name = EXCLUDED.first_name,
-			  last_name = EXCLUDED.last_name,
-			  company = EXCLUDED.company,
-			  phone = EXCLUDED.phone,
+			  -- Enrich, never erase: a blank cell in a re-imported file must
+			  -- not wipe a name we already have.
+			  first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), contacts.first_name),
+			  last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), contacts.last_name),
+			  company = COALESCE(NULLIF(EXCLUDED.company, ''), contacts.company),
+			  phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
 			  custom_fields = contacts.custom_fields || EXCLUDED.custom_fields,
+			  subscribed = COALESCE($10::boolean, contacts.subscribed),
 			  updated_at = NOW()
 			 RETURNING id, first_name, last_name, email, company, phone, custom_fields, subscribed, updated_at, created_at`,
 			userID, orgID, lead.FirstName, lead.LastName, lead.Email, lead.Company, lead.Phone, lead.CustomFields,
+			lead.Subscribed, lead.Subscribed,
 		)
 	}
 
