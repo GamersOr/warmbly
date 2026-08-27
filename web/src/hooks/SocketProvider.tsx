@@ -100,6 +100,12 @@ export default function SocketProvider({
     // 'closed', so a state-filtered rejoin skipped them all and the socket came
     // back with zero subscriptions (no events, no presence) until a reload.
     const desiredTopicsRef = useRef<Map<string, Record<string, unknown>>>(new Map());
+    // How many callers currently want each topic joined. Two surfaces can hold
+    // the same topic (a campaign row and its detail drawer), and the first to
+    // unmount must not take the channel out from under the second, so only the
+    // last holder out actually leaves. Kept beside the channel map rather than
+    // inside the entry because that entry is rebuilt on every join and rejoin.
+    const holdersRef = useRef<Map<string, number>>(new Map());
     // Distinguishes a close we caused (logout / unmount — don't reconnect) from
     // every other close (server idle-close, channel crash, network drop — do
     // reconnect). The old code only reconnected on `!wasClean`, so a clean
@@ -390,6 +396,11 @@ export default function SocketProvider({
 
     // Join channel
     const joinChannel = useCallback((topic: string, params: Record<string, unknown> = {}) => {
+        // Count the holder BEFORE the already-joined bail-out below, or the
+        // second surface to ask for a live topic is never counted and the first
+        // one to unmount leaves the channel while it is still wanted.
+        holdersRef.current.set(topic, (holdersRef.current.get(topic) ?? 0) + 1);
+
         // Remember the intent so a reconnect rejoins this topic even after its
         // live state was reset to 'closed' by a drop.
         desiredTopicsRef.current.set(topic, params);
@@ -428,17 +439,26 @@ export default function SocketProvider({
 
     // Leave channel
     const leaveChannel = useCallback((topic: string) => {
+        // One holder fewer. Anyone still holding the topic keeps it joined.
+        const remaining = (holdersRef.current.get(topic) ?? 0) - 1;
+        if (remaining > 0) {
+            holdersRef.current.set(topic, remaining);
+            return;
+        }
+        holdersRef.current.delete(topic);
+
         // No longer want this topic — don't let a reconnect rejoin it.
         desiredTopicsRef.current.delete(topic);
         clearRejoin(topic);
+        pendingJoinsRef.current.delete(topic);
 
         const channel = channelsRef.current.get(topic);
         if (!channel) return;
 
-        channel.state = 'leaving';
-        markChannelState(topic, 'leaving');
-
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
+        if (
+            wsRef.current?.readyState === WebSocket.OPEN &&
+            (channel.state === 'joined' || channel.state === 'joining')
+        ) {
             sendRaw({
                 topic,
                 event: PHOENIX_EVENTS.LEAVE,
@@ -448,8 +468,15 @@ export default function SocketProvider({
             });
         }
 
-        channelsRef.current.delete(topic);
-        pendingJoinsRef.current.delete(topic);
+        // Handlers belong to subscribeToChannel, not to the join: dropping the
+        // entry here took every other subscriber's registrations with it. Reset
+        // it in place and discard it only once nothing is listening either.
+        if (channel.handlers.size === 0) {
+            channelsRef.current.delete(topic);
+        } else {
+            channel.state = 'closed';
+            channel.joinRef = '';
+        }
         markChannelState(topic, null);
     }, [getRef, sendRaw, markChannelState, clearRejoin]);
 
@@ -486,8 +513,19 @@ export default function SocketProvider({
 
         return () => {
             handlers?.delete(handler);
-            if (handlers?.size === 0) {
-                channel?.handlers.delete(event);
+            if (handlers?.size !== 0) return;
+            channel?.handlers.delete(event);
+            // Nothing listening and nobody holding the join: drop the entry
+            // leaveChannel kept alive for us. Read the live one — a join or a
+            // rejoin rebuilds the entry around the same handlers map.
+            const current = channelsRef.current.get(topic);
+            if (
+                current &&
+                current.handlers.size === 0 &&
+                !holdersRef.current.has(topic) &&
+                !desiredTopicsRef.current.has(topic)
+            ) {
+                channelsRef.current.delete(topic);
             }
         };
     }, []);

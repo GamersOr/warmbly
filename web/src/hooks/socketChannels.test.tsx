@@ -104,6 +104,174 @@ describe('channel subscription lifecycle', () => {
     })
 })
 
+describe('two surfaces holding the same topic', () => {
+    /** Holds the join without rendering anything. */
+    function Joiner() {
+        useChannel(TOPIC)
+        return null
+    }
+
+    /** Listens on the topic without holding the join. */
+    function Listener({ onEvent }: { onEvent: () => void }) {
+        useChannelEvent(TOPIC, 'EMAIL_SENT', () => onEvent())
+        return null
+    }
+
+    it('joins once and keeps the channel while the second holder remains', async () => {
+        const onA = vi.fn()
+        const onB = vi.fn()
+        function Wrapper({ showA }: { showA: boolean }) {
+            return (
+                <>
+                    {showA ? <Panel onEvent={onA} /> : null}
+                    <Panel onEvent={onB} />
+                </>
+            )
+        }
+
+        const { rerender } = await mount(<Wrapper showA />)
+        expect(env.joins(TOPIC)).toHaveLength(1)
+        env.ackJoin(env.lastJoin(TOPIC))
+        await tick(1)
+
+        // The first holder goes away (the list row scrolls out, the drawer stays).
+        await act(async () => {
+            rerender(
+                <SocketProvider>
+                    <Wrapper showA={false} />
+                </SocketProvider>
+            )
+        })
+
+        expect(env.leaves(TOPIC)).toHaveLength(0)
+        await act(async () => {
+            env.pushEvent(TOPIC, 'EMAIL_SENT', {})
+        })
+        expect(onB).toHaveBeenCalledTimes(1)
+        expect(onA).not.toHaveBeenCalled()
+    })
+
+    it('leaves exactly once when the last holder goes', async () => {
+        function Wrapper({ holders }: { holders: number }) {
+            return (
+                <>
+                    {Array.from({ length: holders }, (_, i) => (
+                        <Joiner key={i} />
+                    ))}
+                </>
+            )
+        }
+
+        const { rerender } = await mount(<Wrapper holders={3} />)
+        env.ackJoin(env.lastJoin(TOPIC))
+        await tick(1)
+        expect(env.joins(TOPIC)).toHaveLength(1)
+
+        for (const holders of [2, 1, 0]) {
+            await act(async () => {
+                rerender(
+                    <SocketProvider>
+                        <Wrapper holders={holders} />
+                    </SocketProvider>
+                )
+            })
+        }
+
+        expect(env.leaves(TOPIC)).toHaveLength(1)
+    })
+
+    it('survives a drop while both hold it, then a single holder leaving', async () => {
+        // The concrete case: a campaign row and its detail drawer both hold the
+        // topic, the network blips, and then the drawer closes. The row must
+        // still be joined and still receiving.
+        const onRow = vi.fn()
+        const onDrawer = vi.fn()
+        function Wrapper({ drawer }: { drawer: boolean }) {
+            return (
+                <>
+                    <Panel onEvent={onRow} />
+                    {drawer ? <Panel onEvent={onDrawer} /> : null}
+                </>
+            )
+        }
+
+        const { rerender } = await mount(<Wrapper drawer />)
+        env.ackJoin(env.lastJoin(TOPIC))
+        await tick(1)
+
+        // Network blip: the socket dies, the provider brings a new one up and
+        // rejoins every topic the app still wants.
+        await act(async () => {
+            env.instances[env.instances.length - 1].close()
+        })
+        await tick(500)
+        expect(env.joins(TOPIC)).toHaveLength(2)
+        await act(async () => {
+            env.ackJoin(env.lastJoin(TOPIC))
+        })
+
+        await act(async () => {
+            rerender(
+                <SocketProvider>
+                    <Wrapper drawer={false} />
+                </SocketProvider>
+            )
+        })
+
+        expect(env.leaves(TOPIC)).toHaveLength(0)
+        await act(async () => {
+            env.pushEvent(TOPIC, 'EMAIL_SENT', {})
+        })
+        expect(onRow).toHaveBeenCalledTimes(1)
+        expect(onDrawer).not.toHaveBeenCalled()
+        expect(screen.getByTestId('state').textContent).toBe('joined')
+    })
+
+    it("keeps a listener's handler when a different surface leaves the topic", async () => {
+        // Regression: leaveChannel dropped the whole channel entry, and the
+        // entry owns the handler map, so every other subscriber on that topic
+        // was silently deafened and its unsubscribe closure orphaned.
+        const onEvent = vi.fn()
+        function Wrapper({ joined }: { joined: boolean }) {
+            return (
+                <>
+                    <Listener onEvent={onEvent} />
+                    {joined ? <Joiner /> : null}
+                </>
+            )
+        }
+
+        const { rerender } = await mount(<Wrapper joined />)
+        env.ackJoin(env.lastJoin(TOPIC))
+        await tick(1)
+
+        await act(async () => {
+            rerender(
+                <SocketProvider>
+                    <Wrapper joined={false} />
+                </SocketProvider>
+            )
+        })
+        expect(env.leaves(TOPIC)).toHaveLength(1)
+
+        await act(async () => {
+            rerender(
+                <SocketProvider>
+                    <Wrapper joined />
+                </SocketProvider>
+            )
+        })
+        await act(async () => {
+            env.ackJoin(env.lastJoin(TOPIC))
+        })
+        await act(async () => {
+            env.pushEvent(TOPIC, 'EMAIL_SENT', {})
+        })
+
+        expect(onEvent).toHaveBeenCalledTimes(1)
+    })
+})
+
 describe('a refused join', () => {
     it('retries a throttled join when the server says budget is back', async () => {
         await mount(<Panel />)

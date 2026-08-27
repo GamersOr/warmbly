@@ -19,7 +19,6 @@ export function RealtimeManager({ children }: { children: React.ReactNode }) {
   const setUnseenCount = useAppStore((s) => s.setUnseenCount)
 
   const queryClient = useQueryClient()
-  const prevOrgIdRef = useRef<string | null>(null)
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastHeartbeatRef = useRef<number>(Date.now())
   const hadConnectionRef = useRef(false)
@@ -87,26 +86,21 @@ export function RealtimeManager({ children }: { children: React.ReactNode }) {
     }
   }, [isConnected, user?.id, joinChannel, leaveChannel, addJoinedChannel, removeJoinedChannel])
 
-  // Auto-join/leave org channel on org switch
+  // Auto-join/leave org channel on org switch. Balanced with a cleanup, like
+  // the user channel above: the effect re-runs on every disconnect/reconnect
+  // and on every org switch, so without one the join outnumbered the leave and
+  // the provider's holder count for a workspace never came back to zero.
   useEffect(() => {
-    if (!isConnected) return
+    if (!isConnected || !currentOrg?.id) return
 
-    const prevOrgId = prevOrgIdRef.current
-    const newOrgId = currentOrg?.id
+    const topic = `org:${currentOrg.id}`
+    joinChannel(topic)
+    addJoinedChannel(topic)
 
-    if (prevOrgId && prevOrgId !== newOrgId) {
-      const prevTopic = `org:${prevOrgId}`
-      leaveChannel(prevTopic)
-      removeJoinedChannel(prevTopic)
+    return () => {
+      leaveChannel(topic)
+      removeJoinedChannel(topic)
     }
-
-    if (newOrgId) {
-      const topic = `org:${newOrgId}`
-      joinChannel(topic)
-      addJoinedChannel(topic)
-    }
-
-    prevOrgIdRef.current = newOrgId ?? null
   }, [isConnected, currentOrg?.id, joinChannel, leaveChannel, addJoinedChannel, removeJoinedChannel])
 
   // Connection quality monitoring
