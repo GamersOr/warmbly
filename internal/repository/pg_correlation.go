@@ -53,11 +53,17 @@ func (r *correlationRepository) ClustersBySignupIP(ctx context.Context, minMembe
 		  JOIN users u ON u.id = o.owner_user_id
 		 WHERE u.signup_ip IS NOT NULL
 		   -- A LAN or loopback signup is a self-hosted install, not a signal.
-		   AND NOT (u.signup_ip << '10.0.0.0/8'::inet
-		         OR u.signup_ip << '172.16.0.0/12'::inet
-		         OR u.signup_ip << '192.168.0.0/16'::inet
-		         OR u.signup_ip << '127.0.0.0/8'::inet
-		         OR u.signup_ip << '169.254.0.0/16'::inet)
+		   -- Both families: an IPv6-only LAN clusters just as wrongly.
+		   -- <<= not <<: the strict operator excludes an address from a prefix
+		   -- that describes exactly it, so ::1 is not "inside" ::1/128.
+		   AND NOT (u.signup_ip <<= '10.0.0.0/8'::inet
+		         OR u.signup_ip <<= '172.16.0.0/12'::inet
+		         OR u.signup_ip <<= '192.168.0.0/16'::inet
+		         OR u.signup_ip <<= '127.0.0.0/8'::inet
+		         OR u.signup_ip <<= '169.254.0.0/16'::inet
+		         OR u.signup_ip <<= '::1/128'::inet
+		         OR u.signup_ip <<= 'fc00::/7'::inet
+		         OR u.signup_ip <<= 'fe80::/10'::inet)
 		   AND o.created_at >= $2
 		 GROUP BY 1
 		HAVING COUNT(DISTINCT o.id) >= $1

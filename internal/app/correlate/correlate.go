@@ -9,6 +9,7 @@ package correlate
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,6 +67,11 @@ func (s *Service) Start(ctx context.Context, interval time.Duration) {
 // Run performs one sweep. Each finding is filed as a signal on every member
 // organization; the band it produces is the risk service's decision, not this
 // package's.
+//
+// Every signal is RETRACTED from organizations that no longer match before the
+// current matches are recorded. Without that a cluster which aged out of the
+// lookback, or a mailbox burst that ended, would leave its weight on the
+// workspace permanently and the score could only ever climb.
 func (s *Service) Run(ctx context.Context) {
 	since := time.Now().Add(-LookbackWindow)
 	recorded := 0
@@ -73,25 +79,22 @@ func (s *Service) Run(ctx context.Context) {
 	if clusters, err := s.repo.ClustersBySignupIP(ctx, MinClusterMembers, since); err != nil {
 		log.Warn().Err(err).Msg("correlation sweep: signup-ip clustering failed")
 	} else {
-		recorded += s.record(ctx, clusters, "cluster_signup_ip", weightSharedIP,
+		recorded += s.apply(ctx, clusters, "cluster_signup_ip", weightSharedIP,
 			"opened alongside %d other workspaces from one address")
 	}
 
 	if clusters, err := s.repo.ClustersBySignupIdentity(ctx, MinClusterMembers, since); err != nil {
 		log.Warn().Err(err).Msg("correlation sweep: identity clustering failed")
 	} else {
-		recorded += s.record(ctx, clusters, "cluster_signup_identity", weightSharedIdentity,
+		recorded += s.apply(ctx, clusters, "cluster_signup_identity", weightSharedIdentity,
 			"opened alongside %d other workspaces by the same email identity")
 	}
 
 	if bursts, err := s.repo.OrgsConnectingMailboxesFast(ctx, MailboxBurstCount, MailboxBurstWindow); err != nil {
 		log.Warn().Err(err).Msg("correlation sweep: mailbox burst query failed")
 	} else {
-		for _, b := range bursts {
-			s.signal(ctx, b.OrganizationIDs, "mailbox_burst", weightMailboxBurst,
-				fmt.Sprintf("connected %d or more mailboxes within %s", MailboxBurstCount, MailboxBurstWindow))
-			recorded++
-		}
+		recorded += s.apply(ctx, bursts, "mailbox_burst", weightMailboxBurst,
+			fmt.Sprintf("connected %d or more mailboxes within %s", MailboxBurstCount, MailboxBurstWindow))
 	}
 
 	if recorded > 0 {
@@ -99,18 +102,49 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-func (s *Service) record(ctx context.Context, clusters []repository.Cluster, key string, weight int, format string) int {
-	n := 0
+// apply records the current matches for one detector and retracts the signal
+// from every organization that carried it but no longer matches.
+func (s *Service) apply(ctx context.Context, clusters []repository.Cluster, key string, weight int, format string) int {
+	matched := make(map[uuid.UUID]string)
 	for _, c := range clusters {
-		if len(c.OrganizationIDs) < MinClusterMembers {
+		if len(c.OrganizationIDs) < 2 {
+			// A burst is a single organization; a cluster needs its floor.
+			if key != "mailbox_burst" || len(c.OrganizationIDs) == 0 {
+				continue
+			}
+		} else if len(c.OrganizationIDs) < MinClusterMembers {
 			continue
 		}
-		// "%d OTHER workspaces", so the sentence reads correctly for a member.
-		detail := fmt.Sprintf(format, len(c.OrganizationIDs)-1)
-		s.signal(ctx, c.OrganizationIDs, key, weight, detail)
-		n++
+		detail := format
+		if strings.Contains(format, "%d") {
+			// "%d OTHER workspaces", so the sentence reads correctly to a member.
+			detail = fmt.Sprintf(format, len(c.OrganizationIDs)-1)
+		}
+		for _, orgID := range c.OrganizationIDs {
+			matched[orgID] = detail
+		}
 	}
-	return n
+
+	// Retract first, so an organization that dropped out of every cluster does
+	// not keep the weight.
+	if previous, err := s.orgRisk.OrgsWithSignal(ctx, key); err != nil {
+		log.Warn().Str("signal", key).Msg("correlation sweep: could not list previous holders")
+	} else {
+		for _, orgID := range previous {
+			if _, still := matched[orgID]; still {
+				continue
+			}
+			if _, cerr := s.orgRisk.ClearSignal(ctx, orgID, key); cerr != nil {
+				log.Warn().Str("organization_id", orgID.String()).Str("signal", key).
+					Msg("correlation sweep: could not retract a finding that no longer holds")
+			}
+		}
+	}
+
+	for orgID, detail := range matched {
+		s.signal(ctx, []uuid.UUID{orgID}, key, weight, detail)
+	}
+	return len(matched)
 }
 
 func (s *Service) signal(ctx context.Context, orgs []uuid.UUID, key string, weight int, detail string) {

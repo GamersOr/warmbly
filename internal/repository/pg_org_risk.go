@@ -25,6 +25,10 @@ type OrgRiskRepository interface {
 	// SetOrgRiskState is an operator override. It leaves the signals alone:
 	// the evidence that led here is still the evidence.
 	SetOrgRiskState(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string) (*models.OrgRisk, error)
+	// OrgsWithSignal lists organizations currently carrying a detector's
+	// finding. A recurring sweep needs this to retract findings that no longer
+	// hold; without it a signal recorded once would never decay.
+	OrgsWithSignal(ctx context.Context, key string) ([]uuid.UUID, error)
 }
 
 type orgRiskRepository struct {
@@ -164,4 +168,23 @@ func buildOrgRisk(orgID uuid.UUID, state string, score int, reason *string, rawS
 		risk.Reason = *reason
 	}
 	return risk
+}
+
+func (r *orgRiskRepository) OrgsWithSignal(ctx context.Context, key string) ([]uuid.UUID, error) {
+	rows, err := r.DB.Pool.Query(ctx,
+		`SELECT id FROM organizations WHERE risk_signals ? $1`, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

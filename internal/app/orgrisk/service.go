@@ -58,6 +58,9 @@ type Service interface {
 	RecordSignal(ctx context.Context, orgID uuid.UUID, sig Signal) (*models.OrgRisk, *errx.Error)
 	// ClearSignal removes a detector's finding, for when it no longer holds.
 	ClearSignal(ctx context.Context, orgID uuid.UUID, key string) (*models.OrgRisk, *errx.Error)
+	// OrgsWithSignal lists organizations carrying a detector's finding, so a
+	// recurring sweep can retract the ones that no longer match.
+	OrgsWithSignal(ctx context.Context, key string) ([]uuid.UUID, *errx.Error)
 	// SetState is an operator's manual override, which outranks the score.
 	SetState(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string) (*models.OrgRisk, *errx.Error)
 }
@@ -135,6 +138,14 @@ func (s *service) ClearSignal(ctx context.Context, orgID uuid.UUID, key string) 
 		delete(signals, key)
 		return signals
 	})
+}
+
+func (s *service) OrgsWithSignal(ctx context.Context, key string) ([]uuid.UUID, *errx.Error) {
+	ids, err := s.repo.OrgsWithSignal(ctx, key)
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+	return ids, nil
 }
 
 func (s *service) SetState(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string) (*models.OrgRisk, *errx.Error) {

@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"github.com/warmbly/warmbly/internal/app/correlate"
-	"github.com/warmbly/warmbly/internal/app/orgrisk"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/warmbly/warmbly/internal/app/correlate"
+	"github.com/warmbly/warmbly/internal/app/orgrisk"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconf "github.com/aws/aws-sdk-go-v2/config"

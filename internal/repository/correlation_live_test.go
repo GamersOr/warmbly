@@ -161,3 +161,27 @@ func TestLiveCorrelationNeedsMoreThanTwo(t *testing.T) {
 		}
 	}
 }
+
+// IPv6 LANs cluster just as wrongly as IPv4 ones: a self-hosted install
+// reached over ULA or link-local is the normal case, not a ring.
+func TestLiveCorrelationIgnoresPrivateIPv6(t *testing.T) {
+	handle, _ := liveContactDB(t)
+	repo := NewCorrelationRepository(handle)
+
+	for _, ip := range []string{"fd00::1", "fe80::1", "::1"} {
+		for i := 0; i < 3; i++ {
+			makeOrg(t, ip, "")
+		}
+	}
+	clusters, err := repo.ClustersBySignupIP(context.Background(), 3, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ClustersBySignupIP: %v", err)
+	}
+	for _, c := range clusters {
+		for _, priv := range []string{"fd00::1", "fe80::1", "::1"} {
+			if c.Key == priv {
+				t.Errorf("private IPv6 %s was treated as a cluster", priv)
+			}
+		}
+	}
+}
