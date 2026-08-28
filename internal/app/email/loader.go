@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
+	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 	"golang.org/x/oauth2"
@@ -169,6 +170,41 @@ func (s *emailService) LoadAccountOntoWorker(ctx context.Context, accountID uuid
 		return nil
 	}
 	return s.publisher.PublishAddEmail(ctx, *workerID, payload)
+}
+
+// dropFromWorker tells the worker holding a mailbox to drop it from memory,
+// the same removal the consumer sends when a provider error deactivates one.
+// Workers hold accounts in memory and only filter on status at startup, so
+// without this a disabled or disconnected mailbox syncs until that worker
+// restarts. A send already dispatched is answered with EMAIL_FAILED, which
+// walks its reservation back.
+//
+// The assignment is read on its own because the row an update returns carries
+// no worker_id, which is what made the consumer's removal unreachable in #218.
+func (s *emailService) dropFromWorker(ctx context.Context, userID string, accountID uuid.UUID) *errx.Error {
+	if s.publisher == nil {
+		return nil
+	}
+
+	workerID, xerr := s.emailRepository.GetWorkerID(ctx, accountID)
+	if xerr != nil {
+		return xerr
+	}
+	if workerID == nil {
+		return nil
+	}
+
+	if err := s.publisher.PublishRemoveEmail(ctx, *workerID, &models.RemoveWorkerEmail{
+		UserID:  userID,
+		EmailID: accountID.String(),
+	}); err != nil {
+		log.Warn().Err(err).
+			Str("email_id", accountID.String()).
+			Str("worker_id", workerID.String()).
+			Msg("could not tell the worker to drop the mailbox")
+		return errx.ErrEmailWorkerUnreachable
+	}
+	return nil
 }
 
 // releaseDeadWorker returns the worker a mailbox should load onto, releasing it

@@ -306,6 +306,22 @@ A `503` whose `code` is `mailbox_provider_not_configured` is not transient and r
 - Or connect the mailbox over SMTP and IMAP instead, which needs no configuration
 - Full walkthrough: [connect mailboxes](/development/deployment-guide/#connect-mailboxes)
 
+#### `mailbox_worker_unreachable`
+
+A `503` whose `code` is `mailbox_worker_unreachable` comes from `DELETE /emails/{id}`. Disconnecting a mailbox has to reach the machine that syncs it before the record goes, because once the record is gone nothing can tell that machine to stop. When the instruction cannot be delivered, nothing is removed and the mailbox is left exactly as it was.
+
+```json
+{
+  "error": "Service Unavailable",
+  "message": "This mailbox could not be disconnected right now because the machine syncing it could not be reached. Nothing was removed, so try again in a moment.",
+  "code": "mailbox_worker_unreachable",
+  "request_id": "4bbbd1b2-8f86-47dd-8a7f-9476501ad20e"
+}
+```
+
+**How to fix:**
+- Retry the delete. It is safe to repeat: a mailbox that is already gone returns `404`, and one that is still there is untouched
+
 ## Error handling best practices
 
 ### Implement retry logic
