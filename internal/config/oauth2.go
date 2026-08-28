@@ -1,16 +1,15 @@
 package config
 
-import "golang.org/x/oauth2"
-
+// Oauth2 is the mailbox-connect OAuth configuration. Sign-in clients are not
+// here: browser social sign-in builds its own config in internal/app/socialauth,
+// where the ID token is verified rather than a userinfo endpoint called.
 type Oauth2 struct {
-	GoogleAuthorization *oauth2.Config
-	InboxAuthorization  Oauth2Inbox
+	InboxAuthorization Oauth2Inbox
 }
 
 func LoadOauth2(baseURL string) *Oauth2 {
 	return &Oauth2{
-		GoogleAuthorization: GoogleOauth2Auth(baseURL),
-		InboxAuthorization:  LoadOauth2Inbox(baseURL),
+		InboxAuthorization: LoadOauth2Inbox(baseURL),
 	}
 }
 

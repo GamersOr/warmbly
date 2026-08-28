@@ -145,9 +145,11 @@ TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
 | `WEBAUTHN_RP_ID` | Passkey relying party id. Derived from `APP_URL` when unset. Changing it invalidates every enrolled passkey | derived | yes |
 | `WEBAUTHN_RP_ORIGINS` | Origins accepted for passkey ceremonies | derived from `APP_URL` | yes |
 | `WEBAUTHN_RP_DISPLAY_NAME` | The name the passkey prompt shows | `Warmbly` | yes |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Sign in with Google. Unrelated to the `BOX_GOOGLE_*` mailbox client | unset | yes |
-| `GOOGLE_IOS_CLIENT_ID` | Additional Google client id accepted from the iOS app | unset | yes |
-| `APPLE_APP_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_KEY_SECRET` | Sign in with Apple | unset | yes |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google in the browser. Both are required; unrelated to the `BOX_GOOGLE_*` mailbox client | unset | yes |
+| `GOOGLE_REDIRECT_URI` | Redirect URI registered at Google. Served by the API, not the dashboard | `API_PUBLIC_URL` plus `/v1/auth/google/callback` | yes |
+| `GOOGLE_IOS_CLIENT_ID` | Additional Google client id accepted from the iOS app. Native only: it does not enable the browser button | unset | yes |
+| `APPLE_APP_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_KEY_SECRET` | Sign in with Apple. `APPLE_APP_ID` is the Services ID | unset | yes |
+| `APPLE_REDIRECT_URI` | Return URL registered at Apple. Must be HTTPS | `API_PUBLIC_URL` plus `/v1/auth/apple/callback` | yes |
 | `APPLE_IOS_BUNDLE_ID` | Bundle id accepted from the iOS app | `com.warmbly.app` | yes |
 | `OIDC_ISSUER_URL` | Generic OpenID Connect issuer. Discovery runs at boot | unset | yes |
 | `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | The client Warmbly authenticates as | unset | yes |

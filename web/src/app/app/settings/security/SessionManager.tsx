@@ -12,6 +12,7 @@ const PROVIDER_LABELS: Record<string, string> = {
     email: "Email",
     google: "Google",
     apple: "Apple",
+    oidc: "Single sign-on",
     webauthn: "Passkey",
 };
 

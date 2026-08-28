@@ -82,7 +82,7 @@ Older builds returned the invite-only refusal with the text "This server is not 
 | TOTP | No | Applies to every sign-in path, including Google, Apple and single sign-on |
 | Passkeys | No | Requires a secure context, so `APP_URL` must be HTTPS or a `localhost` address |
 | Single sign-on (OIDC) | No | The recommended posture when you have no relay. See [single sign-on](#single-sign-on) |
-| Sign in with Google or Apple | No | Optional, and unrelated to connecting Gmail mailboxes |
+| Sign in with Google or Apple | No | Optional, and unrelated to connecting Gmail mailboxes. The redirect URI is served by the API: see [self-hosting](/development/deployment-guide/#sign-in-with-google-or-apple-optional) |
 
 <Callout type="warn" title="Do not disable everything at once">
 `DISABLE_PASSWORD_LOGIN=true` with no configured provider leaves no way to sign in at all. The `no_sign_in_method` check on [Instance health](/development/instance-health/#no_sign_in_method) fires when that happens.

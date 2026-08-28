@@ -28,7 +28,6 @@ require (
 	github.com/invopop/jsonschema v0.13.0
 	github.com/jackc/pgx/v5 v5.9.0
 	github.com/meszmate/apple-go v0.0.0-20250828163208-7fea48c91b32
-	github.com/meszmate/google-go v0.0.0-20251207085436-d08bef99cd5d
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/mileusna/useragent v1.3.5
 	github.com/nats-io/nats-server/v2 v2.14.1

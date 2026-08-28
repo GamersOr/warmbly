@@ -255,12 +255,27 @@ func Run(
 		auth.POST("/apple", h.AppleTokenLogin)
 		auth.POST("/google", h.GoogleTokenLogin)
 
-		// Generic OpenID Connect. The only sign-in path with no dependency on
-		// outbound mail, which is what makes it the one that matters for a
-		// deployment with no relay.
+		// Browser sign-in. Generic OIDC is the only sign-in path with no
+		// dependency on outbound mail, which is what makes it the one that
+		// matters for a deployment with no relay; Google and Apple are the
+		// same flow against a fixed provider. Begin hands the SPA the
+		// authorization URL, the provider returns the browser to the callback,
+		// and the single-use handoff code is exchanged for the session.
+		//
+		// Apple posts its callback (requesting any scope forces
+		// response_mode=form_post) and can send a refusal as a redirect, so it
+		// answers on both methods.
 		auth.POST("/oidc/begin", h.OIDCBegin)
 		auth.GET("/oidc/callback", h.OIDCCallback)
-		auth.POST("/oidc/exchange", h.OIDCExchange)
+		auth.POST("/google/begin", h.GoogleBegin)
+		auth.GET("/google/callback", h.GoogleCallback)
+		auth.POST("/apple/begin", h.AppleBegin)
+		auth.POST("/apple/callback", h.AppleCallback)
+		auth.GET("/apple/callback", h.AppleCallback)
+		auth.POST("/sso/exchange", h.SSOExchange)
+		// The name the exchange shipped under when OIDC was the only browser
+		// flow, kept so a client written against it keeps working.
+		auth.POST("/oidc/exchange", h.SSOExchange)
 
 		// 2FA login challenge (PUBLIC): exchanges a single-use pending token +
 		// TOTP/recovery code for a real session. Rate-limited in the service

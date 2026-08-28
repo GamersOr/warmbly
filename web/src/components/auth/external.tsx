@@ -1,9 +1,8 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { RiAppleFill } from "@remixicon/react";
 import { KeyRound, Loader2Icon } from "lucide-react";
 import { Google } from "../svg";
-import { API_URL, PopupCenter } from "@/lib/information";
 import { AUTH_CELL as CELL } from "./styles";
 
 // Snappy-but-smooth spring used for the layout reflow when the passkey cell
@@ -35,18 +34,38 @@ function CellBody({ children }: { children: React.ReactNode }) {
 // equal-width cell; on create-account it animates out and Google/Apple glide
 // wider to fill — one fluid layout transition, no snap.
 //
-// `providers` is the list GET /auth/config returns. A button for a provider
-// this deployment has no client for is a dead end, so it is never rendered.
+// `providers` is the list GET /auth/config returns, and it holds only the
+// providers this backend can actually complete a sign-in with. A button for a
+// provider it cannot is a dead end, so it is never rendered.
+//
+// `onProvider` navigates the whole page to the provider rather than opening a
+// popup: a popup is blocked by default on iOS Safari and lands the session in a
+// window the app cannot read.
 export default function ExternalLogin({
     passkey,
     providers,
+    onProvider,
 }: {
     passkey?: { onClick: () => void; onPrepare: () => void; loading: boolean; disabled?: boolean; label?: string };
     providers: string[];
+    onProvider: (provider: string) => Promise<void> | void;
 }) {
     const passkeyRef = useRef<HTMLButtonElement | null>(null);
+    // Which provider is mid-handoff. The click ends in a full page navigation,
+    // so without this the button sits inert for the length of a round trip.
+    const [busy, setBusy] = useState<string | null>(null);
     const google = providers.includes("google");
     const apple = providers.includes("apple");
+
+    const start = async (provider: string) => {
+        if (busy) return;
+        setBusy(provider);
+        try {
+            await onProvider(provider);
+        } finally {
+            setBusy(null);
+        }
+    };
 
     useEffect(() => {
         const button = passkeyRef.current;
@@ -121,11 +140,17 @@ export default function ExternalLogin({
                     key="google"
                     type="button"
                     transition={spring}
-                    onClick={() => PopupCenter(`${API_URL}/auth/google/login`, "Google Login")}
-                    className={`${CELL} flex-1 min-w-0`}
+                    disabled={busy !== null}
+                    aria-busy={busy === "google"}
+                    onClick={() => start("google")}
+                    className={`${CELL} flex-1 min-w-0 ${busy === "google" ? "!opacity-100" : ""}`}
                 >
                     <CellBody>
-                        <Google className="w-4 shrink-0" />
+                        {busy === "google" ? (
+                            <Loader2Icon className="h-4 w-4 shrink-0 animate-spin text-sky-500" />
+                        ) : (
+                            <Google className="w-4 shrink-0" />
+                        )}
                         Google
                     </CellBody>
                 </motion.button>
@@ -137,11 +162,17 @@ export default function ExternalLogin({
                     key="apple"
                     type="button"
                     transition={spring}
-                    onClick={() => PopupCenter(`${API_URL}/auth/apple/login`, "Apple Login")}
-                    className={`${CELL} flex-1 min-w-0`}
+                    disabled={busy !== null}
+                    aria-busy={busy === "apple"}
+                    onClick={() => start("apple")}
+                    className={`${CELL} flex-1 min-w-0 ${busy === "apple" ? "!opacity-100" : ""}`}
                 >
                     <CellBody>
-                        <RiAppleFill className="size-4 shrink-0" />
+                        {busy === "apple" ? (
+                            <Loader2Icon className="size-4 shrink-0 animate-spin text-sky-500" />
+                        ) : (
+                            <RiAppleFill className="size-4 shrink-0" />
+                        )}
                         Apple
                     </CellBody>
                 </motion.button>

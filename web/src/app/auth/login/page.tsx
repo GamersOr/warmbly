@@ -24,7 +24,7 @@ import getUser from "@/lib/api/client/auth/getUser";
 import { WEBSITE_URL, TURNSTILE_KEY, API_URL } from "@/lib/information";
 import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
 import type Session from "@/lib/api/models/auth/Session";
-import beginOIDC from "@/lib/api/client/auth/beginOIDC";
+import beginSSO from "@/lib/api/client/auth/beginSSO";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 import * as Sentry from "@sentry/react";
@@ -188,8 +188,19 @@ export default function LoginPage() {
         ? (import.meta.env.VITE_TURNSTILE_BYPASS_TOKEN?.trim() || "")
         : "";
 
+    // A social or single sign-on login that hits an enrolled TOTP comes back
+    // here with its pending challenge rather than a session, because the 2FA
+    // form lives on this screen. See the SSO landing page.
+    const ssoTwoFA = (location.state as { two_fa_pending?: string } | null)?.two_fa_pending ?? "";
+    // The pending token is single use, so it must not survive a reload of this
+    // screen: history state does, and would leave a form that can only fail.
+    useEffect(() => {
+        if (ssoTwoFA) window.history.replaceState(null, "", location.pathname + location.search);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     /* State */
-    const [step, setStep] = useState<Step>("email");
+    const [step, setStep] = useState<Step>(ssoTwoFA ? "2fa" : "email");
     const [mode, setMode] = useState<"signin" | "signup">(() =>
         location.pathname.includes("/register") ||
         new URLSearchParams(location.search).get("mode") === "signup"
@@ -231,7 +242,7 @@ export default function LoginPage() {
     );
     const [password, setPassword] = useState("");
     const [session, setSession] = useState("");
-    const [pendingToken, setPendingToken] = useState("");
+    const [pendingToken, setPendingToken] = useState(ssoTwoFA);
     const [direction, setDirection] = useState(0);
     const pendingRef = useRef<((token: string) => void) | null>(null);
     const tokenRef = useRef<string>("");
@@ -487,16 +498,19 @@ export default function LoginPage() {
         return true;
     }, [completeSession]);
 
-    /* Single sign-on. The backend mints state, nonce and the PKCE verifier and
-       stores them server-side, so the client only needs the URL. */
-    const handleSSO = useCallback(async () => {
+    /* Browser sign-in with a provider: "oidc", "google" or "apple". The backend
+       mints state, nonce and the PKCE verifier and stores them server-side, so
+       the client only needs the URL. The whole page navigates rather than
+       opening a popup, and the provider returns to /auth/sso. */
+    const handleProvider = useCallback(async (provider: string) => {
         try {
-            const { url } = await beginOIDC();
+            const { url } = await beginSSO(provider);
             window.location.href = url;
         } catch (e) {
             toast.error(buildError(e as AppError));
         }
     }, []);
+    const handleSSO = useCallback(() => handleProvider("oidc"), [handleProvider]);
 
     /* ── Step 1: Email ─────────────────────── */
     const handleEmailContinue = (data: z.infer<typeof emailSchema>) => {
@@ -671,6 +685,7 @@ export default function LoginPage() {
                             invited={!!inviteToken}
                             providers={authConfig.providers}
                             passkeysEnabled={passkeysEnabled}
+                            onProvider={handleProvider}
                             onModeChange={handleModeChange}
                             defaultEmail={email}
                             onContinue={handleEmailContinue}
@@ -688,6 +703,7 @@ export default function LoginPage() {
                             email={email}
                             pending={pending}
                             ssoEnabled={authConfig.providers.includes("oidc")}
+                            ssoLabel={authConfig.provider_labels?.oidc}
                             onSSO={handleSSO}
                             onBack={() => goTo("email", -1)}
                             onSubmit={handleSignIn}
@@ -808,6 +824,7 @@ function EmailStep({
     invited,
     providers,
     passkeysEnabled,
+    onProvider,
     onModeChange,
     defaultEmail,
     onContinue,
@@ -822,6 +839,7 @@ function EmailStep({
     invited: boolean;
     providers: string[];
     passkeysEnabled: boolean;
+    onProvider: (provider: string) => Promise<void> | void;
     onModeChange: (m: "signin" | "signup") => void;
     defaultEmail: string;
     onContinue: (data: z.infer<typeof emailSchema>) => void;
@@ -934,6 +952,7 @@ function EmailStep({
 
                 <ExternalLogin
                     providers={providers}
+                    onProvider={onProvider}
                     passkey={passkeyCell ? {
                         onClick: onPasskey,
                         onPrepare: onPasskeyPrepare,
@@ -1047,6 +1066,7 @@ function SignInStep({
     email,
     pending,
     ssoEnabled,
+    ssoLabel,
     onSSO,
     onBack,
     onSubmit,
@@ -1054,6 +1074,7 @@ function SignInStep({
     email: string;
     pending: boolean;
     ssoEnabled: boolean;
+    ssoLabel?: string;
     onSSO: () => void;
     onBack: () => void;
     onSubmit: (data: z.infer<typeof signInSchema>) => void;
@@ -1107,7 +1128,7 @@ function SignInStep({
                         disabled={pending}
                         className="w-full h-10 rounded-md border border-slate-200 text-[13px] font-medium text-slate-700 hover:bg-slate-50 focus:border-sky-400 focus:ring-2 focus:ring-sky-100 transition-colors disabled:opacity-50"
                     >
-                        Continue with single sign-on
+                        Continue with {ssoLabel || "single sign-on"}
                     </button>
                 </>
             )}
