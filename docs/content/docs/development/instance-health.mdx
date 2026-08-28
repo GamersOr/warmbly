@@ -172,7 +172,15 @@ Always reported, so the mode is never a surprise. `invite_only` means nobody cre
 
 ### no_sign_in_method
 
-`DISABLE_PASSWORD_LOGIN=true` with no OIDC, Google or Apple provider configured leaves no way to sign in to this instance at all. Set `DISABLE_PASSWORD_LOGIN=false` or configure `OIDC_ISSUER_URL`.
+`DISABLE_PASSWORD_LOGIN=true` with no OIDC, Google or Apple provider configured leaves no way to sign in to this instance at all. Set `DISABLE_PASSWORD_LOGIN=false` or configure `OIDC_ISSUER_URL`. A provider counts as configured only when every value it needs is set, which is what the next two checks report.
+
+### google_sign_in_incomplete
+
+Some of the Google sign-in configuration is set and some is missing, so the button is not shown. `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are both required, and the callback needs a redirect URI, which derives from `API_PUBLIC_URL` when `GOOGLE_REDIRECT_URI` is unset. The same check warns when the redirect URI points at the dashboard: it is served by the API. See [sign-in methods](/development/accounts-and-access/#sign-in-methods).
+
+### apple_sign_in_incomplete
+
+The same for Sign in with Apple, which needs `APPLE_APP_ID` (the Services ID), `APPLE_TEAM_ID`, `APPLE_KEY_ID` and `APPLE_KEY_SECRET` together, plus an HTTPS redirect URI. Apple refuses a plain-http return URL, so Sign in with Apple cannot run against a local http install.
 
 ### single_platform_admin
 

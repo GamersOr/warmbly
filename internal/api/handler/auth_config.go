@@ -46,6 +46,11 @@ type DeploymentAuthConfig struct {
 
 	Providers []string `json:"providers"`
 
+	// ProviderLabels is what each button should say, keyed by the same
+	// identifiers, so a deployment behind Authentik says so rather than
+	// naming a protocol.
+	ProviderLabels map[string]string `json:"provider_labels,omitempty"`
+
 	// SelfHosted lets the UI drop hosted-only affordances (billing prompts,
 	// referral fields) that make no sense on someone's own server.
 	SelfHosted bool `json:"self_hosted"`
@@ -77,16 +82,10 @@ const accountsDocsURL = "https://docs.warmbly.com/development/accounts-and-acces
 func (h *Handler) AuthConfig(c *gin.Context) {
 	policy := h.AuthService.Policy()
 
-	providers := []string{}
-	if h.ExternalAuthProviders.GoogleIOSClientID != "" || h.GoogleWebSignIn {
-		providers = append(providers, "google")
-	}
-	if h.ExternalAuthProviders.AppleBundleID != "" || h.AppleWebSignIn {
-		providers = append(providers, "apple")
-	}
-	if h.OIDCEnabled {
-		providers = append(providers, "oidc")
-	}
+	// Only providers this backend can complete a browser sign-in with. A
+	// native iOS client id is not one of them; native apps read
+	// /auth/providers.
+	providers := h.AuthService.FederatedProviders()
 
 	registration := h.AuthService.RegistrationMode(c.Request.Context())
 
@@ -99,6 +98,7 @@ func (h *Handler) AuthConfig(c *gin.Context) {
 		MailDelivers:      h.MailDelivers,
 		Passkeys:          h.PasskeysUsable,
 		Providers:         providers,
+		ProviderLabels:    h.AuthService.FederatedProviderLabels(),
 		SelfHosted:        config.SelfHosted(),
 		BillingEnabled:    config.BillingProvider() != "none",
 		SetupRequired:     h.BootstrapService != nil && h.BootstrapService.Required(c.Request.Context()),

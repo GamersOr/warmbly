@@ -449,15 +449,21 @@ var table = []Entry{
 	},
 	{
 		Key: "GOOGLE_REDIRECT_URI", Group: GroupAuth, RuntimeChangeable: ChangeBootOnly,
-		Effect:     "Where Google sends the browser back after sign-in.",
-		DocsAnchor: docsSignIn,
-		Resolve:    envValue("GOOGLE_REDIRECT_URI"),
+		Effect:     "Where Google sends the browser back after sign-in. Served by the API, not the dashboard; derived from API_PUBLIC_URL when unset. This is the URI to register at the provider.",
+		DocsAnchor: docsSignIn, WhenUnset: SourceDerived,
+		Resolve: ssoRedirect("GOOGLE_REDIRECT_URI", "google"),
 	},
 	{
 		Key: "APPLE_APP_ID", Group: GroupAuth, RuntimeChangeable: ChangeBootOnly,
-		Effect:     "The Sign in with Apple service identifier.",
+		Effect:     "The Sign in with Apple service identifier (the Services ID, not the app's bundle id).",
 		DocsAnchor: docsSignIn,
 		Resolve:    envValue("APPLE_APP_ID"),
+	},
+	{
+		Key: "APPLE_REDIRECT_URI", Group: GroupAuth, RuntimeChangeable: ChangeBootOnly,
+		Effect:     "Where Apple sends the browser back after sign-in. Must be https; derived from API_PUBLIC_URL when unset.",
+		DocsAnchor: docsSignIn, WhenUnset: SourceDerived,
+		Resolve: ssoRedirect("APPLE_REDIRECT_URI", "apple"),
 	},
 	{
 		Key: "APPLE_TEAM_ID", Group: GroupAuth, RuntimeChangeable: ChangeBootOnly,
@@ -749,6 +755,21 @@ var table = []Entry{
 		DocsAnchor: docsDeployment,
 		Resolve:    envValue("SENTRY_DSN"),
 	},
+}
+
+// ssoRedirect mirrors the backend's own derivation, so the configuration page
+// shows the URI that has to be registered at the provider rather than an empty
+// cell whenever the operator left the override unset.
+func ssoRedirect(key, provider string) func(*Runtime) string {
+	return func(*Runtime) string {
+		if v := trimmed(key); v != "" {
+			return v
+		}
+		if base := strings.TrimRight(trimmed("API_PUBLIC_URL"), "/"); base != "" {
+			return base + "/v1/auth/" + provider + "/callback"
+		}
+		return ""
+	}
 }
 
 func envValue(key string) func(*Runtime) string {

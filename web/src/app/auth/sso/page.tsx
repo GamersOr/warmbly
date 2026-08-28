@@ -11,6 +11,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Loader2Icon, AlertCircleIcon } from "lucide-react";
 
 import exchangeSSO from "@/lib/api/client/auth/exchangeSSO";
+import { takeSSOBinding } from "@/lib/api/client/auth/beginSSO";
 import getUser from "@/lib/api/client/auth/getUser";
 import { saveTokens } from "@/lib/auth";
 import buildError from "@/lib/helper/buildError";
@@ -37,7 +38,25 @@ export default function SSOCallbackPage() {
 
         (async () => {
             try {
-                const session = await exchangeSSO(code);
+                const session = await exchangeSSO(code, takeSSOBinding());
+
+                // A provider-verified identity does not clear an enrolled
+                // second factor, so this can come back as a challenge instead
+                // of a session. The 2FA form lives on the login screen, which
+                // picks the challenge up from history state.
+                if (session.two_fa_required) {
+                    if (!session.pending_token) {
+                        setError("Two-factor authentication is required, but the challenge did not arrive. Try signing in again.");
+                        return;
+                    }
+                    navigate("/auth/login", { replace: true, state: { two_fa_pending: session.pending_token } });
+                    return;
+                }
+                if (!session.access_token) {
+                    setError("That sign-in did not return a session. Try again.");
+                    return;
+                }
+
                 saveTokens(session as unknown as Record<string, unknown>);
                 queryClient.clear();
                 try {

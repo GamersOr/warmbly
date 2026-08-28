@@ -60,6 +60,13 @@ var (
 	ErrSetupComplete = NewWithIdentifier(Forbidden, "setup_already_complete",
 		"This instance has already been set up. Sign in, or recover access with `warmblyctl user reset-password`.")
 
+	// ErrSSOBrowser is a sign-in collected somewhere other than where it
+	// started. The handoff is deliberately non-transferable, so a link someone
+	// forwarded (or was sent) cannot sign the recipient into the sender's
+	// workspace.
+	ErrSSOBrowser = NewWithIdentifier(Unauthorized, "sso_wrong_browser",
+		"Finish signing in in the browser you started in. Open the sign-in page there and try again.")
+
 	ErrExternalCode     = New(BadRequest, "Invalid or expired code, please try again.")
 	ErrExternalEmail    = New(BadRequest, "Invalid or unverified email address.")
 	ErrExternalProvider = New(BadRequest, "This sign-in method isn't available on this server.")

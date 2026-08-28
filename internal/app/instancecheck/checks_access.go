@@ -3,6 +3,8 @@ package instancecheck
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 const (
@@ -21,6 +23,8 @@ func accessChecks() []check {
 	return []check{
 		{id: "registration_mode", run: checkRegistrationMode},
 		{id: "no_sign_in_method", run: checkNoSignInMethod},
+		{id: "google_sign_in_incomplete", run: checkGoogleSignInIncomplete},
+		{id: "apple_sign_in_incomplete", run: checkAppleSignInIncomplete},
 		{id: "single_platform_admin", run: checkSinglePlatformAdmin},
 		{id: "bootstrap_password_still_set", run: checkBootstrapPasswordStillSet},
 		{id: "setup_link_outstanding", run: checkSetupLinkOutstanding},
@@ -43,13 +47,129 @@ func checkNoSignInMethod(ctx context.Context, d Deps, in Input) *Finding {
 	if env("OIDC_ISSUER_URL") != "" || runtimeOf(d).OIDCConfigured {
 		return nil
 	}
-	if env("GOOGLE_CLIENT_ID") != "" || env("APPLE_APP_ID") != "" {
+	if googleSignInConfigured() || appleSignInConfigured() {
 		return nil
 	}
 	return result(CategoryAccess, SeverityError, "No way to sign in",
 		"Password login is disabled and no single sign-on provider is configured, so there is no way to sign in to this instance. "+
 			"Set DISABLE_PASSWORD_LOGIN=false or configure OIDC_ISSUER_URL.",
 		docsSignIn)
+}
+
+// googleSignInConfigured and appleSignInConfigured mirror what the backend
+// actually requires to wire the provider. A client id on its own enables
+// nothing, which is why "I set GOOGLE_CLIENT_ID and the button does not work"
+// is the report this pair of checks exists to answer.
+func googleSignInConfigured() bool {
+	return env("GOOGLE_CLIENT_ID") != "" && env("GOOGLE_CLIENT_SECRET") != "" && ssoRedirectConfigured("GOOGLE_REDIRECT_URI")
+}
+
+func appleSignInConfigured() bool {
+	return env("APPLE_APP_ID") != "" && env("APPLE_TEAM_ID") != "" && env("APPLE_KEY_ID") != "" &&
+		env("APPLE_KEY_SECRET") != "" && ssoRedirectConfigured("APPLE_REDIRECT_URI")
+}
+
+func ssoRedirectConfigured(key string) bool {
+	return env(key) != "" || env("API_PUBLIC_URL") != ""
+}
+
+func checkGoogleSignInIncomplete(ctx context.Context, d Deps, in Input) *Finding {
+	if env("GOOGLE_CLIENT_ID") == "" && env("GOOGLE_CLIENT_SECRET") == "" {
+		return nil
+	}
+	if missing := firstUnset("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"); missing != "" {
+		return result(CategoryAccess, SeverityError, "Sign in with Google is half configured",
+			fmt.Sprintf("%s is not set, so the Google button is not shown and the sign-in cannot complete. "+
+				"Both halves of the OAuth client are required.", missing),
+			docsSignIn)
+	}
+	if !ssoRedirectConfigured("GOOGLE_REDIRECT_URI") {
+		return result(CategoryAccess, SeverityError, "Sign in with Google has no redirect URL",
+			"The Google client is configured but there is no redirect URI: API_PUBLIC_URL is empty and GOOGLE_REDIRECT_URI is not set, "+
+				"so Sign in with Google is disabled. Set API_PUBLIC_URL to this backend's public base.",
+			docsSignIn)
+	}
+	return misdirectedSSORedirect("Google", "GOOGLE_REDIRECT_URI", "google")
+}
+
+func checkAppleSignInIncomplete(ctx context.Context, d Deps, in Input) *Finding {
+	keys := []string{"APPLE_APP_ID", "APPLE_TEAM_ID", "APPLE_KEY_ID", "APPLE_KEY_SECRET"}
+	if allUnset(keys...) {
+		return nil
+	}
+	if missing := firstUnset(keys...); missing != "" {
+		return result(CategoryAccess, SeverityError, "Sign in with Apple is half configured",
+			fmt.Sprintf("%s is not set, so the Apple button is not shown. Sign in with Apple needs the Services ID, "+
+				"the team id, and the key id and key together.", missing),
+			docsSignIn)
+	}
+	if !ssoRedirectConfigured("APPLE_REDIRECT_URI") {
+		return result(CategoryAccess, SeverityError, "Sign in with Apple has no redirect URL",
+			"The Apple credentials are set but there is no redirect URI: API_PUBLIC_URL is empty and APPLE_REDIRECT_URI is not set, "+
+				"so Sign in with Apple is disabled. Set API_PUBLIC_URL to this backend's public base.",
+			docsSignIn)
+	}
+	if redirect := ssoRedirectURI("APPLE_REDIRECT_URI", "apple"); !strings.HasPrefix(redirect, "https://") {
+		return result(CategoryAccess, SeverityError, "Sign in with Apple needs an HTTPS redirect URL",
+			fmt.Sprintf("Apple refuses a plain-http return URL, so Sign in with Apple is disabled with the redirect URI at %s. "+
+				"Put this backend behind HTTPS.", redirect),
+			docsSignIn)
+	}
+	return misdirectedSSORedirect("Apple", "APPLE_REDIRECT_URI", "apple")
+}
+
+// misdirectedSSORedirect catches the mistake that produces a valid OAuth client
+// and a broken button: a redirect URI on the dashboard origin. The callback is
+// served by the API, so the provider lands the browser on a dashboard route
+// that does not exist.
+func misdirectedSSORedirect(provider, key, slug string) *Finding {
+	raw := env(key)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || strings.Contains(u.Path, "/v1/auth/") {
+		return nil
+	}
+	if !strings.EqualFold(u.Host, hostOf(appURL())) {
+		return nil
+	}
+	return result(CategoryAccess, SeverityWarning, fmt.Sprintf("The %s redirect URI points at the dashboard", provider),
+		fmt.Sprintf("%s is %s, which is the dashboard. The callback is served by the API, so the sign-in ends on a page that does not exist. "+
+			"Use %s and register that at the provider.", key, raw, ssoRedirectURI("", slug)),
+		docsSignIn)
+}
+
+// ssoRedirectURI mirrors the backend's derivation so a finding can name the
+// exact value to register at the provider.
+func ssoRedirectURI(key, slug string) string {
+	if key != "" {
+		if v := env(key); v != "" {
+			return v
+		}
+	}
+	if base := strings.TrimRight(env("API_PUBLIC_URL"), "/"); base != "" {
+		return base + "/v1/auth/" + slug + "/callback"
+	}
+	return ""
+}
+
+func allUnset(keys ...string) bool {
+	for _, key := range keys {
+		if env(key) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func firstUnset(keys ...string) string {
+	for _, key := range keys {
+		if env(key) == "" {
+			return key
+		}
+	}
+	return ""
 }
 
 func checkSinglePlatformAdmin(ctx context.Context, d Deps, in Input) *Finding {

@@ -518,15 +518,26 @@ The backend starts the OAuth flow, but **each worker refreshes the token** when 
 Separate from mailboxes, and unrelated to sending. Email and password plus passkeys work without any of this.
 
 ```bash
-GOOGLE_CLIENT_ID=...        # redirect: <app base>/auth/google/callback
+GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_REDIRECT_URI=https://app.example.com/auth/google/callback
+# Optional. Defaults to <API_PUBLIC_URL>/v1/auth/google/callback
+GOOGLE_REDIRECT_URI=https://api.example.com/v1/auth/google/callback
 
-APPLE_APP_ID=...
+APPLE_APP_ID=...            # the Services ID, not the app's bundle id
 APPLE_TEAM_ID=...
 APPLE_KEY_ID=...
 APPLE_KEY_SECRET=...
+# Optional. Defaults to <API_PUBLIC_URL>/v1/auth/apple/callback
+APPLE_REDIRECT_URI=https://api.example.com/v1/auth/apple/callback
 ```
+
+<Callout type="warn" title="The redirect URI belongs to the API, not the dashboard">
+The provider returns the browser to a route the **backend** serves, which is why the default derives from `API_PUBLIC_URL`. Registering `https://app.example.com/auth/google/callback` at the provider gives you a correctly configured OAuth client and a sign-in button that lands on a dashboard route that does not exist. Warmbly logs the exact URI to register at boot: `Sign in with Google enabled (redirect ...)`.
+</Callout>
+
+Register that URI as an authorized redirect URI on a **Web application** client in the Google Cloud console, and as a Return URL on the Services ID in the Apple developer console. Apple additionally requires HTTPS, so Sign in with Apple cannot run against a plain-http local install.
+
+Once either is configured, `GET /auth/config` advertises it and the login screen renders the button. First sign-in provisions the account, its organization and its trial, and answers to `DISABLE_REGISTRATION` and `SSO_AUTO_PROVISION` exactly like a password signup does.
 
 ## Authentication
 
@@ -609,7 +620,7 @@ Three things to know:
 |---------|-------------|
 | Stripe billing | `BILLING_PROVIDER=stripe` plus `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and `STRIPE_PUBLISHABLE_KEY`. All three are read at boot and the backend exits if any is missing |
 | Turnstile captcha | `CAPTCHA_PROVIDER=turnstile` plus `TURNSTILE_SECRET` (backend) and `WARMBLY_TURNSTILE_KEY` (web and admin). Compose pins captcha off, so use a `docker-compose.override.yml` |
-| Sign in with Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` |
+| Sign in with Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` (defaults to `<API_PUBLIC_URL>/v1/auth/google/callback`) |
 | Sign in with Apple | `APPLE_APP_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_KEY_SECRET` |
 | Mobile push (APNs) | `APNS_KEY_PATH` (or `APNS_KEY`), `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC` on backend and consumer. Partial config disables push with a warning, never a crash |
 | Notification tuning | `NOTIFICATION_PUSH_WINDOW` (default `5h`), `NOTIFICATION_EMAIL_DAILY_CAP` (default `25`, `0` means uncapped) |

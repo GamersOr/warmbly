@@ -15,6 +15,10 @@ export default interface AuthConfig {
     mail_delivers: boolean;
     passkeys: boolean;
     providers: string[];
+    /** What each provider's button should say, keyed by the same identifiers.
+     *  Absent for a backend that predates it, so callers fall back to a name
+     *  of their own. */
+    provider_labels?: Record<string, string>;
     self_hosted: boolean;
     /** False when BILLING_PROVIDER=none: the backend unlocks every feature and
      *  the org must not be presented as being on a trial or free tier. */

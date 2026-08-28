@@ -85,19 +85,43 @@ func passkeysUsableFor(appURL string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasSuffix(host, ".localhost")
 }
 
-// oidcRedirectURL is where the provider sends the browser back. Explicit
-// OIDC_REDIRECT_URL wins; otherwise it derives from the backend's public base,
-// which is where the callback handler actually lives.
-func oidcRedirectURL() string {
-	if v := strings.TrimSpace(os.Getenv("OIDC_REDIRECT_URL")); v != "" {
+// ssoRedirectURL is where a provider sends the browser back. The explicit
+// override wins; otherwise it derives from the backend's public base, because
+// the callback is served by the API and not by the dashboard.
+func ssoRedirectURL(explicit, provider string) string {
+	if v := strings.TrimSpace(explicit); v != "" {
 		return v
 	}
 	base := strings.TrimRight(os.Getenv("API_PUBLIC_URL"), "/")
 	if base == "" {
 		return ""
 	}
-	// The route is registered on /v1, not /api/v1: there is no /api prefix.
-	return base + "/v1/auth/oidc/callback"
+	// The routes are registered on /v1, not /api/v1: there is no /api prefix.
+	return base + "/v1/auth/" + provider + "/callback"
+}
+
+func oidcRedirectURL() string { return ssoRedirectURL(os.Getenv("OIDC_REDIRECT_URL"), "oidc") }
+
+// warnSSORedirectOrigin fires on the mistake that produces a working OAuth
+// client and a broken button: a redirect URI on the dashboard origin, which
+// serves no callback route.
+func warnSSORedirectOrigin(provider, redirectURL string) {
+	if redirectURL == "" {
+		return
+	}
+	u, err := url.Parse(redirectURL)
+	if err != nil {
+		return
+	}
+	if strings.Contains(u.Path, "/v1/auth/") {
+		return
+	}
+	app, aerr := url.Parse(config.AppBaseURL())
+	if aerr != nil || app.Host == "" || app.Host != u.Host {
+		return
+	}
+	log.Printf("Warning: the %s sign-in redirect URI %s points at the dashboard, which serves no callback. It should be %s (your API_PUBLIC_URL), registered at the provider.",
+		provider, redirectURL, ssoRedirectURL("", provider))
 }
 
 // oauthPublicBaseURL is the base every mailbox-connect redirect_uri is built

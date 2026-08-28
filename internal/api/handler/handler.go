@@ -80,13 +80,12 @@ type Handler struct {
 	ExternalAuthProviders models.ExternalAuthProviders
 
 	// Deployment facts served by GET /auth/config so the login screen renders
-	// what this backend can actually do instead of guessing.
-	GoogleWebSignIn bool
-	AppleWebSignIn  bool
-	OIDCEnabled     bool
-	MailDelivers    bool
-	PasskeysUsable  bool
-	MailTransport   string
+	// what this backend can actually do instead of guessing. The sign-in
+	// provider list is not here: it comes from the auth service, which is what
+	// actually holds the configured flows.
+	MailDelivers   bool
+	PasskeysUsable bool
+	MailTransport  string
 	// MailTransportRef backs the admin mail diagnostics, which need Preflight
 	// and so cannot go through the EmailNotificationService interface.
 	MailTransportRef *notify.Transport

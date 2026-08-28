@@ -19,6 +19,7 @@ APPLE_APP_ID=""
 APPLE_TEAM_ID=""
 APPLE_KEY_ID=""
 APPLE_KEY_SECRET=""
+APPLE_REDIRECT_URI=""
 
 # Config
 NOTIFY_NAME="Warmbly Notifications"

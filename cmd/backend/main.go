@@ -19,7 +19,6 @@ import (
 	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/meszmate/apple-go"
-	"github.com/meszmate/google-go"
 	"github.com/warmbly/warmbly/internal/api"
 	"github.com/warmbly/warmbly/internal/api/handler"
 	"github.com/warmbly/warmbly/internal/api/middleware"
@@ -79,6 +78,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/sequence"
 	"github.com/warmbly/warmbly/internal/app/settings"
 	"github.com/warmbly/warmbly/internal/app/skills"
+	"github.com/warmbly/warmbly/internal/app/socialauth"
 	"github.com/warmbly/warmbly/internal/app/socket"
 	"github.com/warmbly/warmbly/internal/app/stripe"
 	"github.com/warmbly/warmbly/internal/app/subscription"
@@ -230,7 +230,6 @@ func main() {
 	// Deployment auth facts resolved during boot and served by /auth/config.
 	var authPolicy *config.AuthPolicy
 	var passkeysUsable bool
-	var googleWebSignIn, appleWebSignIn bool
 	var bootstrapService *bootstrap.Service
 	// oidcLogin is nil unless OIDC_ISSUER_URL is configured.
 	var oidcLogin *oidcauth.Service
@@ -477,13 +476,6 @@ func main() {
 			sentry.CaptureException(err)
 			log.Fatal(err)
 		}
-
-		googleAuth := google.NewAuth(
-			authCfg.GoogleClientID,
-			authCfg.GoogleClientSecret,
-			authCfg.GoogleRedirectURI,
-			nil,
-		)
 
 		// Apple Sign in is optional. Skip it entirely when unconfigured (a
 		// self-host without Apple creds); only warn — never fatal — when creds
@@ -763,10 +755,6 @@ func main() {
 			captcha,
 			tokenService,
 			emailNotificationService,
-			&models.ExternalAuth{
-				GoogleAuth: googleAuth,
-				AppleAuth:  appleAuthClient,
-			},
 			trialService,
 			organizationService,
 			userRepostory,
@@ -835,8 +823,36 @@ func main() {
 				log.Printf("Warning: OIDC disabled: %v", oerr)
 			} else {
 				oidcLogin = oidcSvc
-				authService.WireOIDC(oidcSvc)
-				log.Printf("OIDC login enabled (issuer %s)", oidcSvc.Issuer())
+				authService.WireFederatedProvider(models.IdentityProviderOIDC, oidcSvc)
+				log.Printf("OIDC login enabled (issuer %s, redirect %s)", oidcSvc.Issuer(), oidcRedirectURL())
+			}
+		}
+
+		// Sign in with Google in the browser. The redirect URI is logged
+		// because it is the value that has to be registered at the provider.
+		if authCfg.GoogleClientID != "" || authCfg.GoogleClientSecret != "" {
+			redirect := ssoRedirectURL(authCfg.GoogleRedirectURI, "google")
+			googleLogin, gerr := socialauth.NewGoogle(authCfg.GoogleClientID, authCfg.GoogleClientSecret, redirect)
+			if gerr != nil {
+				log.Printf("Warning: Sign in with Google disabled: %v", gerr)
+			} else {
+				authService.WireFederatedProvider(models.IdentityProviderGoogle, googleLogin)
+				warnSSORedirectOrigin("Google", redirect)
+				log.Printf("Sign in with Google enabled (redirect %s)", googleLogin.RedirectURL())
+			}
+		}
+
+		// Sign in with Apple in the browser, on the same credentials the
+		// native path uses. APPLE_APP_ID is the Services ID here.
+		if appleAuthClient != nil {
+			redirect := ssoRedirectURL(authCfg.AppleRedirectURI, "apple")
+			appleLogin, aerr := socialauth.NewApple(appleAuthClient, authCfg.AppleAppID, redirect)
+			if aerr != nil {
+				log.Printf("Warning: Sign in with Apple disabled: %v", aerr)
+			} else {
+				authService.WireFederatedProvider(models.IdentityProviderApple, appleLogin)
+				warnSSORedirectOrigin("Apple", redirect)
+				log.Printf("Sign in with Apple enabled (redirect %s)", appleLogin.RedirectURL())
 			}
 		}
 		externalAuthProviders = models.ExternalAuthProviders{
@@ -875,8 +891,6 @@ func main() {
 			log.Fatal(passkeyErr)
 		}
 		passkeysUsable = passkeysUsableFor(os.Getenv("APP_URL"))
-		googleWebSignIn = authCfg.GoogleClientID != ""
-		appleWebSignIn = authCfg.AppleAppID != ""
 		authCache = cache
 		warnDeploymentURLs(ctx, os.Getenv("APP_URL"))
 
@@ -1640,9 +1654,6 @@ func main() {
 		AuthService:           authService,
 		ExternalAuthProviders: externalAuthProviders,
 
-		GoogleWebSignIn:  googleWebSignIn,
-		AppleWebSignIn:   appleWebSignIn,
-		OIDCEnabled:      oidcLogin != nil,
 		MailDelivers:     mailTransport != nil && mailTransport.Delivers,
 		MailTransport:    mailTransportKind(mailTransport),
 		MailTransportRef: mailTransport,

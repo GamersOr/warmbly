@@ -8,14 +8,20 @@ import (
 )
 
 type AuthConfig struct {
+	// Browser social sign-in. The redirect URIs are where the provider sends
+	// the browser back, which is the API, not the dashboard: both default to
+	// API_PUBLIC_URL plus /v1/auth/<provider>/callback when left unset.
 	GoogleClientID     string
 	GoogleRedirectURI  string
 	GoogleClientSecret string
 
-	AppleAppID     string
-	AppleTeamID    string
-	AppleKeyID     string
-	AppleKeySecret string
+	// AppleAppID is the Services ID (the web identifier), not the app's
+	// bundle ID.
+	AppleAppID       string
+	AppleTeamID      string
+	AppleKeyID       string
+	AppleKeySecret   string
+	AppleRedirectURI string
 
 	// Native-app (iOS) social sign-in. ID-token verification only needs the
 	// expected audiences: the app's bundle ID for Sign in with Apple (fixed by
@@ -59,6 +65,7 @@ func (c *Config) LoadAuthConfig(ctx context.Context) (*AuthConfig, error) {
 	googleClientSecret := c.GetSecretOptional(ctx, "GOOGLE_CLIENT_SECRET", "google-auth/client_secret", "")
 
 	appleAppID := c.GetStringOptional(ctx, "APPLE_APP_ID", "apple-auth/app_id", "")
+	appleRedirectURI := c.GetStringOptional(ctx, "APPLE_REDIRECT_URI", "apple-auth/redirect_uri", "")
 	appleTeamID := c.GetStringOptional(ctx, "APPLE_TEAM_ID", "apple-auth/team_id", "")
 	appleKeyID := c.GetStringOptional(ctx, "APPLE_KEY_ID", "apple-auth/key_id", "")
 	appleKeySecret := c.GetSecretOptional(ctx, "APPLE_KEY_SECRET", "apple-auth/key_secret", "")
@@ -88,10 +95,11 @@ func (c *Config) LoadAuthConfig(ctx context.Context) (*AuthConfig, error) {
 		GoogleClientSecret: googleClientSecret,
 		GoogleRedirectURI:  googleRedirectURI,
 
-		AppleAppID:     appleAppID,
-		AppleTeamID:    appleTeamID,
-		AppleKeyID:     appleKeyID,
-		AppleKeySecret: appleKeySecret,
+		AppleAppID:       appleAppID,
+		AppleTeamID:      appleTeamID,
+		AppleKeyID:       appleKeyID,
+		AppleKeySecret:   appleKeySecret,
+		AppleRedirectURI: appleRedirectURI,
 
 		AppleIOSBundleID:  appleIOSBundleID,
 		GoogleIOSClientID: googleIOSClientID,

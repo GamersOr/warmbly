@@ -88,13 +88,18 @@ type AuthService interface {
 	// sign-in resolves accounts by (issuer, subject) instead of email.
 	WireIdentities(r repository.IdentityRepository)
 
-	// Generic OIDC. WireOIDC attaches the provider (nil = OIDC disabled).
-	WireOIDC(p OIDCProvider)
-	OIDCBegin(ctx context.Context) (*OIDCRedirect, *errx.Error)
-	// OIDCCallback returns a single-use handoff code, not a session: the
+	// Browser sign-in: generic OIDC, Sign in with Google, Sign in with Apple.
+	// WireFederatedProvider attaches one under its identity-provider key
+	// ("oidc", "google", "apple"); a provider that is never wired stays
+	// unavailable and its button is never advertised.
+	WireFederatedProvider(name string, p FederatedProvider)
+	FederatedProviders() []string
+	FederatedProviderLabels() map[string]string
+	SSOBegin(ctx context.Context, provider string) (*SSORedirect, *errx.Error)
+	// SSOCallbackComplete returns a single-use handoff code, not a session: the
 	// provider redirects a browser here, so the response must be a redirect.
-	OIDCCallback(ctx context.Context, code, state, ipaddr, userAgent string) (string, *errx.Error)
-	OIDCExchange(ctx context.Context, code string) (*models.LoginResult, *errx.Error)
+	SSOCallbackComplete(ctx context.Context, in SSOCallback) (string, *errx.Error)
+	SSOExchange(ctx context.Context, code, binding string) (*models.LoginResult, *errx.Error)
 }
 
 type authService struct {
@@ -107,7 +112,6 @@ type authService struct {
 	emailNotificationService notify.EmailNotificationService
 	cache                    *cache.Cache
 	captcha                  *captcha.Turnstile
-	externalAuth             *models.ExternalAuth
 	appleIDTokens            IDTokenVerifier
 	googleIDTokens           IDTokenVerifier
 	twofa                    TwoFAChallenger
@@ -119,8 +123,9 @@ type authService struct {
 	// unwired repository falls back to the historic email-only matching, which
 	// is only safe for Apple and Google.
 	identities repository.IdentityRepository
-	// oidc is the generic OpenID Connect provider, nil unless configured.
-	oidc OIDCProvider
+	// providers are the configured browser sign-in flows, keyed by identity
+	// provider ("oidc", "google", "apple"). Empty unless one is configured.
+	providers map[string]FederatedProvider
 
 	// policy and mailDelivers govern whether an emailed code gates a login and
 	// whether public signups are open. Defaults are set in NewService so a
@@ -142,8 +147,6 @@ func (s *authService) Policy() *config.AuthPolicy { return s.policy }
 
 func (s *authService) WireIdentities(r repository.IdentityRepository) { s.identities = r }
 
-func (s *authService) WireOIDC(p OIDCProvider) { s.oidc = p }
-
 func (s *authService) WireReferral(r ReferralAttributor) { s.referral = r }
 
 // WireInstanceSettings attaches the instance settings document, so the signup
@@ -156,7 +159,6 @@ func NewService(
 	captcha *captcha.Turnstile,
 	tokenService token.TokenService,
 	emailNotificationService notify.EmailNotificationService,
-	externalAuthData *models.ExternalAuth,
 	trialService trial.TrialService,
 	organizationService organization.OrganizationService,
 	userRepository repository.UserRepository,
@@ -168,7 +170,6 @@ func NewService(
 		emailNotificationService: emailNotificationService,
 		cache:                    cache,
 		captcha:                  captcha,
-		externalAuth:             externalAuthData,
 		trialService:             trialService,
 		organizationService:      organizationService,
 		userRepository:           userRepository,

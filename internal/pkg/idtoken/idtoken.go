@@ -50,6 +50,11 @@ type Verifier struct {
 	issuers   []string
 	audiences []string
 	client    *http.Client
+	// canonical collapses a provider that signs with more than one spelling of
+	// its issuer onto one value. Identities are keyed on (issuer, subject), so
+	// without it the same person becomes two accounts depending on which form
+	// the token happened to carry.
+	canonical string
 
 	mu      sync.Mutex
 	keys    map[string]*rsa.PublicKey
@@ -67,12 +72,17 @@ func AppleVerifier(bundleIDs ...string) *Verifier {
 }
 
 // GoogleVerifier verifies Google Sign-In ID tokens for the given OAuth client IDs.
+//
+// Google signs with either spelling of its issuer, so both are accepted and the
+// claims report the https form whichever arrived.
 func GoogleVerifier(clientIDs ...string) *Verifier {
-	return NewVerifier(
+	v := NewVerifier(
 		"https://www.googleapis.com/oauth2/v3/certs",
 		[]string{"https://accounts.google.com", "accounts.google.com"},
 		clientIDs,
 	)
+	v.canonical = "https://accounts.google.com"
+	return v
 }
 
 func NewVerifier(jwksURL string, issuers, audiences []string) *Verifier {
@@ -113,6 +123,10 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (*Claims, error) {
 	}
 	if !v.audienceAllowed(mc["aud"]) {
 		return nil, errors.New("idtoken: audience not allowed")
+	}
+
+	if v.canonical != "" {
+		iss = v.canonical
 	}
 
 	sub, _ := mc["sub"].(string)

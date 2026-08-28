@@ -12,4 +12,7 @@ const (
 	AuthProviderApple    = "apple"
 	AuthProviderGoogle   = "google"
 	AuthProviderWebAuthn = "webauthn"
+	// AuthProviderOIDC covers generic single sign-on. Google and Apple keep
+	// their own values, so the security page can name what was actually used.
+	AuthProviderOIDC = "oidc"
 )

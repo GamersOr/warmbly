@@ -327,6 +327,7 @@ services:
       APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
       APPLE_KEY_ID: ${APPLE_KEY_ID:-}
       APPLE_KEY_SECRET: ${APPLE_KEY_SECRET:-}
+      APPLE_REDIRECT_URI: ${APPLE_REDIRECT_URI:-}
       # Passkeys derive from APP_URL when unset. Changing the RP id invalidates
       # every enrolled passkey, so keep it stable per deployment.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-}
