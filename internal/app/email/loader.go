@@ -119,13 +119,21 @@ func (s *emailService) loadAccountBestEffort(ctx context.Context, accountID uuid
 
 // LoadAccountOntoWorker assigns a worker if the account has none, rebuilds the
 // account's decrypted credentials into an AddWorkerEmail payload, and publishes
-// it so the worker loads the account into memory. Safe to call repeatedly.
+// it so the worker loads the account into memory. Safe to call repeatedly, and
+// a no-op for a mailbox that is not active.
 func (s *emailService) LoadAccountOntoWorker(ctx context.Context, accountID uuid.UUID) error {
 	acc, xerr := s.emailRepository.GetByID(ctx, accountID)
 	if xerr != nil {
 		return xerr
 	}
 	if acc == nil {
+		return nil
+	}
+	// A mailbox that is not active must never be shipped to a worker. The
+	// reconciler reads the active list a tick before it publishes, so without
+	// this it can put back a mailbox that was deactivated in between and undo
+	// the removal the consumer just sent.
+	if acc.Status != "active" {
 		return nil
 	}
 
