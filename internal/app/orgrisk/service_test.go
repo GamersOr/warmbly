@@ -135,6 +135,9 @@ func (s *stubRiskRepo) UpdateOrgRiskSignals(_ context.Context, _ uuid.UUID,
 	copy := *s.risk
 	return &copy, nil
 }
+func (s *stubRiskRepo) OrgsWithSignal(context.Context, string) ([]uuid.UUID, error) {
+	return nil, nil
+}
 func (s *stubRiskRepo) SetOrgRiskState(_ context.Context, _ uuid.UUID, state models.OrgRiskState, reason string) (*models.OrgRisk, error) {
 	s.risk.State, s.risk.Reason = state, reason
 	copy := *s.risk
