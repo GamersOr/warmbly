@@ -1,10 +1,5 @@
-// Package authrisk compares a sign-in against where the account was last used.
-//
-// A hijacked workspace owns warmed mailboxes and decryptable credentials, so it
-// is worth more to an attacker than an ordinary SaaS account. The existing
-// device fingerprint already challenges an unfamiliar browser; this adds the
-// question that fingerprint cannot answer, which is whether the sign-in could
-// physically have come from the same person.
+// Package authrisk asks whether a sign-in could physically have come from the
+// same person as the previous one, which the device fingerprint cannot answer.
 package authrisk
 
 import (
@@ -39,26 +34,20 @@ const (
 	// MaxPlausibleKmh is faster than a commercial flight including transfers.
 	// Above it the two sign-ins cannot be the same person travelling.
 	MaxPlausibleKmh = 1000
-	// MinDistanceKm is the distance below which speed is not worth computing.
-	// City centroids are coarse, and two sign-ins from opposite sides of one
-	// metro area would otherwise imply an absurd speed over a tiny gap.
+	// MinDistanceKm keeps coarse city centroids from implying an absurd speed
+	// across one metro area.
 	MinDistanceKm = 500
-	// MinElapsed guards against dividing by an interval so short that any
-	// distance looks impossible. Two sign-ins seconds apart from different
-	// cities are far more likely to be a proxy than a journey.
+	// MinElapsed avoids dividing by an interval so short that any distance
+	// looks impossible; that pattern is a proxy, not a journey.
 	MinElapsed = 2 * time.Minute
 )
 
-// Assess compares a new sign-in against the most recent previous one.
-//
-// It answers only what the data supports. With no history, no coordinates, or
-// an interval too short to reason about, it declines to flag: a false step-up
-// locks a real user out of their own account, which is a worse outcome than a
-// missed signal on one sign-in.
+// Assess compares a new sign-in against the most recent previous one. It
+// declines to flag whenever the data does not support a verdict: a false
+// step-up locks a real user out of their own account.
 func Assess(prev *Place, current Place) Verdict {
 	if prev == nil {
-		// First recorded sign-in. There is nothing to compare against, and
-		// challenging it would challenge every new user.
+		// First sign-in: challenging it would challenge every new user.
 		return Verdict{}
 	}
 

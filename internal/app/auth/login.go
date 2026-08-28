@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"github.com/warmbly/warmbly/internal/app/authrisk"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -34,8 +35,11 @@ func (s *authService) LoginStart(ctx context.Context, data *AuthData, ipaddr, us
 	// SP 800-63B and OWASP ASVS both decline to count email as one. When it is
 	// off, or the device is already known, the login completes here and never
 	// touches the mail transport.
-	if !s.loginCodeRequired(ctx, uid, userAgent, ipaddr) {
-		result, ferr := s.finishLogin(ctx, uid, ipaddr, userAgent)
+	// Assessed once here: the verdict that decides the challenge is the same
+	// one recorded when the sign-in completes.
+	verdict := s.assessLogin(ctx, uid, ipaddr)
+	if !s.loginCodeRequired(ctx, uid, userAgent, verdict) {
+		result, ferr := s.finishLoginWith(ctx, uid, ipaddr, userAgent, &verdict)
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -86,8 +90,9 @@ func (s *authService) LoginStart(ctx context.Context, data *AuthData, ipaddr, us
 	}
 
 	session := &models.LoginSession{
-		CodeHash: codeHash,
-		Nonce:    nonce,
+		CodeHash:      codeHash,
+		Nonce:         nonce,
+		AnomalyReason: verdict.Reason,
 	}
 
 	sessionToken, xerr := s.tokenService.GenerateToken(uid, sessionID, "", nonce, issuedAt, expiresAt)
@@ -108,7 +113,7 @@ func (s *authService) LoginStart(ctx context.Context, data *AuthData, ipaddr, us
 
 // loginCodeRequired applies AUTH_LOGIN_CODE. A transport that cannot deliver
 // never demands a code, because there would be no way to complete the login.
-func (s *authService) loginCodeRequired(ctx context.Context, userID uuid.UUID, userAgent, ipaddr string) bool {
+func (s *authService) loginCodeRequired(ctx context.Context, userID uuid.UUID, userAgent string, verdict authrisk.Verdict) bool {
 	if !s.mailDelivers {
 		return false
 	}
@@ -121,18 +126,10 @@ func (s *authService) loginCodeRequired(ctx context.Context, userID uuid.UUID, u
 	case config.LoginCodeNewDevice:
 		// A familiar browser in an impossible place is exactly the case the
 		// device fingerprint cannot catch: the attacker has the cookie.
-		return !s.isKnownDevice(ctx, userID, userAgent) || s.loginLooksAnomalous(ctx, userID, ipaddr)
+		return !s.isKnownDevice(ctx, userID, userAgent) || verdict.Flagged
 	default:
 		return true
 	}
-}
-
-// loginLooksAnomalous compares this sign-in against the account's last one.
-// Best-effort: no history repository, no geo database, or a failed lookup all
-// answer "no", because a false challenge locks a real user out of their own
-// account and that is the worse outcome.
-func (s *authService) loginLooksAnomalous(ctx context.Context, userID uuid.UUID, ipaddr string) bool {
-	return s.assessLogin(ctx, userID, ipaddr).Flagged
 }
 
 func (s *authService) LoginConfirm(ctx context.Context, data *ConfirmData, session, ipaddr string, userAgent string) (*models.LoginResult, *errx.Error) {
@@ -172,11 +169,23 @@ func (s *authService) LoginConfirm(ctx context.Context, data *ConfirmData, sessi
 	// One email confirmation means exactly one challenge.
 	_ = s.cache.Del(ctx, getLoginSessionKey(atoken.SessionID)).Err()
 
-	return s.finishLogin(ctx, atoken.UserID, ipaddr, userAgent)
+	return s.finishLoginWith(ctx, atoken.UserID, ipaddr, userAgent, challengeVerdict(sess))
+}
+
+// challengeVerdict recovers the verdict that issued this challenge rather than
+// reaching a fresh one: history has moved on since, and the confirming request
+// can arrive from a different address, so re-judging could store a challenged
+// sign-in as clean.
+func challengeVerdict(sess *models.LoginSession) *authrisk.Verdict {
+	return &authrisk.Verdict{Flagged: sess.AnomalyReason != "", Reason: sess.AnomalyReason}
 }
 
 func (s *authService) finishLogin(ctx context.Context, userID uuid.UUID, ipaddr, userAgent string) (*models.LoginResult, *errx.Error) {
-	return s.finishLoginAs(ctx, userID, ipaddr, userAgent, token.AuthProviderEmail)
+	return s.finishLoginWith(ctx, userID, ipaddr, userAgent, nil)
+}
+
+func (s *authService) finishLoginWith(ctx context.Context, userID uuid.UUID, ipaddr, userAgent string, verdict *authrisk.Verdict) (*models.LoginResult, *errx.Error) {
+	return s.finishLoginAsWith(ctx, userID, ipaddr, userAgent, token.AuthProviderEmail, verdict)
 }
 
 // finishLoginAs is everything that happens once a caller has proved they own
@@ -187,6 +196,13 @@ func (s *authService) finishLogin(ctx context.Context, userID uuid.UUID, ipaddr,
 // Apple, Google or a passkey, and the browser OAuth paths skipped the ban check
 // as well.
 func (s *authService) finishLoginAs(ctx context.Context, userID uuid.UUID, ipaddr, userAgent, provider string) (*models.LoginResult, *errx.Error) {
+	return s.finishLoginAsWith(ctx, userID, ipaddr, userAgent, provider, nil)
+}
+
+// finishLoginAsWith takes the verdict the caller already reached, if it has
+// one. A nil verdict is assessed here, which is right for the paths that
+// authenticate and complete in the same request.
+func (s *authService) finishLoginAsWith(ctx context.Context, userID uuid.UUID, ipaddr, userAgent, provider string, verdict *authrisk.Verdict) (*models.LoginResult, *errx.Error) {
 	// Ban-scope enforcement (migration 000045). The runtime treats
 	// BanScopeLogin as "this account cannot authenticate" — the row's
 	// banned_at is set in tandem so legacy callers still see the user
@@ -211,11 +227,12 @@ func (s *authService) finishLoginAs(ctx context.Context, userID uuid.UUID, ipadd
 	}
 
 	// Record where this sign-in came from, whatever route reached here, so the
-	// next one has something to compare against. The verdict is recomputed
-	// rather than threaded through: every path into finishLoginAs would
-	// otherwise have to carry it, and the ones that forgot would silently stop
-	// building the history.
-	s.recordLogin(ctx, userID, ipaddr, userAgent, s.assessLogin(ctx, userID, ipaddr))
+	// next one has something to compare against.
+	if verdict == nil {
+		v := s.assessLogin(ctx, userID, ipaddr)
+		verdict = &v
+	}
+	s.recordLogin(ctx, userID, ipaddr, userAgent, *verdict)
 
 	newToken, err := s.tokenService.GenerateSession(ctx, userID, "", ipaddr, userAgent, provider)
 	if err != nil {
