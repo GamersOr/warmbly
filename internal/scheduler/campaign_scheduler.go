@@ -176,17 +176,27 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// STEP 3.5: Resolve the recipient ESP/provider for ESP matching. Cheap:
 	// prefer the cached contact.esp_provider, else derive from the domain
 	// string. NEVER dial MX on the hot path. Empty => unknown => wildcard.
+	// STEP 3.4: Recipient-timezone policy. Disabled, absent or unreadable all
+	// leave the send on the sending mailbox's clock.
+	sendPref := s.sendTimePreference(ctx, campaign.OrganizationID)
+
+	// Loaded once: ESP matching and send-time optimization share the row.
+	var recipientContact *models.Contact
+	if (campaign.ESPMatchMode != "off" || sendPref.enabled) && s.contactRepo != nil {
+		if contact, cerr := s.contactRepo.GetByID(ctx, nextPair.ContactID); cerr == nil {
+			recipientContact = contact
+		}
+	}
+
 	recipientProvider := ""
-	if campaign.ESPMatchMode != "off" && s.contactRepo != nil {
-		if contact, cerr := s.contactRepo.GetByID(ctx, nextPair.ContactID); cerr == nil && contact != nil {
-			if contact.ESPProvider != "" {
-				recipientProvider = contact.ESPProvider
-			} else {
-				recipientProvider = providerForEmailDomain(contact.Email)
-				// Opportunistically cache the derived provider (best-effort).
-				if recipientProvider != "" {
-					_ = s.contactRepo.SetContactESP(ctx, contact.ID, recipientProvider)
-				}
+	if campaign.ESPMatchMode != "off" && recipientContact != nil {
+		if recipientContact.ESPProvider != "" {
+			recipientProvider = recipientContact.ESPProvider
+		} else {
+			recipientProvider = providerForEmailDomain(recipientContact.Email)
+			// Opportunistically cache the derived provider (best-effort).
+			if recipientProvider != "" {
+				_ = s.contactRepo.SetContactESP(ctx, recipientContact.ID, recipientProvider)
 			}
 		}
 	}
@@ -618,6 +628,17 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// curve on top would drag sends away from the hours the customer chose.
 	if !selected.Behavior.Enabled {
 		candidateTime = applyDistributionCurve(candidateTime, campaignTZ)
+	}
+
+	// STEP 13.5: Aim the send at the RECIPIENT's business hours. hardFloor
+	// moves with it, because the task handler sends whatever pair this returns
+	// and a slot that did not gate would be a hint the send ignores.
+	if sendPref.enabled {
+		if snapped, ok := s.recipientSlot(ctx, selected.Behavior, candidateTime, windows, campaignTZ,
+			recipientContact, sendPref, campaign.EndDate); ok && snapped.After(candidateTime) {
+			candidateTime = snapped
+			hardFloor = snapped
+		}
 	}
 
 	// STEP 14: Ensure still within a sending window after all adjustments

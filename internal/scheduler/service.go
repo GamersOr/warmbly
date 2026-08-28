@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"math/rand"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +44,9 @@ type schedulerService struct {
 	// Optional/nil-safe: without it the persisted auth state stays
 	// observe-only and never blocks a send.
 	domainAuth DomainAuthPolicy
+	// outreachRepo reads the org's send-time-optimization settings. Optional/
+	// nil-safe: without it sends stay on the sending mailbox's clock.
+	outreachRepo repository.AdvancedOutreachRepository
 }
 
 // DomainAuthPolicy resolves whether the sending-domain authentication gate is
@@ -85,6 +90,33 @@ func (s *schedulerService) WireDomainAuth(p DomainAuthPolicy) {
 // authentication gate after construction.
 type DomainAuthAware interface {
 	WireDomainAuth(p DomainAuthPolicy)
+}
+
+// WireOutreach attaches the advanced-outreach settings repository, which
+// carries the org's recipient-timezone send-time policy. Kept off the
+// constructor for the same reason as WireBehavior.
+func (s *schedulerService) WireOutreach(r repository.AdvancedOutreachRepository) {
+	s.outreachRepo = r
+}
+
+// OutreachAware is the optional capability the caller uses to attach the
+// outreach settings after construction.
+type OutreachAware interface {
+	WireOutreach(r repository.AdvancedOutreachRepository)
+}
+
+// sendTimePreference resolves the org's recipient-timezone policy for one
+// scheduling pass. No repository, no organization, or an unreadable settings
+// row all mean "not enabled", which leaves the slot on the mailbox's clock.
+func (s *schedulerService) sendTimePreference(ctx context.Context, orgID *uuid.UUID) sendTimePreference {
+	if s.outreachRepo == nil || orgID == nil {
+		return sendTimePreference{}
+	}
+	settings, err := s.outreachRepo.GetOutreachSettings(ctx, *orgID)
+	if err != nil {
+		return sendTimePreference{}
+	}
+	return sendTimePreferenceFrom(settings)
 }
 
 // NewSchedulerService creates a new scheduler service
@@ -139,17 +171,30 @@ func convertToAccountTimezone(t time.Time, campaignTZ, accountTZ string) time.Ti
 // Time calculation helpers
 
 // parseTimeOfDay parses a time string like "08:00" and returns minutes since midnight
+// parseTimeOfDay reads "HH:MM" into minutes since midnight, tolerating any
+// trailing seconds or fraction.
+//
+// It used to accept the "15:04" layout only. The app writes that, but
+// start_time/end_time and warmup_start_time/warmup_end_time are Postgres
+// `time` columns, which pgx hands back as "09:00:00.000000" — so every read
+// failed to parse and returned 0. That silently disabled BOTH the campaign
+// sending window and its day-of-week gate (effectiveWindows reads 0 >= 0 as
+// "unconstrained"), and pinned every mailbox's warmup window to the 08:00-20:00
+// fallbacks whatever the owner had configured.
 func parseTimeOfDay(timeStr string) int {
-	if timeStr == "" {
+	parts := strings.Split(strings.TrimSpace(timeStr), ":")
+	if len(parts) < 2 {
 		return 0
 	}
-
-	t, err := time.Parse("15:04", timeStr)
-	if err != nil {
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil || hour < 0 || hour > 23 {
 		return 0
 	}
-
-	return t.Hour()*60 + t.Minute()
+	minute, err := strconv.Atoi(parts[1])
+	if err != nil || minute < 0 || minute > 59 {
+		return 0
+	}
+	return hour*60 + minute
 }
 
 // calculateBusinessHoursRemaining calculates hours remaining in business day
