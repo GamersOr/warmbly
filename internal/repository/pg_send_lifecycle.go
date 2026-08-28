@@ -20,8 +20,15 @@ type SendLifecycleRepository interface {
 	// rebalancer cannot override a deliberate hold.
 	SetSendLifecycle(ctx context.Context, accountID uuid.UUID, state models.SendLifecycle, reason string, force bool) (bool, error)
 	// ListLifecycleCandidates returns mailboxes the rebalancer may move, with
-	// the warmup health that decides where they go.
+	// the warmup health that decides where they go, oldest-checked first so
+	// every mailbox is reached rather than the same page every pass.
 	ListLifecycleCandidates(ctx context.Context, limit int) ([]LifecycleCandidate, error)
+	// MarkLifecycleChecked records that the rebalancer looked at these
+	// mailboxes, which is what rotates the candidate window.
+	MarkLifecycleChecked(ctx context.Context, accountIDs []uuid.UUID) error
+	// RestartProbation re-stamps a resting mailbox's clock without changing
+	// its state, so probation measures healthy time rather than time elapsed.
+	RestartProbation(ctx context.Context, accountID uuid.UUID) error
 }
 
 // LifecycleCandidate is one mailbox the rebalancer is considering.
@@ -101,7 +108,7 @@ func (r *sendLifecycleRepository) ListLifecycleCandidates(ctx context.Context, l
 		  LEFT JOIN warmup_pool_participants wpp ON wpp.email_account_id = ea.id
 		 WHERE ea.status = 'active'
 		   AND ea.send_lifecycle IN ('active', 'resting')
-		 ORDER BY ea.send_lifecycle_since NULLS FIRST
+		 ORDER BY ea.send_lifecycle_checked_at NULLS FIRST, ea.id
 		 LIMIT $1
 	`, limit)
 	if err != nil {
@@ -121,4 +128,22 @@ func (r *sendLifecycleRepository) ListLifecycleCandidates(ctx context.Context, l
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (r *sendLifecycleRepository) MarkLifecycleChecked(ctx context.Context, accountIDs []uuid.UUID) error {
+	if len(accountIDs) == 0 {
+		return nil
+	}
+	_, err := r.DB.Pool.Exec(ctx,
+		`UPDATE email_accounts SET send_lifecycle_checked_at = NOW() WHERE id = ANY($1::uuid[])`, accountIDs)
+	return err
+}
+
+func (r *sendLifecycleRepository) RestartProbation(ctx context.Context, accountID uuid.UUID) error {
+	_, err := r.DB.Pool.Exec(ctx, `
+		UPDATE email_accounts
+		   SET send_lifecycle_since = NOW()
+		 WHERE id = $1 AND send_lifecycle = 'resting'
+	`, accountID)
+	return err
 }

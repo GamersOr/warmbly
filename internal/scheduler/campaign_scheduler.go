@@ -267,7 +267,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 
 	// Which mailboxes are in cold rotation at all. A resting mailbox keeps its
 	// warmup traffic and its reputation; it just is not offered cold sends.
-	lifecycles := s.sendLifecycles(ctx, accounts)
+	lifecycles, lifecyclesKnown := s.sendLifecycles(ctx, accounts)
 
 	effectiveCap := func(acct models.Email) int {
 		lim := min(acct.CampaignLimit, campaign.DailyLimit)
@@ -357,8 +357,9 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		}
 
 		// Not in cold rotation. Checked here, beside the authentication gate,
-		// so a resting mailbox costs no capacity query.
-		if !lifecycles[acct.ID].State.SendsCold() {
+		// so a resting mailbox costs no capacity query. Applied only when the
+		// states were actually read.
+		if lifecyclesKnown && !lifecycles[acct.ID].State.SendsCold() {
 			lifecycleGated++
 			continue
 		}

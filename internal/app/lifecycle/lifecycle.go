@@ -1,10 +1,6 @@
-// Package lifecycle decides when a cold mailbox should rest and when it may
-// come back.
-//
-// Cold sending ran at full volume until a hard health band tripped, so a
-// mailbox showing early fatigue either kept going or was quarantined, with
-// nothing in between. Resting pulls it out of cold rotation while warmup keeps
-// its reputation alive, and returns it after a clean probation.
+// Package lifecycle decides when a cold mailbox rests and when it may return.
+// Resting removes it from cold rotation while warmup keeps its reputation
+// alive; it returns only after a clean probation.
 package lifecycle
 
 import (
@@ -19,16 +15,18 @@ type Decision struct {
 	// changes.
 	Next   models.SendLifecycle
 	Reason string
+	// RestartProbation asks the caller to re-stamp the clock without changing
+	// state. Probation has to measure HEALTHY time: a mailbox that sat resting
+	// and unhealthy for three days would otherwise resume on its first healthy
+	// tick, having served no clean time at all.
+	RestartProbation bool
 }
 
 // Changed reports whether the mailbox should move.
 func (d Decision) Changed(current models.SendLifecycle) bool { return d.Next != current }
 
-// Decide maps a mailbox's warmup health onto its cold lifecycle.
-//
-// Rests on throttled and worse, never on watch: watch is the band defined to
-// change nothing a customer can feel, and leaving cold rotation is very much
-// something they feel.
+// Decide maps warmup health onto the cold lifecycle. Rests at throttled and
+// worse, never at watch: watch is defined to change nothing a customer feels.
 func Decide(current models.SendLifecycle, since *time.Time, health models.WarmupHealthState, now time.Time) Decision {
 	if !current.AutoManaged() {
 		return Decision{Next: current}
@@ -46,8 +44,12 @@ func Decide(current models.SendLifecycle, since *time.Time, health models.Warmup
 	// Healthy or watch. A resting mailbox returns only after a probation, so
 	// one good hour cannot bounce it straight back to full cold volume.
 	if current == models.SendLifecycleResting {
+		if health != models.WarmupHealthHealthy {
+			// Still not healthy: the clean streak starts again from here.
+			return Decision{Next: current, RestartProbation: true}
+		}
 		state := models.SendLifecycleState{State: current, Since: since}
-		if health == models.WarmupHealthHealthy && state.ReadyToResume(now) {
+		if state.ReadyToResume(now) {
 			return Decision{Next: models.SendLifecycleActive, Reason: "recovered and served its rest"}
 		}
 		return Decision{Next: current}
