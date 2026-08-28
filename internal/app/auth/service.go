@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"github.com/warmbly/warmbly/internal/app/orgrisk"
+	"github.com/warmbly/warmbly/internal/pkg/geo"
 
 	"github.com/google/uuid"
 
@@ -107,6 +108,10 @@ type authService struct {
 	// orgRisk files signup findings onto the new workspace's posture.
 	// Optional/nil-safe: without it signups are scored but not fused.
 	orgRisk orgrisk.Service
+	// loginHistory and geo back the sign-in anomaly check. Either being nil
+	// leaves every sign-in unjudged, which is the safe direction.
+	loginHistory repository.LoginHistoryRepository
+	geo          *geo.Client
 
 	authRepository           repository.AuthRepository
 	userRepository           repository.UserRepository
@@ -194,4 +199,15 @@ func (s *authService) WireOrgRisk(r orgrisk.Service) { s.orgRisk = r }
 // OrgRiskAware is the optional capability the caller uses to attach org risk.
 type OrgRiskAware interface {
 	WireOrgRisk(r orgrisk.Service)
+}
+
+// WireLoginRisk attaches the sign-in anomaly check. Kept off the constructor
+// so auth stays constructible where geo or the history table is absent.
+func (s *authService) WireLoginRisk(h repository.LoginHistoryRepository, g *geo.Client) {
+	s.loginHistory, s.geo = h, g
+}
+
+// LoginRiskAware is the optional capability the caller uses to attach it.
+type LoginRiskAware interface {
+	WireLoginRisk(h repository.LoginHistoryRepository, g *geo.Client)
 }

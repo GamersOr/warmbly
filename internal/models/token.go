@@ -83,6 +83,12 @@ type LoginSession struct {
 	CodeHash string `json:"code_hash"`
 	Tries    int    `json:"tries"`
 	Nonce    string `json:"nonce"`
+	// AnomalyReason carries the verdict that CAUSED this challenge, so the
+	// completed sign-in is recorded as the anomaly it was. Recomputing it at
+	// confirm would judge different history, and possibly a different address,
+	// and could store a challenged sign-in as clean — which is exactly the
+	// accounting the repeat threshold depends on.
+	AnomalyReason string `json:"anomaly_reason,omitempty"`
 }
 
 type RegistrationSession struct {

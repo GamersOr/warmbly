@@ -776,6 +776,11 @@ func main() {
 		if aware, ok := authService.(auth.OrgRiskAware); ok && orgRiskService != nil {
 			aware.WireOrgRisk(orgRiskService)
 		}
+		// Sign-in anomaly detection. Without a geo database every sign-in is
+		// simply unjudged, which is the safe direction.
+		if aware, ok := authService.(auth.LoginRiskAware); ok {
+			aware.WireLoginRisk(repository.NewLoginHistoryRepository(primaryDB), geoloc)
+		}
 		// TOTP 2FA: the secret is sealed with a server-wide key (the per-user DEK
 		// is unreachable at login time). Wire the challenger into auth so the login
 		// gate can issue a pending challenge.

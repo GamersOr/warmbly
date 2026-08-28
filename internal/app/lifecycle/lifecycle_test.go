@@ -107,3 +107,23 @@ func TestDecideDoesNotRestartProbationForOtherStates(t *testing.T) {
 		}
 	}
 }
+
+// A mailbox that is in no warmup pool reports no health at all. Reading that
+// as healthy would let a rested mailbox resume on the strength of having left
+// the pool, which is the opposite of evidence.
+func TestUnknownHealthNeitherRestsNorResumes(t *testing.T) {
+	now := time.Now()
+	long := now.Add(-30 * 24 * time.Hour)
+
+	d := Decide(models.SendLifecycleResting, &long, "", now)
+	if d.Next != models.SendLifecycleResting {
+		t.Fatalf("resting mailbox with no pool resumed: %v", d.Next)
+	}
+	if !d.RestartProbation {
+		t.Fatal("probation must not accrue while health is unknown")
+	}
+
+	if d := Decide(models.SendLifecycleActive, &long, "", now); d.Next != models.SendLifecycleActive {
+		t.Fatalf("active mailbox with no pool moved to %v", d.Next)
+	}
+}

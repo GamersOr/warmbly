@@ -36,7 +36,9 @@ type LifecycleCandidate struct {
 	EmailAccountID uuid.UUID
 	Current        models.SendLifecycle
 	Since          *time.Time
-	HealthState    models.WarmupHealthState
+	// HealthState is empty when the mailbox is in no warmup pool, meaning no
+	// signal rather than a healthy one.
+	HealthState models.WarmupHealthState
 }
 
 type sendLifecycleRepository struct {
@@ -99,11 +101,12 @@ func (r *sendLifecycleRepository) ListLifecycleCandidates(ctx context.Context, l
 	if limit <= 0 {
 		limit = 500
 	}
-	// Only mailboxes the rebalancer may move, and only those whose warmup
-	// health is known: a mailbox in no pool has no signal to act on.
+	// health_state stays NULL for a mailbox in no pool: leaving the pool is
+	// not evidence of health, so the caller must see "unknown" rather than a
+	// clean bill that would auto-resume it.
 	rows, err := r.DB.Pool.Query(ctx, `
 		SELECT ea.id, ea.send_lifecycle, ea.send_lifecycle_since,
-		       COALESCE(wpp.health_state, 'healthy')
+		       wpp.health_state
 		  FROM email_accounts ea
 		  LEFT JOIN warmup_pool_participants wpp ON wpp.email_account_id = ea.id
 		 WHERE ea.status = 'active'
@@ -119,12 +122,15 @@ func (r *sendLifecycleRepository) ListLifecycleCandidates(ctx context.Context, l
 	var out []LifecycleCandidate
 	for rows.Next() {
 		var c LifecycleCandidate
-		var state, health string
+		var state string
+		var health *string
 		if err := rows.Scan(&c.EmailAccountID, &state, &c.Since, &health); err != nil {
 			return nil, err
 		}
 		c.Current = models.SendLifecycle(state)
-		c.HealthState = models.WarmupHealthState(health)
+		if health != nil {
+			c.HealthState = models.WarmupHealthState(*health)
+		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
