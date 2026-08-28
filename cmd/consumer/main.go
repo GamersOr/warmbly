@@ -376,6 +376,7 @@ func main() {
 		WarmupEngagementRepo:        repository.NewWarmupEngagementRepository(primaryDB.Pool),
 		WarmupService:               warmupService,
 		WorkerRepo:                  workerRepo,
+		LifecycleRepo:               repository.NewSendLifecycleRepository(primaryDB),
 		Publisher:                   eventsPublisher,
 		StreamingPublisher:          streamingPublisher,
 		AdvancedService:             advancedService,
@@ -432,6 +433,9 @@ func main() {
 	// risk_pool worker when the band changes. Skipped if AssignmentService
 	// or WorkerRepo are nil.
 	go jobsService.StartRiskRebalancer(ctx, 1*time.Hour)
+	// Same cadence, different question: risk_band picks the worker, the
+	// lifecycle picks whether the mailbox is in cold rotation at all.
+	go jobsService.StartLifecycleRebalancer(ctx, 1*time.Hour)
 	// The cross-account sweep. Nightly rather than hourly: it looks for
 	// patterns that form over days and it touches every organization.
 	go correlate.NewService(

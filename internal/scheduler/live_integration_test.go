@@ -1019,3 +1019,72 @@ func TestLiveGraduationDoesNotGateAMailboxThatNeverWarmed(t *testing.T) {
 		t.Errorf("a never-warmed mailbox allows %d, want its full 50 cap", got)
 	}
 }
+
+// setLifecycle moves the fixture's mailbox in or out of cold rotation.
+func (f *liveFixture) setLifecycle(t *testing.T, state models.SendLifecycle) {
+	t.Helper()
+	if _, err := f.pool.Exec(context.Background(),
+		`UPDATE email_accounts SET send_lifecycle = $2, send_lifecycle_since = NOW() WHERE id = $1`,
+		f.mailbox, string(state)); err != nil {
+		t.Fatalf("set lifecycle: %v", err)
+	}
+}
+
+// Issue #157: a resting mailbox must actually leave cold rotation. The state
+// existing in the database proves nothing; this proves the scheduler reads it.
+func TestLiveRestingMailboxLeavesColdRotation(t *testing.T) {
+	handle, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+	s := liveScheduler(t, handle, pool)
+	if aware, ok := s.(LifecycleAware); ok {
+		aware.WireLifecycle(repository.NewSendLifecycleRepository(handle))
+	}
+
+	// Active: the campaign schedules normally.
+	if _, _, _, err := s.CalculateNextCampaignTime(context.Background(), f.campaign); err != nil &&
+		!errors.Is(err, ErrCampaignDeferred) {
+		t.Fatalf("an active mailbox could not be scheduled: %v", err)
+	}
+
+	// Resting: the only mailbox in the pool is out, so the campaign defers
+	// rather than sending from a mailbox that is meant to be recovering.
+	f.setLifecycle(t, models.SendLifecycleResting)
+	_, _, _, err := s.CalculateNextCampaignTime(context.Background(), f.campaign)
+	if err == nil {
+		t.Fatal("a resting mailbox was still offered cold traffic")
+	}
+	if !errors.Is(err, ErrCampaignDeferred) {
+		t.Errorf("err = %v, want a deferral: the mailbox returns on its own", err)
+	}
+}
+
+// Reserve is the owner holding a mailbox back, and it must be honoured the
+// same way.
+func TestLiveReservedMailboxLeavesColdRotation(t *testing.T) {
+	handle, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+	s := liveScheduler(t, handle, pool)
+	if aware, ok := s.(LifecycleAware); ok {
+		aware.WireLifecycle(repository.NewSendLifecycleRepository(handle))
+	}
+
+	f.setLifecycle(t, models.SendLifecycleReserve)
+	if _, _, _, err := s.CalculateNextCampaignTime(context.Background(), f.campaign); err == nil {
+		t.Fatal("a reserved mailbox was still offered cold traffic")
+	}
+}
+
+// The default must not change behaviour for any existing mailbox.
+func TestLiveActiveIsTheDefault(t *testing.T) {
+	_, pool := liveDB(t)
+	f := newLiveFixture(t, pool, "UTC")
+
+	var state string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT send_lifecycle FROM email_accounts WHERE id = $1`, f.mailbox).Scan(&state); err != nil {
+		t.Fatalf("read lifecycle: %v", err)
+	}
+	if models.SendLifecycle(state) != models.SendLifecycleActive {
+		t.Errorf("a new mailbox is %q, want active", state)
+	}
+}
