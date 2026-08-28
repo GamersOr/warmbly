@@ -36,7 +36,11 @@ const (
 	MailErrorCodeGooglePayment   MailErrorCode = "GOOGLE_PAYMENT_REQUIRED"
 	MailErrorCodeGoogleForbidden MailErrorCode = "GOOGLE_FORBIDDEN"
 
-	MailErrorCodeServerUnreachable    MailErrorCode = "SERVER_UNREACHABLE"
+	MailErrorCodeServerUnreachable MailErrorCode = "SERVER_UNREACHABLE"
+	// MailErrorCodeNotFound is the provider saying the addressed resource is
+	// absent, kept apart from SERVER_UNREACHABLE so "this folder does not
+	// exist" is never inferred from a catch-all that also covers a 503.
+	MailErrorCodeNotFound             MailErrorCode = "RESOURCE_NOT_FOUND"
 	MailErrorCodeUnsupported          MailErrorCode = "UNSUPPORTED"
 	MailErrorCodeInvalidCredentials   MailErrorCode = "INVALID_CREDENTIALS"   // e.g. invalid username or password
 	MailErrorCodeAuthorizationFailed  MailErrorCode = "AUTHORIZATION_FAILED"  // e.g. imap disabled
@@ -113,6 +117,7 @@ var (
 		return MError(MailErrorWarning, MailErrorCodeGoogleUnknown(code), message, MailErrorResolveMethodRetry)
 	}
 	ErrMailServerUnreachable     = MError(MailErrorWarning, MailErrorCodeServerUnreachable, "The connection to the mail server could not be established. The server may be offline or blocking the connection.", MailErrorResolveMethodRetry)
+	ErrMailResourceNotFound      = MError(MailErrorWarning, MailErrorCodeNotFound, "The mail server does not have the folder or message that was requested.", MailErrorResolveMethodRetry)
 	ErrMailCondStoreNotSupported = MError(MailErrorCritical, MailErrorCodeUnsupported, "The mail server does not support the required CONDSTORE extension. Synchronization cannot continue.", MailErrorResolveMethodReload)
 	ErrMailInvalidCredentials    = MError(
 		MailErrorCritical,
@@ -210,6 +215,9 @@ func (e *MailError) GetUserErrorInfo() UserErrorInfo {
 	case MailErrorCodeServerUnreachable:
 		info.Title = "Connection Error"
 		info.ActionRequired = "The email server is temporarily unavailable. We'll retry automatically."
+	case MailErrorCodeNotFound:
+		info.Title = "Mailbox Item Missing"
+		info.ActionRequired = "The folder or message is no longer on the mail server. Nothing to do; we'll skip it."
 	case MailErrorCodeRateLimitExceeded:
 		info.Title = "Rate Limit Exceeded"
 		info.ActionRequired = "Your account has been temporarily limited due to unusual activity"

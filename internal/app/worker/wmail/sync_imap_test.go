@@ -236,3 +236,110 @@ func TestImapSyncWalksEveryBatchWithinBudget(t *testing.T) {
 		t.Errorf("released the mailbox %d times, want once before LIST-STATUS", conn.released)
 	}
 }
+
+// backfillImapConn serves an initial import: per-folder UID lists, with a
+// folder's search made to fail on demand so a pass can be driven through a
+// server having a moment.
+type backfillImapConn struct {
+	ImapConn
+	folders  []models.Mailbox
+	uids     map[string][]goimap.UID
+	fail     map[string]int // folder -> failures left (-1 for always)
+	selected string
+}
+
+func (c *backfillImapConn) Folders() ([]models.Mailbox, *errx.MailError) { return c.folders, nil }
+func (c *backfillImapConn) ReleaseMailbox()                              {}
+
+func (c *backfillImapConn) SelectForSync(name string) (uint32, *errx.MailError) {
+	c.selected = name
+	return uint32(len(c.uids[name])), nil
+}
+
+func (c *backfillImapConn) SearchChangedSince(uint64) ([]goimap.UID, *errx.MailError) {
+	return nil, nil
+}
+
+func (c *backfillImapConn) SearchSince(time.Time) ([]goimap.UID, *errx.MailError) {
+	if n := c.fail[c.selected]; n != 0 {
+		if n > 0 {
+			c.fail[c.selected] = n - 1
+		}
+		return nil, errx.ErrMailServerUnreachable
+	}
+	return append([]goimap.UID(nil), c.uids[c.selected]...), nil
+}
+
+func (c *backfillImapConn) FetchEnvelopes(_ context.Context, uids []goimap.UID) ([]*imap.Fetched, *errx.MailError) {
+	out := make([]*imap.Fetched, 0, len(uids))
+	for _, uid := range uids {
+		out = append(out, &imap.Fetched{Email: &models.EmailMessageData{
+			UID:       uint32(uid),
+			MessageID: fmt.Sprintf("<%s-%d@fake.test>", c.selected, uid),
+			Subject:   "history",
+		}})
+	}
+	return out, nil
+}
+
+func (c *backfillImapConn) FetchBody(*imap.Fetched) {}
+
+// The Graph defect's shape, checked on the IMAP import: a folder whose search
+// fails holds its cursor and is walked again on the next pass. Nothing about a
+// server error may mark a folder, or the whole import, complete.
+func TestImapBackfillRetriesAFolderAfterATransientFailure(t *testing.T) {
+	conn := &backfillImapConn{
+		folders: []models.Mailbox{
+			{Name: "INBOX", UIDValidity: 7, HighestModSeq: 100},
+			{Name: "Archive", UIDValidity: 8, HighestModSeq: 100},
+		},
+		uids: map[string][]goimap.UID{"INBOX": {5, 6}, "Archive": {9}},
+		fail: map[string]int{"Archive": 1},
+	}
+	var events []captured
+	w := &WMail{
+		UserID:                    uuid.New(),
+		ID:                        uuid.New(),
+		Storage:                   fakeStore{},
+		EmailMessageMapRepository: fakeMessageMap{},
+		gov:                       newGovernor(uuid.New(), nil, nil, models.SyncPolicy{}),
+		SmtpImapData: &SmtpImapData{
+			ImapClient: conn,
+			Mailboxes: []*models.Mailbox{
+				{Name: "INBOX", UIDValidity: 7, HighestModSeq: 100},
+				{Name: "Archive", UIDValidity: 8, HighestModSeq: 100},
+			},
+		},
+	}
+	w.onEvent = func(kind models.JobEventType, body any) error {
+		events = append(events, captured{eventType: kind, body: body})
+		return nil
+	}
+	w.tracker = newSyncTracker(nil, func(models.SyncState) error { return nil })
+
+	if err := w.Sync(t.Context()); err == nil {
+		t.Fatal("a failed folder search was swallowed; the pass must end so the folder is retried")
+	}
+	if w.tracker.folder("8").Done {
+		t.Fatal("the archive backfill was marked complete by a transient failure")
+	}
+	if st := w.tracker.state.BackfillStatus; st == models.SyncBackfillComplete {
+		t.Fatalf("backfill status = %s after a failed pass", st)
+	}
+
+	if err := w.Sync(t.Context()); err != nil {
+		t.Fatalf("second pass: %v", err.Message)
+	}
+	if !w.tracker.folder("8").Done {
+		t.Error("archive is still not done after a successful search")
+	}
+	if err := w.Sync(t.Context()); err != nil {
+		t.Fatalf("third pass: %v", err.Message)
+	}
+	if st := w.tracker.state.BackfillStatus; st != models.SyncBackfillComplete {
+		t.Fatalf("backfill status = %s, want %s", st, models.SyncBackfillComplete)
+	}
+	if !hasEvent(events, models.JobEventTypeNewEmail) {
+		t.Error("no history was imported at all")
+	}
+}

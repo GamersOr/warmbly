@@ -47,7 +47,8 @@ func (s *WorkerService) recordSendOutcome(result *wmail.SendResult) {
 		errx.MailErrorCodeAccountSuspended:
 		s.RecordBounceHard()
 	case errx.MailErrorCodeServerUnreachable,
-		errx.MailErrorCodeConnectionLost:
+		errx.MailErrorCodeConnectionLost,
+		errx.MailErrorCodeNotFound:
 		s.RecordBounceSoft()
 	default:
 		// Best-effort classification on free-text — keeps the signal
