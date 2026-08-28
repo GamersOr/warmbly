@@ -369,26 +369,24 @@ export default function ContactsTable({
                     hasMore={!!contactsData.hasNextPage}
                     serverCounts={contactsData.data?.pages[0]?.lead_counts}
                 />
-                <div className="relative">
-                    {tableNode}
-                    <SelectionBar
-                        count={selected.length}
-                        deleting={del}
-                        pushTargets={pushTargets}
-                        pushing={pushContacts.isPending}
-                        onPush={pushToCRM}
-                        onBulkEdit={() => setBulkEdit(true)}
-                        onResearch={bulkResearch}
-                        researching={batchResearch.isPending}
-                        onDelete={() =>
-                            confirm?.show(
-                                `Are you sure you want to delete ${selected.length} contacts?`,
-                                bulkDelete,
-                            )
-                        }
-                        onClear={() => setSelected([])}
-                    />
-                </div>
+                {tableNode}
+                <SelectionBar
+                    count={selected.length}
+                    deleting={del}
+                    pushTargets={pushTargets}
+                    pushing={pushContacts.isPending}
+                    onPush={pushToCRM}
+                    onBulkEdit={() => setBulkEdit(true)}
+                    onResearch={bulkResearch}
+                    researching={batchResearch.isPending}
+                    onDelete={() =>
+                        confirm?.show(
+                            `Are you sure you want to delete ${selected.length} contacts?`,
+                            bulkDelete,
+                        )
+                    }
+                    onClear={() => setSelected([])}
+                />
                 <ContactFilters
                     active={filtersOpen}
                     setActive={setFiltersOpen}
@@ -1180,7 +1178,11 @@ function SelectionBar({
 }) {
     if (count === 0) return null;
     return (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center max-w-[calc(100vw-16px)] flex-wrap justify-center md:max-w-none md:flex-nowrap gap-1.5 rounded-md border border-slate-200 bg-white shadow-[0_6px_20px_-4px_rgba(15,23,42,0.12),0_2px_4px_rgba(15,23,42,0.04)] px-2 py-1.5">
+        // Fixed, not absolute. On a campaign's Leads tab this sits inside a
+        // wrapper that grows with the table, so an absolutely positioned bar
+        // parked itself at the bottom of the whole list: selecting rows
+        // appeared to do nothing until you scrolled past every lead.
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 flex items-center max-w-[calc(100vw-16px)] flex-wrap justify-center md:max-w-none md:flex-nowrap gap-1.5 rounded-md border border-slate-200 bg-white shadow-[0_6px_20px_-4px_rgba(15,23,42,0.12),0_2px_4px_rgba(15,23,42,0.04)] px-2 py-1.5">
             <div className="inline-flex items-center gap-1.5 px-2 h-7 rounded bg-sky-50 text-sky-700 text-[12px] font-medium">
                 <CheckIcon className="w-3 h-3" />
                 <span>{count} selected</span>
