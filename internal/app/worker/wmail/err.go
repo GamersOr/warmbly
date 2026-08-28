@@ -74,6 +74,7 @@ func mailErrorToJobEventType(mailErr *errx.MailError) models.JobEventType {
 	// event would deactivate the mailbox for a transient provider throttle.
 	case errx.MailErrorCodeServerUnreachable,
 		errx.MailErrorCodeConnectionLost,
+		errx.MailErrorCodeNotFound,
 		errx.MailErrorCodeImapUnknown:
 		return models.JobEventTypeEmailServerError
 	}
