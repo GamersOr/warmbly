@@ -34,7 +34,7 @@ func (s *authService) LoginStart(ctx context.Context, data *AuthData, ipaddr, us
 	// SP 800-63B and OWASP ASVS both decline to count email as one. When it is
 	// off, or the device is already known, the login completes here and never
 	// touches the mail transport.
-	if !s.loginCodeRequired(ctx, uid, userAgent) {
+	if !s.loginCodeRequired(ctx, uid, userAgent, ipaddr) {
 		result, ferr := s.finishLogin(ctx, uid, ipaddr, userAgent)
 		if ferr != nil {
 			return nil, ferr
@@ -108,18 +108,31 @@ func (s *authService) LoginStart(ctx context.Context, data *AuthData, ipaddr, us
 
 // loginCodeRequired applies AUTH_LOGIN_CODE. A transport that cannot deliver
 // never demands a code, because there would be no way to complete the login.
-func (s *authService) loginCodeRequired(ctx context.Context, userID uuid.UUID, userAgent string) bool {
+func (s *authService) loginCodeRequired(ctx context.Context, userID uuid.UUID, userAgent, ipaddr string) bool {
 	if !s.mailDelivers {
 		return false
 	}
 	switch s.policy.LoginCode {
 	case config.LoginCodeOff:
+		// An operator who turned codes off has made that choice explicitly,
+		// and overriding it would mean this deployment can never sign in
+		// without mail. Anomalies are still recorded for review.
 		return false
 	case config.LoginCodeNewDevice:
-		return !s.isKnownDevice(ctx, userID, userAgent)
+		// A familiar browser in an impossible place is exactly the case the
+		// device fingerprint cannot catch: the attacker has the cookie.
+		return !s.isKnownDevice(ctx, userID, userAgent) || s.loginLooksAnomalous(ctx, userID, ipaddr)
 	default:
 		return true
 	}
+}
+
+// loginLooksAnomalous compares this sign-in against the account's last one.
+// Best-effort: no history repository, no geo database, or a failed lookup all
+// answer "no", because a false challenge locks a real user out of their own
+// account and that is the worse outcome.
+func (s *authService) loginLooksAnomalous(ctx context.Context, userID uuid.UUID, ipaddr string) bool {
+	return s.assessLogin(ctx, userID, ipaddr).Flagged
 }
 
 func (s *authService) LoginConfirm(ctx context.Context, data *ConfirmData, session, ipaddr string, userAgent string) (*models.LoginResult, *errx.Error) {
@@ -196,6 +209,13 @@ func (s *authService) finishLoginAs(ctx context.Context, userID uuid.UUID, ipadd
 			return &models.LoginResult{TwoFARequired: true, PendingToken: pendTok, ExpiresIn: expiresIn}, nil
 		}
 	}
+
+	// Record where this sign-in came from, whatever route reached here, so the
+	// next one has something to compare against. The verdict is recomputed
+	// rather than threaded through: every path into finishLoginAs would
+	// otherwise have to carry it, and the ones that forgot would silently stop
+	// building the history.
+	s.recordLogin(ctx, userID, ipaddr, userAgent, s.assessLogin(ctx, userID, ipaddr))
 
 	newToken, err := s.tokenService.GenerateSession(ctx, userID, "", ipaddr, userAgent, provider)
 	if err != nil {

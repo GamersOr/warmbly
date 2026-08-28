@@ -71,6 +71,26 @@ Creating an account records the address it was created from, the browser's user-
 
 Nothing here refuses a signup on its own. A single weak signal is wrong too often, and turning a false positive into a rejected account leaves a real customer with no way through.
 
+## Sign-ins from an impossible place
+
+A hijacked workspace owns warmed mailboxes and decryptable sending credentials, so it is worth more to an attacker than an ordinary account. Sign-in alerts tell you after the fact; this stops the sign-in.
+
+Warmbly keeps a short window of where your account was recently used and compares each new sign-in against the last. When the two could not physically be the same person travelling, faster than about `1000` km/h, the sign-in has to pass an emailed code even from a browser you have used before. That is exactly the case a remembered device cannot catch, because an attacker holding your cookie looks like a familiar device.
+
+What it deliberately does not do:
+
+- **It does not judge your first sign-in.** There is nothing to compare against, and challenging it would challenge every new account.
+- **It ignores short hops.** Locations come from a city database, so two sign-ins from opposite sides of one city are not a journey.
+- **It ignores intervals under two minutes.** Two sign-ins seconds apart from different cities are far more likely a proxy than travel, and dividing by that interval makes any distance look impossible.
+- **A real flight passes.** London to New York in nine hours is ordinary and is never challenged.
+- **It respects your login-code setting.** Where an operator has turned emailed codes off entirely, anomalies are recorded for review but no code is demanded, since that deployment may have no working mail.
+
+Repeated anomalies inside a fortnight are recorded against the workspace's posture. One unusual trip is not a pattern.
+
+<Callout type="info" title="Needs a location database">
+This uses the optional MaxMind city database. Without it configured, sign-ins are recorded but never judged, which is the safe direction: a false challenge locks a real person out of their own account.
+</Callout>
+
 ## Strongest setup
 
 1. **Add a passkey** so daily sign-in is fast and phishing-resistant.
