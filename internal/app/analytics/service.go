@@ -38,6 +38,9 @@ type analyticsService struct {
 	campaignRepo           repository.CampaignRepository
 	emailAccountErrorsRepo repository.EmailAccountErrorRepository
 	warmupRepo             repository.WarmupRepository
+	// lifecycleRepo reads whether the mailbox is in cold rotation.
+	// Optional/nil-safe.
+	lifecycleRepo repository.SendLifecycleRepository
 }
 
 func NewService(
@@ -221,20 +224,22 @@ func (s *analyticsService) GetAccountStatus(ctx context.Context, orgID, accountI
 	}
 
 	coldRamp := s.coldRampInfo(ctx, email)
+	lifecycle := s.sendLifecycleInfo(ctx, email.ID)
 
 	return &models.EmailAccountStatus{
-		ID:           email.ID,
-		Email:        email.Email,
-		Provider:     email.Provider,
-		Status:       email.Status,
-		LastSyncedAt: &email.LastSyncedAt,
-		Health:       health,
-		Errors:       errors,
-		DailyUsage:   *usage,
-		WarmupStatus: warmupStatus,
-		WarmupHealth: warmupHealth,
-		InCampaign:   inCampaign,
-		ColdRamp:     coldRamp,
+		ID:            email.ID,
+		Email:         email.Email,
+		Provider:      email.Provider,
+		Status:        email.Status,
+		LastSyncedAt:  &email.LastSyncedAt,
+		Health:        health,
+		Errors:        errors,
+		DailyUsage:    *usage,
+		WarmupStatus:  warmupStatus,
+		WarmupHealth:  warmupHealth,
+		InCampaign:    inCampaign,
+		ColdRamp:      coldRamp,
+		SendLifecycle: lifecycle,
 	}, nil
 }
 
@@ -573,4 +578,31 @@ func (s *analyticsService) coldRampInfo(ctx context.Context, email *models.Email
 		DaysToFullCap: days,
 		Held:          warmupramp.ColdHeldUntil(rampStart, state.Placements, now, warmupramp.FreezeWindow) != nil,
 	}
+}
+
+// sendLifecycleInfo reports the mailbox's cold-rotation state, but only when
+// it is not active: an active mailbox is the normal case and needs no notice.
+func (s *analyticsService) sendLifecycleInfo(ctx context.Context, accountID uuid.UUID) *models.SendLifecycleState {
+	if s.lifecycleRepo == nil {
+		return nil
+	}
+	states, err := s.lifecycleRepo.GetSendLifecycles(ctx, []uuid.UUID{accountID})
+	if err != nil {
+		return nil
+	}
+	state, ok := states[accountID]
+	if !ok || state.State.SendsCold() {
+		return nil
+	}
+	return &state
+}
+
+// WireLifecycle attaches the cold-sending lifecycle.
+func (s *analyticsService) WireLifecycle(r repository.SendLifecycleRepository) {
+	s.lifecycleRepo = r
+}
+
+// LifecycleAware is the optional capability the caller uses to attach it.
+type LifecycleAware interface {
+	WireLifecycle(r repository.SendLifecycleRepository)
 }

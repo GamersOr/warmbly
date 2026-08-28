@@ -1145,6 +1145,11 @@ func main() {
 		analyticsRepository := repository.NewAnalyticsRepository(primaryDB)
 		emailAccountErrorRepository := repository.NewEmailAccountErrorRepository(primaryDB)
 		analyticsService = analytics.NewService(analyticsRepository, emailRepostory, campaignRepostory, emailAccountErrorRepository, warmupRepository)
+		// A mailbox out of cold rotation says so in its drawer; an active one
+		// needs no notice.
+		if aware, ok := analyticsService.(analytics.LifecycleAware); ok {
+			aware.WireLifecycle(repository.NewSendLifecycleRepository(primaryDB))
+		}
 
 		rateLimitRepository := repository.NewRateLimitRepository(primaryDB)
 		rateLimitService = ratelimit.NewService(cache, rateLimitRepository)
@@ -1212,6 +1217,10 @@ func main() {
 		// A restricted organization sends less; a suspended one does not send.
 		if aware, ok := schedulerService.(scheduler.OrgRiskAware); ok {
 			aware.WireOrgRisk(orgRiskRepository)
+		}
+		// A resting mailbox keeps its warmup traffic but leaves cold rotation.
+		if aware, ok := schedulerService.(scheduler.LifecycleAware); ok {
+			aware.WireLifecycle(repository.NewSendLifecycleRepository(primaryDB))
 		}
 		campaignService = campaign.NewService(campaignRepostory, taskRepository, emailRepostory, campaignLogRepository, featureGateService, dailyThrottleService, schedulerService, tasksClient, streamingPublisher)
 		// Delete drops attachment objects and duplicate copies them, so the

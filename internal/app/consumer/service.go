@@ -35,6 +35,9 @@ type JobsService struct {
 	WarmupEngagementRepo        repository.WarmupEngagementRepository
 	WarmupService               warmupapp.Service
 	WorkerRepo                  repository.WorkerRepository
+	// LifecycleRepo moves mailboxes in and out of cold rotation. Nil disables
+	// the lifecycle rebalancer entirely.
+	LifecycleRepo repository.SendLifecycleRepository
 
 	// Publisher for sending events to workers
 	Publisher events.Publisher

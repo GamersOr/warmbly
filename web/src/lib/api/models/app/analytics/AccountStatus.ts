@@ -72,6 +72,8 @@ export default interface AccountStatus {
     warmup_status?: WarmupStatusInfo;
     /** Present only while graduation holds the cold cap below the configured one. */
     cold_ramp?: ColdRampInfo;
+    /** Present only when the mailbox is NOT in cold rotation. */
+    send_lifecycle?: SendLifecycleState;
     warmup_health?: WarmupHealthInfo;
     // True when the mailbox backs a live campaign — a low-volume health-check
     // warmup keeps running even if the user has warmup paused/off.
@@ -84,4 +86,13 @@ export interface ColdRampInfo {
     mailbox_cap: number;
     days_to_full_cap: number;
     held: boolean;
+}
+
+export type SendLifecycle = "warming" | "active" | "resting" | "reserve";
+
+// Why a mailbox is not being offered cold sends.
+export interface SendLifecycleState {
+    state: SendLifecycle;
+    since?: string;
+    reason?: string;
 }
