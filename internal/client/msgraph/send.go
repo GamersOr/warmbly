@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog/log"
-	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/mailhdr"
 )
@@ -116,7 +115,7 @@ func (c *Client) createDraft(ctx context.Context, raw []byte) (string, string, e
 	encoded := base64.StdEncoding.EncodeToString(raw)
 	resp, err := c.do(ctx, http.MethodPost, graphBase+"/me/messages", "text/plain", []byte(encoded))
 	if err != nil {
-		return "", "", errx.ErrMailServerUnreachable
+		return "", "", transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -152,7 +151,7 @@ func (c *Client) draftMessageID(ctx context.Context, draftID string) string {
 func (c *Client) sendDraft(ctx context.Context, draftID string) error {
 	resp, err := c.do(ctx, http.MethodPost, c.messageURL(draftID)+"/send", "", nil)
 	if err != nil {
-		return errx.ErrMailServerUnreachable
+		return transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -191,7 +190,7 @@ func (c *Client) sendMIME(ctx context.Context, raw []byte) error {
 	encoded := base64.StdEncoding.EncodeToString(raw)
 	resp, err := c.do(ctx, http.MethodPost, graphBase+"/me/sendMail", "text/plain", []byte(encoded))
 	if err != nil {
-		return errx.ErrMailServerUnreachable
+		return transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

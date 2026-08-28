@@ -57,14 +57,7 @@ func (s *JobsService) HandleEmailAuthError(ctx context.Context, event models.Ema
 	}
 
 	// Mark email account as needing re-auth (set status to inactive)
-	if s.EmailRepository != nil {
-		inactive := "inactive"
-		if _, xerr := s.EmailRepository.Update(ctx, event.UserID, event.EmailAccountID, &models.UpdateEmail{
-			Status: &inactive,
-		}); xerr != nil {
-			log.Error().Str("error", xerr.Message).Msg("Failed to update email account status")
-		}
-	}
+	s.deactivateAccount(ctx, userID, emailAccountID)
 
 	// Send Pub/Sub notification to user
 	if s.StreamingPublisher != nil && event.UserVisible {
@@ -129,14 +122,7 @@ func (s *JobsService) HandleEmailDisabled(ctx context.Context, event models.Emai
 	}
 
 	// Mark email account as inactive
-	if s.EmailRepository != nil {
-		inactive := "inactive"
-		if _, xerr := s.EmailRepository.Update(ctx, event.UserID, event.EmailAccountID, &models.UpdateEmail{
-			Status: &inactive,
-		}); xerr != nil {
-			log.Error().Str("error", xerr.Message).Msg("Failed to update email account status")
-		}
-	}
+	s.deactivateAccount(ctx, userID, emailAccountID)
 
 	// Send Pub/Sub notification to user
 	if s.StreamingPublisher != nil && event.UserVisible {
@@ -201,14 +187,7 @@ func (s *JobsService) HandleEmailRateLimited(ctx context.Context, event models.E
 	}
 
 	// Mark email account as inactive (terminated due to abuse)
-	if s.EmailRepository != nil {
-		inactive := "inactive"
-		if _, xerr := s.EmailRepository.Update(ctx, event.UserID, event.EmailAccountID, &models.UpdateEmail{
-			Status: &inactive,
-		}); xerr != nil {
-			log.Error().Str("error", xerr.Message).Msg("Failed to update email account status")
-		}
-	}
+	s.deactivateAccount(ctx, userID, emailAccountID)
 
 	if s.WarmupService != nil {
 		health, _ := s.WarmupService.ApplyRateLimitExceeded(ctx, emailAccountID, "worker sync/email rate limit exceeded")
@@ -299,4 +278,49 @@ func ptrString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// deactivateAccount marks a mailbox inactive AND tells the worker holding it
+// to drop it. The per-worker load filters on status, but that only decides what
+// a worker picks up when it starts, and the send path relays an account-level
+// failure without stopping the mailbox's own sync loop: without this the worker
+// keeps syncing a mailbox that has just been deactivated, failing every pass
+// and writing an email_account_errors row each time, until someone restarts it.
+func (s *JobsService) deactivateAccount(ctx context.Context, userID, emailAccountID uuid.UUID) {
+	if s.EmailRepository == nil {
+		return
+	}
+	inactive := "inactive"
+	if _, xerr := s.EmailRepository.Update(ctx, userID.String(), emailAccountID.String(), &models.UpdateEmail{
+		Status: &inactive,
+	}); xerr != nil {
+		log.Error().Str("error", xerr.Message).Msg("Failed to update email account status")
+		return
+	}
+	if s.Publisher == nil {
+		return
+	}
+
+	// Asked for on its own rather than read off the row Update returned: that
+	// row is the mailbox as the dashboard sees it and carries no assignment.
+	workerID, xerr := s.EmailRepository.GetWorkerID(ctx, emailAccountID)
+	if xerr != nil {
+		log.Warn().
+			Str("error", xerr.Message).
+			Str("email_account_id", emailAccountID.String()).
+			Msg("Cannot tell the worker to drop the deactivated mailbox: assignment lookup failed")
+		return
+	}
+	if workerID == nil {
+		return
+	}
+	if err := s.Publisher.PublishRemoveEmail(ctx, *workerID, &models.RemoveWorkerEmail{
+		UserID:  userID.String(),
+		EmailID: emailAccountID.String(),
+	}); err != nil {
+		log.Warn().Err(err).
+			Str("email_account_id", emailAccountID.String()).
+			Str("worker_id", workerID.String()).
+			Msg("Failed to tell the worker to drop the deactivated mailbox")
+	}
 }
