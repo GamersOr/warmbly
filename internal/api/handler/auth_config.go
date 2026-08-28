@@ -47,9 +47,8 @@ type DeploymentAuthConfig struct {
 	Providers []string `json:"providers"`
 
 	// ProviderLabels is what each button should say, keyed by the same
-	// identifiers. It is how OIDC_PROVIDER_NAME reaches the login screen: a
-	// deployment behind Authentik should not offer a button labelled with a
-	// protocol nobody outside this file has heard of.
+	// identifiers, so a deployment behind Authentik says so rather than
+	// naming a protocol.
 	ProviderLabels map[string]string `json:"provider_labels,omitempty"`
 
 	// SelfHosted lets the UI drop hosted-only affordances (billing prompts,
@@ -83,10 +82,9 @@ const accountsDocsURL = "https://docs.warmbly.com/development/accounts-and-acces
 func (h *Handler) AuthConfig(c *gin.Context) {
 	policy := h.AuthService.Policy()
 
-	// Only providers this backend can actually complete a browser sign-in
-	// with. A native iOS client id is not one of them: it advertised a Google
-	// button the dashboard could not finish, which is the shape of the whole
-	// defect this list exists to avoid. Native apps read /auth/providers.
+	// Only providers this backend can complete a browser sign-in with. A
+	// native iOS client id is not one of them; native apps read
+	// /auth/providers.
 	providers := h.AuthService.FederatedProviders()
 
 	registration := h.AuthService.RegistrationMode(c.Request.Context())

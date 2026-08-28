@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/warmbly/warmbly/internal/app/token"
@@ -45,6 +46,22 @@ func TestWireFederatedProviderIgnoresNothing(t *testing.T) {
 
 	if got := s.FederatedProviders(); len(got) != 0 {
 		t.Fatalf("got %v, want nothing wired", got)
+	}
+}
+
+// A handoff that could be collected by any browser holding the code is a
+// forwardable login: run the flow against your own provider account, send
+// someone the resulting link, and they land in your workspace. The binding is
+// what makes the code useless anywhere but the browser that began the flow, so
+// an absent one must never be treated as "no binding required".
+func TestSSOExchangeRefusesAnUnboundCollection(t *testing.T) {
+	s := &authService{}
+	for _, binding := range []string{"", "   "} {
+		if _, err := s.SSOExchange(context.Background(), "handoff-code", strings.TrimSpace(binding)); err == nil {
+			t.Fatalf("a handoff collected with binding %q was accepted", binding)
+		} else if err.Identifier != "sso_wrong_browser" {
+			t.Fatalf("got %q, want the sso_wrong_browser refusal", err.Identifier)
+		}
 	}
 }
 

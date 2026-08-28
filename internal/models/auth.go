@@ -4,9 +4,9 @@ package models
 // native app binary can discover which social sign-in options a (self-)hosted
 // backend supports. Client IDs here are public identifiers, not secrets.
 //
-// Browser social sign-in is separate and lives behind GET /auth/config: the
-// dashboard needs to know which buttons to render, not which client to
-// authenticate against, because the whole flow runs server-side.
+// Browser social sign-in is separate and lives behind GET /auth/config: that
+// flow runs server-side, so the dashboard needs the button list, not a client
+// id.
 type ExternalAuthProviders struct {
 	AppleBundleID     string
 	GoogleIOSClientID string

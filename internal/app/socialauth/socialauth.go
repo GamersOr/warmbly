@@ -1,17 +1,10 @@
-// Package socialauth is browser Sign in with Google and Sign in with Apple.
+// Package socialauth is the browser authorization-code flow for Sign in with
+// Google and Sign in with Apple. The native apps hand the backend a
+// provider-signed ID token directly (internal/pkg/idtoken); a browser has to be
+// sent to the provider and come back with a code, which is what this owns.
 //
-// The native apps authenticate with the provider on device and hand the
-// backend a signed ID token, which internal/pkg/idtoken verifies and the auth
-// service turns into a session. A browser cannot do that: it has to be sent to
-// the provider and come back with an authorization code, and until now nothing
-// in the backend owned that half. GOOGLE_CLIENT_ID was read at boot, the login
-// screen rendered a Google button because of it, and the button led to a URL no
-// route served.
-//
-// Both providers here end where generic OIDC ends, at a verified
-// idtoken.Claims, so the auth service runs one federated login for all three:
-// the same (issuer, subject) identity keying, the same just-in-time
-// provisioning, the same ban and 2FA gates.
+// Both providers end where generic OIDC ends, at a verified idtoken.Claims, so
+// the auth service runs one federated login for all three.
 package socialauth
 
 import (
@@ -32,10 +25,9 @@ type Google struct {
 	verifier *idtoken.Verifier
 }
 
-// NewGoogle builds the flow. Both halves of the client credential and a
-// redirect URL are required: Google refuses the exchange without the secret and
-// rejects the authorization request outright without a registered redirect, and
-// either mistake would otherwise only surface as a failed sign-in.
+// NewGoogle builds the flow. Both halves of the client credential and an
+// absolute redirect URL are required, because either one missing surfaces only
+// as a failed sign-in at the provider.
 func NewGoogle(clientID, clientSecret, redirectURL string) (*Google, error) {
 	if clientID == "" || clientSecret == "" {
 		return nil, errors.New("socialauth: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are both required")
@@ -53,8 +45,7 @@ func NewGoogle(clientID, clientSecret, redirectURL string) (*Google, error) {
 			ClientSecret: clientSecret,
 			RedirectURL:  redirectURL,
 			// The ID token carries everything a login needs, so no userinfo
-			// call and no token to store: nothing here grants access to
-			// anything in the person's Google account.
+			// call and no stored token.
 			Scopes:   []string{"openid", "email", "profile"},
 			Endpoint: googleendpoint.Endpoint,
 		},
@@ -64,18 +55,14 @@ func NewGoogle(clientID, clientSecret, redirectURL string) (*Google, error) {
 
 func (g *Google) ProviderName() string { return "Google" }
 
-// RedirectURL is the URI that has to be registered at the provider, surfaced so
-// boot can log it: an operator who configured the client and got nothing has no
-// other way to see what Warmbly is asking the provider to call back.
+// RedirectURL is the URI to register at the provider, surfaced so boot can log
+// it for an operator whose sign-in is failing.
 func (g *Google) RedirectURL() string { return g.oauth.RedirectURL }
 
-// AuthCodeURL builds the authorization request. PKCE is mandatory for every
-// client type under RFC 9700, including confidential ones, and the nonce is
-// what binds the returned ID token to this attempt.
-//
-// prompt=select_account is deliberate: without it Google silently reuses
-// whichever account the browser is already signed into, which on a shared
-// machine signs the wrong person in with no way to notice.
+// AuthCodeURL builds the authorization request. RFC 9700 requires PKCE for
+// confidential clients too, and the nonce binds the ID token to this attempt.
+// prompt=select_account stops Google silently reusing whichever account the
+// browser is already signed into.
 func (g *Google) AuthCodeURL(state, nonce, verifier string) string {
 	return g.oauth.AuthCodeURL(
 		state,
@@ -109,12 +96,9 @@ func (g *Google) Exchange(ctx context.Context, code, verifier, expectedNonce str
 	return claims, nil
 }
 
-// Apple is the browser authorization-code flow for Sign in with Apple.
-//
-// Apple only puts the email claim in the ID token when the email scope is
-// requested, and requiring a scope forces response_mode=form_post, so its
-// callback arrives as a cross-site POST rather than a redirect with a query
-// string. That is the one structural difference from Google here.
+// Apple is the browser authorization-code flow for Sign in with Apple. Apple
+// only sends the email claim when the email scope is requested, and any scope
+// forces response_mode=form_post, so its callback arrives as a cross-site POST.
 type Apple struct {
 	client      apple.AppleAuth
 	servicesID  string
@@ -134,8 +118,8 @@ func NewApple(client apple.AppleAuth, servicesID, redirectURL string) (*Apple, e
 	if redirectURL == "" {
 		return nil, errors.New("socialauth: APPLE_REDIRECT_URI is required (or set API_PUBLIC_URL and let it derive)")
 	}
-	// Apple rejects a plain-http redirect URI outright, so a deployment that
-	// would never work is better refused at boot than at the first sign-in.
+	// Apple rejects a plain-http return URL, so refuse at boot rather than at
+	// the first sign-in.
 	if !strings.HasPrefix(redirectURL, "https://") {
 		return nil, fmt.Errorf("socialauth: Apple requires an https redirect URI, got %q", redirectURL)
 	}
@@ -167,9 +151,9 @@ func (a *Apple) AuthCodeURL(state, nonce, _ string) string {
 }
 
 // Exchange trades the authorization code for a verified identity. The ID token
-// comes straight off Apple's token endpoint, but it is still verified against
-// Apple's published keys: a token nobody checked is a token nobody can trust,
-// and the audience check is what stops one issued for a different client.
+// comes straight off Apple's token endpoint and is still verified against
+// Apple's keys, because the audience check is what rejects one issued for a
+// different client.
 func (a *Apple) Exchange(ctx context.Context, code, _, expectedNonce string) (*idtoken.Claims, error) {
 	resp, err := a.client.ValidateCodeWithRedirectURI(code, a.redirectURL)
 	if err != nil {
@@ -193,9 +177,8 @@ func (a *Apple) Exchange(ctx context.Context, code, _, expectedNonce string) (*i
 }
 
 // checkIdentity is the part neither provider does for us: the nonce proves the
-// token was minted for this authorization request rather than replayed from
-// another one, and an unverified address is how federated login turns into
-// account takeover at any issuer where addresses are self-asserted.
+// token was minted for this request rather than replayed, and an unverified
+// address is how federated login turns into account takeover.
 func checkIdentity(claims *idtoken.Claims, expectedNonce string) error {
 	if expectedNonce == "" || claims.Nonce != expectedNonce {
 		return errors.New("socialauth: id_token nonce does not match this authorization request")

@@ -195,7 +195,7 @@ export default function LoginPage() {
     // The pending token is single use, so it must not survive a reload of this
     // screen: history state does, and would leave a form that can only fail.
     useEffect(() => {
-        if (ssoTwoFA) window.history.replaceState(null, "", location.pathname + location.search);
+        if (ssoTwoFA) navigate(location.pathname + location.search, { replace: true, state: null });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 

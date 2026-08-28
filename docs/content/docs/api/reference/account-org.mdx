@@ -277,15 +277,17 @@ A browser cannot authenticate with the provider itself, so it is sent there and 
 
 | Endpoint | Body | Purpose |
 |----------|------|---------|
-| `POST /auth/google/begin` | none | Returns `{"url": "..."}`, the authorization URL to send the browser to. The state, nonce and PKCE verifier are minted and held server-side, so nothing replayable is handed to the client. |
+| `POST /auth/google/begin` | none | Returns `{"url": "...", "binding": "..."}`. Send the browser to `url`; keep `binding` in that browser and present it at the exchange. The state, nonce and PKCE verifier are minted and held server-side. |
 | `POST /auth/apple/begin` | none | The same for Sign in with Apple. |
 | `POST /auth/oidc/begin` | none | The same for the configured OpenID Connect provider. |
 | `GET /auth/google/callback` | none | Where Google returns the browser. Answers with a redirect to `<APP_URL>/auth/sso?code=...`, or to `<APP_URL>/auth/login?sso_error=...` when the sign-in was refused. |
 | `POST /auth/apple/callback` | form post | Where Apple returns the browser. Apple uses `response_mode=form_post` because the flow requests the email scope, so this arrives as a form rather than a redirect; it also accepts `GET` for a refusal. |
 | `GET /auth/oidc/callback` | none | Where the OpenID Connect provider returns the browser. |
-| `POST /auth/sso/exchange` | `code` (required) | Swaps the single-use handoff code from any callback for the session. `POST /auth/oidc/exchange` is the older name for the same endpoint. |
+| `POST /auth/sso/exchange` | `code` and `binding` (both required) | Swaps the single-use handoff code from any callback for the session. `POST /auth/oidc/exchange` is the older name for the same endpoint. |
 
 The callback never returns a token. It hands the browser an opaque, single-use code with a 60 second lifetime and the client exchanges it over `POST`, so no token lands in a URL, browser history, `Referer` header or proxy log. The exchange returns a token pair, or a two-factor challenge when the account has TOTP enrolled.
+
+The exchange also requires the `binding` secret that `begin` returned. A one-time `state` proves the callback answers a request this server made; it does not prove it answers one this browser made. Without the binding, someone could run the flow with their own provider account and send you the resulting link, signing you into their workspace. The binding never travels to the provider and never appears in a URL, so a forwarded link arrives without it and is refused with [`sso_wrong_browser`](/api/error-codes/).
 
 Redirect URIs are served by the API, not the dashboard: they default to `<API_PUBLIC_URL>/v1/auth/<provider>/callback` and that is the value to register at the provider. See [deployment](/development/deployment-guide/#sign-in-with-google-or-apple-optional).
 

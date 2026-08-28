@@ -34,13 +34,10 @@ function CellBody({ children }: { children: React.ReactNode }) {
 // equal-width cell; on create-account it animates out and Google/Apple glide
 // wider to fill — one fluid layout transition, no snap.
 //
-// `providers` is the list GET /auth/config returns, and it holds only the
-// providers this backend can actually complete a sign-in with. A button for a
-// provider it cannot is a dead end, so it is never rendered.
-//
-// `onProvider` navigates the whole page to the provider rather than opening a
-// popup: a popup is blocked by default on iOS Safari and lands the session in a
-// window the app cannot read.
+// `providers` is the list GET /auth/config returns: only the providers this
+// backend can actually complete a sign-in with, so no button is a dead end.
+// `onProvider` navigates the whole page rather than opening a popup, which iOS
+// Safari blocks and which lands the session in a window the app cannot read.
 export default function ExternalLogin({
     passkey,
     providers,

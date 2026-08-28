@@ -85,13 +85,9 @@ func passkeysUsableFor(appURL string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasSuffix(host, ".localhost")
 }
 
-// ssoRedirectURL is where a browser sign-in provider sends the browser back.
-// The explicit override wins; otherwise it derives from the backend's public
-// base, which is where the callback handler actually lives.
-//
-// Deriving it matters more than it looks: the callback is served by the API,
-// not the dashboard, and pointing it at APP_URL is the mistake that turns a
-// correctly registered OAuth client into a sign-in button that 404s.
+// ssoRedirectURL is where a provider sends the browser back. The explicit
+// override wins; otherwise it derives from the backend's public base, because
+// the callback is served by the API and not by the dashboard.
 func ssoRedirectURL(explicit, provider string) string {
 	if v := strings.TrimSpace(explicit); v != "" {
 		return v
@@ -106,9 +102,9 @@ func ssoRedirectURL(explicit, provider string) string {
 
 func oidcRedirectURL() string { return ssoRedirectURL(os.Getenv("OIDC_REDIRECT_URL"), "oidc") }
 
-// warnSSORedirectOrigin fires on the one configuration mistake that produces a
-// working OAuth client and a broken button: a redirect URI on the dashboard
-// origin, which serves no callback route.
+// warnSSORedirectOrigin fires on the mistake that produces a working OAuth
+// client and a broken button: a redirect URI on the dashboard origin, which
+// serves no callback route.
 func warnSSORedirectOrigin(provider, redirectURL string) {
 	if redirectURL == "" {
 		return

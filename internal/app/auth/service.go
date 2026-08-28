@@ -99,7 +99,7 @@ type AuthService interface {
 	// SSOCallbackComplete returns a single-use handoff code, not a session: the
 	// provider redirects a browser here, so the response must be a redirect.
 	SSOCallbackComplete(ctx context.Context, in SSOCallback) (string, *errx.Error)
-	SSOExchange(ctx context.Context, code string) (*models.LoginResult, *errx.Error)
+	SSOExchange(ctx context.Context, code, binding string) (*models.LoginResult, *errx.Error)
 }
 
 type authService struct {

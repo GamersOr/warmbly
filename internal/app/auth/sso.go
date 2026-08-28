@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"net/mail"
@@ -15,17 +16,15 @@ import (
 	"github.com/warmbly/warmbly/internal/pkg/idtoken"
 )
 
-// ssoStateTTL bounds how long an in-flight authorization may take. Short enough
-// that a leaked state is useless, long enough for a real person to type a
-// password and approve an MFA prompt at their provider.
+// ssoStateTTL bounds an in-flight authorization: long enough to type a password
+// and approve an MFA prompt at the provider, short enough that a leaked state
+// is useless.
 const ssoStateTTL = 10 * time.Minute
 
-// FederatedProvider is one browser sign-in flow: generic OIDC, Sign in with
-// Google or Sign in with Apple. All three hand back the same verified claims,
-// so the service runs one login path for them rather than three.
-//
+// FederatedProvider is one browser sign-in flow. All three hand back the same
+// verified claims, so the service runs one login path rather than three.
 // Satisfied by *oidcauth.Service, *socialauth.Google and *socialauth.Apple; an
-// interface here so the auth package imports none of them and tests can stub it.
+// interface so the auth package imports none of them and tests can stub it.
 type FederatedProvider interface {
 	AuthCodeURL(state, nonce, verifier string) string
 	Exchange(ctx context.Context, code, verifier, expectedNonce string) (*idtoken.Claims, error)
@@ -35,16 +34,18 @@ type FederatedProvider interface {
 	ProviderName() string
 }
 
-// SSORedirect is what the client sends the browser to.
+// SSORedirect is what the client sends the browser to, plus the binding secret
+// it must keep and hand back at the exchange.
 type SSORedirect struct {
 	URL string `json:"url"`
+	// Binding never travels to the provider and never appears in a URL: the
+	// client stores it and presents it when collecting the session.
+	Binding string `json:"binding"`
 }
 
-// SSOCallback is one provider callback: everything the flow needs that is not
-// already held server-side under the state.
-//
-// FirstName and LastName exist for Apple, which shares the person's name once,
-// with the callback, and never inside the ID token.
+// SSOCallback is what a provider callback carries that is not already held
+// server-side under the state. FirstName and LastName exist for Apple, which
+// sends the name with the callback and never inside the ID token.
 type SSOCallback struct {
 	Provider  string
 	Code      string
@@ -55,19 +56,29 @@ type SSOCallback struct {
 	UserAgent string
 }
 
-// ssoFlow is the server-side half of one authorization request. Keeping the
-// verifier and nonce here, keyed by state, is what makes them single-use: RFC
-// 9700 requires PKCE and a one-time state, and an ID token nonce only proves
-// anything if the value it is compared against was never reused.
-//
+// ssoFlow is the server-side half of one authorization request, keyed by state.
+// Holding the verifier and nonce here is what makes them single-use, and
 // Provider is stored with them so a state minted for one provider cannot be
 // presented at another provider's callback.
+//
+// Binding is the secret that ties the flow to the browser that started it (see
+// SSOExchange).
 type ssoFlow struct {
 	Provider string `json:"provider"`
 	Verifier string `json:"verifier"`
 	Nonce    string `json:"nonce"`
+	Binding  string `json:"binding"`
 }
 
+// ssoHandoff is a completed login waiting to be collected, carrying the same
+// binding forward so only the browser that began the flow can collect it.
+type ssoHandoff struct {
+	Binding string             `json:"binding"`
+	Result  models.LoginResult `json:"result"`
+}
+
+// The cache keys keep the oidc_ prefix they shipped with: renaming them would
+// strand every authorization already in flight across a deploy.
 func ssoStateKey(state string) string { return "oidc_state:" + state }
 
 // ssoHandoffTTL is how long the dashboard has to exchange the handoff code for
@@ -123,19 +134,16 @@ func (s *authService) FederatedProviderLabels() map[string]string {
 	return out
 }
 
-// mintHandoff stores a completed login behind a single-use code.
-//
-// The provider redirects a browser to the callback, so that response cannot be
-// JSON: it has to be a redirect the user can follow. Putting tokens in the URL
-// would leak them into history, Referer and any proxy log, so the redirect
-// carries an opaque code and the dashboard exchanges it over POST.
-func (s *authService) mintHandoff(ctx context.Context, result *models.LoginResult) (string, *errx.Error) {
+// mintHandoff stores a completed login behind a single-use code. The callback
+// answers a browser, so it must redirect; tokens in that URL would leak into
+// history, Referer and proxy logs, so it carries an opaque code instead.
+func (s *authService) mintHandoff(ctx context.Context, result *models.LoginResult, binding string) (string, *errx.Error) {
 	code, err := randomHex(32)
 	if err != nil {
 		sentry.CaptureException(err)
 		return "", errx.InternalError()
 	}
-	payload, err := json.Marshal(result)
+	payload, err := json.Marshal(ssoHandoff{Binding: binding, Result: *result})
 	if err != nil {
 		sentry.CaptureException(err)
 		return "", errx.InternalError()
@@ -149,20 +157,29 @@ func (s *authService) mintHandoff(ctx context.Context, result *models.LoginResul
 
 // SSOExchange swaps a handoff code for the session it stands for. Single use:
 // the code is deleted as it is read.
-func (s *authService) SSOExchange(ctx context.Context, code string) (*models.LoginResult, *errx.Error) {
-	if code == "" {
-		return nil, errx.ErrToken
+//
+// binding makes the handoff non-transferable. One-time state proves the
+// callback answers a request this server made, not one THIS browser made, so
+// without it a flow run against an attacker's own provider account could be
+// forwarded to sign that person into the attacker's workspace (RFC 9700 4.7.1).
+// The secret never leaves the initiating browser and never appears in a URL.
+func (s *authService) SSOExchange(ctx context.Context, code, binding string) (*models.LoginResult, *errx.Error) {
+	if code == "" || binding == "" {
+		return nil, errx.ErrSSOBrowser
 	}
 	raw, err := s.cache.GetDel(ctx, ssoHandoffKey(code)).Bytes()
 	if err != nil || len(raw) == 0 {
 		return nil, errx.ErrToken
 	}
-	var result models.LoginResult
-	if err := json.Unmarshal(raw, &result); err != nil {
+	var handoff ssoHandoff
+	if err := json.Unmarshal(raw, &handoff); err != nil {
 		sentry.CaptureException(err)
 		return nil, errx.InternalError()
 	}
-	return &result, nil
+	if subtle.ConstantTimeCompare([]byte(handoff.Binding), []byte(binding)) != 1 {
+		return nil, errx.ErrSSOBrowser
+	}
+	return &handoff.Result, nil
 }
 
 // SSOBegin starts an authorization request against one provider.
@@ -187,8 +204,13 @@ func (s *authService) SSOBegin(ctx context.Context, provider string) (*SSORedire
 		sentry.CaptureException(err)
 		return nil, errx.InternalError()
 	}
+	binding, err := randomHex(32)
+	if err != nil {
+		sentry.CaptureException(err)
+		return nil, errx.InternalError()
+	}
 
-	payload, err := json.Marshal(ssoFlow{Provider: provider, Verifier: verifier, Nonce: nonce})
+	payload, err := json.Marshal(ssoFlow{Provider: provider, Verifier: verifier, Nonce: nonce, Binding: binding})
 	if err != nil {
 		sentry.CaptureException(err)
 		return nil, errx.InternalError()
@@ -198,7 +220,7 @@ func (s *authService) SSOBegin(ctx context.Context, provider string) (*SSORedire
 		return nil, errx.InternalError()
 	}
 
-	return &SSORedirect{URL: p.AuthCodeURL(state, nonce, verifier)}, nil
+	return &SSORedirect{URL: p.AuthCodeURL(state, nonce, verifier), Binding: binding}, nil
 }
 
 // SSOCallbackComplete finishes an authorization and returns a single-use
@@ -212,9 +234,7 @@ func (s *authService) SSOCallbackComplete(ctx context.Context, in SSOCallback) (
 		return "", errx.ErrExternalCode
 	}
 
-	// Consume the state before doing anything with it. A replayed callback
-	// finds nothing and is rejected, which is the whole point of one-time
-	// state.
+	// Consume the state before using it, so a replayed callback finds nothing.
 	raw, cerr := s.cache.GetDel(ctx, ssoStateKey(in.State)).Bytes()
 	if cerr != nil || len(raw) == 0 {
 		return "", errx.ErrExternalCode
@@ -225,16 +245,16 @@ func (s *authService) SSOCallbackComplete(ctx context.Context, in SSOCallback) (
 		sentry.CaptureException(err)
 		return "", errx.InternalError()
 	}
-	// A state is minted for one provider. Presenting it at another provider's
-	// callback is a mix-up attack (RFC 9700 4.4), not a real sign-in.
+	// A state minted for one provider presented at another's callback is a
+	// mix-up attack (RFC 9700 4.4).
 	if flow.Provider != "" && flow.Provider != in.Provider {
 		return "", errx.ErrExternalCode
 	}
 
 	claims, err := p.Exchange(ctx, in.Code, flow.Verifier, flow.Nonce)
 	if err != nil {
-		// Provider-side failures are user-visible configuration problems more
-		// often than attacks, so they are worth reporting rather than burying.
+		// Reported, not buried: these are configuration problems more often
+		// than attacks.
 		sentry.CaptureException(err)
 		return "", errx.ErrExternalCode
 	}
@@ -269,7 +289,7 @@ func (s *authService) SSOCallbackComplete(ctx context.Context, in SSOCallback) (
 	if lerr != nil {
 		return "", lerr
 	}
-	return s.mintHandoff(ctx, result)
+	return s.mintHandoff(ctx, result, flow.Binding)
 }
 
 // sessionProvider is how the session records what the person signed in with,

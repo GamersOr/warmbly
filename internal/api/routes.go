@@ -255,16 +255,12 @@ func Run(
 		auth.POST("/apple", h.AppleTokenLogin)
 		auth.POST("/google", h.GoogleTokenLogin)
 
-		// Browser sign-in. Generic OIDC is the only sign-in path with no
-		// dependency on outbound mail, which is what makes it the one that
-		// matters for a deployment with no relay; Google and Apple are the
-		// same flow against a fixed provider. Begin hands the SPA the
-		// authorization URL, the provider returns the browser to the callback,
-		// and the single-use handoff code is exchanged for the session.
-		//
-		// Apple posts its callback (requesting any scope forces
-		// response_mode=form_post) and can send a refusal as a redirect, so it
-		// answers on both methods.
+		// Browser sign-in: begin hands the SPA an authorization URL, the
+		// provider returns the browser to the callback, and the single-use
+		// handoff code is exchanged for the session. Generic OIDC is the only
+		// sign-in path with no dependency on outbound mail. Apple's callback
+		// answers on both methods: any scope forces response_mode=form_post,
+		// but a refusal can still arrive as a redirect.
 		auth.POST("/oidc/begin", h.OIDCBegin)
 		auth.GET("/oidc/callback", h.OIDCCallback)
 		auth.POST("/google/begin", h.GoogleBegin)

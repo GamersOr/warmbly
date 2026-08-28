@@ -828,10 +828,8 @@ func main() {
 			}
 		}
 
-		// Sign in with Google in the browser. The redirect URI is the one that
-		// has to be registered at the provider, so it is logged: an operator
-		// who set the client id and secret and got nothing has no other way to
-		// find out what Warmbly is asking Google to call back.
+		// Sign in with Google in the browser. The redirect URI is logged
+		// because it is the value that has to be registered at the provider.
 		if authCfg.GoogleClientID != "" || authCfg.GoogleClientSecret != "" {
 			redirect := ssoRedirectURL(authCfg.GoogleRedirectURI, "google")
 			googleLogin, gerr := socialauth.NewGoogle(authCfg.GoogleClientID, authCfg.GoogleClientSecret, redirect)
@@ -844,8 +842,8 @@ func main() {
 			}
 		}
 
-		// Sign in with Apple in the browser, on the same credentials the native
-		// app path uses. APPLE_APP_ID is the Services ID here.
+		// Sign in with Apple in the browser, on the same credentials the
+		// native path uses. APPLE_APP_ID is the Services ID here.
 		if appleAuthClient != nil {
 			redirect := ssoRedirectURL(authCfg.AppleRedirectURI, "apple")
 			appleLogin, aerr := socialauth.NewApple(appleAuthClient, authCfg.AppleAppID, redirect)

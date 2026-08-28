@@ -104,7 +104,9 @@ Returned when authentication fails.
 - Check if your key has expired or been revoked
 - Generate a new key if necessary
 
-One `401` variant is not about API keys at all. `setup_token_invalid` is returned by the first-run claim endpoint when the setup link is invalid, already used or expired. Print a new one with `warmblyctl setup-link`, described in [first run](/development/first-run/).
+Two `401` variants are not about API keys at all. `setup_token_invalid` is returned by the first-run claim endpoint when the setup link is invalid, already used or expired. Print a new one with `warmblyctl setup-link`, described in [first run](/development/first-run/).
+
+`sso_wrong_browser` is returned by `POST /auth/sso/exchange` when the handoff code is collected without the binding secret that `POST /auth/<provider>/begin` handed the browser that started the sign-in. The handoff is deliberately non-transferable: a sign-in link that was forwarded, or opened in another browser, cannot sign the recipient in. Start the sign-in again in the browser you want to use.
 
 ### 402 Payment Required
 
