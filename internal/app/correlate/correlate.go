@@ -1,9 +1,5 @@
-// Package correlate runs the nightly cross-account sweep.
-//
-// Every other abuse control watches one subject: a rate limit watches a user,
-// warmup health a mailbox, verification an address. An actor spreading the same
-// behaviour across several accounts stays under all of them. This is the pass
-// that looks at the group.
+// Package correlate runs the nightly cross-account sweep: the abuse pass that
+// watches a group of accounts rather than one subject.
 package correlate
 
 import (
@@ -64,14 +60,9 @@ func (s *Service) Start(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Run performs one sweep. Each finding is filed as a signal on every member
-// organization; the band it produces is the risk service's decision, not this
-// package's.
-//
-// Every signal is RETRACTED from organizations that no longer match before the
-// current matches are recorded. Without that a cluster which aged out of the
-// lookback, or a mailbox burst that ended, would leave its weight on the
-// workspace permanently and the score could only ever climb.
+// Run performs one sweep, filing each finding as a signal on every member
+// organization. Signals are retracted from organizations that no longer match
+// before current ones are recorded, so a score can fall as well as climb.
 func (s *Service) Run(ctx context.Context) {
 	since := time.Now().Add(-LookbackWindow)
 	recorded := 0
