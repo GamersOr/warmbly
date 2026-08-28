@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/app/worker"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/events"
 	"github.com/warmbly/warmbly/internal/models"
@@ -27,6 +29,7 @@ type stubRemovalRepo struct {
 	updateErr   *errx.Error
 	deleteErr   *errx.Error
 	statusSet   []string
+	refunded    []float64
 	deleteCalls int
 	workerCalls int
 }
@@ -71,8 +74,9 @@ func (s *stubRemovalRepo) GetSMTPCredentials(ctx context.Context, emailAccountID
 	return &repository.SMTPCredentials{SMTPHost: "smtp.test.local", SMTPPort: 587, IMAPHost: "imap.test.local", IMAPPort: 993}, nil
 }
 
-func (s *stubRemovalRepo) Delete(ctx context.Context, userID, emailAccountID string) *errx.Error {
+func (s *stubRemovalRepo) Delete(ctx context.Context, userID, emailAccountID string, workerLoadRefund float64) *errx.Error {
 	s.deleteCalls++
+	s.refunded = append(s.refunded, workerLoadRefund)
 	s.record("delete")
 	return s.deleteErr
 }
@@ -294,8 +298,8 @@ func TestDeleteKeepsTheMailboxWhenTheWorkerCannotBeTold(t *testing.T) {
 	if f.repo.deleteCalls != 0 {
 		t.Errorf("the row was deleted %d times after the removal failed, want 0", f.repo.deleteCalls)
 	}
-	if f.assign.unassignCalls != 0 {
-		t.Errorf("worker capacity was released for a mailbox that still exists (%d calls)", f.assign.unassignCalls)
+	if len(f.repo.refunded) != 0 {
+		t.Errorf("worker capacity was refunded for a mailbox that still exists (%v)", f.repo.refunded)
 	}
 }
 
@@ -331,15 +335,33 @@ func TestDeleteWithoutAWorkerStillRemovesTheRow(t *testing.T) {
 }
 
 // The worker keeps counting a deleted mailbox against its capacity otherwise:
-// the foreign key nulls worker_id and nothing refunds the load.
+// the foreign key nulls worker_id and nothing refunds the load. The refund
+// rides inside the delete, so it cannot be left half-applied against a row that
+// no longer says which worker was charged.
 func TestDeleteGivesTheWorkerItsCapacityBack(t *testing.T) {
 	f := newRemovalFixture(t)
 
 	if xerr := f.svc.Delete(context.Background(), f.user.String(), f.mailbox.String()); xerr != nil {
 		t.Fatalf("delete: %v", xerr)
 	}
-	if f.assign.unassignCalls != 1 {
-		t.Errorf("released the assignment %d times, want 1", f.assign.unassignCalls)
+	if len(f.repo.refunded) != 1 || f.repo.refunded[0] != worker.MailboxWeight("smtp_imap", false) {
+		t.Errorf("refunds handed to the delete = %v, want one smtp_imap weight", f.repo.refunded)
+	}
+}
+
+// A warming Gmail mailbox is charged less than a cold SMTP one, and has to be
+// refunded what it was actually charged.
+func TestDeleteRefundsTheWeightTheMailboxWasChargedAt(t *testing.T) {
+	f := newRemovalFixture(t)
+	warming := time.Now()
+	f.repo.account.Provider = "gmail-api"
+	f.repo.account.Warmup = &warming
+
+	if xerr := f.svc.Delete(context.Background(), f.user.String(), f.mailbox.String()); xerr != nil {
+		t.Fatalf("delete: %v", xerr)
+	}
+	if len(f.repo.refunded) != 1 || f.repo.refunded[0] != worker.MailboxWeight("gmail-api", true) {
+		t.Errorf("refund = %v, want the warmup weight", f.repo.refunded)
 	}
 }
 

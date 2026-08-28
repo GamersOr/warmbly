@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/app/worker"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
@@ -56,14 +57,10 @@ func (s *emailService) Update(ctx context.Context, userID, emailAccountID string
 	return account, nil
 }
 
-// applyStatusToWorker carries a mailbox status change through to the machine
-// running it. Only the row was written before this, so a mailbox the customer
-// switched off kept syncing and sending on its old schedule until its worker
-// restarted, and one switched back on waited for the reconciler's next pass.
-//
-// Best-effort in both directions, unlike the delete path: the status is
-// already written, no load path ships a mailbox that is not active, and the
-// reconciler re-places an active one either way.
+// applyStatusToWorker carries a status change through to the machine running
+// the mailbox, which only the row recorded before. Best-effort both ways: no
+// load path ships a mailbox that is not active, and the reconciler re-places an
+// active one anyway.
 func (s *emailService) applyStatusToWorker(ctx context.Context, userID string, account *models.Email, status *string) {
 	if account == nil || status == nil {
 		return
@@ -271,25 +268,19 @@ func (s *emailService) resolveDomainAuth(ctx context.Context, userID, emailAccou
 	return domain, &res, nil
 }
 
-// Delete disconnects a mailbox for good.
-//
-// The worker holding it is told to drop it BEFORE the row goes, because after
-// the delete there is no assignment left to read and no reconciler that can
-// repair a missed removal: a worker that was never told keeps syncing an
-// account that no longer exists and emits events the consumer resolves against
-// nothing. That makes the removal part of the delete rather than a follow-up.
-// When it cannot be sent, nothing is deleted and the customer can try again.
+// Delete disconnects a mailbox. The worker is told to drop it BEFORE the row
+// goes, because afterwards no assignment is left to read and nothing can repair
+// a missed removal, so a removal that cannot be sent fails the whole delete.
 func (s *emailService) Delete(ctx context.Context, userID, emailAccountID string) *errx.Error {
 	accountID, err := uuid.Parse(emailAccountID)
 	if err != nil {
 		return errx.ErrUuid
 	}
 
-	// Read by id rather than through Get: Get is scoped by organization and was
-	// being handed a user id, so it never found the mailbox and every side
-	// effect below was silently skipped. Ownership is checked here instead,
-	// against the same owner the delete itself filters on, so the removal
-	// published below is never reachable for someone else's mailbox.
+	// Read by id: Get is scoped by organization and was being handed a user id,
+	// so it never found the mailbox and every side effect below was skipped.
+	// Ownership moves here, or the removal below would be publishable for a
+	// mailbox the caller does not own.
 	account, xerr := s.emailRepository.GetByID(ctx, accountID)
 	if xerr != nil {
 		return xerr
@@ -302,23 +293,13 @@ func (s *emailService) Delete(ctx context.Context, userID, emailAccountID string
 		return xerr
 	}
 
-	// Give the worker back the capacity this mailbox was counted for. Nothing
-	// else does it on delete: the row's worker_id is only nulled by the foreign
-	// key, so the worker's account count and load score would stay charged for
-	// a mailbox that no longer exists and its usable capacity would shrink with
-	// every disconnect.
-	if s.workerAssignment != nil && account.WorkerID != nil {
-		if err := s.workerAssignment.UnassignWorkerFromEmail(ctx, accountID); err != nil {
-			log.Warn().Err(err).
-				Str("email_id", accountID.String()).
-				Msg("could not release the deleted mailbox's worker capacity")
-		}
-	}
-
-	if xerr := s.emailRepository.Delete(ctx, userID, emailAccountID); xerr != nil {
-		// The removal has already gone out and the mailbox is still active, so
-		// put it back now rather than leaving it dark until the reconciler's
-		// next pass, minutes later.
+	// The refund travels inside the delete's transaction: the foreign key only
+	// nulls worker_id, so a worker not credited here stays charged for a
+	// mailbox that no longer exists, unrepairably.
+	refund := worker.MailboxWeight(account.Provider, account.Warmup != nil)
+	if xerr := s.emailRepository.Delete(ctx, userID, emailAccountID, refund); xerr != nil {
+		// The removal already went out and the mailbox is still active: put it
+		// back now instead of leaving it dark until the reconciler's next pass.
 		s.loadAccountBestEffort(ctx, accountID)
 		return xerr
 	}
@@ -336,9 +317,8 @@ func (s *emailService) Delete(ctx context.Context, userID, emailAccountID string
 	return nil
 }
 
-// sameUser compares two user ids as uuids, so a differently formatted but equal
-// id is not read as a different owner (the delete itself compares in SQL,
-// where Postgres does the same).
+// sameUser compares user ids as uuids, the way the delete's own WHERE clause
+// does, so formatting alone never reads as a different owner.
 func sameUser(a, b string) bool {
 	left, aerr := uuid.Parse(a)
 	right, berr := uuid.Parse(b)

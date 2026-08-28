@@ -117,7 +117,10 @@ type EmailRepository interface {
 	// domains. It returns the mailboxes that entered the failing state on THIS
 	// call, which is what the sweep notifies on.
 	UpdateDomainAuthState(ctx context.Context, domain, state string, spf, dkim, dmarc bool, dmarcPolicy, reason string, checkedAt time.Time) ([]models.EmailAuthTransition, *errx.Error)
-	Delete(ctx context.Context, userID, emailAccountID string) *errx.Error
+	// Delete removes a mailbox and refunds workerLoadRefund of its worker's
+	// load in the same transaction, so a deleted mailbox can never leave a
+	// worker permanently charged for it.
+	Delete(ctx context.Context, userID, emailAccountID string, workerLoadRefund float64) *errx.Error
 
 	NewOauthAccount(ctx context.Context, userID string, data models.NewOauthAccount) (*models.Email, *errx.Error)
 	NewSMTPIMAPAccount(ctx context.Context, userID string, data models.NewSMTPIMAPAccount) (*models.Email, *errx.Error)
@@ -1228,28 +1231,54 @@ func (r *emailRepository) UpdateDomainAuthState(ctx context.Context, domain, sta
 	return transitions, nil
 }
 
-func (r *emailRepository) Delete(ctx context.Context, userID, emailAccountID string) *errx.Error {
+// Delete removes a mailbox and refunds its worker's capacity in ONE
+// transaction. Split in two, the refund can be lost for good: after the row is
+// gone nothing records which worker was charged for that mailbox, so a refund
+// that failed on its own could never be repaired and the worker would carry a
+// deleted mailbox's load forever. workerLoadRefund is the mailbox's placement
+// weight, computed by the caller from the same provider and warmup flag
+// assignment charged it with.
+func (r *emailRepository) Delete(ctx context.Context, userID, emailAccountID string, workerLoadRefund float64) *errx.Error {
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		db.CaptureError(err, "", nil, "begin")
+		return errx.InternalError()
+	}
+	defer tx.Rollback(ctx)
+
 	query := `
 		DELETE FROM email_accounts
 		WHERE user_id = $1 AND id = $2
+		RETURNING worker_id
 	`
+	params := []any{userID, emailAccountID}
 
-	params := []any{
-		userID,
-		emailAccountID,
-	}
-
-	cmd, err := r.DB.Exec(
-		ctx,
-		query,
-		params...,
-	)
-	if err != nil {
-		db.CaptureError(err, query, params, "exec")
+	var workerID *uuid.UUID
+	if err := tx.QueryRow(ctx, query, params...).Scan(&workerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errx.ErrNotFound
+		}
+		db.CaptureError(err, query, params, "queryrow")
 		return errx.InternalError()
 	}
-	if cmd.RowsAffected() == 0 {
-		return errx.ErrNotFound
+
+	if workerID != nil {
+		refund := `
+			UPDATE workers
+			   SET account_count = GREATEST(account_count - 1, 0),
+			       load_score = GREATEST(0, load_score - $2),
+			       updated_at = now()
+			 WHERE id = $1
+		`
+		if _, err := tx.Exec(ctx, refund, *workerID, workerLoadRefund); err != nil {
+			db.CaptureError(err, refund, []any{*workerID, workerLoadRefund}, "exec")
+			return errx.InternalError()
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		db.CaptureError(err, "", nil, "commit")
+		return errx.InternalError()
 	}
 	return nil
 }

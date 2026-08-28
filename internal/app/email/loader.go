@@ -172,21 +172,15 @@ func (s *emailService) LoadAccountOntoWorker(ctx context.Context, accountID uuid
 	return s.publisher.PublishAddEmail(ctx, *workerID, payload)
 }
 
-// dropFromWorker tells the worker holding a mailbox to drop it from memory.
+// dropFromWorker tells the worker holding a mailbox to drop it from memory,
+// the same removal the consumer sends when a provider error deactivates one.
+// Workers hold accounts in memory and only filter on status at startup, so
+// without this a disabled or disconnected mailbox syncs until that worker
+// restarts. A send already dispatched is answered with EMAIL_FAILED, which
+// walks its reservation back.
 //
-// Workers keep accounts in memory, and the per-worker load filters on status
-// only when a worker starts, so a mailbox the customer disabled or disconnected
-// keeps syncing on its old schedule until that worker restarts. This is the
-// control-plane half of that: the same removal the consumer sends when a
-// provider error deactivates a mailbox.
-//
-// The assignment is asked for on its own rather than read off an updated row:
-// the mailbox as the dashboard sees it carries no worker_id, which is exactly
-// what made the consumer's removal unreachable the first time.
-//
-// A send already dispatched to that worker is not lost: it is answered with
-// EMAIL_FAILED, which walks the reservation back and lets routing retry the
-// step on a mailbox that is still active.
+// The assignment is read on its own because the row an update returns carries
+// no worker_id, which is what made the consumer's removal unreachable in #218.
 func (s *emailService) dropFromWorker(ctx context.Context, userID string, accountID uuid.UUID) *errx.Error {
 	if s.publisher == nil {
 		return nil
