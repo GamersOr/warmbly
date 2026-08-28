@@ -102,6 +102,18 @@ Keep warmup running after campaigns begin rather than switching it off once a ma
   The model still supports separate free and premium pools, but access is gated to paid workspaces today.
 </Callout>
 
+## Pausing and disconnecting
+
+A mailbox can be set inactive (`PATCH /emails/{id}` with `status`) when you want it to stop without losing its settings, its history, or its place in the fleet.
+
+Switching it off takes effect immediately: the machine syncing it is told to drop it, so it stops importing mail and stops being picked for campaign sends and warmup within seconds rather than at that machine's next restart. Warmup pool membership is dropped, and any warmup chain it had winds down on its next step. A campaign email already handed over is answered as a failure and the step is retried later on a mailbox that is still active, so nobody receives it twice and no lead is stranded.
+
+It keeps its worker assignment while off, so switching it back on puts it back on the same machine, sending from the same IP, and it resumes syncing from where it stopped instead of re-importing.
+
+**Disconnecting** removes the mailbox for good, from the Accounts selection bar. The machine syncing it is told to drop it before the record is removed, because afterwards there is nothing left to tell. If that instruction cannot be delivered, the disconnect fails with a `503` and nothing is removed, so retry it in a moment rather than assuming it worked.
+
+Everything belonging to that mailbox goes with it: its imported mail in the unibox, its warmup history and pool membership, its credentials, its sender links, and any send still scheduled for it. A campaign that was using it keeps running on its remaining senders. Export the workspace first if you want a copy. Disable the mailbox instead when you only want it to stop.
+
 ## Worker assignment
 
 You never pick a worker. Warmbly assigns each mailbox to a sending worker automatically and can move it later. Workers are the machines that send and sync, so spreading mailboxes across them spreads sending across network identities and IPs.

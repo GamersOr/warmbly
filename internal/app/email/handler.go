@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
@@ -50,8 +51,36 @@ func (s *emailService) Update(ctx context.Context, userID, emailAccountID string
 	}
 
 	s.syncWarmupPoolMembership(ctx, account)
+	s.applyStatusToWorker(ctx, userID, account, udata.Status)
 	s.publishAccountEvent(ctx, pubsub.EventAccountSynced, account)
 	return account, nil
+}
+
+// applyStatusToWorker carries a mailbox status change through to the machine
+// running it. Only the row was written before this, so a mailbox the customer
+// switched off kept syncing and sending on its old schedule until its worker
+// restarted, and one switched back on waited for the reconciler's next pass.
+//
+// Best-effort in both directions, unlike the delete path: the status is
+// already written, no load path ships a mailbox that is not active, and the
+// reconciler re-places an active one either way.
+func (s *emailService) applyStatusToWorker(ctx context.Context, userID string, account *models.Email, status *string) {
+	if account == nil || status == nil {
+		return
+	}
+
+	if *status == "active" {
+		s.loadAccountBestEffort(ctx, account.ID)
+		return
+	}
+
+	if xerr := s.dropFromWorker(ctx, userID, account.ID); xerr != nil {
+		log.Warn().
+			Str("error", xerr.Message).
+			Str("email_id", account.ID.String()).
+			Str("status", *status).
+			Msg("could not tell the worker to drop the disabled mailbox; it stops syncing when that worker next restarts")
+	}
 }
 
 // BulkUpdateTags is a pure tag-link rewrite: no warmup pool or worker state
@@ -242,20 +271,62 @@ func (s *emailService) resolveDomainAuth(ctx context.Context, userID, emailAccou
 	return domain, &res, nil
 }
 
+// Delete disconnects a mailbox for good.
+//
+// The worker holding it is told to drop it BEFORE the row goes, because after
+// the delete there is no assignment left to read and no reconciler that can
+// repair a missed removal: a worker that was never told keeps syncing an
+// account that no longer exists and emits events the consumer resolves against
+// nothing. That makes the removal part of the delete rather than a follow-up.
+// When it cannot be sent, nothing is deleted and the customer can try again.
 func (s *emailService) Delete(ctx context.Context, userID, emailAccountID string) *errx.Error {
-	account, xerr := s.emailRepository.Get(ctx, userID, emailAccountID)
-	if xerr != nil && xerr != errx.ErrNotFound {
+	accountID, err := uuid.Parse(emailAccountID)
+	if err != nil {
+		return errx.ErrUuid
+	}
+
+	// Read by id rather than through Get: Get is scoped by organization and was
+	// being handed a user id, so it never found the mailbox and every side
+	// effect below was silently skipped. Ownership is checked here instead,
+	// against the same owner the delete itself filters on, so the removal
+	// published below is never reachable for someone else's mailbox.
+	account, xerr := s.emailRepository.GetByID(ctx, accountID)
+	if xerr != nil {
+		return xerr
+	}
+	if account == nil || !sameUser(account.UserID, userID) {
+		return errx.ErrNotFound
+	}
+
+	if xerr := s.dropFromWorker(ctx, userID, accountID); xerr != nil {
 		return xerr
 	}
 
+	// Give the worker back the capacity this mailbox was counted for. Nothing
+	// else does it on delete: the row's worker_id is only nulled by the foreign
+	// key, so the worker's account count and load score would stay charged for
+	// a mailbox that no longer exists and its usable capacity would shrink with
+	// every disconnect.
+	if s.workerAssignment != nil && account.WorkerID != nil {
+		if err := s.workerAssignment.UnassignWorkerFromEmail(ctx, accountID); err != nil {
+			log.Warn().Err(err).
+				Str("email_id", accountID.String()).
+				Msg("could not release the deleted mailbox's worker capacity")
+		}
+	}
+
 	if xerr := s.emailRepository.Delete(ctx, userID, emailAccountID); xerr != nil {
+		// The removal has already gone out and the mailbox is still active, so
+		// put it back now rather than leaving it dark until the reconciler's
+		// next pass, minutes later.
+		s.loadAccountBestEffort(ctx, accountID)
 		return xerr
 	}
 
 	s.removeFromAllWarmupPools(ctx, account)
 	s.publishAccountEvent(ctx, pubsub.EventAccountDisconnected, account)
 
-	if s.webhookService != nil && account != nil && account.OrganizationID != nil {
+	if s.webhookService != nil && account.OrganizationID != nil {
 		_, _ = s.webhookService.Dispatch(ctx, *account.OrganizationID, models.WebhookEventEmailAccountRemoved, map[string]any{
 			"email_account_id": account.ID,
 			"email":            account.Email,
@@ -263,6 +334,15 @@ func (s *emailService) Delete(ctx context.Context, userID, emailAccountID string
 		})
 	}
 	return nil
+}
+
+// sameUser compares two user ids as uuids, so a differently formatted but equal
+// id is not read as a different owner (the delete itself compares in SQL,
+// where Postgres does the same).
+func sameUser(a, b string) bool {
+	left, aerr := uuid.Parse(a)
+	right, berr := uuid.Parse(b)
+	return aerr == nil && berr == nil && left == right
 }
 
 func (s *emailService) syncWarmupPoolMembership(ctx context.Context, account *models.Email) {

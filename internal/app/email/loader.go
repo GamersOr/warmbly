@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
+	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 	"golang.org/x/oauth2"
@@ -169,6 +170,47 @@ func (s *emailService) LoadAccountOntoWorker(ctx context.Context, accountID uuid
 		return nil
 	}
 	return s.publisher.PublishAddEmail(ctx, *workerID, payload)
+}
+
+// dropFromWorker tells the worker holding a mailbox to drop it from memory.
+//
+// Workers keep accounts in memory, and the per-worker load filters on status
+// only when a worker starts, so a mailbox the customer disabled or disconnected
+// keeps syncing on its old schedule until that worker restarts. This is the
+// control-plane half of that: the same removal the consumer sends when a
+// provider error deactivates a mailbox.
+//
+// The assignment is asked for on its own rather than read off an updated row:
+// the mailbox as the dashboard sees it carries no worker_id, which is exactly
+// what made the consumer's removal unreachable the first time.
+//
+// A send already dispatched to that worker is not lost: it is answered with
+// EMAIL_FAILED, which walks the reservation back and lets routing retry the
+// step on a mailbox that is still active.
+func (s *emailService) dropFromWorker(ctx context.Context, userID string, accountID uuid.UUID) *errx.Error {
+	if s.publisher == nil {
+		return nil
+	}
+
+	workerID, xerr := s.emailRepository.GetWorkerID(ctx, accountID)
+	if xerr != nil {
+		return xerr
+	}
+	if workerID == nil {
+		return nil
+	}
+
+	if err := s.publisher.PublishRemoveEmail(ctx, *workerID, &models.RemoveWorkerEmail{
+		UserID:  userID,
+		EmailID: accountID.String(),
+	}); err != nil {
+		log.Warn().Err(err).
+			Str("email_id", accountID.String()).
+			Str("worker_id", workerID.String()).
+			Msg("could not tell the worker to drop the mailbox")
+		return errx.ErrEmailWorkerUnreachable
+	}
+	return nil
 }
 
 // releaseDeadWorker returns the worker a mailbox should load onto, releasing it

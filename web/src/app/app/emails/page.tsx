@@ -147,12 +147,18 @@ export default function AddressesPage() {
             async () => {
                 setRemoving(true);
                 const results = await Promise.allSettled(selected.map((id) => removeEmail(id)));
-                const failed = results.filter((r) => r.status === "rejected").length;
+                const failed = results.filter((r) => r.status === "rejected");
                 await queryClient.invalidateQueries({ queryKey: ["emails"] });
                 setSelected([]);
                 setRemoving(false);
-                if (failed > 0) toast.error(`${failed} mailbox${failed > 1 ? "es" : ""} couldn't be removed`);
-                else toast.success(`Removed ${n} mailbox${n > 1 ? "es" : ""}`);
+                if (failed.length > 0) {
+                    // Surface the server's reason when there is one to show: a
+                    // disconnect that could not reach the machine syncing the
+                    // mailbox is worth retrying, and "couldn't be removed"
+                    // alone does not say so.
+                    const reason = failed.length === 1 ? removeErrorMessage(failed[0].reason) : undefined;
+                    toast.error(reason ?? `${failed.length} mailbox${failed.length > 1 ? "es" : ""} couldn't be removed`);
+                } else toast.success(`Removed ${n} mailbox${n > 1 ? "es" : ""}`);
             },
         );
     };
@@ -449,6 +455,12 @@ export default function AddressesPage() {
 }
 
 /* ── one mailbox row + its warmup dropdown ───────────────────────────── */
+
+// removeErrorMessage pulls the API's own explanation out of a failed request.
+function removeErrorMessage(err: unknown): string | undefined {
+    const e = err as { response?: { data?: { message?: string } } };
+    return e?.response?.data?.message;
+}
 
 function MailboxRow({
     box,

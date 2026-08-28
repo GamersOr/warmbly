@@ -132,6 +132,12 @@ var (
 	ErrEmailWarmupIncrease       = New(BadRequest, "Warmup increase amount must be between 0 and 100.")
 	ErrEmailReplyRate            = New(BadRequest, "Warmup reply rate must be between 0 and 100.")
 
+	// Disconnecting a mailbox has to reach the machine syncing it before the
+	// row goes: afterwards there is no assignment left to read and nothing that
+	// can repair a missed removal, so the mailbox would sync on forever.
+	ErrEmailWorkerUnreachable = NewWithIdentifier(ServiceUnavailable, "mailbox_worker_unreachable",
+		"This mailbox could not be disconnected right now because the machine syncing it could not be reached. Nothing was removed, so try again in a moment.")
+
 	// Campaign
 	ErrCampaignName        = New(BadRequest, "Campaign name length must be between 3 and 50 characters.")
 	ErrCampaignDescription = New(BadRequest, "Campaign description length must be below 300 characters.")
