@@ -71,6 +71,19 @@ Creating an account records the address it was created from, the browser's user-
 
 Nothing here refuses a signup on its own. A single weak signal is wrong too often, and turning a false positive into a rejected account leaves a real customer with no way through.
 
+## Cross-account patterns
+
+Individually, every abuse control watches one thing: a rate limit watches one account, warmup health one mailbox, verification one address. Someone spreading the same behaviour across several accounts stays under all of them.
+
+A nightly sweep looks at the group instead. It groups workspaces that were opened from the same address, or by the same email identity once plus-tags and Gmail dots are collapsed, and notices a workspace that connects an unusual number of mailboxes at once.
+
+Findings are recorded as evidence on the [workspace posture](/guides/deliverability/), never acted on alone:
+
+- **Three workspaces is the floor.** Two sharing an address is a coincidence.
+- **Private and loopback addresses are ignored**, since every self-hosted install signs up over a LAN.
+- **Sharing an address carries little weight** on its own. Offices, co-working spaces and VPNs all produce it honestly.
+- **Only the last 30 days count.** Two workspaces opened from one office a year apart are not related.
+
 ## Strongest setup
 
 1. **Add a passkey** so daily sign-in is fast and phishing-resistant.
