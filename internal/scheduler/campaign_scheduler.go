@@ -265,6 +265,10 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	}
 	riskMultiplier := riskState.CapMultiplier()
 
+	// Which mailboxes are in cold rotation at all. A resting mailbox keeps its
+	// warmup traffic and its reputation; it just is not offered cold sends.
+	lifecycles, lifecyclesKnown := s.sendLifecycles(ctx, accounts)
+
 	effectiveCap := func(acct models.Email) int {
 		lim := min(acct.CampaignLimit, campaign.DailyLimit)
 		if campaign.RampEnabled {
@@ -335,6 +339,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// reported as the DNS problem it is rather than as a scheduling one.
 	enforceAuth, authGrace := s.domainAuthGate(ctx)
 	authGated := 0
+	lifecycleGated := 0
 
 	var candidates []AccountCandidate
 	for _, acct := range accounts {
@@ -348,6 +353,14 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		// through, so a resolver hiccup can never stop a campaign.
 		if enforceAuth && acct.DomainAuthBlocked(time.Now(), authGrace) {
 			authGated++
+			continue
+		}
+
+		// Not in cold rotation. Checked here, beside the authentication gate,
+		// so a resting mailbox costs no capacity query. Applied only when the
+		// states were actually read.
+		if lifecyclesKnown && !lifecycles[acct.ID].State.SendsCold() {
+			lifecycleGated++
 			continue
 		}
 
@@ -470,6 +483,15 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 			"No mailbox can send: every sending domain fails SPF/DMARC authentication",
 			map[string]interface{}{"gated_mailboxes": authGated, "pool_size": len(accounts)})
 		return time.Time{}, nil, uuid.Nil, ErrDomainAuthFailing
+	}
+
+	// Every mailbox is out of cold rotation. Say so rather than letting the
+	// campaign look stalled for no visible reason; they return on their own.
+	if len(candidates) == 0 && lifecycleGated == len(accounts) {
+		s.logCampaignDecision(ctx, campaignID, "mailboxes_resting",
+			"No mailbox is in cold rotation: all are resting or held in reserve",
+			map[string]interface{}{"resting_mailboxes": lifecycleGated, "pool_size": len(accounts)})
+		return s.deferToNextDay(campaign), nil, accounts[0].ID, ErrCampaignDeferred
 	}
 
 	// STEP 8.25: Apply ESP matching to the under-budget candidate set.

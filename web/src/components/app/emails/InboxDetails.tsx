@@ -115,6 +115,32 @@ function RampHoldNotice({ hold }: { hold: import("@/lib/api/models/app/analytics
     );
 }
 
+// A mailbox that has quietly stopped receiving campaign sends looks broken.
+function LifecycleNotice({ state }: { state: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState }) {
+    const resting = state.state === "resting";
+    const copy = resting
+        ? "This mailbox is resting: it keeps its warmup traffic to rebuild reputation, but campaigns are not sending from it. It returns on its own once it has recovered and held steady for three days."
+        : state.state === "reserve"
+            ? "This mailbox is held in reserve, so campaigns will not send from it until you put it back."
+            : "This mailbox is still warming up, so campaigns are not sending from it yet.";
+    return (
+        <div className="px-5 pb-4">
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 flex items-start gap-2">
+                <PauseIcon className="w-3.5 h-3.5 mt-px shrink-0 text-slate-500" />
+                <div className="min-w-0">
+                    <p className="text-[12.5px] font-medium text-slate-900">
+                        Not sending campaigns ({state.state})
+                    </p>
+                    <p className="text-[11.5px] text-slate-600 leading-relaxed mt-0.5">
+                        {copy}
+                        {state.reason ? ` ${state.reason}.` : ""}
+                    </p>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 // A cold cap below the configured one reads as a bug unless it says why.
 function ColdRampNotice({ ramp }: { ramp: import("@/lib/api/models/app/analytics/AccountStatus").ColdRampInfo }) {
     return (
@@ -483,6 +509,7 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
             </div>
 
             {ws?.ramp_hold && <RampHoldNotice hold={ws.ramp_hold} />}
+            {status?.send_lifecycle && <LifecycleNotice state={status.send_lifecycle} />}
             {status?.cold_ramp && <ColdRampNotice ramp={status.cold_ramp} />}
 
             {/* Errors */}

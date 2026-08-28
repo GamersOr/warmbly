@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/app/behavior"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -49,6 +50,43 @@ type schedulerService struct {
 	// orgRiskRepo reads the organization's fused abuse posture. Optional/
 	// nil-safe: without it no organization is ever risk-capped.
 	orgRiskRepo repository.OrgRiskRepository
+	// lifecycleRepo reads whether a mailbox is in cold rotation at all.
+	// Optional/nil-safe: without it every mailbox is treated as active.
+	lifecycleRepo repository.SendLifecycleRepository
+}
+
+// WireLifecycle attaches the cold-sending lifecycle.
+func (s *schedulerService) WireLifecycle(r repository.SendLifecycleRepository) {
+	s.lifecycleRepo = r
+}
+
+// LifecycleAware is the optional capability the caller uses to attach it.
+type LifecycleAware interface {
+	WireLifecycle(r repository.SendLifecycleRepository)
+}
+
+// sendLifecycles resolves the pool's lifecycle states. The second return says
+// whether the answer is usable: a nil map and "no states" are indistinguishable
+// to the caller otherwise, and an unresolved state reads as active, which would
+// quietly put every resting mailbox back into rotation on a transient error.
+//
+// The gate is skipped rather than closed on error. Failing closed would stop a
+// customer's campaigns entirely on one bad query, which is the worse outcome;
+// skipping is logged so it is visible rather than silent.
+func (s *schedulerService) sendLifecycles(ctx context.Context, accounts []models.Email) (map[uuid.UUID]models.SendLifecycleState, bool) {
+	if s.lifecycleRepo == nil || len(accounts) == 0 {
+		return nil, false
+	}
+	ids := make([]uuid.UUID, 0, len(accounts))
+	for _, a := range accounts {
+		ids = append(ids, a.ID)
+	}
+	states, err := s.lifecycleRepo.GetSendLifecycles(ctx, ids)
+	if err != nil {
+		log.Warn().Err(err).Msg("could not read mailbox lifecycles; cold rotation is unfiltered this pass")
+		return nil, false
+	}
+	return states, true
 }
 
 // DomainAuthPolicy resolves whether the sending-domain authentication gate is

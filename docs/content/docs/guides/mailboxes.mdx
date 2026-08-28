@@ -130,6 +130,27 @@ Within a tier, Warmbly picks the least-loaded healthy worker with capacity rathe
 
 Mailboxes migrate automatically when a trial upgrades, a subscription ends, a workspace moves to or from a dedicated worker, or a risk band changes. No action needed.
 
+## Resting a tired mailbox
+
+Cold sending used to run at full volume until a mailbox crossed a hard health band, with nothing in between. A mailbox showing early fatigue either kept going or was quarantined.
+
+A mailbox now has a cold-rotation state, separate from its health:
+
+| State | Meaning |
+|-------|---------|
+| `active` | In cold rotation. The default, and where every mailbox starts |
+| `resting` | Out of cold rotation to recover. Warmup keeps running, so its reputation stays alive |
+| `reserve` | Held back by you. Never entered or left automatically |
+| `warming` | Building reputation and not yet taking campaign traffic |
+
+A mailbox rests when its warmup health reaches `throttled` or worse, and returns on its own once it is healthy again **and** has held steady for three days. One good hour does not put it back at full cold volume.
+
+It does not rest on the `watch` band. That band is deliberately the one that changes nothing you can feel, and leaving cold rotation is very much something you feel.
+
+<Callout type="info" title="Separate from where a mailbox runs">
+This is not the same as the risk band that decides which sending worker and IP host a mailbox. A resting mailbox is usually still on a clean worker; it is simply not being offered campaign sends. The mailbox drawer says which state it is in and why.
+</Callout>
+
 ## Health
 
 The Accounts list groups mailboxes as **Healthy** (sending normally), **Warming** (ramping through warmup), or **Needs attention** (paused, failing, or not sending), each row showing a live state and score. A drop between refreshes notifies you rather than waiting to be noticed.

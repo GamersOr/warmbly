@@ -107,6 +107,9 @@ type EmailAccountStatus struct {
 	// When true a low-volume health-check warmup keeps running even if the
 	// user has warmup paused/off.
 	InCampaign bool `json:"in_campaign"`
+	// SendLifecycle is whether the mailbox is in cold rotation, present only
+	// when it is NOT: an active mailbox needs no explanation.
+	SendLifecycle *SendLifecycleState `json:"send_lifecycle,omitempty"`
 	// ColdRamp is the warmup-to-cold graduation ceiling, present only while it
 	// is below the mailbox's own cap. Without it the cap just reads lower than
 	// the number the owner configured.

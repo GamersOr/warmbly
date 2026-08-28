@@ -157,7 +157,14 @@ var Tables = []Table{
 		// mailbox's cold ceiling, and the destination never watched it send.
 		// Cleared, the mailbox re-graduates from its warmup-maturity band,
 		// which costs a few days and is the safe direction to be wrong in.
-		ResetOnImport: []string{"worker_id", "auth_checked_at", "auth_failing_since", "cold_ramp_started_at"},
+		// send_lifecycle is this instance's operational decision about a
+		// mailbox it watched send. Importing "resting" would silence a mailbox
+		// on the destination for a reason nothing there observed; importing
+		// "active" would assert readiness the destination has not seen.
+		ResetOnImport: []string{
+			"worker_id", "auth_checked_at", "auth_failing_since", "cold_ramp_started_at",
+			"send_lifecycle", "send_lifecycle_since", "send_lifecycle_reason",
+		},
 	},
 	{
 		Name: "email_accounts_smtp_imap", Group: models.OrgDataGroupCore,
