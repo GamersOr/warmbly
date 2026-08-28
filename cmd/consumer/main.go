@@ -8,6 +8,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/warmbly/warmbly/internal/app/correlate"
+	"github.com/warmbly/warmbly/internal/app/orgrisk"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconf "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/getsentry/sentry-go"
@@ -433,6 +436,12 @@ func main() {
 	// Same cadence, different question: risk_band picks the worker, the
 	// lifecycle picks whether the mailbox is in cold rotation at all.
 	go jobsService.StartLifecycleRebalancer(ctx, 1*time.Hour)
+	// The cross-account sweep. Nightly rather than hourly: it looks for
+	// patterns that form over days and it touches every organization.
+	go correlate.NewService(
+		repository.NewCorrelationRepository(primaryDB),
+		orgrisk.NewService(repository.NewOrgRiskRepository(primaryDB)),
+	).Start(ctx, 24*time.Hour)
 
 	// Tracking consumer (opens/clicks): a second subscription on the shared bus
 	// for the tracking topic. It records open/click engagement and fires INSTANT
