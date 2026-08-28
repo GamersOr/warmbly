@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/client/msgraph"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -167,9 +168,14 @@ func (w *WMail) graphBackfill(ctx context.Context, stats *tickStats) *errx.MailE
 			if err != nil {
 				var mailErr *errx.MailError
 				if errors.As(err, &mailErr) {
-					// A folder the tenant does not have (archive on some
-					// plans) is skipped, not fatal.
-					if mailErr.Code == errx.MailErrorCodeServerUnreachable && cur.Next == "" {
+					// Only Graph saying the folder is absent (archive on
+					// some plans) skips it; a 503 ends the pass instead, or
+					// one blip marks the folder complete forever.
+					if mailErr.Code == errx.MailErrorCodeNotFound {
+						log.Debug().
+							Str("email_id", w.ID.String()).
+							Str("folder", folder).
+							Msg("backfill: folder absent on the tenant, skipped")
 						w.tracker.setFolder(folder, models.SyncFolderCursor{Done: true})
 						break
 					}
