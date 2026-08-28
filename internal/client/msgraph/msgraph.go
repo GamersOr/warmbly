@@ -11,13 +11,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"sync"
 
+	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/cache"
+	"github.com/warmbly/warmbly/internal/pkg/mailauth"
 	"github.com/warmbly/warmbly/internal/pkg/stoken"
 	"golang.org/x/oauth2"
 )
@@ -133,16 +134,21 @@ func (c *Client) doJSON(ctx context.Context, method, url string, in, out any) er
 }
 
 // transportError classifies a failure of the HTTP call itself. The client's
-// token source runs inside it, so a refresh token the provider has revoked
-// arrives here rather than as a status code; reporting that as "the mail server
+// token source runs inside it, so a grant the provider has revoked arrives
+// here rather than as a status code, and reporting that as "the mail server
 // could not be established" points the operator at the network and promises a
 // retry that can never succeed.
 func transportError(err error) *errx.MailError {
-	var retrieve *oauth2.RetrieveError
-	if errors.As(err, &retrieve) {
-		if retrieve.Response != nil && retrieve.Response.StatusCode >= 500 {
-			return errx.ErrMailServerUnreachable
-		}
+	f := mailauth.ClassifyTokenError(err)
+	if f.Refused() {
+		log.Debug().
+			Str("oauth_error", f.ErrorCode).
+			Str("oauth_description", f.Description).
+			Int("status", f.Status).
+			Bool("revoked", f.Revoked()).
+			Msg("Graph token refresh refused")
+	}
+	if f.Revoked() {
 		return errx.ErrMailAuthenticationFailed
 	}
 	return errx.ErrMailServerUnreachable
