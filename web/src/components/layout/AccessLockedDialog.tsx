@@ -69,7 +69,7 @@ export default function AccessLockedDialog({
                         <div
                             className={
                                 isPlan
-                                    ? "mx-auto mb-3 size-11 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center"
+                                    ? "mx-auto mb-3 size-11 rounded-xl bg-sky-50 border border-sky-200 text-sky-600 flex items-center justify-center"
                                     : "mx-auto mb-3 size-11 rounded-xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center"
                             }
                         >
@@ -93,7 +93,7 @@ export default function AccessLockedDialog({
                                         <Link
                                             to={upgradeTo}
                                             onClick={onClose}
-                                            className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-[12.5px] font-medium transition-colors"
+                                            className="inline-flex items-center gap-1.5 h-8 px-4 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12.5px] font-medium transition-colors"
                                         >
                                             <SparklesIcon className="w-3.5 h-3.5" /> Upgrade
                                         </Link>

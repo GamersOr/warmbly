@@ -16,8 +16,10 @@ import { useConfirm } from "@/hooks/context/confirm";
 import InboxDetails from "@/components/app/emails/InboxDetails";
 import WarmupCoverageNotice from "@/components/app/emails/WarmupCoverageNotice";
 import CloudPoolBanner from "@/components/app/emails/CloudPoolBanner";
+import CloudPathsPanel from "@/components/app/emails/CloudPathsPanel";
 import CloudConnectDialog from "@/components/app/cloud/CloudConnectDialog";
 import useCloudPool from "@/hooks/useCloudPool";
+import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
 import { useEnrollCloudLinkMailbox, useUnenrollCloudLinkMailbox, useCloudLinkMailboxLifecycle } from "@/lib/api/hooks/app/cloudlink/useCloudLink";
 import { providerSupported } from "@/app/app/settings/warmbly-cloud/providers";
 import { CloudIcon } from "lucide-react";
@@ -115,6 +117,7 @@ export default function AddressesPage() {
     // row badges and menu items below key off this.
     const cloud = useCloudPool();
     const [cloudDialog, setCloudDialog] = React.useState(false);
+    const authConfigLoading = useAuthConfig().isLoading;
 
     // One query for the whole surface; each row reads its own advice out of the
     // index rather than asking for it.
@@ -327,6 +330,7 @@ export default function AddressesPage() {
                     className="mx-5 my-3"
                 />
                 <CloudPoolBanner onConnect={() => setCloudDialog(true)} mailboxCount={stats.total} />
+                {!emailsData.isLoading && <CloudPathsPanel mailboxCount={stats.total} onAdd={() => p?.setAddEmail(true)} />}
                 <WarmupCoverageNotice
                     warmupCount={warmupActive}
                     totalCount={stats.total}
@@ -348,6 +352,7 @@ export default function AddressesPage() {
                         ))}
                     </div>
                 ) : !emailsData.emails || emailsData.emails.length === 0 ? (
+                    cloud.selfHosted || authConfigLoading ? (
                     <EmptyBlock
                         title="No email accounts yet"
                         body="Connect your first mailbox to start warming up and sending campaigns."
@@ -360,6 +365,7 @@ export default function AddressesPage() {
                             </TopbarAction>
                         }
                     />
+                    ) : null
                 ) : (
                     <table className="w-full text-left">
                         <thead className="sticky top-0 bg-white z-[1]">
