@@ -436,11 +436,12 @@ func main() {
 	// Same cadence, different question: risk_band picks the worker, the
 	// lifecycle picks whether the mailbox is in cold rotation at all.
 	go jobsService.StartLifecycleRebalancer(ctx, 1*time.Hour)
-	// The cross-account sweep. Nightly rather than hourly: it looks for
-	// patterns that form over days and it touches every organization.
+	// The abuse sweep: cross-account shape, plus what each organization's mail
+	// did to recipients. Nightly, because both form over days.
 	orgRiskService := orgrisk.NewService(repository.NewOrgRiskRepository(primaryDB))
 	go correlate.NewService(
 		repository.NewCorrelationRepository(primaryDB),
+		repository.NewOrgConductRepository(primaryDB),
 		orgRiskService,
 	).Start(ctx, 24*time.Hour)
 	// Evidence a one-shot detector filed cannot retract itself, so it carries

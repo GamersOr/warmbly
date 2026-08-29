@@ -298,17 +298,34 @@ func (s *authService) recordSignupRisk(ctx context.Context, orgID uuid.UUID, ema
 	if s.orgRisk == nil {
 		return
 	}
+	// Two signals, not one score: a throwaway domain is evidence about the
+	// account, a tagged address only describes how the signup looked.
 	risk := signuprisk.Score(email, origin.IP)
-	if risk.Score == 0 {
+	s.fileSignupFindings(ctx, orgID, "signup_disposable", orgrisk.ClassSubstantive, risk.Substantive())
+	s.fileSignupFindings(ctx, orgID, "signup", orgrisk.ClassCircumstantial, risk.Circumstantial())
+}
+
+// fileSignupFindings records one class of a signup's findings as a single
+// signal. Nothing is filed when that class found nothing.
+func (s *authService) fileSignupFindings(ctx context.Context, orgID uuid.UUID, key string,
+	class orgrisk.SignalClass, findings []signuprisk.Finding) {
+	weight, reasons := 0, make([]string, 0, len(findings))
+	for _, f := range findings {
+		weight += f.Weight
+		reasons = append(reasons, f.Reason)
+	}
+	if weight == 0 {
 		return
 	}
 	if _, err := s.orgRisk.RecordSignal(ctx, orgID, orgrisk.Signal{
-		Key:    "signup",
-		Weight: risk.Score,
-		Detail: strings.Join(risk.Reasons, "; "),
+		Key:    key,
+		Weight: weight,
+		Detail: strings.Join(reasons, "; "),
+		Class:  class,
 		TTL:    orgrisk.DefaultSignalTTL,
 	}); err != nil {
-		log.Warn().Str("organization_id", orgID.String()).Msg("could not record the signup risk signal")
+		log.Warn().Str("organization_id", orgID.String()).Str("signal", key).
+			Msg("could not record the signup risk signal")
 	}
 }
 
