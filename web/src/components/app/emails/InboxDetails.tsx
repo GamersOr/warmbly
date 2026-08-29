@@ -117,16 +117,38 @@ function RampHoldNotice({ hold }: { hold: import("@/lib/api/models/app/analytics
 }
 
 // A mailbox that has quietly stopped receiving campaign sends looks broken.
-function LifecycleNotice({ state }: { state: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState }) {
+// hasHealthSignal is warmup_health presence: the pool row the rebalancer reads, not the warmup setting.
+function LifecycleNotice({
+    mailboxId,
+    state,
+    hasHealthSignal,
+}: {
+    mailboxId: string;
+    state: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState;
+    hasHealthSignal: boolean;
+}) {
+    const hold = useSendHold(mailboxId);
     const reserve = state.state === "reserve";
     const copy = reserve
         ? "You are holding this mailbox out of campaigns. Warmup keeps running. Turn the hold off below to put it back into rotation."
-        : "This mailbox is resting: it keeps its warmup traffic to rebuild reputation, but campaigns are not sending from it. It returns on its own once it has recovered and held steady for three days.";
+        : hasHealthSignal
+            ? "This mailbox is resting: campaigns are not sending from it while its warmup health recovers. It returns on its own once that health is back and has held steady for three days."
+            : "This mailbox is resting, but it is in no warmup pool, so there is no health signal to recover on. It returns on its own after three days of rest, or now if you put it back.";
+    const resume = () =>
+        hold.mutate(false, {
+            onSuccess: (data) =>
+                toast.success(
+                    data.state === "resting"
+                        ? "Still resting: its warmup health is throttled or worse, so it stays out until that recovers"
+                        : "Mailbox back in campaign rotation",
+                ),
+            onError: (e) => toast.error(buildError(e as unknown as AppError)),
+        });
     return (
         <div className="px-5 pb-4">
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 flex items-start gap-2">
                 <PauseIcon className="w-3.5 h-3.5 mt-px shrink-0 text-slate-500" />
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                     <p className="text-[12.5px] font-medium text-slate-900">
                         Not sending campaigns ({reserve ? "held" : state.state})
                     </p>
@@ -134,6 +156,16 @@ function LifecycleNotice({ state }: { state: import("@/lib/api/models/app/analyt
                         {copy}
                         {!reserve && state.reason ? ` ${state.reason}.` : ""}
                     </p>
+                    {!reserve && (
+                        <button
+                            type="button"
+                            onClick={resume}
+                            disabled={hold.isPending}
+                            className="mt-2 h-7 px-2.5 inline-flex items-center rounded-md border border-slate-200 bg-white text-[12px] font-medium text-slate-700 hover:border-sky-400 hover:text-sky-700 disabled:opacity-50 transition-colors"
+                        >
+                            {hold.isPending ? "Putting back…" : "Put back into campaigns"}
+                        </button>
+                    )}
                 </div>
             </div>
         </div>
@@ -539,7 +571,7 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
             </div>
 
             {ws?.ramp_hold && <RampHoldNotice hold={ws.ramp_hold} />}
-            {status?.send_lifecycle && <LifecycleNotice state={status.send_lifecycle} />}
+            {status?.send_lifecycle && <LifecycleNotice mailboxId={mailbox.id} state={status.send_lifecycle} hasHealthSignal={!!status.warmup_health} />}
             {status?.cold_ramp && <ColdRampNotice ramp={status.cold_ramp} />}
             {status && <SendHoldControl mailboxId={mailbox.id} state={status.send_lifecycle} />}
 

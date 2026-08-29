@@ -108,6 +108,7 @@ func (s *emailService) SetWarmupLifecycle(ctx context.Context, userID, emailAcco
 }
 
 // SetSendHold: force is set because this is the owner's decision the rebalancer's guard protects.
+// A release also serves as the manual exit from resting (issue #243).
 func (s *emailService) SetSendHold(ctx context.Context, orgID, emailAccountID string, hold bool) (*models.SendLifecycleState, *errx.Error) {
 	if s.lifecycleRepo == nil {
 		return nil, errx.New(errx.Conflict, "Holding a mailbox is not available on this install.")
@@ -126,6 +127,9 @@ func (s *emailService) SetSendHold(ctx context.Context, orgID, emailAccountID st
 		}
 		d := lifecycle.Decide(models.SendLifecycleActive, nil, candidate.HealthState, time.Now())
 		next, reason = d.Next, "released by its owner"
+		if candidate.Current == models.SendLifecycleResting {
+			reason = "put back by its owner"
+		}
 		if d.Reason != "" {
 			reason = "released by its owner; " + d.Reason
 		}

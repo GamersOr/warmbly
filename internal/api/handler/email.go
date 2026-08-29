@@ -189,8 +189,8 @@ func (h *Handler) warmupLifecycle(c *gin.Context, action string) {
 // campaign sending until they release it. Warmup is untouched.
 func (h *Handler) HoldEmail(c *gin.Context) { h.sendHold(c, true) }
 
-// ReleaseEmail serves POST /emails/:id/release, putting a held mailbox back
-// into campaign rotation.
+// ReleaseEmail serves POST /emails/:id/release, putting a held or resting
+// mailbox back into campaign rotation.
 func (h *Handler) ReleaseEmail(c *gin.Context) { h.sendHold(c, false) }
 
 func (h *Handler) sendHold(c *gin.Context, hold bool) {

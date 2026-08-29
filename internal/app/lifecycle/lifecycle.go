@@ -41,12 +41,14 @@ func Decide(current models.SendLifecycle, since *time.Time, health models.Warmup
 			Reason: "warmup health is " + string(health) + "; out of cold rotation until it recovers"}
 	}
 
-	// No warmup pool means no health signal. Nothing justifies resting an
-	// active mailbox, and nothing justifies resuming a resting one: warmup is
-	// not running, so it is not recovering either.
+	// No pool, no signal: never rest, and let a resting clock run rather than strand the mailbox.
 	if health == "" {
 		if current == models.SendLifecycleResting {
-			return Decision{Next: current, RestartProbation: true}
+			state := models.SendLifecycleState{State: current, Since: since}
+			if state.ReadyToResume(now) {
+				return Decision{Next: models.SendLifecycleActive,
+					Reason: "warmup is not running, so there was nothing to recover on; returned after the rest window"}
+			}
 		}
 		return Decision{Next: current}
 	}
