@@ -17,8 +17,7 @@ import (
 // Read-only: it reports what DNS says right now and leaves the mailbox's stored
 // auth_state alone. Use RefreshEmailAuthCheck to record the verdict.
 func (h *Handler) GetEmailAuthCheck(c *gin.Context) {
-	// Mailboxes are workspace assets and the lookup behind this is scoped by
-	// organization, so the caller's user id would 404 for everyone.
+	// The mailbox lookup is organization-scoped; a user id here 404s for everyone.
 	orgID := middleware.GetOrganizationID(c)
 	if orgID == nil {
 		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))

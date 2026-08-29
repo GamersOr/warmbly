@@ -53,10 +53,7 @@ export default function EmailEditor({
 }: EmailEditorProps) {
     const editorRef = useRef<HTMLDivElement>(null);
     const [activeTab, setActiveTab] = useState<"html" | "plain">("html");
-    // The visual editor owns its DOM while the user types: rewriting innerHTML
-    // from the prop on every render resets the caret to the start, so only
-    // push htmlText in when it differs from what the element already holds
-    // (mount, switching back from the source view, an outside reset).
+    // Only rewrite innerHTML when the prop diverges from the DOM; rewriting it every render resets the caret.
     useEffect(() => {
         const el = editorRef.current;
         if (el && el.innerHTML !== htmlText) el.innerHTML = htmlText;

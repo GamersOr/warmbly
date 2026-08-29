@@ -247,10 +247,8 @@ func (s *emailService) RefreshDomainAuth(ctx context.Context, orgID, emailAccoun
 	return res, nil
 }
 
-// resolveDomainAuth loads the organization's mailbox and runs the DNS lookup
-// for its sending domain, returning the domain alongside the result so the
-// persisting caller does not re-derive it. Get is organization-scoped: handing
-// it a user id made every check 404.
+// resolveDomainAuth loads the organization's mailbox (Get is org-scoped, never user-scoped)
+// and runs the DNS lookup, returning the domain so the persisting caller does not re-derive it.
 func (s *emailService) resolveDomainAuth(ctx context.Context, orgID, emailAccountID string) (string, *dnsauth.Result, *errx.Error) {
 	account, xerr := s.emailRepository.Get(ctx, orgID, emailAccountID)
 	if xerr != nil {

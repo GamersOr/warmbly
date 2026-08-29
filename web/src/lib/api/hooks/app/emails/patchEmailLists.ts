@@ -4,10 +4,7 @@ import type { InfiniteData, QueryClient } from "@tanstack/react-query";
 
 type EmailListCache = InfiniteData<GetEmails> | Inbox[];
 
-// Two shapes live under ["emails", "list"]: the paginated accounts list
-// (InfiniteData pages) and the store's flat mailbox directory (Inbox[]).
-// Patching both through one helper is what keeps a mutation's cache write
-// from assuming one shape and crashing on the other.
+// ["emails", "list"] holds both the paginated list (InfiniteData) and the flat directory (Inbox[]); patch each by shape.
 export default function patchEmailLists(queryClient: QueryClient, patch: (rows: Inbox[]) => Inbox[]) {
     const allLists = queryClient.getQueriesData<EmailListCache>({ queryKey: ["emails", "list"] });
 
