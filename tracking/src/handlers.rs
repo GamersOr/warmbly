@@ -346,9 +346,9 @@ pub async fn track_page_hit(
     }
 
     // Reloads and double-fires: acknowledged, not counted.
-    if state.hits.is_duplicate(&payload.v, &payload.u).await {
+    let Some(claim) = state.hits.claim(&payload.v, &payload.u).await else {
         return StatusCode::NO_CONTENT.into_response();
-    }
+    };
 
     let origin_host = headers
         .get(header::ORIGIN)
@@ -392,7 +392,7 @@ pub async fn track_page_hit(
         Outcome::Malformed => (StatusCode::BAD_REQUEST, "Invalid payload").into_response(),
         Outcome::Unavailable => {
             // Nothing was stored, so the next attempt must not be deduped away.
-            state.hits.forget(&dedupe_visitor, &dedupe_url).await;
+            state.hits.forget(&dedupe_visitor, &dedupe_url, claim).await;
             (StatusCode::SERVICE_UNAVAILABLE, "Try again shortly").into_response()
         }
     }

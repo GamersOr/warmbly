@@ -336,7 +336,11 @@ func (s *service) Ingest(ctx context.Context, req *models.WebsiteHitRequest) (*m
 			}
 			// A ticket from another workspace's campaign proves nothing here.
 			if terr == nil && ok && ticketOrg == site.OrganizationID {
-				visitor, result.NewVisitorKey = s.attach(ctx, site.OrganizationID, visitor, contactID, now)
+				attached, key, aerr := s.attach(ctx, site.OrganizationID, visitor, contactID, now)
+				if aerr != nil {
+					return nil, aerr
+				}
+				visitor, result.NewVisitorKey = attached, key
 			}
 		}
 	}
@@ -358,37 +362,43 @@ func (s *service) Ingest(ctx context.Context, req *models.WebsiteHitRequest) (*m
 	return result, nil
 }
 
+// errAttach means the browser could not be tied to the ticket's contact
+// safely; the hit is dropped rather than stored under the wrong person, and
+// the edge retries it.
+var errAttach = errors.New("visitor attach failed")
+
 // attach ties the browser to the ticket's contact. An anonymous row is
 // claimed with a guarded update; if a concurrent hit won that race for a
 // different contact, or the row already belonged to someone else, the browser
-// is split onto a fresh row so neither contact inherits the other's history.
-func (s *service) attach(ctx context.Context, orgID uuid.UUID, visitor *models.WebsiteVisitor, contactID uuid.UUID, now time.Time) (*models.WebsiteVisitor, string) {
+// is split onto a fresh row. Any failure on the way returns errAttach so the
+// caller never inserts under a row it does not own.
+func (s *service) attach(ctx context.Context, orgID uuid.UUID, visitor *models.WebsiteVisitor, contactID uuid.UUID, now time.Time) (*models.WebsiteVisitor, string, error) {
 	if visitor.ContactID == nil {
 		updated, err := s.repo.IdentifyVisitor(ctx, visitor.ID, contactID, "email_link", now)
 		if err != nil {
 			db.CaptureError(err, "", nil, "websitetracking IdentifyVisitor")
-			return visitor, ""
+			return nil, "", errAttach
 		}
 		if updated {
 			visitor.ContactID = &contactID
-			return visitor, ""
+			return visitor, "", nil
 		}
 		current, err := s.repo.GetVisitorByID(ctx, visitor.ID)
 		if err != nil {
 			db.CaptureError(err, "", nil, "websitetracking GetVisitorByID")
-			return visitor, ""
+			return nil, "", errAttach
 		}
 		visitor = current
 	}
 	if visitor.ContactID != nil && *visitor.ContactID == contactID {
-		return visitor, ""
+		return visitor, "", nil
 	}
 	fresh, err := s.repo.CreateVisitor(ctx, orgID, newKey(), contactID, "email_link", now)
 	if err != nil {
 		db.CaptureError(err, "", nil, "websitetracking CreateVisitor")
-		return visitor, ""
+		return nil, "", errAttach
 	}
-	return fresh, fresh.VisitorKey
+	return fresh, fresh.VisitorKey, nil
 }
 
 // locate fills location from the request IP at the workspace's precision;

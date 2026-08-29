@@ -139,7 +139,9 @@ pub struct HitForwarder {
     internal_token: String,
     unknown_sites: Cache<String, ()>,
     miss_budget: Cache<String, Arc<AtomicU32>>,
-    dedupe: Cache<String, ()>,
+    /// (visitor, URL) -> the id of the request that owns the entry.
+    dedupe: Cache<String, u64>,
+    next_request: AtomicU64,
     breaker_failures: AtomicU32,
     breaker_open_until_ms: AtomicU64,
     started: Instant,
@@ -168,27 +170,39 @@ impl HitForwarder {
                 .max_capacity(200_000)
                 .time_to_live(DEDUPE_WINDOW)
                 .build(),
+            next_request: AtomicU64::new(1),
             breaker_failures: AtomicU32::new(0),
             breaker_open_until_ms: AtomicU64::new(0),
             started: Instant::now(),
         }
     }
 
-    /// True when this browser already reported this URL inside the window.
-    pub async fn is_duplicate(&self, visitor: &str, url: &str) -> bool {
-        let key = format!("{}:{}", visitor, url);
-        if self.dedupe.contains_key(&key) {
-            return true;
+    /// Claims the (visitor, URL) pair for this request. None when another
+    /// request inside the window already owns it; otherwise the claim token
+    /// to hand back to `forget` if the forward fails. The insert is atomic, so
+    /// two concurrent requests cannot both pass.
+    pub async fn claim(&self, visitor: &str, url: &str) -> Option<u64> {
+        let token = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let entry = self
+            .dedupe
+            .entry(format!("{}:{}", visitor, url))
+            .or_insert(token)
+            .await;
+        if entry.is_fresh() {
+            Some(token)
+        } else {
+            None
         }
-        self.dedupe.insert(key, ()).await;
-        false
     }
 
-    /// Drops a dedupe entry after a failed forward so the retry is counted.
-    pub async fn forget(&self, visitor: &str, url: &str) {
-        self.dedupe
-            .invalidate(&format!("{}:{}", visitor, url))
-            .await;
+    /// Releases a claim after a failed forward so the retry is counted. Only
+    /// the owning request can release it: a concurrent request that succeeded
+    /// keeps its entry.
+    pub async fn forget(&self, visitor: &str, url: &str, token: u64) {
+        let key = format!("{}:{}", visitor, url);
+        if self.dedupe.get(&key).await == Some(token) {
+            self.dedupe.invalidate(&key).await;
+        }
     }
 
     pub async fn forward(&self, hit: ForwardedHit, source: &str) -> Outcome {
@@ -307,6 +321,22 @@ mod tests {
             sh: 0,
             ld: true,
         }
+    }
+
+    #[tokio::test]
+    async fn claim_is_exclusive_and_forget_only_releases_the_owner() {
+        let f = HitForwarder::new("http://127.0.0.1:9".into(), "t".into());
+        let a = f.claim("v", "u").await.expect("first claim wins");
+        assert!(
+            f.claim("v", "u").await.is_none(),
+            "second claim inside the window is a duplicate"
+        );
+        // A stale token (a concurrent loser) cannot release the winner's entry.
+        f.forget("v", "u", a + 1).await;
+        assert!(f.claim("v", "u").await.is_none());
+        // The owner can.
+        f.forget("v", "u", a).await;
+        assert!(f.claim("v", "u").await.is_some());
     }
 
     #[test]
