@@ -107,20 +107,39 @@ func TestDecideDoesNotRestartProbationForOtherStates(t *testing.T) {
 
 // A mailbox that is in no warmup pool reports no health at all. Reading that
 // as healthy would let a rested mailbox resume on the strength of having left
-// the pool, which is the opposite of evidence.
-func TestUnknownHealthNeitherRestsNorResumes(t *testing.T) {
-	now := time.Now()
-	long := now.Add(-30 * 24 * time.Hour)
+// the pool, so it serves the rest window first. It must not restart the
+// window either: with no warmup running it is not recovering, and holding it
+// until a signal that never comes strands it (issue #243).
+func TestUnknownHealthResumesOnlyAfterTheRestWindow(t *testing.T) {
+	now := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
 
-	d := Decide(models.SendLifecycleResting, &long, "", now)
+	fresh := now.Add(-time.Hour)
+	d := Decide(models.SendLifecycleResting, &fresh, "", now)
 	if d.Next != models.SendLifecycleResting {
-		t.Fatalf("resting mailbox with no pool resumed: %v", d.Next)
+		t.Fatalf("resting mailbox with no pool resumed after an hour: %v", d.Next)
 	}
-	if !d.RestartProbation {
-		t.Fatal("probation must not accrue while health is unknown")
+	if d.RestartProbation {
+		t.Fatal("no health signal must let the clock run, not restart it")
 	}
 
-	if d := Decide(models.SendLifecycleActive, &long, "", now); d.Next != models.SendLifecycleActive {
+	served := now.Add(-models.RestProbation)
+	d = Decide(models.SendLifecycleResting, &served, "", now)
+	if d.Next != models.SendLifecycleActive {
+		t.Fatalf("resting mailbox with no pool stayed %v after the rest window", d.Next)
+	}
+	if d.Reason == "" {
+		t.Fatal("resuming with no signal needs a reason the owner can read")
+	}
+
+	if d := Decide(models.SendLifecycleActive, &served, "", now); d.Next != models.SendLifecycleActive {
 		t.Fatalf("active mailbox with no pool moved to %v", d.Next)
+	}
+}
+
+// A resting mailbox with no clock cannot serve a window, so it stays put
+// rather than resuming on a missing stamp.
+func TestUnknownHealthWithNoClockStaysResting(t *testing.T) {
+	if d := Decide(models.SendLifecycleResting, nil, "", time.Now()); d.Next != models.SendLifecycleResting {
+		t.Fatalf("resting mailbox with no since resumed: %v", d.Next)
 	}
 }
