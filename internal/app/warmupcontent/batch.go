@@ -190,9 +190,7 @@ func (s *service) pollBatchJob(ctx context.Context, job *models.WarmupGeneration
 		job.Status = "failed"
 		job.FinishedAt = &now
 		if job.Error == "" {
-			// A batch that failed as a whole has no error file, so the provider's
-			// own message is the only account of why. Recording just the status
-			// leaves the operator with "batch failed" and nothing to act on.
+			// A batch that failed as a whole has no error file; this is the only account of why.
 			job.Error = fmt.Sprintf("batch %s", state.Status)
 			if state.FailureReason != "" {
 				job.Error += ": " + state.FailureReason

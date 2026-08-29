@@ -6,9 +6,7 @@ import (
 	"github.com/openai/openai-go/v2"
 )
 
-// A batch that fails as a whole produces no error file, so the message the
-// provider puts on the batch itself is the only account of why. Losing it is
-// how "batch failed" ended up being everything an operator was told.
+// A batch that fails as a whole produces no error file, so the message on the batch is the only account of why.
 func TestBatchFailureReason(t *testing.T) {
 	cases := []struct {
 		name string
@@ -31,9 +29,20 @@ func TestBatchFailureReason(t *testing.T) {
 			"first reason (+2 more)",
 		},
 		{
-			"skips a blank message",
+			// The suffix counts readable messages, not entries: a blank one is
+			// not a second reason for the operator to go hunting for.
+			"a blank message is not a reason",
 			[]openai.BatchError{{Code: "empty"}, {Message: "  the real one  "}},
-			"the real one (+1 more)",
+			"the real one",
+		},
+		{
+			"counts only the readable ones",
+			[]openai.BatchError{
+				{Message: "first reason"},
+				{Code: "empty"},
+				{Message: "second reason"},
+			},
+			"first reason (+1 more)",
 		},
 		{"all blank", []openai.BatchError{{Code: "a"}, {Code: "b"}}, ""},
 	}

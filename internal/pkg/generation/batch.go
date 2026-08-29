@@ -112,21 +112,14 @@ func (c *GenerationClient) SubmitBatch(ctx context.Context, requests []BatchRequ
 	return batch.ID, file.ID, nil
 }
 
-// BatchState is the provider's view of one batch. Grouped rather than returned
-// as a widening list of strings, because the two failure surfaces are different
-// and a caller has to tell them apart.
+// BatchState is the provider's view of one batch.
 type BatchState struct {
 	Status string
-	// OutputFileID is present when at least one request succeeded, ErrorFileID
-	// when at least one failed. A batch whose requests ALL failed still
-	// completes, with output empty and every refusal in the error file.
+	// A batch whose requests all failed still completes: output empty, refusals in the error file.
 	OutputFileID string
 	ErrorFileID  string
 	Counts       BatchCounts
-	// FailureReason is the batch-level error, reported when the batch itself
-	// never ran: a rejected input file, a quota refusal. It is not a per-request
-	// refusal, and it arrives with no error file to read it out of, so it is the
-	// only place that says why.
+	// Batch-level error, set when the batch itself never ran, so no error file exists to read.
 	FailureReason string
 }
 
@@ -149,20 +142,23 @@ func (c *GenerationClient) GetBatch(ctx context.Context, batchID string) (BatchS
 	}, nil
 }
 
-// batchFailureReason renders the batch-level errors as one line, naming how many
-// more there are rather than pasting all of them into a job row.
+// batchFailureReason renders the batch-level errors as one line for a job row.
 func batchFailureReason(errs []openai.BatchError) string {
+	// Count only entries that carry a message: a blank one is not a reason to go looking for.
+	msgs := make([]string, 0, len(errs))
 	for _, e := range errs {
-		msg := strings.TrimSpace(e.Message)
-		if msg == "" {
-			continue
+		if msg := strings.TrimSpace(e.Message); msg != "" {
+			msgs = append(msgs, msg)
 		}
-		if len(errs) > 1 {
-			return fmt.Sprintf("%s (+%d more)", msg, len(errs)-1)
-		}
-		return msg
 	}
-	return ""
+	switch len(msgs) {
+	case 0:
+		return ""
+	case 1:
+		return msgs[0]
+	default:
+		return fmt.Sprintf("%s (+%d more)", msgs[0], len(msgs)-1)
+	}
 }
 
 // CancelBatch requests cancellation of an in-flight batch.
