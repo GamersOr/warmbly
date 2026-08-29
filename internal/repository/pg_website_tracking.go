@@ -11,10 +11,8 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 )
 
-// WebsiteTrackingRepository is the store behind the website tracking snippet:
-// per-workspace settings, the browsers the snippet has seen, and their page
-// views. Writes on the hit path come only from the backend's internal ingest
-// endpoint; the dashboard only reads hits.
+// WebsiteTrackingRepository stores tracking settings, the browsers the snippet
+// has seen, and their page views. Only the internal ingest path writes hits.
 type WebsiteTrackingRepository interface {
 	GetOrCreateSettings(ctx context.Context, orgID uuid.UUID, siteKey string) (*models.WebsiteTrackingSettings, error)
 	UpdateSettings(ctx context.Context, orgID, updatedBy uuid.UUID, s *models.WebsiteTrackingSettings) error
@@ -29,7 +27,10 @@ type WebsiteTrackingRepository interface {
 
 	UpsertVisitor(ctx context.Context, orgID uuid.UUID, visitorKey string, seenAt time.Time) (*models.WebsiteVisitor, error)
 	CreateVisitor(ctx context.Context, orgID uuid.UUID, visitorKey string, contactID uuid.UUID, via string, at time.Time) (*models.WebsiteVisitor, error)
-	IdentifyVisitor(ctx context.Context, visitorID, contactID uuid.UUID, via string, at time.Time) error
+	// IdentifyVisitor ties an anonymous browser to a contact. false when the
+	// row was already tied (possibly by a concurrent hit) and nothing changed.
+	IdentifyVisitor(ctx context.Context, visitorID, contactID uuid.UUID, via string, at time.Time) (bool, error)
+	GetVisitorByID(ctx context.Context, visitorID uuid.UUID) (*models.WebsiteVisitor, error)
 	InsertHit(ctx context.Context, orgID uuid.UUID, hit *models.WebsitePageHit) error
 
 	ListHitsForContact(ctx context.Context, orgID, contactID uuid.UUID, before time.Time, limit int) ([]models.WebsitePageHit, error)
@@ -59,9 +60,7 @@ func scanWebsiteSettings(row pgx.Row) (*models.WebsiteTrackingSettings, error) {
 	return &s, nil
 }
 
-// GetOrCreateSettings returns the workspace's row, creating a disabled one
-// with the given site key on first read so the dashboard always has a key to
-// show.
+// GetOrCreateSettings creates a disabled row with the given site key on first read.
 func (r *websiteTrackingRepository) GetOrCreateSettings(ctx context.Context, orgID uuid.UUID, siteKey string) (*models.WebsiteTrackingSettings, error) {
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO website_tracking_settings (organization_id, site_key)
@@ -115,9 +114,7 @@ func (r *websiteTrackingRepository) GetSiteByKey(ctx context.Context, siteKey st
 	`, siteKey))
 }
 
-// SiteForCampaign is what the click redirect consults to decide whether to
-// append the identification ticket. nil, nil when the workspace never opened
-// the tracking settings.
+// SiteForCampaign backs the click redirect's identify decision. nil, nil when unset.
 func (r *websiteTrackingRepository) SiteForCampaign(ctx context.Context, campaignID uuid.UUID) (*models.WebsiteSite, error) {
 	return scanWebsiteSite(r.db.QueryRow(ctx, `
 		SELECT s.organization_id, s.enabled, s.consent_mode, s.location_precision, s.allowed_hosts
@@ -169,9 +166,8 @@ func (r *websiteTrackingRepository) UpsertVisitor(ctx context.Context, orgID uui
 		RETURNING `+websiteVisitorColumns, orgID, visitorKey, seenAt))
 }
 
-// CreateVisitor opens a fresh, already-identified browser record. Used when a
-// ticket names a different contact than the one tied to the browser: the old
-// record keeps its history and the browser moves to this one.
+// CreateVisitor opens a fresh, already-identified browser record (the split
+// path: a ticket named a different contact than the one tied to the browser).
 func (r *websiteTrackingRepository) CreateVisitor(ctx context.Context, orgID uuid.UUID, visitorKey string, contactID uuid.UUID, via string, at time.Time) (*models.WebsiteVisitor, error) {
 	return scanWebsiteVisitor(r.db.QueryRow(ctx, `
 		INSERT INTO website_visitors (organization_id, visitor_key, contact_id, identified_at, identified_via, first_seen_at, last_seen_at)
@@ -179,15 +175,21 @@ func (r *websiteTrackingRepository) CreateVisitor(ctx context.Context, orgID uui
 		RETURNING `+websiteVisitorColumns, orgID, visitorKey, contactID, at, via))
 }
 
-// IdentifyVisitor ties an anonymous browser to a contact. A browser already
-// tied to someone is left alone; the caller splits it instead.
-func (r *websiteTrackingRepository) IdentifyVisitor(ctx context.Context, visitorID, contactID uuid.UUID, via string, at time.Time) error {
-	_, err := r.db.Exec(ctx, `
+func (r *websiteTrackingRepository) IdentifyVisitor(ctx context.Context, visitorID, contactID uuid.UUID, via string, at time.Time) (bool, error) {
+	tag, err := r.db.Exec(ctx, `
 		UPDATE website_visitors
 		SET contact_id = $2, identified_at = $3, identified_via = $4
 		WHERE id = $1 AND contact_id IS NULL
 	`, visitorID, contactID, at, via)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (r *websiteTrackingRepository) GetVisitorByID(ctx context.Context, visitorID uuid.UUID) (*models.WebsiteVisitor, error) {
+	return scanWebsiteVisitor(r.db.QueryRow(ctx,
+		`SELECT `+websiteVisitorColumns+` FROM website_visitors WHERE id = $1`, visitorID))
 }
 
 func (r *websiteTrackingRepository) InsertHit(ctx context.Context, orgID uuid.UUID, h *models.WebsitePageHit) error {
@@ -221,8 +223,7 @@ func (r *websiteTrackingRepository) InsertHit(ctx context.Context, orgID uuid.UU
 	return err
 }
 
-// ListHitsForContact feeds the contact timeline: every counted view from any
-// browser tied to the contact, newest first, strictly before the cursor.
+// ListHitsForContact: every view from any browser tied to the contact, newest first.
 func (r *websiteTrackingRepository) ListHitsForContact(ctx context.Context, orgID, contactID uuid.UUID, before time.Time, limit int) ([]models.WebsitePageHit, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT h.id, h.visitor_id, h.session_key, h.occurred_at,
@@ -283,8 +284,7 @@ func (r *websiteTrackingRepository) RetentionCutoffs(ctx context.Context, now ti
 	return out, rows.Err()
 }
 
-// PruneBefore drops one workspace's page views older than the cutoff, then the
-// browser records that have nothing left and have not been seen since.
+// PruneBefore drops old page views, then browser rows with nothing left.
 func (r *websiteTrackingRepository) PruneBefore(ctx context.Context, orgID uuid.UUID, before time.Time) (int64, error) {
 	tag, err := r.db.Exec(ctx, `
 		DELETE FROM website_page_hits WHERE organization_id = $1 AND occurred_at < $2

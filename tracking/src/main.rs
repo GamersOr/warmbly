@@ -135,7 +135,14 @@ async fn main() {
         }
     };
 
-    if let Err(e) = axum::serve(listener, app).await {
+    // Connect info carries the socket peer, which is the client unless it is a
+    // trusted proxy (TRACKING_TRUSTED_PROXIES).
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    {
         observability::report_issue("Tracking server terminated unexpectedly", &e.to_string());
         std::process::exit(1);
     }

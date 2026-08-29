@@ -1,21 +1,9 @@
-//! Website page-view ingest.
-//!
-//! The snippet POSTs a small JSON document; this module validates it, keeps
-//! everything a browser could lie about out of the forwarded payload, and
-//! hands the hit to the backend's internal API, where the user agent and IP
-//! are turned into device and location and the row is stored. The same
-//! layered defenses as the click resolver keep a key-spray away from the
-//! backend:
-//!
-//! 1. negative cache: site keys confirmed unknown are dropped from memory
-//! 2. per-source miss budget: real snippets never miss, so a source
-//!    accumulating unknown keys is probing and gets cut off
-//! 3. circuit breaker: when the backend errors, forwarding pauses for a
-//!    cooldown instead of piling on
-//!
-//! Nothing in the request can name a contact. The only link between a
-//! browser and a person is the click ticket the redirect appended, and the
-//! backend checks that ticket against the workspace that owns the site key.
+//! Website page-view ingest: validate the snippet's payload, keep anything a
+//! browser could lie about out of it, and forward to the backend, which turns
+//! the user agent and IP into device and location and stores the row. Same
+//! layered defenses as the click resolver: negative cache for unknown keys,
+//! per-source miss budget, circuit breaker. Nothing in a request can name a
+//! contact; only the click ticket does, and the backend verifies it.
 
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
@@ -194,6 +182,13 @@ impl HitForwarder {
         }
         self.dedupe.insert(key, ()).await;
         false
+    }
+
+    /// Drops a dedupe entry after a failed forward so the retry is counted.
+    pub async fn forget(&self, visitor: &str, url: &str) {
+        self.dedupe
+            .invalidate(&format!("{}:{}", visitor, url))
+            .await;
     }
 
     pub async fn forward(&self, hit: ForwardedHit, source: &str) -> Outcome {

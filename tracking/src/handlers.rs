@@ -1,12 +1,13 @@
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
 use chrono::Utc;
 use moka::future::Cache;
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +43,8 @@ pub struct AppState {
     pub hits: Arc<HitForwarder>,
     /// Tighter per-source budget for page views than for pixels
     pub hit_rate_limiter: Arc<RateLimiter>,
+    /// Proxies whose forwarded-IP headers are believed
+    pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
 }
 
 impl AppState {
@@ -69,6 +72,7 @@ impl AppState {
                 config.internal_api_token.clone(),
             )),
             hit_rate_limiter: Arc::new(RateLimiter::new(config.pagehit_rate_limit_per_min)),
+            trusted_proxies: Arc::new(config.trusted_proxies.clone()),
         }
     }
 
@@ -106,6 +110,7 @@ pub async fn health() -> impl IntoResponse {
 /// GET /t/o/{task_id}.png
 pub async fn track_open(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(task_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -118,7 +123,7 @@ pub async fn track_open(
     }
 
     // Extract IP hash for deduplication + rate limiting
-    let ip_hash = extract_ip_hash(&headers);
+    let ip_hash = Some(hash_ip(&client_ip(peer, &headers, &state.trusted_proxies)));
 
     // Anti-flood: over-budget sources still get the pixel (real mail clients
     // must never see a broken image), but nothing is published.
@@ -170,6 +175,7 @@ pub async fn track_open(
 /// Unknown tickets 404.
 pub async fn track_click(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(link_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -179,7 +185,7 @@ pub async fn track_click(
     }
 
     // Anti-flood: cap total request rate per source
-    let ip_hash = extract_ip_hash(&headers);
+    let ip_hash = Some(hash_ip(&client_ip(peer, &headers, &state.trusted_proxies)));
     let source = ip_hash.clone().unwrap_or_else(|| "unknown".to_string());
     if !state.rate_limiter.allow(&source).await {
         return (StatusCode::TOO_MANY_REQUESTS, "Slow down").into_response();
@@ -289,12 +295,12 @@ const TRACKING_JS: &str = include_str!("../static/tracking.js");
 /// the URL, and nothing in the body names a contact.
 pub async fn track_page_hit(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let ip = extract_ip(&headers);
-    let ip_hash = ip.as_deref().map(hash_ip);
-    let source = ip_hash.clone().unwrap_or_else(|| "unknown".to_string());
+    let ip = client_ip(peer, &headers, &state.trusted_proxies);
+    let source = hash_ip(&ip);
 
     // Anti-flood: page views have their own, tighter budget on top of the
     // shared one, and the shared one counts too so a flood here also
@@ -349,10 +355,12 @@ pub async fn track_page_hit(
         screen_height: payload.sh,
         landing: payload.ld,
         user_agent: user_agent.unwrap_or_default(),
-        ip: ip.unwrap_or_default(),
+        ip,
         origin_host,
     };
 
+    let dedupe_visitor = hit.visitor_key.clone();
+    let dedupe_url = hit.url.clone();
     match state.hits.forward(hit, &source).await {
         Outcome::Accepted(None) => StatusCode::NO_CONTENT.into_response(),
         Outcome::Accepted(Some(vid)) => (
@@ -366,6 +374,8 @@ pub async fn track_page_hit(
         Outcome::UnknownSite => StatusCode::NO_CONTENT.into_response(),
         Outcome::Malformed => (StatusCode::BAD_REQUEST, "Invalid payload").into_response(),
         Outcome::Unavailable => {
+            // Nothing was stored, so the next attempt must not be deduped away.
+            state.hits.forget(&dedupe_visitor, &dedupe_url).await;
             (StatusCode::SERVICE_UNAVAILABLE, "Try again shortly").into_response()
         }
     }
@@ -405,32 +415,30 @@ fn pixel_response() -> Response {
         .into_response()
 }
 
-/// Extract and hash IP address for privacy
-fn extract_ip_hash(headers: &HeaderMap) -> Option<String> {
-    extract_ip(headers).map(|ip| hash_ip(&ip))
-}
-
-/// The client IP as the proxy in front reported it. Used raw only for the
-/// page-view forward, where the backend turns it into a location and drops it.
-fn extract_ip(headers: &HeaderMap) -> Option<String> {
-    // Try various headers for the real IP
-    headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|h| h.to_str().ok())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            headers
-                .get("cf-connecting-ip")
-                .and_then(|h| h.to_str().ok())
-                .map(|s| s.to_string())
-        })
+/// The client address. Forwarded headers are believed only when the socket
+/// peer is a trusted proxy; otherwise anyone could pick their own rate-limit
+/// bucket and the location stored with a page view.
+fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[ipnet::IpNet]) -> String {
+    let peer_ip = peer.ip();
+    if !trusted.iter().any(|net| net.contains(&peer_ip)) {
+        return peer_ip.to_string();
+    }
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|h| h.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    // The proxy appends the address it saw as the LAST X-Forwarded-For entry;
+    // the first is whatever the client claimed.
+    let forwarded = header("cf-connecting-ip")
+        .or_else(|| header("x-forwarded-for").and_then(|v| v.rsplit(',').next().map(str::trim)))
+        .or_else(|| header("x-real-ip"));
+    match forwarded.and_then(|v| v.parse::<IpAddr>().ok()) {
+        Some(ip) => ip.to_string(),
+        None => peer_ip.to_string(),
+    }
 }
 
 fn hash_ip(ip: &str) -> String {
@@ -455,6 +463,33 @@ mod tests {
             with_identify_param("https://x.com/p?a=1#top", "abc"),
             "https://x.com/p?a=1&wbly_t=abc#top"
         );
+    }
+
+    fn hdr(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn client_ip_ignores_forwarded_headers_from_untrusted_peers() {
+        let peer: SocketAddr = "203.0.113.9:4000".parse().unwrap();
+        let h = hdr(&[("x-forwarded-for", "1.1.1.1, 2.2.2.2")]);
+        assert_eq!(client_ip(peer, &h, &[]), "203.0.113.9");
+    }
+
+    #[test]
+    fn client_ip_takes_the_proxy_appended_entry_from_trusted_peers() {
+        let trusted = vec!["10.0.0.0/8".parse::<ipnet::IpNet>().unwrap()];
+        let peer: SocketAddr = "10.1.2.3:4000".parse().unwrap();
+        let h = hdr(&[("x-forwarded-for", "1.1.1.1, 198.51.100.7")]);
+        assert_eq!(client_ip(peer, &h, &trusted), "198.51.100.7");
+        let h = hdr(&[("cf-connecting-ip", "198.51.100.8")]);
+        assert_eq!(client_ip(peer, &h, &trusted), "198.51.100.8");
+        let h = hdr(&[("x-forwarded-for", "not an ip")]);
+        assert_eq!(client_ip(peer, &h, &trusted), "10.1.2.3");
     }
 
     #[test]

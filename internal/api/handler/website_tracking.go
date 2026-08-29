@@ -12,8 +12,7 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 )
 
-// Website tracking settings (JWT only, MANAGE_SETTINGS): the snippet's site
-// key, consent mode, location precision, allowed hosts and retention.
+// Website tracking settings (JWT only, MANAGE_SETTINGS).
 
 func (h *Handler) GetWebsiteTrackingSettings(c *gin.Context) {
 	orgID := middleware.GetOrganizationID(c)
@@ -56,8 +55,7 @@ func (h *Handler) UpdateWebsiteTrackingSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, settings)
 }
 
-// RotateWebsiteTrackingKey issues a new site key. Snippets carrying the old
-// one are refused from the next hit on.
+// RotateWebsiteTrackingKey issues a new site key; the old one stops at once.
 func (h *Handler) RotateWebsiteTrackingKey(c *gin.Context) {
 	orgID := middleware.GetOrganizationID(c)
 	if orgID == nil {
@@ -81,15 +79,11 @@ func (h *Handler) RotateWebsiteTrackingKey(c *gin.Context) {
 	c.JSON(http.StatusOK, settings)
 }
 
-// InternalIngestPageHit is where the tracking service forwards a page view
-// after its own rate limiting, filtering and payload caps.
+// InternalIngestPageHit receives a page view from the tracking service.
 //
 //	POST /api/v1/internal/page-hits
 //	  -> 204 accepted or quietly rejected | 200 {"new_visitor_key":...}
-//	  -> 400 malformed | 404 unknown site key
-//
-// Unknown keys 404 so the edge can cache them negatively and cut off a
-// probing source, exactly like an unknown click ticket.
+//	  -> 400 malformed | 404 unknown site key (cached negatively at the edge)
 func (h *Handler) InternalIngestPageHit(c *gin.Context) {
 	var req models.WebsiteHitRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -113,8 +107,7 @@ func (h *Handler) InternalIngestPageHit(c *gin.Context) {
 	}
 }
 
-// websiteIdentifyForLink is the click redirect's question: may this
-// destination carry the visitor-identification ticket?
+// websiteIdentifyForLink: may this click destination carry the identification ticket?
 func (h *Handler) websiteIdentifyForLink(c *gin.Context, campaignID uuid.UUID, destination string) bool {
 	if h.WebsiteTrackingService == nil {
 		return false

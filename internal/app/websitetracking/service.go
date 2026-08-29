@@ -1,9 +1,6 @@
-// Package websitetracking is the control plane behind the website tracking
-// snippet: the workspace's settings, and the ingest path the Rust tracking
-// service forwards page views to. Device and location are derived here from
-// the request facts the edge saw; nothing about them is trusted from the
-// browser, and a hit only reaches a contact through a click ticket the
-// contact's own email carried.
+// Package websitetracking owns the tracking snippet's settings and the page
+// view ingest path. Device and location are derived server-side; a hit reaches
+// a contact only through a click ticket. See docs/guides/website-tracking.
 package websitetracking
 
 import (
@@ -28,9 +25,7 @@ import (
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
-// Payload caps. The tracking service enforces the same limits before
-// forwarding; these are the backstop for anything that reaches the backend
-// another way.
+// Payload caps, mirrored by the tracking service; the backstop here.
 const (
 	maxURLLen      = 2048
 	maxTitleLen    = 512
@@ -45,19 +40,15 @@ const (
 )
 
 var (
-	// ErrUnknownSite is a site key no workspace owns. The tracking service
-	// caches this negatively and budgets misses per source.
+	// ErrUnknownSite: no workspace owns the key (the edge caches this negatively).
 	ErrUnknownSite = errors.New("unknown site key")
-	// ErrRejected is a well-formed hit the workspace's policy does not accept
-	// (tracking off, consent not met, host not allowed, automated client).
-	// The browser gets a quiet 204 either way.
+	// ErrRejected: well-formed but declined by policy (off, consent, host, bot).
 	ErrRejected = errors.New("hit rejected")
 	// ErrMalformed is a payload that fails validation.
 	ErrMalformed = errors.New("malformed hit")
 )
 
-// identifyParam is the query parameter the click redirect appends and the
-// snippet strips. Kept out of stored URLs even if a snippet forgets to.
+// identifyParam is what the click redirect appends; never stored in a URL.
 const identifyParam = "wbly_t"
 
 type Service interface {
@@ -65,13 +56,10 @@ type Service interface {
 	UpdateSettings(ctx context.Context, orgID, userID uuid.UUID, req *models.UpdateWebsiteTrackingSettingsRequest) (*models.WebsiteTrackingSettings, *errx.Error)
 	RotateSiteKey(ctx context.Context, orgID, userID uuid.UUID) (*models.WebsiteTrackingSettings, *errx.Error)
 
-	// ShouldIdentify reports whether a click redirect for this campaign may
-	// append the ticket to the destination: only when the workspace has
-	// tracking on and the destination host is one it registered.
+	// ShouldIdentify: may the click redirect append the ticket to this destination?
 	ShouldIdentify(ctx context.Context, campaignID uuid.UUID, destination string) bool
 
-	// Ingest records one page view. Returns ErrUnknownSite, ErrRejected or
-	// ErrMalformed for the tracking service to map to a status.
+	// Ingest records one page view; ErrUnknownSite/ErrRejected/ErrMalformed map to statuses.
 	Ingest(ctx context.Context, req *models.WebsiteHitRequest) (*models.WebsiteHitResult, error)
 }
 
@@ -85,8 +73,7 @@ func NewService(repo repository.WebsiteTrackingRepository, geoClient *geo.Client
 	return &service{repo: repo, geo: geoClient, publisher: publisher}
 }
 
-// newKey is 128 bits of randomness as hex: unguessable, URL-safe, and the
-// same shape for site keys and server-issued visitor ids.
+// newKey is 128 random bits as hex, used for site keys and visitor ids.
 func newKey() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -160,8 +147,7 @@ func (s *service) RotateSiteKey(ctx context.Context, orgID, userID uuid.UUID) (*
 	return s.GetSettings(ctx, orgID)
 }
 
-// normalizeHosts reduces whatever was typed (URLs, mixed case, blank lines)
-// to unique bare hostnames.
+// normalizeHosts reduces pasted URLs and mixed case to unique bare hostnames.
 func normalizeHosts(raw []string) ([]string, bool) {
 	out := make([]string, 0, len(raw))
 	seen := map[string]bool{}
@@ -185,9 +171,7 @@ func normalizeHosts(raw []string) ([]string, bool) {
 	return out, true
 }
 
-// hostAllowed matches a request host against the registered list. Ports are
-// ignored and a registered apex covers its subdomains, so "example.com"
-// admits "www.example.com" and "app.example.com".
+// hostAllowed ignores ports; a registered apex covers its subdomains.
 func hostAllowed(allowed []string, host string) bool {
 	host = hostOnly(host)
 	if host == "" {
@@ -266,8 +250,7 @@ func (s *service) Ingest(ctx context.Context, req *models.WebsiteHitRequest) (*m
 		return nil, ErrRejected
 	}
 
-	// The server, not the snippet, decides whether consent was sufficient. A
-	// stale snippet attribute cannot downgrade an explicit-mode workspace.
+	// The server decides whether consent sufficed; a stale snippet cannot downgrade it.
 	switch site.ConsentMode {
 	case models.WebsiteConsentExplicit:
 		if req.Consent != "granted" {
@@ -310,8 +293,7 @@ func (s *service) Ingest(ctx context.Context, req *models.WebsiteHitRequest) (*m
 		DeviceType:     deviceType(ua),
 	}
 
-	// Strip the identification ticket from the stored URL so it never shows
-	// up in the timeline or travels in an archive.
+	// The ticket never reaches the stored URL.
 	q := pageURL.Query()
 	hit.UTMSource = clip(q.Get("utm_source"), 256)
 	hit.UTMMedium = clip(q.Get("utm_medium"), 256)
@@ -354,24 +336,7 @@ func (s *service) Ingest(ctx context.Context, req *models.WebsiteHitRequest) (*m
 			}
 			// A ticket from another workspace's campaign proves nothing here.
 			if terr == nil && ok && ticketOrg == site.OrganizationID {
-				switch {
-				case visitor.ContactID == nil:
-					if ierr := s.repo.IdentifyVisitor(ctx, visitor.ID, contactID, "email_link", now); ierr != nil {
-						db.CaptureError(ierr, "", nil, "websitetracking IdentifyVisitor")
-					} else {
-						visitor.ContactID = &contactID
-					}
-				case *visitor.ContactID != contactID:
-					// A different person on the same browser: split rather than
-					// merge, so neither contact inherits the other's history.
-					fresh, cerr := s.repo.CreateVisitor(ctx, site.OrganizationID, newKey(), contactID, "email_link", now)
-					if cerr != nil {
-						db.CaptureError(cerr, "", nil, "websitetracking CreateVisitor")
-					} else {
-						visitor = fresh
-						result.NewVisitorKey = fresh.VisitorKey
-					}
-				}
+				visitor, result.NewVisitorKey = s.attach(ctx, site.OrganizationID, visitor, contactID, now)
 			}
 		}
 	}
@@ -393,9 +358,41 @@ func (s *service) Ingest(ctx context.Context, req *models.WebsiteHitRequest) (*m
 	return result, nil
 }
 
-// locate fills the location columns from the request IP, trimmed to the
-// workspace's precision. Best-effort: no database or a private address leaves
-// them empty. The IP itself goes no further than this call.
+// attach ties the browser to the ticket's contact. An anonymous row is
+// claimed with a guarded update; if a concurrent hit won that race for a
+// different contact, or the row already belonged to someone else, the browser
+// is split onto a fresh row so neither contact inherits the other's history.
+func (s *service) attach(ctx context.Context, orgID uuid.UUID, visitor *models.WebsiteVisitor, contactID uuid.UUID, now time.Time) (*models.WebsiteVisitor, string) {
+	if visitor.ContactID == nil {
+		updated, err := s.repo.IdentifyVisitor(ctx, visitor.ID, contactID, "email_link", now)
+		if err != nil {
+			db.CaptureError(err, "", nil, "websitetracking IdentifyVisitor")
+			return visitor, ""
+		}
+		if updated {
+			visitor.ContactID = &contactID
+			return visitor, ""
+		}
+		current, err := s.repo.GetVisitorByID(ctx, visitor.ID)
+		if err != nil {
+			db.CaptureError(err, "", nil, "websitetracking GetVisitorByID")
+			return visitor, ""
+		}
+		visitor = current
+	}
+	if visitor.ContactID != nil && *visitor.ContactID == contactID {
+		return visitor, ""
+	}
+	fresh, err := s.repo.CreateVisitor(ctx, orgID, newKey(), contactID, "email_link", now)
+	if err != nil {
+		db.CaptureError(err, "", nil, "websitetracking CreateVisitor")
+		return visitor, ""
+	}
+	return fresh, fresh.VisitorKey
+}
+
+// locate fills location from the request IP at the workspace's precision;
+// best-effort, and the IP goes no further than this call.
 func (s *service) locate(ip string, precision models.WebsiteLocationPrecision, hit *models.WebsitePageHit) {
 	if precision == models.WebsiteLocationNone || s.geo == nil || ip == "" {
 		return

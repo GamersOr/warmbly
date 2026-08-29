@@ -411,6 +411,8 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-}
       KAFKA_TRACKING_TOPIC: ${KAFKA_TRACKING_TOPIC:-tracking-events}
       TRACKING_RATE_LIMIT_PER_MIN: ${TRACKING_RATE_LIMIT_PER_MIN:-}
+      TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN: ${TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN:-}
+      TRACKING_TRUSTED_PROXIES: ${TRACKING_TRUSTED_PROXIES:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
       # Overridable so `make dev` (native backend) can point at
       # host.docker.internal:8080 while `docker compose up` uses the container.

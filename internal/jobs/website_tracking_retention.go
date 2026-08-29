@@ -8,9 +8,7 @@ import (
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
-// WebsiteTrackingRetentionJob prunes page views past each workspace's own
-// retention window. The window is the promise the workspace makes on its
-// tracking settings page, so the sweep is what keeps that promise.
+// WebsiteTrackingRetentionJob prunes page views past each workspace's own window.
 type WebsiteTrackingRetentionJob struct {
 	repo repository.WebsiteTrackingRepository
 }
@@ -19,8 +17,7 @@ func NewWebsiteTrackingRetentionJob(repo repository.WebsiteTrackingRepository) *
 	return &WebsiteTrackingRetentionJob{repo: repo}
 }
 
-// Run executes one pruning pass over every workspace. A failure on one
-// workspace is reported and the pass continues with the next.
+// Run prunes every workspace; one failure does not stop the pass.
 func (j *WebsiteTrackingRetentionJob) Run(ctx context.Context) error {
 	if j.repo == nil {
 		return nil
