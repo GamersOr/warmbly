@@ -112,22 +112,53 @@ func (c *GenerationClient) SubmitBatch(ctx context.Context, requests []BatchRequ
 	return batch.ID, file.ID, nil
 }
 
-// GetBatch returns the current status, the output file ID (present when at
-// least one request succeeded), the error file ID (present when at least one
-// failed), and the request counts for a batch. A batch whose requests all
-// failed still completes, with output empty and every refusal in the error
-// file, so callers must read that one to learn why.
-func (c *GenerationClient) GetBatch(ctx context.Context, batchID string) (status, outputFileID, errorFileID string, counts BatchCounts, err error) {
+// BatchState is the provider's view of one batch.
+type BatchState struct {
+	Status string
+	// A batch whose requests all failed still completes: output empty, refusals in the error file.
+	OutputFileID string
+	ErrorFileID  string
+	Counts       BatchCounts
+	// Batch-level error, set when the batch itself never ran, so no error file exists to read.
+	FailureReason string
+}
+
+// GetBatch returns the provider's current view of a batch.
+func (c *GenerationClient) GetBatch(ctx context.Context, batchID string) (BatchState, error) {
 	batch, err := c.client.Batches.Get(ctx, batchID)
 	if err != nil {
-		return "", "", "", BatchCounts{}, err
+		return BatchState{}, err
 	}
-	counts = BatchCounts{
-		Completed: int(batch.RequestCounts.Completed),
-		Failed:    int(batch.RequestCounts.Failed),
-		Total:     int(batch.RequestCounts.Total),
+	return BatchState{
+		Status:       string(batch.Status),
+		OutputFileID: batch.OutputFileID,
+		ErrorFileID:  batch.ErrorFileID,
+		Counts: BatchCounts{
+			Completed: int(batch.RequestCounts.Completed),
+			Failed:    int(batch.RequestCounts.Failed),
+			Total:     int(batch.RequestCounts.Total),
+		},
+		FailureReason: batchFailureReason(batch.Errors.Data),
+	}, nil
+}
+
+// batchFailureReason renders the batch-level errors as one line for a job row.
+func batchFailureReason(errs []openai.BatchError) string {
+	// Count only entries that carry a message: a blank one is not a reason to go looking for.
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		if msg := strings.TrimSpace(e.Message); msg != "" {
+			msgs = append(msgs, msg)
+		}
 	}
-	return string(batch.Status), batch.OutputFileID, batch.ErrorFileID, counts, nil
+	switch len(msgs) {
+	case 0:
+		return ""
+	case 1:
+		return msgs[0]
+	default:
+		return fmt.Sprintf("%s (+%d more)", msgs[0], len(msgs)-1)
+	}
 }
 
 // CancelBatch requests cancellation of an in-flight batch.
