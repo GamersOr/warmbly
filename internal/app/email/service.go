@@ -48,11 +48,11 @@ type EmailService interface {
 	StartTrackingDomainSweep(ctx context.Context, interval, staleAfter time.Duration)
 	// CheckDomainAuth runs a live SPF/DKIM/DMARC lookup for a mailbox's
 	// sending domain and returns it without touching stored state.
-	CheckDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error)
+	CheckDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error)
 	// RefreshDomainAuth does the same and PERSISTS the verdict. That write can
 	// lift the cold-send and warmup gate, so it sits behind the write
 	// permission while CheckDomainAuth stays readable.
-	RefreshDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error)
+	RefreshDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error)
 	Delete(ctx context.Context, userID, emailAccountID string) *errx.Error
 
 	// Onboarding flow

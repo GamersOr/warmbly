@@ -216,8 +216,8 @@ func (s *emailService) resolveTrackingDomain(ctx context.Context, domain string)
 
 // CheckDomainAuth runs a live SPF/DKIM/DMARC lookup for a mailbox's sending
 // domain and reports it without writing anything.
-func (s *emailService) CheckDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
-	_, res, xerr := s.resolveDomainAuth(ctx, userID, emailAccountID)
+func (s *emailService) CheckDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
+	_, res, xerr := s.resolveDomainAuth(ctx, orgID, emailAccountID)
 	return res, xerr
 }
 
@@ -229,8 +229,8 @@ func (s *emailService) CheckDomainAuth(ctx context.Context, userID, emailAccount
 // their DNS would keep being blocked until the background sweep next reached
 // their domain, which can be a day away, and "I fixed it and nothing happened"
 // is how a correct gate still becomes a support incident.
-func (s *emailService) RefreshDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
-	domain, res, xerr := s.resolveDomainAuth(ctx, userID, emailAccountID)
+func (s *emailService) RefreshDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
+	domain, res, xerr := s.resolveDomainAuth(ctx, orgID, emailAccountID)
 	if xerr != nil {
 		return nil, xerr
 	}
@@ -247,11 +247,12 @@ func (s *emailService) RefreshDomainAuth(ctx context.Context, userID, emailAccou
 	return res, nil
 }
 
-// resolveDomainAuth loads the caller's mailbox and runs the DNS lookup for its
-// sending domain, returning the domain alongside the result so the persisting
-// caller does not re-derive it.
-func (s *emailService) resolveDomainAuth(ctx context.Context, userID, emailAccountID string) (string, *dnsauth.Result, *errx.Error) {
-	account, xerr := s.emailRepository.Get(ctx, userID, emailAccountID)
+// resolveDomainAuth loads the organization's mailbox and runs the DNS lookup
+// for its sending domain, returning the domain alongside the result so the
+// persisting caller does not re-derive it. Get is organization-scoped: handing
+// it a user id made every check 404.
+func (s *emailService) resolveDomainAuth(ctx context.Context, orgID, emailAccountID string) (string, *dnsauth.Result, *errx.Error) {
+	account, xerr := s.emailRepository.Get(ctx, orgID, emailAccountID)
 	if xerr != nil {
 		return "", nil, xerr
 	}

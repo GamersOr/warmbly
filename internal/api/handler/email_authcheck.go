@@ -17,13 +17,15 @@ import (
 // Read-only: it reports what DNS says right now and leaves the mailbox's stored
 // auth_state alone. Use RefreshEmailAuthCheck to record the verdict.
 func (h *Handler) GetEmailAuthCheck(c *gin.Context) {
-	userID, err := middleware.GetUserUUID(c)
-	if err != nil {
-		errx.JSON(c, errx.ErrUnauthorized)
+	// Mailboxes are workspace assets and the lookup behind this is scoped by
+	// organization, so the caller's user id would 404 for everyone.
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
 		return
 	}
 
-	res, xerr := h.EmailService.CheckDomainAuth(c.Request.Context(), userID.String(), c.Param("id"))
+	res, xerr := h.EmailService.CheckDomainAuth(c.Request.Context(), orgID.String(), c.Param("id"))
 	if xerr != nil {
 		errx.JSON(c, xerr)
 		return
@@ -42,13 +44,13 @@ func (h *Handler) GetEmailAuthCheck(c *gin.Context) {
 // to change it. No Idempotency-Key: the write is derived entirely from public
 // DNS with no caller input, so repeating it converges on the same row.
 func (h *Handler) RefreshEmailAuthCheck(c *gin.Context) {
-	userID, err := middleware.GetUserUUID(c)
-	if err != nil {
-		errx.JSON(c, errx.ErrUnauthorized)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
 		return
 	}
 
-	res, xerr := h.EmailService.RefreshDomainAuth(c.Request.Context(), userID.String(), c.Param("id"))
+	res, xerr := h.EmailService.RefreshDomainAuth(c.Request.Context(), orgID.String(), c.Param("id"))
 	if xerr != nil {
 		errx.JSON(c, xerr)
 		return
