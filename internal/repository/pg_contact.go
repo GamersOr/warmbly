@@ -58,7 +58,7 @@ type ContactRepository interface {
 	// CampaignLeadCounts returns per-status lead totals for one campaign (the
 	// Leads-view scope chips), independent of the request's lead_status filter.
 	CampaignLeadCounts(ctx context.Context, orgID, campaignID string) (*models.CampaignLeadCounts, *errx.Error)
-	ExportAll(ctx context.Context, userID string, filters *models.SearchContacts, contactIDs []string, max int) ([]models.Contact, *errx.Error)
+	ExportAll(ctx context.Context, orgID string, filters *models.SearchContacts, contactIDs []string, max int) ([]models.Contact, *errx.Error)
 	BulkUpdate(ctx context.Context, userID string, orgID uuid.UUID, data *models.BulkEditContactsData) ([]models.Contact, *errx.Error)
 	Update(ctx context.Context, userID, contactID string, orgID uuid.UUID, data *models.UpdateContact) (*models.Contact, *errx.Error)
 	BulkDelete(ctx context.Context, userID string, orgID uuid.UUID, contactIDs []string) *errx.Error
@@ -2139,9 +2139,9 @@ func (r *contactRepository) GetByEmailsAndUser(ctx context.Context, userID uuid.
 // Three selection modes overlap with the search filter machinery:
 //   - filters != nil  → reuse the SearchContacts WHERE-builder.
 //   - contactIDs > 0  → constrain to just those rows.
-//   - both nil/empty  → "every contact this user owns".
-func (r *contactRepository) ExportAll(ctx context.Context, userID string, filters *models.SearchContacts, contactIDs []string, max int) ([]models.Contact, *errx.Error) {
-	if _, perr := uuid.Parse(userID); perr != nil {
+//   - both nil/empty  → "every contact in the organization".
+func (r *contactRepository) ExportAll(ctx context.Context, orgID string, filters *models.SearchContacts, contactIDs []string, max int) ([]models.Contact, *errx.Error) {
+	if _, perr := uuid.Parse(orgID); perr != nil {
 		return nil, errx.ErrUuid
 	}
 	if max <= 0 {
@@ -2177,7 +2177,7 @@ func (r *contactRepository) ExportAll(ctx context.Context, userID string, filter
 	var cursor *string
 	pageSize := int32(500)
 	for {
-		page, xerr := r.Search(ctx, userID, nil, cursor, search, pageSize)
+		page, xerr := r.Search(ctx, orgID, nil, cursor, search, pageSize)
 		if xerr != nil {
 			return nil, xerr
 		}

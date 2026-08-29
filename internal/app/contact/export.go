@@ -21,7 +21,7 @@ import (
 // returned content type + filename.
 func (s *contactService) Export(
 	ctx context.Context,
-	userID string,
+	orgID string,
 	req *models.ContactExportRequest,
 	w io.Writer,
 ) (string, string, int, *errx.Error) {
@@ -75,7 +75,7 @@ func (s *contactService) Export(
 		}
 	}
 
-	rows, xerr := s.contactRepository.ExportAll(ctx, userID, searchFilters, contactIDs, models.MaxContactExportRows)
+	rows, xerr := s.contactRepository.ExportAll(ctx, orgID, searchFilters, contactIDs, models.MaxContactExportRows)
 	if xerr != nil {
 		return "", "", 0, xerr
 	}
