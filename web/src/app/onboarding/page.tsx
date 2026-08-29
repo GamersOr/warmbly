@@ -14,7 +14,6 @@ import AuthButton from "@/components/auth/button";
 import useCompleteOnboarding from "@/lib/api/hooks/auth/useCompleteOnboarding";
 import useUpdateOrganization from "@/lib/api/hooks/app/organizations/useUpdateOrganization";
 import useCurrentOrganization from "@/lib/api/hooks/app/organizations/useCurrentOrganization";
-import createWebhook from "@/lib/api/client/app/webhooks/createWebhook";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 
@@ -33,15 +32,6 @@ const schema = z.object({
     referral_source: z.enum(["reddit", "x", "facebook", "google", "other"], {
         error: "Let us know how you found us",
     }),
-    // Optional final step: connect a webhook. Skippable, so an empty value is OK;
-    // when present it must look like a URL.
-    webhook_url: z
-        .string()
-        .trim()
-        .url("Enter a valid URL (https://…)")
-        .refine((u) => u.startsWith("https://"), "Webhook URLs must use https")
-        .optional()
-        .or(z.literal("")),
 });
 
 type OnboardingForm = z.infer<typeof schema>;
@@ -64,19 +54,14 @@ const BASE_STEPS = [
         title: "A few quick questions",
         subtitle: "This helps us tailor Warmbly to how you send.",
     },
-    {
-        fields: ["webhook_url"] as const,
-        title: "Connect a webhook",
-        subtitle: "Optional. Get a realtime HTTP callback when things happen in your workspace. You can skip this and add it later.",
-    },
 ];
 
 // Self-hosted instances get one more step: linking to Warmbly Cloud so the
 // pool warms their mailboxes. Skippable; Settings > Warmbly Cloud has it too.
 const CLOUD_STEP = {
     fields: [] as const,
-    title: "Warm your mailboxes in the Warmbly pool",
-    subtitle: "Optional. Link this instance to Warmbly Cloud and we run warmup for up to 10 mailboxes for free. Everything else stays on this server.",
+    title: "Warm up your mailboxes",
+    subtitle: "Get started links this instance to Warmbly Cloud so it warms your mailboxes. You can skip it.",
 };
 
 const ROLES = [
@@ -177,6 +162,7 @@ export default function OnboardingPage() {
     const cloudStep = selfHosted ? STEPS.length - 1 : -1;
     const [cloudLinked, setCloudLinked] = useState(false);
     const [cloudOrg, setCloudOrg] = useState("");
+    const [cloudStart, setCloudStart] = useState(0);
 
     const [step, setStep] = useState(0);
     const isLast = step === STEPS.length - 1;
@@ -214,16 +200,6 @@ export default function OnboardingPage() {
                 role: data.role,
                 team_size: data.team_size,
             });
-            // Optional webhook. Best effort: an empty URL skips it, and a hiccup
-            // here must never block completing onboarding.
-            const webhookUrl = (data.webhook_url ?? "").trim();
-            if (webhookUrl) {
-                try {
-                    await createWebhook({ url: webhookUrl, event_types: [], enabled: true });
-                } catch {
-                    /* keep going — onboarding completion matters more */
-                }
-            }
             queryClient.removeQueries({ queryKey: ["auth", "me"] });
             navigate("/app/emails");
         } catch (e) {
@@ -236,6 +212,11 @@ export default function OnboardingPage() {
         if (pending) return;
         const ok = await trigger(STEPS[step].fields as unknown as (keyof OnboardingForm)[]);
         if (!ok) return;
+        if (step === cloudStep && !cloudLinked) {
+            // First press asks the cloud for a code; the card then waits for approval.
+            setCloudStart((n) => n + 1);
+            return;
+        }
         if (isLast) await finish();
         else setStep((s) => s + 1);
     };
@@ -353,6 +334,8 @@ export default function OnboardingPage() {
                             <div className="rounded-lg border border-slate-200 bg-white p-4">
                                 <CloudLinkCard
                                     compact
+                                    minimal
+                                    startSignal={cloudStart}
                                     linked={cloudLinked}
                                     orgName={cloudOrg}
                                     onLinked={(name) => {
@@ -362,34 +345,16 @@ export default function OnboardingPage() {
                                 />
                             </div>
                         )}
-                        {step === 3 && (
-                            <div>
-                                <FieldLabel>Webhook URL</FieldLabel>
-                                <input
-                                    type="url"
-                                    placeholder="https://acme.com/webhooks/warmbly"
-                                    className={INPUT}
-                                    autoFocus
-                                    {...register("webhook_url")}
-                                />
-                                <FieldError message={errors.webhook_url?.message} />
-                                <p className="text-sm text-slate-400 mt-2 leading-relaxed">
-                                    We'll POST a signed callback here for every workspace event. Subscribe to specific events and
-                                    manage signing secrets later in Settings. You can skip this for now.
-                                </p>
-                            </div>
-                        )}
                     </motion.div>
                 </AnimatePresence>
 
-                <AuthButton loading={isLast && pending}>{isLast ? "Get started" : "Continue"}</AuthButton>
+                <AuthButton loading={isLast && pending}>{step === cloudStep && cloudStart > 0 && !cloudLinked ? "Waiting for approval" : isLast ? "Get started" : "Continue"}</AuthButton>
 
-                {isLast && (
+                {isLast && step === cloudStep && (
                     <button
                         type="button"
                         onClick={() => {
                             if (pending) return;
-                            setValue("webhook_url", "");
                             void finish();
                         }}
                         disabled={pending}

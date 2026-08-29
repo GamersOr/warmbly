@@ -18,6 +18,8 @@ export default function CloudLinkCard({
     onLinked,
     compact = false,
     autoStart = false,
+    minimal = false,
+    startSignal = 0,
 }: {
     linked: boolean;
     orgName?: string;
@@ -27,6 +29,10 @@ export default function CloudLinkCard({
     compact?: boolean;
     /** Request a code immediately instead of showing the pitch first. */
     autoStart?: boolean;
+    /** Short pitch, no heading or button: the host owns the primary action. */
+    minimal?: boolean;
+    /** Increment to request a code from outside (the host's primary button). */
+    startSignal?: number;
 }) {
     const start = useStartCloudLinkConnect();
     const poll = usePollCloudLinkConnect();
@@ -49,6 +55,11 @@ export default function CloudLinkCard({
             void begin();
         }
     }, [autoStart, linked, pending, begin]);
+
+    React.useEffect(() => {
+        if (startSignal > 0 && !linked && !pending) void begin();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [startSignal]);
 
     // Poll on the cloud's interval while a code is out.
     React.useEffect(() => {
@@ -107,6 +118,25 @@ export default function CloudLinkCard({
                     <p className="text-[12.5px] text-slate-500 mt-0.5">This instance can now warm mailboxes in the Warmbly pool.</p>
                 </div>
             </motion.div>
+        );
+    }
+
+    if (!pending && minimal) {
+        return (
+            <div className="flex items-start gap-3">
+                <span className="size-9 rounded-md bg-sky-600 text-white inline-flex items-center justify-center shrink-0">
+                    <FlameIcon className="w-4 h-4" />
+                </span>
+                <div className="text-[13px] text-slate-600 leading-relaxed">
+                    <p className="text-slate-900 font-medium">Warmbly warms your mailboxes for you.</p>
+                    <p className="mt-1">Free for 10 mailboxes. Your data stays on this server; only warmup runs in the cloud.</p>
+                    {start.isPending && (
+                        <p className="mt-2 inline-flex items-center gap-1.5 text-slate-400">
+                            <Loader2Icon className="w-3 h-3 animate-spin" /> Getting a code
+                        </p>
+                    )}
+                </div>
+            </div>
         );
     }
 
