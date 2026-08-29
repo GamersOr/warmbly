@@ -95,6 +95,7 @@ import (
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
 	"github.com/warmbly/warmbly/internal/app/webhook"
+	"github.com/warmbly/warmbly/internal/app/websitetracking"
 	"github.com/warmbly/warmbly/internal/app/worker"
 	"github.com/warmbly/warmbly/internal/app/worker_orchestrator"
 	"github.com/warmbly/warmbly/internal/config"
@@ -157,6 +158,7 @@ func main() {
 	var rateLimitService ratelimit.RateLimitService
 	var sequenceService sequence.SequenceService
 	var contactService contact.ContactService
+	var websiteTrackingService websitetracking.Service
 	var socketService socket.SocketService
 	var uniboxService unibox.UniboxService
 	var cipherService cipher.CipherService
@@ -1580,6 +1582,13 @@ func main() {
 		auditRetentionScheduler := jobs.NewAuditRetentionScheduler(auditRetentionJob, 6*time.Hour)
 		go auditRetentionScheduler.Start(ctx)
 
+		// Website tracking: the snippet's settings, the ingest path the tracking
+		// service forwards page views to, and the per-workspace retention sweep
+		// that keeps the window promised on the settings page.
+		websiteTrackingRepo := repository.NewWebsiteTrackingRepository(primaryDB.Pool)
+		websiteTrackingService = websitetracking.NewService(websiteTrackingRepo, geoloc, streamingPublisher)
+		go jobs.NewWebsiteTrackingRetentionJob(websiteTrackingRepo).Start(ctx, 6*time.Hour)
+
 		// Warmup content generator: tops the AI thread bank up toward the
 		// admin-configured per-pool/segment targets. The internal cadence gate
 		// honours the admin's cadence_hours; it no-ops when generation is
@@ -1861,6 +1870,7 @@ func main() {
 		EmailMessageMap:          emailMessageMapForHandler,
 		EmailSyncState:           emailSyncStateRepository,
 		TrackedLinks:             trackedLinkRepository,
+		WebsiteTrackingService:   websiteTrackingService,
 		UserRepo:                 userRepoForHandler,
 		OrgRepo:                  organizationRepoForHandler,
 		AttachmentRepo:           attachmentRepoForHandler,

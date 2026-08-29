@@ -4,7 +4,7 @@
 //   - Campaign panel: for each campaign the contact is in, the flow with this
 //     contact's progress, the lead status, and a scheduler-backed next action
 //   - Filters: type chips (All / Emails / Replies / Deliv. / Notes /
-//     Meetings / Campaigns / Lifecycle), free-text query, date range
+//     Meetings / Campaigns / Lifecycle / Website), free-text query, date range
 //   - Feed: collapsed rows stay to one line; click a row to expand every
 //     detail the event carries
 //
@@ -44,6 +44,7 @@ import {
     TagIcon,
     UserPlusIcon,
     XIcon,
+    GlobeIcon,
 } from "lucide-react";
 import useContactTimeline from "@/lib/api/hooks/app/contacts/useContactTimeline";
 import useContactCampaignStates from "@/lib/api/hooks/app/contacts/useContactCampaignStates";
@@ -66,7 +67,8 @@ type FilterId =
     | "notes"
     | "meetings"
     | "campaigns"
-    | "lifecycle";
+    | "lifecycle"
+    | "website";
 
 const FILTERS: { id: FilterId; label: string }[] = [
     { id: "all", label: "All" },
@@ -77,6 +79,7 @@ const FILTERS: { id: FilterId; label: string }[] = [
     { id: "meetings", label: "Meetings" },
     { id: "campaigns", label: "Campaigns" },
     { id: "lifecycle", label: "Lifecycle" },
+    { id: "website", label: "Website" },
 ];
 
 const EMAIL_TYPES: ContactTimelineEventType[] = [
@@ -627,6 +630,9 @@ function applyFilters(
             case "lifecycle":
                 if (!LIFECYCLE_TYPES.includes(e.type)) return false;
                 break;
+            case "website":
+                if (e.type !== "page_hit") return false;
+                break;
             case "all":
                 break;
         }
@@ -643,6 +649,10 @@ function applyFilters(
                 e.source_detail,
                 e.reason,
                 e.intent,
+                e.page_hit?.url,
+                e.page_hit?.referrer_domain,
+                e.page_hit?.utm_source,
+                e.page_hit?.utm_campaign,
             ]
                 .filter(Boolean)
                 .join(" ")
@@ -1026,10 +1036,45 @@ function detailsFor(e: ContactTimelineEvent): [string, React.ReactNode][] {
             );
         }
     }
+    if (e.type === "page_hit" && e.page_hit) {
+        const h = e.page_hit;
+        const link = (u: string) => (
+            <a
+                href={u}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sky-600 hover:text-sky-700 break-all"
+            >
+                {u}
+            </a>
+        );
+        add("Page URL", safeHttpUrl(h.url) ? link(h.url) : h.url);
+        add("Page title", h.title);
+        add("Referrer", safeHttpUrl(h.referrer) ? link(h.referrer) : h.referrer);
+        add("Device", cap(h.device_type));
+        add("Operating system", h.os);
+        add("Browser", [h.browser, h.browser_version].filter(Boolean).join(" "));
+        add("Device brand", h.device_brand);
+        add("Language", h.language);
+        add("Timezone", h.timezone);
+        add("Screen", h.screen_width && h.screen_height ? `${h.screen_width} × ${h.screen_height}` : null);
+        add("Location", [h.city, h.region, h.country_code].filter(Boolean).join(", "));
+        add("UTM source", h.utm_source);
+        add("UTM medium", h.utm_medium);
+        add("UTM campaign", h.utm_campaign);
+        add("UTM term", h.utm_term);
+        add("UTM content", h.utm_content);
+        add("Session", <span className="font-mono">{h.session_key.slice(0, 8)}</span>);
+    }
     add("Reason", e.reason);
     add("Content", e.content);
     if (e.task_id) add("Task", <span className="font-mono">{e.task_id}</span>);
     return out;
+}
+
+function cap(s: string): string {
+    if (!s || s === "unknown") return "";
+    return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function EventMeta({
@@ -1039,6 +1084,42 @@ function EventMeta({
     event: ContactTimelineEvent;
     highlight: string;
 }) {
+    // Page views: path, where from, what device, which UTM source.
+    if (event.type === "page_hit" && event.page_hit) {
+        const h = event.page_hit;
+        const device = [cap(h.device_type), h.os, h.browser].filter(Boolean).join(" / ");
+        const bits: React.ReactNode[] = [
+            <span key="path" className="font-mono truncate max-w-[260px]">
+                <Highlight text={h.path} q={highlight} />
+            </span>,
+        ];
+        if (h.referrer_domain) {
+            bits.push(
+                <span key="ref">
+                    from <Highlight text={h.referrer_domain} q={highlight} />
+                </span>,
+            );
+        }
+        if (device) bits.push(<span key="device">{device}</span>);
+        if (h.utm_source) {
+            bits.push(
+                <span key="utm">
+                    utm <Highlight text={h.utm_source} q={highlight} />
+                </span>,
+            );
+        }
+        return (
+            <div className="text-[11px] text-slate-500 mt-0.5 flex gap-1.5 flex-wrap items-center">
+                {bits.map((b, i) => (
+                    <React.Fragment key={i}>
+                        {b}
+                        {i < bits.length - 1 && <span className="text-slate-300">·</span>}
+                    </React.Fragment>
+                ))}
+            </div>
+        );
+    }
+
     // Meetings get a dedicated meta line: when the call is set for, which
     // calendar it came from, and a one-click join link (when not canceled).
     if (event.type.startsWith("meeting_")) {
@@ -1265,6 +1346,8 @@ function visualFor(e: ContactTimelineEvent): {
             return { Icon: TagIcon, label: "Added to category" };
         case "category_removed":
             return { Icon: TagIcon, label: "Removed from category" };
+        case "page_hit":
+            return { Icon: GlobeIcon, label: e.page_hit?.landing ? "Landed on" : "Page hit" };
         default:
             return { Icon: MailIcon, label: e.type };
     }

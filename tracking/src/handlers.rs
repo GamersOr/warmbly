@@ -1,17 +1,20 @@
 use axum::{
-    extract::{Path, State},
+    body::Bytes,
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
 use chrono::Utc;
 use moka::future::Cache;
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::abuse::{is_prefetch, is_scanner, RateLimiter};
 use crate::config::Config;
 use crate::events::TrackingEvent;
+use crate::hits::{ForwardedHit, HitForwarder, HitPayload, Outcome};
 use crate::links::{LinkResolver, Resolution};
 use crate::producer::Producer;
 
@@ -36,6 +39,13 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     /// Click-ticket resolver (backend internal API + layered caches)
     pub links: Arc<LinkResolver>,
+    /// Website page-view forwarder (backend internal API + layered caches)
+    pub hits: Arc<HitForwarder>,
+    /// Tighter per-source budget for page views than for pixels
+    pub hit_rate_limiter: Arc<RateLimiter>,
+    /// Proxies whose forwarded-IP header is believed, and which header
+    pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
+    pub client_ip_header: Arc<String>,
 }
 
 impl AppState {
@@ -58,6 +68,13 @@ impl AppState {
                 config.backend_internal_url.clone(),
                 config.internal_api_token.clone(),
             )),
+            hits: Arc::new(HitForwarder::new(
+                config.backend_internal_url.clone(),
+                config.internal_api_token.clone(),
+            )),
+            hit_rate_limiter: Arc::new(RateLimiter::new(config.pagehit_rate_limit_per_min)),
+            trusted_proxies: Arc::new(config.trusted_proxies.clone()),
+            client_ip_header: Arc::new(config.client_ip_header.clone()),
         }
     }
 
@@ -95,6 +112,7 @@ pub async fn health() -> impl IntoResponse {
 /// GET /t/o/{task_id}.png
 pub async fn track_open(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(task_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -107,7 +125,12 @@ pub async fn track_open(
     }
 
     // Extract IP hash for deduplication + rate limiting
-    let ip_hash = extract_ip_hash(&headers);
+    let ip_hash = Some(hash_ip(&client_ip(
+        peer,
+        &headers,
+        &state.trusted_proxies,
+        &state.client_ip_header,
+    )));
 
     // Anti-flood: over-budget sources still get the pixel (real mail clients
     // must never see a broken image), but nothing is published.
@@ -159,6 +182,7 @@ pub async fn track_open(
 /// Unknown tickets 404.
 pub async fn track_click(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(link_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -168,7 +192,12 @@ pub async fn track_click(
     }
 
     // Anti-flood: cap total request rate per source
-    let ip_hash = extract_ip_hash(&headers);
+    let ip_hash = Some(hash_ip(&client_ip(
+        peer,
+        &headers,
+        &state.trusted_proxies,
+        &state.client_ip_header,
+    )));
     let source = ip_hash.clone().unwrap_or_else(|| "unknown".to_string());
     if !state.rate_limiter.allow(&source).await {
         return (StatusCode::TOO_MANY_REQUESTS, "Slow down").into_response();
@@ -192,14 +221,25 @@ pub async fn track_click(
         .map(|s| s.to_string());
 
     // Security gateways and link previewers follow every URL in a message;
-    // serve them the destination but never count a click.
+    // serve them the destination but never count a click, and never hand
+    // them the identification ticket.
     if is_prefetch(&headers) || is_scanner(user_agent.as_deref()) {
         return Redirect::temporary(&link.destination).into_response();
     }
 
+    // When the workspace registered the destination's host for website
+    // tracking, the ticket rides along so the snippet can tie the browser to
+    // the recipient. The ticket is opaque and per-recipient: it names no
+    // destination and no secret, only "the click the backend already knows".
+    let target = if link.identify {
+        with_identify_param(&link.destination, &link_id)
+    } else {
+        link.destination.clone()
+    };
+
     // Dedupe repeat clicks of the same ticket from the same source
     if state.is_duplicate("CLICK", &link_id, &ip_hash).await {
-        return Redirect::temporary(&link.destination).into_response();
+        return Redirect::temporary(&target).into_response();
     }
 
     // Publish event asynchronously (fire and forget)
@@ -218,7 +258,163 @@ pub async fn track_click(
             .await;
     });
 
-    Redirect::temporary(&link.destination).into_response()
+    Redirect::temporary(&target).into_response()
+}
+
+/// Query parameter the click redirect appends and the snippet strips.
+const IDENTIFY_PARAM: &str = "wbly_t";
+
+/// Appends the identification ticket to a destination, keeping any existing
+/// query and fragment intact.
+fn with_identify_param(destination: &str, ticket: &str) -> String {
+    let (base, fragment) = match destination.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (destination, None),
+    };
+    let sep = if base.contains('?') { '&' } else { '?' };
+    let mut out = format!("{}{}{}={}", base, sep, IDENTIFY_PARAM, ticket);
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
+/// The tracking snippet customers embed.
+/// GET /tracking.js
+pub async fn tracking_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        TRACKING_JS,
+    )
+        .into_response()
+}
+
+const TRACKING_JS: &str = include_str!("../static/tracking.js");
+
+/// Website page-view ingest.
+/// POST /p  (JSON body, sent as text/plain so browsers skip the preflight)
+///
+/// Same controls as the pixel, then the payload is validated and forwarded to
+/// the backend, which owns consent policy, enrichment and storage. Nothing in
+/// the URL, and nothing in the body names a contact.
+pub async fn track_page_hit(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let ip = client_ip(
+        peer,
+        &headers,
+        &state.trusted_proxies,
+        &state.client_ip_header,
+    );
+    let source = hash_ip(&ip);
+
+    // Anti-flood: page views have their own, tighter budget on top of the
+    // shared one, and the shared one counts too so a flood here also
+    // throttles the same source's pixels and clicks.
+    if !state.rate_limiter.allow(&source).await || !state.hit_rate_limiter.allow(&source).await {
+        return (StatusCode::TOO_MANY_REQUESTS, "Slow down").into_response();
+    }
+
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Prefetches, crawlers, and browsers signalling Global Privacy Control
+    // are acknowledged and never counted.
+    if is_prefetch(&headers) || is_scanner(user_agent.as_deref()) || has_gpc(&headers) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
+    let payload: HitPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid payload").into_response(),
+    };
+    if !payload.validate() {
+        return (StatusCode::BAD_REQUEST, "Invalid payload").into_response();
+    }
+
+    // Reloads and double-fires: acknowledged, not counted.
+    let Some(claim) = state.hits.claim(&payload.v, &payload.u).await else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+
+    let origin_host = headers
+        .get(header::ORIGIN)
+        .or_else(|| headers.get(header::REFERER))
+        .and_then(|h| h.to_str().ok())
+        .map(host_of)
+        .unwrap_or_default();
+
+    let hit = ForwardedHit {
+        site_key: payload.k,
+        visitor_key: payload.v,
+        session_key: payload.s,
+        consent: payload.c,
+        identify_token: payload.t,
+        url: payload.u,
+        title: payload.ti,
+        referrer: payload.r,
+        language: payload.l,
+        timezone: payload.tz,
+        screen_width: payload.sw,
+        screen_height: payload.sh,
+        landing: payload.ld,
+        user_agent: user_agent.unwrap_or_default(),
+        ip,
+        origin_host,
+    };
+
+    let dedupe_visitor = hit.visitor_key.clone();
+    let dedupe_url = hit.url.clone();
+    match state.hits.forward(hit, &source).await {
+        Outcome::Accepted(None) => StatusCode::NO_CONTENT.into_response(),
+        Outcome::Accepted(Some(vid)) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            format!("{{\"vid\":\"{}\"}}", vid),
+        )
+            .into_response(),
+        // An unknown key is not told apart from a declined hit: the browser
+        // learns nothing about which keys exist.
+        Outcome::UnknownSite => StatusCode::NO_CONTENT.into_response(),
+        Outcome::Malformed => (StatusCode::BAD_REQUEST, "Invalid payload").into_response(),
+        Outcome::Unavailable => {
+            // Nothing was stored, so the next attempt must not be deduped away.
+            state.hits.forget(&dedupe_visitor, &dedupe_url, claim).await;
+            (StatusCode::SERVICE_UNAVAILABLE, "Try again shortly").into_response()
+        }
+    }
+}
+
+/// Sec-GPC: 1 is the browser's own opt-out signal.
+fn has_gpc(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-gpc")
+        .and_then(|h| h.to_str().ok())
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Bare host of an Origin/Referer value ("https://www.example.com/x" ->
+/// "www.example.com").
+fn host_of(value: &str) -> String {
+    let rest = value.split_once("://").map(|(_, r)| r).unwrap_or(value);
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
 /// Return the transparent pixel response
@@ -236,32 +432,110 @@ fn pixel_response() -> Response {
         .into_response()
 }
 
-/// Extract and hash IP address for privacy
-fn extract_ip_hash(headers: &HeaderMap) -> Option<String> {
-    // Try various headers for the real IP
-    let ip = headers
-        .get("x-forwarded-for")
+/// The client address. The configured header is believed only when the
+/// socket peer is a trusted proxy, and no other header is consulted, so a
+/// caller cannot pick its rate-limit bucket or the location stored with a
+/// page view by adding a header the proxy passes through.
+fn client_ip(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    trusted: &[ipnet::IpNet],
+    header: &str,
+) -> String {
+    let peer_ip = peer.ip();
+    if !trusted.iter().any(|net| net.contains(&peer_ip)) {
+        return peer_ip.to_string();
+    }
+    let raw = headers
+        .get(header)
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|h| h.to_str().ok())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            headers
-                .get("cf-connecting-ip")
-                .and_then(|h| h.to_str().ok())
-                .map(|s| s.to_string())
-        });
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    // A proxy appends the address it saw as the LAST X-Forwarded-For entry;
+    // the earlier ones are whatever the client claimed.
+    let candidate = match raw {
+        Some(v) if header == "x-forwarded-for" => v.rsplit(',').next().map(str::trim),
+        Some(v) => Some(v),
+        None => None,
+    };
+    match candidate.and_then(|v| v.parse::<IpAddr>().ok()) {
+        Some(ip) => ip.to_string(),
+        None => peer_ip.to_string(),
+    }
+}
 
-    ip.map(|ip| {
-        // Hash the IP for privacy
-        let mut hasher = Sha256::new();
-        hasher.update(ip.as_bytes());
-        let result = hasher.finalize();
-        format!("{:x}", result)[..16].to_string() // Take first 16 chars
-    })
+fn hash_ip(ip: &str) -> String {
+    // Hash the IP for privacy
+    let mut hasher = Sha256::new();
+    hasher.update(ip.as_bytes());
+    let result = hasher.finalize();
+    format!("{:x}", result)[..16].to_string() // Take first 16 chars
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identify_param_keeps_query_and_fragment() {
+        assert_eq!(
+            with_identify_param("https://x.com/p", "abc"),
+            "https://x.com/p?wbly_t=abc"
+        );
+        assert_eq!(
+            with_identify_param("https://x.com/p?a=1#top", "abc"),
+            "https://x.com/p?a=1&wbly_t=abc#top"
+        );
+    }
+
+    fn hdr(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn client_ip_ignores_forwarded_headers_from_untrusted_peers() {
+        let peer: SocketAddr = "203.0.113.9:4000".parse().unwrap();
+        let h = hdr(&[("x-forwarded-for", "1.1.1.1, 2.2.2.2")]);
+        assert_eq!(client_ip(peer, &h, &[], "x-forwarded-for"), "203.0.113.9");
+    }
+
+    #[test]
+    fn client_ip_reads_only_the_configured_header_from_trusted_peers() {
+        let trusted = vec!["10.0.0.0/8".parse::<ipnet::IpNet>().unwrap()];
+        let peer: SocketAddr = "10.1.2.3:4000".parse().unwrap();
+        // Proxy-appended last entry wins over what the client claimed.
+        let h = hdr(&[("x-forwarded-for", "1.1.1.1, 198.51.100.7")]);
+        assert_eq!(
+            client_ip(peer, &h, &trusted, "x-forwarded-for"),
+            "198.51.100.7"
+        );
+        // A client-supplied CF-Connecting-IP passed through a generic proxy is
+        // ignored unless that header is the configured one.
+        let h = hdr(&[
+            ("cf-connecting-ip", "8.8.8.8"),
+            ("x-forwarded-for", "198.51.100.7"),
+        ]);
+        assert_eq!(
+            client_ip(peer, &h, &trusted, "x-forwarded-for"),
+            "198.51.100.7"
+        );
+        assert_eq!(client_ip(peer, &h, &trusted, "cf-connecting-ip"), "8.8.8.8");
+        // Garbage or a missing header falls back to the proxy itself.
+        let h = hdr(&[("x-forwarded-for", "not an ip")]);
+        assert_eq!(client_ip(peer, &h, &trusted, "x-forwarded-for"), "10.1.2.3");
+        assert_eq!(
+            client_ip(peer, &hdr(&[]), &trusted, "x-forwarded-for"),
+            "10.1.2.3"
+        );
+    }
+
+    #[test]
+    fn host_of_strips_scheme_and_path() {
+        assert_eq!(host_of("https://WWW.Example.com/a?b#c"), "www.example.com");
+        assert_eq!(host_of("example.com"), "example.com");
+    }
 }

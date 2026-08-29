@@ -297,6 +297,10 @@ const (
 	TimelineCampaignRemoved ContactTimelineEventType = "campaign_removed"
 	TimelineCategoryAdded   ContactTimelineEventType = "category_added"
 	TimelineCategoryRemoved ContactTimelineEventType = "category_removed"
+
+	// A page view from the website tracking snippet, tied to the contact
+	// through an email-link ticket. Detail rides in PageHit.
+	TimelinePageHit ContactTimelineEventType = "page_hit"
 )
 
 // ContactTimelineEvent is one entry in the merged activity feed. The
@@ -340,6 +344,9 @@ type ContactTimelineEvent struct {
 	CategoryID    *uuid.UUID `json:"category_id,omitempty"`
 	CategoryTitle *string    `json:"category_title,omitempty"`
 	SourceDetail  *string    `json:"source_detail,omitempty"`
+
+	// Website page view (page_hit): URL, referrer, device, UTM, location.
+	PageHit *WebsitePageHit `json:"page_hit,omitempty"`
 
 	// Author (notes, lifecycle events).
 	UserID *uuid.UUID `json:"user_id,omitempty"`

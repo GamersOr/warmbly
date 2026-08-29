@@ -121,6 +121,11 @@ func Run(
 		// here instead of touching Postgres (read-only, heavily cached there).
 		internal.GET("/tracked-links/:id", h.InternalGetTrackedLink)
 
+		// Website page views: the tracking service forwards each counted hit
+		// here after its own rate limiting and filtering. Enrichment (user
+		// agent, IP location) and storage happen on this side.
+		internal.POST("/page-hits", h.InternalIngestPageHit)
+
 		// Worker mailbox-sync messageId -> internal email map (replaces the
 		// former DynamoDB EmailMessageData table). Workers read/write it here.
 		internal.GET("/email-message-map", h.InternalGetEmailMessageMap)
@@ -1027,6 +1032,13 @@ func Run(
 			// org settings. There is no read-scoped API bit that should be able
 			// to silence the Advisor for a whole workspace.
 			jwtOnly.PATCH("/advisor/settings", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.UpdateAdvisorSettings)
+
+			// Website tracking is privacy governance (consent mode, retention,
+			// what the snippet may collect), so it is JWT-only like the other
+			// org settings. The rotate is bodyless and idempotent per call.
+			jwtOnly.GET("/website-tracking/settings", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.GetWebsiteTrackingSettings)
+			jwtOnly.PATCH("/website-tracking/settings", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.UpdateWebsiteTrackingSettings)
+			jwtOnly.POST("/website-tracking/settings/rotate-key", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.RotateWebsiteTrackingKey)
 
 			// The agent fix is JWT-only for the same reason the dashboard agent
 			// is: it acts as a named member, inside their permissions, and there
