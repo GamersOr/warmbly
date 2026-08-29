@@ -123,7 +123,7 @@ Same shape as `/auth/login`: `email`, `password`, `turnstile`.
 
 `POST /auth/register/confirm`
 
-Confirms the emailed code and creates the account. Returns `204 No Content` (the client then signs in via the login flow).
+Confirms the emailed code, creates the account and signs it in: the response is the same shape as a completed `/auth/login` (a `token` pair, or a `two_fa_required` challenge), so the client lands in the dashboard without a second sign-in. `/auth/register` itself returns that shape directly when the deployment does not require email verification.
 
 Auth: public (not available to API keys).
 
@@ -137,7 +137,12 @@ Auth: public (not available to API keys).
 
 #### Response
 
-`204 No Content`.
+```json
+{
+  "code_required": false,
+  "token": { "access_token": "…", "refresh_token": "…", "access_token_expires_at": "…" }
+}
+```
 
 ### Refresh token
 

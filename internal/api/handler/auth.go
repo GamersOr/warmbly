@@ -85,12 +85,13 @@ func (h *Handler) RegistrationConfirm(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), authRequestTimeout)
 	defer cancel()
 
-	if err := h.AuthService.RegistrationConfirm(ctx, &data, data.Session, auth.SignupOrigin{IP: c.ClientIP(), UserAgent: c.Request.UserAgent()}); err != nil {
+	resp, err := h.AuthService.RegistrationConfirm(ctx, &data, data.Session, auth.SignupOrigin{IP: c.ClientIP(), UserAgent: c.Request.UserAgent()})
+	if err != nil {
 		errx.Handle(c, err)
 		return
 	}
 
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *Handler) RefreshToken(c *gin.Context) {

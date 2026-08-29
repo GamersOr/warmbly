@@ -551,9 +551,14 @@ export default function LoginPage() {
                     turnstile: token,
                     invite: inviteToken || undefined,
                 });
-                // Email verification off means the account already exists, so
-                // send them to sign in rather than to a code they never got.
+                // Email verification off means the account already exists and
+                // is signed in: land in the dashboard.
                 if (!res.code_required) {
+                    if (res.token) {
+                        toast.success("Welcome to Warmbly!");
+                        await completeSession(res.token);
+                        return;
+                    }
                     toast.success("Account created. Sign in to continue.");
                     handleModeChange("signin");
                     goTo("signin");
@@ -606,7 +611,12 @@ export default function LoginPage() {
                     // shell never mounts without identity (no infinite loader).
                     await completeSession(res as unknown as Token);
                 } else {
-                    await registerConfirmMutation.mutateAsync({ session, code, turnstile: token });
+                    const created = await registerConfirmMutation.mutateAsync({ session, code, turnstile: token });
+                    if (created?.token) {
+                        toast.success("Welcome to Warmbly!");
+                        await completeSession(created.token);
+                        return;
+                    }
                     toast.success("Account created! Please sign in.");
                     handleModeChange("signin");
                     goTo("email", -1);
