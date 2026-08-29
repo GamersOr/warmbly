@@ -27,7 +27,12 @@ const maxImportUploadBytes = 50 * 1024 * 1024
 // in memory if we can help it — the service writes through to
 // c.Writer so the response trickles out as rows are encoded.
 func (h *Handler) ExportContacts(c *gin.Context) {
-	userIDStr := middleware.GetUserID(c)
+	// Search is organization-scoped; passing the user id here matched no rows.
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	var req models.ContactExportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -53,7 +58,7 @@ func (h *Handler) ExportContacts(c *gin.Context) {
 	// things simple, we capture into a buffer and ship at once. For
 	// 50k rows × 12 columns this is a few MB; well within reason.
 	pw := &bufferedResponse{c: c}
-	filename, contentType, count, err := h.ContactService.Export(c.Request.Context(), userIDStr, &req, pw)
+	filename, contentType, count, err := h.ContactService.Export(c.Request.Context(), orgID.String(), &req, pw)
 	if err != nil {
 		errx.Handle(c, err)
 		return

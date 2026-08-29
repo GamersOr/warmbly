@@ -21,7 +21,7 @@ import (
 // returned content type + filename.
 func (s *contactService) Export(
 	ctx context.Context,
-	userID string,
+	orgID string,
 	req *models.ContactExportRequest,
 	w io.Writer,
 ) (string, string, int, *errx.Error) {
@@ -65,9 +65,17 @@ func (s *contactService) Export(
 			return "", "", 0, errx.New(errx.BadRequest, "contact_ids required when scope=selected")
 		}
 		contactIDs = req.ContactIDs
+		// Filters are optional here: a campaign Leads export passes its
+		// campaign so the lead_* columns are populated for the selected rows.
+		searchFilters = req.Filters
+	}
+	if searchFilters != nil {
+		if err := validateLeadFilters(*searchFilters); err != nil {
+			return "", "", 0, err
+		}
 	}
 
-	rows, xerr := s.contactRepository.ExportAll(ctx, userID, searchFilters, contactIDs, models.MaxContactExportRows)
+	rows, xerr := s.contactRepository.ExportAll(ctx, orgID, searchFilters, contactIDs, models.MaxContactExportRows)
 	if xerr != nil {
 		return "", "", 0, xerr
 	}
@@ -145,7 +153,11 @@ func validateFieldList(fields []string) *errx.Error {
 			models.ContactExportFieldCategories,
 			models.ContactExportFieldCampaigns,
 			models.ContactExportFieldCreatedAt,
-			models.ContactExportFieldUpdatedAt:
+			models.ContactExportFieldUpdatedAt,
+			models.ContactExportFieldLeadStatus,
+			models.ContactExportFieldLeadOpened,
+			models.ContactExportFieldLeadClicked,
+			models.ContactExportFieldLeadReplied:
 		default:
 			return errx.New(errx.BadRequest, "unknown export field: "+f)
 		}
@@ -183,6 +195,14 @@ func fieldHeader(f string) string {
 		return "Created At"
 	case models.ContactExportFieldUpdatedAt:
 		return "Updated At"
+	case models.ContactExportFieldLeadStatus:
+		return "Lead Status"
+	case models.ContactExportFieldLeadOpened:
+		return "Opened"
+	case models.ContactExportFieldLeadClicked:
+		return "Clicked"
+	case models.ContactExportFieldLeadReplied:
+		return "Replied"
 	}
 	return f
 }
@@ -235,8 +255,32 @@ func fieldValue(c *models.Contact, f string) string {
 			return ""
 		}
 		return c.UpdatedAt.UTC().Format(time.RFC3339)
+	case models.ContactExportFieldLeadStatus:
+		if c.CampaignLead == nil {
+			return ""
+		}
+		return c.CampaignLead.Status
+	case models.ContactExportFieldLeadOpened, models.ContactExportFieldLeadClicked, models.ContactExportFieldLeadReplied:
+		if c.CampaignLead == nil {
+			return ""
+		}
+		return strconv.FormatBool(leadEngaged(c.CampaignLead, f))
 	}
 	return ""
+}
+
+// leadEngaged is the yes/no engagement cell: any human open, click or reply on
+// any step of the campaign.
+func leadEngaged(lead *models.ContactCampaignProgress, f string) bool {
+	switch f {
+	case models.ContactExportFieldLeadOpened:
+		return lead.Opened > 0
+	case models.ContactExportFieldLeadClicked:
+		return lead.Clicked > 0
+	case models.ContactExportFieldLeadReplied:
+		return lead.Replied > 0
+	}
+	return false
 }
 
 // writeCSV uses encoding/csv from the stdlib. The leading UTF-8 BOM is
@@ -285,6 +329,8 @@ func writeJSON(w io.Writer, rows []models.Contact, fields []string) error {
 				obj[f] = c.Categories
 			} else if f == models.ContactExportFieldCampaigns {
 				obj[f] = c.Campaigns
+			} else if c.CampaignLead != nil && (f == models.ContactExportFieldLeadOpened || f == models.ContactExportFieldLeadClicked || f == models.ContactExportFieldLeadReplied) {
+				obj[f] = leadEngaged(c.CampaignLead, f)
 			} else {
 				obj[f] = fieldValue(c, f)
 			}
