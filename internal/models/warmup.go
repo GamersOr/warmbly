@@ -108,9 +108,7 @@ type WarmupPoolHealthSummary struct {
 	ByState           map[string]int `json:"by_state"`
 	AvgSpamScore      float64        `json:"avg_spam_score"`
 	AvgSpamPlacement  float64        `json:"avg_spam_placement_rate"`
-	// SpamPlacementByProvider breaks recent spam-placement counts down by the
-	// recipient provider so the admin can see where warmup mail is being
-	// filtered (e.g. mostly at Outlook vs Gmail) rather than one flat rate.
+	// Keyed by who runs the recipient's mail, the vocabulary routing reads.
 	SpamPlacementByProvider map[string]int `json:"spam_placement_by_provider"`
 	BlockedCount            int            `json:"blocked_count"`
 	AtRiskCount             int            `json:"at_risk_count"`
