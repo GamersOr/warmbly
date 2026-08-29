@@ -352,8 +352,7 @@ func (s *emailService) syncDataFor(ctx context.Context, emailID uuid.UUID) *mode
 			OrgDailyMessages: budget.DailyMessagesPerOrg,
 		},
 	}
-	// A pool-linked mailbox is a warmup-only mirror: no history import, and
-	// the consumer drops everything that is not verified warmup mail.
+	// A pool-linked mailbox is a warmup-only mirror: no history import.
 	if s.poolLink != nil {
 		if linked, err := s.poolLink.GetMailboxByAccount(ctx, emailID); err == nil && linked != nil {
 			data.Policy.BackfillDays = 1

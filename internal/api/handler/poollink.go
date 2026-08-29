@@ -10,9 +10,7 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 )
 
-// Cloud side of the self-hosted warmup pool link. Public: the device-code
-// handshake. JWT: approving a code and managing linked instances. Instance
-// token: everything under /pool-link/instance.
+// Cloud side of the self-hosted warmup pool link.
 
 func (h *Handler) poolLinkReady(c *gin.Context) bool {
 	if h.PoolLinkService == nil {
@@ -73,9 +71,7 @@ func (h *Handler) PoolLinkDescribeCode(c *gin.Context) {
 	c.JSON(http.StatusOK, code)
 }
 
-// PoolLinkApproveCode binds the code to one of the member's workspaces. The
-// workspace comes from the body rather than the session so the approval page
-// can offer a picker without switching the whole dashboard.
+// PoolLinkApproveCode binds the code to the workspace named in the body, not the session's.
 func (h *Handler) PoolLinkApproveCode(c *gin.Context) {
 	if !h.poolLinkReady(c) {
 		return

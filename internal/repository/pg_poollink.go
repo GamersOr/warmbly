@@ -12,18 +12,14 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 )
 
-// PoolLinkRepository is the cloud side of pool link: handshake codes, linked
-// instances and the mailboxes they enrolled.
+// PoolLinkRepository is the cloud side of pool link.
 type PoolLinkRepository interface {
 	CreateCode(ctx context.Context, deviceCodeHash, userCode string, req models.PoolLinkStartRequest, expiresAt time.Time) (*models.PoolLinkCode, error)
 	GetCodeByUserCode(ctx context.Context, userCode string) (*models.PoolLinkCode, error)
-	// ApproveCode binds a pending code to an organization and stores the token
-	// the instance will collect on its next poll. Returns false when the code
-	// is not pending anymore.
+	// ApproveCode stores the token for the next poll; false when the code is no longer pending.
 	ApproveCode(ctx context.Context, userCode string, orgID, approvedBy, instanceID uuid.UUID, instanceToken string) (bool, error)
 	DenyCode(ctx context.Context, userCode string) (bool, error)
-	// ClaimCode returns the approved code for a device code and clears the
-	// stored token in the same statement, so a token is handed out once.
+	// ClaimCode hands the token out exactly once, clearing it in the same statement.
 	ClaimCode(ctx context.Context, deviceCodeHash string) (*models.PoolLinkCode, string, error)
 	DeleteExpiredCodes(ctx context.Context) error
 
@@ -33,8 +29,7 @@ type PoolLinkRepository interface {
 	ListInstances(ctx context.Context, orgID uuid.UUID) ([]models.PoolLinkInstance, error)
 	TouchInstance(ctx context.Context, id uuid.UUID, version string) error
 	RevokeInstance(ctx context.Context, id uuid.UUID) error
-	// HasActiveInstance reports whether the organization has any live link,
-	// which is what entitles it to warm enrolled mailboxes for free.
+	// HasActiveInstance is what entitles a workspace to warm linked mailboxes for free.
 	HasActiveInstance(ctx context.Context, orgID uuid.UUID) (bool, error)
 
 	EnrollMailbox(ctx context.Context, m *models.PoolLinkMailbox) error
@@ -114,9 +109,7 @@ func (r *poolLinkRepository) DenyCode(ctx context.Context, userCode string) (boo
 }
 
 func (r *poolLinkRepository) ClaimCode(ctx context.Context, deviceCodeHash string) (*models.PoolLinkCode, string, error) {
-	// A pending code is returned as-is; an approved one flips to claimed and
-	// gives up its token in the same statement. The token is read from the
-	// locked pre-update row, because RETURNING would only see the cleared value.
+	// The token comes from the locked pre-update row; RETURNING would only see the cleared value.
 	query := `
 		WITH picked AS (
 			SELECT id, instance_token

@@ -81,8 +81,7 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 	if account == nil {
 		return errx.ErrNotFound
 	}
-	// A mailbox enrolled in Warmbly Cloud is warmed there; the local chain
-	// ends here and the reconciler will not reseed it.
+	// A mailbox enrolled in Warmbly Cloud is warmed there; the local chain ends here.
 	if s.cloudLink != nil && s.cloudLink.IsEnrolled(ctx, account.ID) {
 		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
 		executionStatus = "skipped_cloud_warmup"
@@ -495,9 +494,7 @@ func (s *tasksService) selectWarmupPartner(ctx context.Context, account Email) (
 		return nil, err
 	}
 
-	// A thin tier borrows the other tier's proven-healthy mailboxes so a
-	// paid sender never starves and a free sender still finds partners; the
-	// fallback set is age- and health-gated in SQL, nothing unproven crosses.
+	// A thin tier borrows the other tier's proven mailboxes; the SQL gates age and health.
 	fallbackIDs := []uuid.UUID{}
 	if len(participantIDs) < config.WarmupPoolTierFallbackFloor {
 		if extra, ferr := s.warmupRepo.GetPoolFallbackRecipients(ctx, poolType, config.WarmupPoolFallbackMinAgeDays*24*time.Hour); ferr == nil {

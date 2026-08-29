@@ -13,8 +13,7 @@ import (
 	"github.com/warmbly/warmbly/internal/pkg/encrypt"
 )
 
-// CloudLinkRepository is the self-hosted side of pool link: the single link
-// row and which local mailboxes the cloud warms.
+// CloudLinkRepository is the self-hosted side of pool link.
 type CloudLinkRepository interface {
 	Get(ctx context.Context) (*models.CloudLink, error)
 	Put(ctx context.Context, link *models.CloudLink) error
@@ -37,8 +36,7 @@ type cloudLinkRepository struct {
 
 var errNoLinkEncrypter = errors.New("credential encrypter not configured (set CREDENTIALS_ENCRYPTION_KEY)")
 
-// NewCloudLinkRepository seals the instance token with the same key as
-// mailbox credentials, since it grants the cloud-side mailbox operations.
+// NewCloudLinkRepository seals the instance token with the mailbox credential key.
 func NewCloudLinkRepository(db *pgxpool.Pool, enc *encrypt.Encrypter) CloudLinkRepository {
 	return &cloudLinkRepository{db: db, encrypt: enc}
 }

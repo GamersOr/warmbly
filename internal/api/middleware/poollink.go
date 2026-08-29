@@ -10,9 +10,7 @@ import (
 
 const PoolLinkInstanceKey = "pool_link_instance"
 
-// PoolLinkAuthMiddleware authenticates a linked self-hosted instance by its
-// bearer token. The instance is set on the context; no user or org session
-// exists on these requests.
+// PoolLinkAuthMiddleware authenticates a linked instance by bearer token; no user session exists here.
 func (h *Handler) PoolLinkAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if h.PoolLinkService == nil {

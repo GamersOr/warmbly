@@ -111,8 +111,7 @@ type emailService struct {
 	syncState          repository.EmailSyncStateRepository
 	mailboxes          repository.MailboxRepository
 	syncBudget         SyncBudgetSource
-	// poolLink marks warmup-only mirrors of a linked instance's mailboxes,
-	// which sync with no history at all.
+	// poolLink marks linked warmup-only mailboxes, which sync with no history.
 	poolLink repository.PoolLinkRepository
 	// webhookService is optional. When non-nil, account lifecycle events
 	// (email_account.connected, email_account.removed) are dispatched to

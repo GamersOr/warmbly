@@ -296,9 +296,7 @@ type Handler struct {
 	// one back, for moving between instances. Nil disables the endpoints.
 	OrgTransferService orgtransfer.Service
 
-	// PoolLinkService is the cloud side of the self-hosted warmup pool link;
-	// CloudLinkService is the self-hosted side. Both are nil-safe (the routes
-	// answer 501).
+	// PoolLinkService (cloud side) and CloudLinkService (self-hosted side) are nil-safe: routes answer 501.
 	PoolLinkService  poollink.Service
 	CloudLinkService cloudlink.Service
 

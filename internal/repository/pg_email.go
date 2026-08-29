@@ -1336,8 +1336,7 @@ func (r *emailRepository) SetWarmupLifecycle(ctx context.Context, userID, emailA
 		return nil, errx.ErrNotFound
 	}
 
-	// Get is organization-scoped; the ownership check already happened in
-	// the UPDATE's WHERE clause, so re-read by id.
+	// Get is organization-scoped and ownership was checked by the UPDATE, so re-read by id.
 	id, perr := uuid.Parse(emailAccountID)
 	if perr != nil {
 		return nil, errx.ErrUuid

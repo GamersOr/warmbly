@@ -13,8 +13,7 @@ import (
 	"github.com/warmbly/warmbly/internal/errx"
 )
 
-// client is the outbound-only HTTP client to the cloud's pool-link API. The
-// self-hosted instance never accepts connections from the cloud.
+// client is the outbound-only HTTP client to the cloud's pool-link API.
 type client struct {
 	baseURL string
 	token   string
@@ -31,8 +30,7 @@ func newClient(baseURL, token, version string) *client {
 	}
 }
 
-// remoteError is the cloud's error envelope, surfaced to the dashboard with
-// its own code so the reason (limit reached, revoked, denied) reads clearly.
+// remoteError is the cloud's error envelope, re-surfaced with its own code.
 type remoteError struct {
 	Error     string `json:"error"`
 	Message   string `json:"message"`

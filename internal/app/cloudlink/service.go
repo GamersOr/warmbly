@@ -1,7 +1,4 @@
-// Package cloudlink is the self-hosted side of the warmup pool link. The
-// instance keeps its mailboxes, campaigns and inbox; for an enrolled mailbox
-// it hands the credential to Warmbly Cloud, which runs the warmup, and it
-// mirrors the cloud's warmup state for the dashboard.
+// Package cloudlink is the self-hosted side of the warmup pool link.
 package cloudlink
 
 import (
@@ -31,6 +28,22 @@ var (
 	ErrMailboxInactive = errx.NewWithIdentifier(errx.Unprocessable, "cloud_link_mailbox_inactive", "Only active mailboxes can be enrolled.")
 )
 
+// cloudURLAllowed requires TLS: the token and mailbox passwords travel on
+// this URL. Loopback is exempt for local development.
+func cloudURLAllowed(u string) bool {
+	if strings.HasPrefix(u, "https://") {
+		return true
+	}
+	if !strings.HasPrefix(u, "http://") {
+		return false
+	}
+	host := strings.TrimPrefix(u, "http://")
+	if i := strings.IndexAny(host, ":/"); i >= 0 {
+		host = host[:i]
+	}
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+}
+
 // CloudURL is where the instance links to: WARMBLY_CLOUD_URL or the hosted API.
 func CloudURL() string {
 	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("WARMBLY_CLOUD_URL")), "/"); v != "" {
@@ -56,8 +69,7 @@ func instanceName() string {
 	return "Self-hosted Warmbly"
 }
 
-// PendingConnect is an in-flight device-code handshake, held in memory: it
-// lives minutes and belongs to the process that started it.
+// PendingConnect is an in-flight device-code handshake, held in memory.
 type PendingConnect struct {
 	DeviceCode      string    `json:"-"`
 	UserCode        string    `json:"user_code"`
@@ -86,8 +98,7 @@ type Service interface {
 	Unenroll(ctx context.Context, orgID, accountID uuid.UUID) *errx.Error
 	SetLifecycle(ctx context.Context, orgID, accountID uuid.UUID, action string) (*models.CloudLinkMailboxRow, *errx.Error)
 
-	// IsEnrolled tells the local warmup scheduler to stand down for a mailbox
-	// the cloud warms. Fails closed to false.
+	// IsEnrolled is the local warmup scheduler's stand-down check; fails closed to false.
 	IsEnrolled(ctx context.Context, accountID uuid.UUID) bool
 }
 
@@ -149,7 +160,7 @@ func (s *service) StartConnect(ctx context.Context, userID uuid.UUID, cloudURL s
 	if cloudURL == "" {
 		cloudURL = CloudURL()
 	}
-	if !strings.HasPrefix(cloudURL, "https://") && !strings.HasPrefix(cloudURL, "http://") {
+	if !cloudURLAllowed(cloudURL) {
 		return nil, errx.NewWithIdentifier(errx.BadRequest, "cloud_link_url", "The cloud URL must start with https://.")
 	}
 	c := newClient(cloudURL, "", instanceVersion())
@@ -239,8 +250,7 @@ func (s *service) Disconnect(ctx context.Context) *errx.Error {
 	if xerr != nil {
 		return xerr
 	}
-	// Best effort on the cloud side: a revoked token or an unreachable cloud
-	// must not keep the instance chained to it.
+	// Best effort: an unreachable or revoked cloud must not keep the instance chained to it.
 	if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance", nil, nil); xerr != nil {
 		log.Warn().Str("code", xerr.Identifier).Msg("cloud link: remote disconnect failed; clearing local link anyway")
 	}
@@ -356,6 +366,10 @@ func (s *service) Enroll(ctx context.Context, orgID, accountID uuid.UUID) (*mode
 		return nil, xerr
 	}
 	if _, err := s.repo.Enroll(ctx, acc.ID, acc.ID); err != nil {
+		// Without the local row the mailbox would warm in both places; undo the cloud side.
+		if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+acc.ID.String(), nil, nil); xerr != nil {
+			log.Error().Str("account_id", acc.ID.String()).Str("code", xerr.Identifier).Msg("cloud link: local enrollment failed and the cloud copy could not be removed; unenroll it from Settings")
+		}
 		return nil, errx.InternalError()
 	}
 	return s.row(ctx, orgID, accountID)
@@ -376,13 +390,18 @@ func (s *service) Unenroll(ctx context.Context, orgID, accountID uuid.UUID) *err
 	if m == nil {
 		return nil
 	}
-	if l, err := s.repo.Get(ctx); err == nil && l != nil {
-		if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+m.RemoteID.String(), nil, nil); xerr != nil && xerr.Identifier != "pool_link_mailbox_not_found" {
-			return xerr
-		}
-	}
+	// Local row first, so a failed cloud call can be retried from a consistent
+	// state instead of leaving the mailbox with no warmup anywhere.
 	if err := s.repo.Unenroll(ctx, accountID); err != nil {
 		return errx.InternalError()
+	}
+	if l, err := s.repo.Get(ctx); err == nil && l != nil {
+		if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+m.RemoteID.String(), nil, nil); xerr != nil && xerr.Identifier != "pool_link_mailbox_not_found" {
+			if _, rerr := s.repo.Enroll(ctx, accountID, m.RemoteID); rerr != nil {
+				log.Error().Str("account_id", accountID.String()).Msg("cloud link: cloud unenroll failed and the local row could not be restored")
+			}
+			return xerr
+		}
 	}
 	return nil
 }

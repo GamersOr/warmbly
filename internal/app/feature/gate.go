@@ -84,8 +84,7 @@ type featureGateService struct {
 	// sending is unlimited. Stripe deployments (BILLING_PROVIDER=stripe) keep the
 	// subscription-based gating below.
 	selfHost bool
-	// poolLink entitles a workspace with a linked self-hosted instance to warm
-	// its enrolled mailboxes without a paid plan. Nil when not wired.
+	// poolLink entitles a linked workspace to warm without a paid plan; nil when not wired.
 	poolLink PoolLinkReader
 }
 

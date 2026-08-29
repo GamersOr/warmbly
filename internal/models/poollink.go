@@ -6,11 +6,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Pool link is the bridge between a self-hosted Warmbly instance and the
-// hosted warmup pool. The cloud holds a mailbox's credential for warmup only
-// and runs the sends, replies and inbox engagement on its own workers; the
-// self-hosted instance keeps everything else (campaigns, contacts, inbox,
-// storage) and mirrors the warmup state for its dashboard.
+// Pool link: a self-hosted instance's mailboxes warmed by the hosted pool.
 
 // PoolLinkCodeStatus is the lifecycle of one device-code handshake.
 type PoolLinkCodeStatus string
@@ -76,8 +72,7 @@ type PoolLinkStartResponse struct {
 	Interval        int    `json:"interval"`
 }
 
-// PoolLinkPollResponse is the poll answer; Token and the rest are present
-// only once the code has been approved.
+// PoolLinkPollResponse is the poll answer; the token is present only once approved.
 type PoolLinkPollResponse struct {
 	Status        PoolLinkCodeStatus `json:"status"`
 	InstanceID    *uuid.UUID         `json:"instance_id,omitempty"`
@@ -100,11 +95,9 @@ type PoolLinkPlan struct {
 	Enrolled     int  `json:"enrolled"`
 	// PriceUSD is the monthly price of the paid tier, for the upgrade card.
 	PriceUSD int `json:"price_usd"`
-	// UpgradeURL is where the paid tier is bought; empty when billing is off
-	// or the plan has no price attached.
+	// UpgradeURL is empty when billing is off or the plan has no price.
 	UpgradeURL string `json:"upgrade_url,omitempty"`
-	// WarmupEntitled is false when the cloud workspace itself cannot warm
-	// (billing off is always entitled).
+	// WarmupEntitled is false when the cloud workspace itself cannot warm.
 	WarmupEntitled bool `json:"warmup_entitled"`
 }
 
@@ -115,8 +108,7 @@ type PoolLinkInstanceInfo struct {
 	Plan         PoolLinkPlan     `json:"plan"`
 }
 
-// PoolLinkWarmupSettings is the ramp the self-hosted instance asks the cloud
-// to run; zero values fall back to the cloud defaults.
+// PoolLinkWarmupSettings is the requested ramp; zero values mean cloud defaults.
 type PoolLinkWarmupSettings struct {
 	Base      int    `json:"base"`
 	Max       int    `json:"max"`
@@ -135,8 +127,7 @@ type PoolLinkOAuthCredential struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
-// PoolLinkEnrollRequest enrolls one remote mailbox. Exactly one credential
-// block is set, matching Provider.
+// PoolLinkEnrollRequest enrolls one remote mailbox; one credential block matches Provider.
 type PoolLinkEnrollRequest struct {
 	RemoteID uuid.UUID                `json:"remote_id"`
 	Email    string                   `json:"email"`
@@ -147,8 +138,7 @@ type PoolLinkEnrollRequest struct {
 	Warmup   PoolLinkWarmupSettings   `json:"warmup"`
 }
 
-// PoolLinkMailboxState is the per-mailbox view returned to the instance and
-// shown in both dashboards.
+// PoolLinkMailboxState is the per-mailbox view shown in both dashboards.
 type PoolLinkMailboxState struct {
 	RemoteID       uuid.UUID              `json:"remote_id"`
 	EmailAccountID uuid.UUID              `json:"email_account_id"`
@@ -176,8 +166,7 @@ type PoolLinkMailboxPatch struct {
 	SMTPIMAP  *SmtpImap                `json:"smtp_imap,omitempty"`
 }
 
-// CloudLink is the self-hosted instance's single link row. Token is never
-// serialized.
+// CloudLink is the self-hosted instance's single link row; Token is never serialized.
 type CloudLink struct {
 	CloudURL         string     `json:"cloud_url"`
 	InstanceID       uuid.UUID  `json:"instance_id"`
@@ -201,8 +190,7 @@ type CloudLinkStatus struct {
 	Connected bool                  `json:"connected"`
 	Link      *CloudLink            `json:"link,omitempty"`
 	Info      *PoolLinkInstanceInfo `json:"info,omitempty"`
-	// Reachable is false when the cloud could not be contacted on this read;
-	// Link is still returned from the local row.
+	// Reachable is false when the cloud could not be contacted; Link still comes from the local row.
 	Reachable bool   `json:"reachable"`
 	Error     string `json:"error,omitempty"`
 	// DefaultCloudURL is what the connect flow proposes.

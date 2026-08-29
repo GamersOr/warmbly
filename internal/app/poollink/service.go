@@ -1,6 +1,4 @@
-// Package poollink is the cloud side of the self-hosted warmup pool link: it
-// hands out device codes, turns an approval into an instance token, and runs
-// enrolled mailboxes as warmup-only accounts inside the approving workspace.
+// Package poollink is the cloud side of the self-hosted warmup pool link.
 package poollink
 
 import (
@@ -38,8 +36,7 @@ var (
 	ErrBadRequest        = errx.NewWithIdentifier(errx.BadRequest, "pool_link_request", "Instance name is required.")
 )
 
-// WarmupScheduler seeds the first warmup task after enrollment; the tasks
-// service satisfies it.
+// WarmupScheduler seeds the first warmup task after enrollment.
 type WarmupScheduler interface {
 	EnsureWarmupScheduled(ctx context.Context, accountID uuid.UUID) error
 }
@@ -67,8 +64,7 @@ type Service interface {
 	PatchMailbox(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID, patch models.PoolLinkMailboxPatch) (*models.PoolLinkMailboxState, *errx.Error)
 	Unenroll(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) *errx.Error
 
-	// IsLinkedMailbox is the consumer's hot-path check: linked mailboxes keep
-	// only verified warmup mail.
+	// IsLinkedMailbox is the consumer's hot-path warmup-only check.
 	IsLinkedMailbox(ctx context.Context, accountID uuid.UUID) bool
 	// HasActiveLink entitles a workspace to warm its linked mailboxes.
 	HasActiveLink(ctx context.Context, orgID uuid.UUID) bool
@@ -135,8 +131,7 @@ func hashToken(t string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// NormalizeUserCode accepts what a person typed: any case, with or without
-// the dash.
+// NormalizeUserCode accepts any case, with or without the dash.
 func NormalizeUserCode(raw string) string {
 	raw = strings.ToUpper(strings.TrimSpace(raw))
 	raw = strings.ReplaceAll(raw, "-", "")
@@ -376,8 +371,7 @@ func (s *service) RevokeInstance(ctx context.Context, orgID, instanceID uuid.UUI
 	return nil
 }
 
-// ownerUserID is who the enrolled email_accounts rows belong to: the member
-// who approved the link, falling back to the workspace owner.
+// ownerUserID is the approving member, falling back to the workspace owner.
 func (s *service) ownerUserID(ctx context.Context, inst *models.PoolLinkInstance) (string, *errx.Error) {
 	if inst.CreatedBy != nil {
 		return inst.CreatedBy.String(), nil

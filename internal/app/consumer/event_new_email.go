@@ -47,8 +47,7 @@ func (s *JobsService) HandleNewEmail(ctx context.Context, e *models.JobEventNewE
 		return nil
 	}
 
-	// A pool-linked mailbox lives here for warmup only: anything that is not
-	// verified warmup mail is dropped unread, never stored or fanned out.
+	// A pool-linked mailbox is warmup-only: everything else is dropped unread.
 	if s.PoolLinkRepo != nil {
 		if linked, lerr := s.PoolLinkRepo.GetMailboxByAccount(ctx, e.Message.EmailID); lerr == nil && linked != nil {
 			log.Debug().Str("email_account_id", e.Message.EmailID.String()).Msg("dropping non-warmup mail for pool-linked mailbox")

@@ -24,7 +24,6 @@ type Handler struct {
 	// RateLimitService because that one is keyed on a user id that does not
 	// exist yet.
 	Cache *cache.Cache
-	// PoolLinkService authenticates linked self-hosted instances (nil-safe:
-	// the instance routes answer 501 when unset).
+	// PoolLinkService authenticates linked instances; nil-safe, routes answer 501.
 	PoolLinkService poollink.Service
 }
