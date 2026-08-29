@@ -438,11 +438,15 @@ func main() {
 	go jobsService.StartLifecycleRebalancer(ctx, 1*time.Hour)
 	// The abuse sweep: cross-account shape, plus what each organization's mail
 	// did to recipients. Nightly, because both form over days.
+	orgRiskService := orgrisk.NewService(repository.NewOrgRiskRepository(primaryDB))
 	go correlate.NewService(
 		repository.NewCorrelationRepository(primaryDB),
 		repository.NewOrgConductRepository(primaryDB),
-		orgrisk.NewService(repository.NewOrgRiskRepository(primaryDB)),
+		orgRiskService,
 	).Start(ctx, 24*time.Hour)
+	// Evidence a one-shot detector filed cannot retract itself, so it carries
+	// an expiry; only a re-derive moves the stored score, which is this.
+	go orgrisk.StartExpirySweep(ctx, orgRiskService, orgrisk.ExpirySweepInterval)
 
 	// Tracking consumer (opens/clicks): a second subscription on the shared bus
 	// for the tracking topic. It records open/click engagement and fires INSTANT

@@ -48,19 +48,54 @@ func (s *stubRiskRepo) GetOrgRiskStates(_ context.Context, ids []uuid.UUID) (map
 }
 
 func (s *stubRiskRepo) UpdateOrgRiskSignals(_ context.Context, orgID uuid.UUID,
-	derive func(map[string]any) (map[string]any, models.OrgRiskState, int, string)) (*models.OrgRisk, error) {
+	derive repository.OrgRiskDerive) (*models.OrgRisk, error) {
+	return s.write(orgID, derive), nil
+}
+
+// write models the stored row: the derived score always lands, but the band
+// only does when no operator pin outranks it.
+func (s *stubRiskRepo) write(orgID uuid.UUID, derive repository.OrgRiskDerive) *models.OrgRisk {
 	row := s.row(orgID)
 	signals, state, score, reason := derive(row.Signals)
-	row.Signals, row.State, row.Score, row.Reason = signals, state, score, reason
+	row.Signals, row.Score, row.Reason = signals, score, reason
+	if row.Override != nil {
+		row.State = row.Override.State
+	} else {
+		row.State = state
+	}
+	copied := *row
+	return &copied
+}
+
+func (s *stubRiskRepo) ClearOrgRiskOverride(_ context.Context, orgID uuid.UUID,
+	derive repository.OrgRiskDerive) (*models.OrgRisk, error) {
+	s.row(orgID).Override = nil
+	return s.write(orgID, derive), nil
+}
+
+func (s *stubRiskRepo) SetOrgRiskOverride(_ context.Context, orgID uuid.UUID,
+	state models.OrgRiskState, reason string, by uuid.UUID) (*models.OrgRisk, error) {
+	row := s.row(orgID)
+	actor := by
+	row.State, row.Reason = state, reason
+	row.Override = &models.OrgRiskOverride{State: state, Reason: reason, By: &actor}
 	copied := *row
 	return &copied, nil
 }
 
-func (s *stubRiskRepo) SetOrgRiskState(_ context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string) (*models.OrgRisk, error) {
-	row := s.row(orgID)
-	row.State, row.Reason = state, reason
-	copied := *row
-	return &copied, nil
+func (s *stubRiskRepo) OrgsWithExpiringSignals(context.Context) ([]uuid.UUID, error) {
+	var out []uuid.UUID
+	for id, row := range s.rows {
+		for _, raw := range row.Signals {
+			if entry, ok := raw.(map[string]any); ok {
+				if _, dated := entry["expires_at"]; dated {
+					out = append(out, id)
+					break
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 func (s *stubRiskRepo) OrgsWithSignal(_ context.Context, key string) ([]uuid.UUID, error) {

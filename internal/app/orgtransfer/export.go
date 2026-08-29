@@ -408,6 +408,11 @@ func jsonBool(raw json.RawMessage) bool {
 func toAnyMap(in map[string]json.RawMessage) map[string]any {
 	out := make(map[string]any, len(in))
 	for k, v := range in {
+		// The archive is a customer download, so the operator's verdict and
+		// the evidence behind it stay out of it.
+		if OrgRiskColumns[k] {
+			continue
+		}
 		var decoded any
 		if err := json.Unmarshal(v, &decoded); err != nil {
 			continue

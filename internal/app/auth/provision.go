@@ -322,6 +322,7 @@ func (s *authService) fileSignupFindings(ctx context.Context, orgID uuid.UUID, k
 		Weight: weight,
 		Detail: strings.Join(reasons, "; "),
 		Class:  class,
+		TTL:    orgrisk.DefaultSignalTTL,
 	}); err != nil {
 		log.Warn().Str("organization_id", orgID.String()).Str("signal", key).
 			Msg("could not record the signup risk signal")

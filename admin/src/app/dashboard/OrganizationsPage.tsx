@@ -23,10 +23,21 @@ import { useCursorPager } from "@/lib/useCursorPager";
 import { emptyRange, rangeActive, rangeWithin, rangeAfter, rangeBefore, type DateRange } from "@/lib/dateRange";
 import { listOrganizations } from "@/lib/api/client/admin/organizations";
 import { listPlans } from "@/lib/api/client/admin/plans";
-import type { AdminOrgListItem } from "@/lib/api/models/admin";
+import type { AdminOrgListItem, OrgRiskState } from "@/lib/api/models/admin";
+import { RiskBadge } from "./OrganizationRiskCard";
 
 type StatusFilter = "active" | "pending_deletion" | "all";
 type VisibilityFilter = "" | "public" | "private" | "none";
+type RiskFilter = "" | "flagged" | OrgRiskState;
+
+const RISK_OPTIONS: { value: RiskFilter | "any"; label: string }[] = [
+    { value: "any", label: "Any posture" },
+    { value: "flagged", label: "Flagged (not trusted)" },
+    { value: "watch", label: "Watch" },
+    { value: "restricted", label: "Restricted" },
+    { value: "suspended", label: "Suspended" },
+    { value: "trusted", label: "Trusted" },
+];
 
 const SUB_STATUS_OPTIONS: { value: string; label: string }[] = [
     { value: "any", label: "Any subscription" },
@@ -113,6 +124,17 @@ const columns: Column<AdminOrgListItem>[] = [
             ),
         csv: (o) => o.plan_name || "",
     },
+    {
+        id: "posture",
+        header: "Posture",
+        cell: (o) =>
+            o.risk_state && o.risk_state !== "trusted" ? (
+                <RiskBadge state={o.risk_state} />
+            ) : (
+                <span className="text-xs text-muted-foreground">—</span>
+            ),
+        csv: (o) => o.risk_state || "",
+    },
     { id: "members", header: "Members", align: "right", sortable: true, sortKey: "member_count", cell: (o) => <span className="tabular-nums">{o.member_count}</span>, csv: (o) => o.member_count },
     {
         id: "mailboxes",
@@ -179,6 +201,7 @@ export default function OrganizationsPage() {
     const [subStatus, setSubStatus] = useState("");
     const [enterprise, setEnterprise] = useState(false);
     const [hasOverrides, setHasOverrides] = useState(false);
+    const [risk, setRisk] = useState<RiskFilter>("");
     const [cancelAtPeriodEnd, setCancelAtPeriodEnd] = useState(false);
     const [hasActiveSubscription, setHasActiveSubscription] = useState(false);
     const [noSubscription, setNoSubscription] = useState(false);
@@ -209,7 +232,7 @@ export default function OrganizationsPage() {
     ];
 
     const filterKey = JSON.stringify({
-        query, status, planId, visibility, subStatus, enterprise, hasOverrides, cancelAtPeriodEnd,
+        query, status, planId, visibility, subStatus, enterprise, hasOverrides, risk, cancelAtPeriodEnd,
         hasActiveSubscription, noSubscription, ownerBanned, hasActiveCampaigns, hasEmailAccounts,
         memMin, memMax, mbMin, mbMax, campMin, campMax, created, trialEnd, periodEnd, updated, sort,
     });
@@ -229,6 +252,8 @@ export default function OrganizationsPage() {
                 subscription_status: subStatus || undefined,
                 enterprise: enterprise || undefined,
                 has_overrides: hasOverrides || undefined,
+                risk_state: risk && risk !== "flagged" ? risk : undefined,
+                risk_flagged: risk === "flagged" || undefined,
                 cancel_at_period_end: cancelAtPeriodEnd || undefined,
                 has_active_subscription: hasActiveSubscription || undefined,
                 no_subscription: noSubscription || undefined,
@@ -269,6 +294,7 @@ export default function OrganizationsPage() {
         (planId ? 1 : 0) +
         (visibility ? 1 : 0) +
         (subStatus ? 1 : 0) +
+        (risk ? 1 : 0) +
         bools.filter(Boolean).length +
         ranges.filter(([a, b]) => a !== undefined || b !== undefined).length +
         [created, trialEnd, periodEnd, updated].filter(rangeActive).length +
@@ -337,6 +363,13 @@ export default function OrganizationsPage() {
                                 onChange={(v) => setVisibility(v === "any" ? "" : (v as VisibilityFilter))}
                                 options={VISIBILITY_OPTIONS}
                                 placeholder="Any plan state"
+                            />
+                        </FilterGroup>
+                        <FilterGroup label="Abuse posture">
+                            <SelectFilter
+                                value={(risk || "any") as RiskFilter | "any"}
+                                onChange={(v) => setRisk(v === "any" ? "" : (v as RiskFilter))}
+                                options={RISK_OPTIONS}
                             />
                         </FilterGroup>
                         <FilterGroup label="Subscription">

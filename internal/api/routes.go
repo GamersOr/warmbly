@@ -1158,6 +1158,14 @@ func Run(
 		adminRoutes.GET("/organizations/:id/overrides", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminGetOrgOverrides)
 		adminRoutes.PUT("/organizations/:id/overrides", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminUpdateOrgOverrides)
 
+		// Workspace abuse posture. The customer route withholds the evidence;
+		// this is where an operator reads it, pins a decision over it, and
+		// lifts one.
+		adminRoutes.GET("/organizations/:id/risk", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminGetOrgRisk)
+		adminRoutes.PUT("/organizations/:id/risk", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminSetOrgRiskOverride)
+		adminRoutes.DELETE("/organizations/:id/risk", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminClearOrgRiskOverride)
+		adminRoutes.DELETE("/organizations/:id/risk/signals/:key", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminClearOrgRiskSignal)
+
 		// Limit-increase request queue. Approval writes the override
 		// row via the same SetLimitOverrides path used by direct
 		// edits, so granted_by + audit-log story stays unified.

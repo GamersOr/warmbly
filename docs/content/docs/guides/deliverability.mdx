@@ -133,7 +133,17 @@ Signals come in two kinds, and only one of them can cost you volume.
 
 **What a workspace does to recipients** is what a posture acts on: an import that is mostly unusable addresses, a bounce rate at or above `5%`, or a complaint rate at or above `0.1%`. Rates are measured over at least `100` sends in the last `30 days`, because below that a percentage is noise. A rate past the point providers themselves act on, `10%` bounces or `0.3%` complaints, is enough to restrict a workspace on its own.
 
-Import quality is measured across everything a workspace has imported rather than per file, so one clean upload does not erase a bad list that is still stored, and the finding fades as good data outweighs it. Postures are re-derived nightly, so a restriction lifts on its own once the evidence behind it no longer holds. A suspension is the exception: it stays until it is reviewed, because time passing is not evidence that anything changed.
+### How a posture lifts
+
+No posture is permanent, and there are three ways out of one.
+
+**The evidence stops holding.** Postures are re-derived nightly, so a posture lifts on its own once the findings behind it no longer stand. A finding that is re-checked on a schedule, such as being part of a cluster of workspaces opened from one address, is withdrawn the moment it stops being true. Import quality is measured across everything a workspace has imported rather than per file, so one clean upload does not erase a bad list that is still stored, and the finding fades as good data outweighs it.
+
+**A one-off finding ages out.** A detector that fires once and has nothing that would ever re-check it, such as the score of the address a workspace signed up with or a run of sign-ins from implausible places, files its finding with a 30-day expiry. After that it is retired and the score falls without anyone doing anything.
+
+**Review.** A platform operator can read every finding on file, retract any one of them, and set the posture directly. A posture set by review holds against the detectors until an operator lifts it, so a workspace cleared by a human is not put back by evidence that is still on file, and a workspace an operator suspended is not released by a detector retracting.
+
+If your workspace is restricted or suspended and you believe it is wrong, reply to the notice or contact your platform operator and ask for a review. The banner's reason is the same sentence they see.
 
 ## How to read it
 
