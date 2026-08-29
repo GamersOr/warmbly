@@ -751,6 +751,13 @@ func (r *contactRepository) Search(
 			whereClauses = append(whereClauses, clause)
 		}
 	}
+	// Engagement composes with lead_status as AND, so "replied AND not_opened"
+	// is a valid (if odd) combination rather than one overriding the other.
+	if filters.Engagement != "" && singleCampaignPlaceholder != "" {
+		if clause := leadEngagementClause(filters.Engagement, singleCampaignPlaceholder); clause != "" {
+			whereClauses = append(whereClauses, clause)
+		}
+	}
 
 	// -----------------------------
 	// Category IDs filter (must have ALL specified categories)
@@ -862,7 +869,10 @@ func (r *contactRepository) Search(
 		leadProgressSelect = fmt.Sprintf(`(
 			SELECT json_build_object(
 				'sent',    COUNT(*) FILTER (WHERE p.sent_at IS NOT NULL),
-				'opened',  COUNT(*) FILTER (WHERE p.opened_at IS NOT NULL),
+				-- Human opens only; automated fetches (Apple MPP prefetch, UA-less
+				-- clients) are counted apart so they never read as engagement.
+				'opened',  COUNT(*) FILTER (WHERE p.opened_at IS NOT NULL AND NOT p.opened_machine),
+				'machine_opened', COUNT(*) FILTER (WHERE p.opened_at IS NOT NULL AND p.opened_machine),
 				'clicked', COUNT(*) FILTER (WHERE p.clicked_at IS NOT NULL),
 				'replied', COUNT(*) FILTER (WHERE p.replied_at IS NOT NULL),
 				'bounced', COUNT(*) FILTER (WHERE p.bounced_at IS NOT NULL),
@@ -1015,6 +1025,7 @@ func (r *contactRepository) Search(
 			var lp struct {
 				Sent       int        `json:"sent"`
 				Opened     int        `json:"opened"`
+				MachineOpn int        `json:"machine_opened"`
 				Clicked    int        `json:"clicked"`
 				Replied    int        `json:"replied"`
 				Bounced    int        `json:"bounced"`
@@ -1063,6 +1074,7 @@ func (r *contactRepository) Search(
 				Status:         status,
 				Sent:           lp.Sent,
 				Opened:         lp.Opened,
+				MachineOpened:  lp.MachineOpn,
 				Clicked:        lp.Clicked,
 				Replied:        lp.Replied,
 				Bounced:        lp.Bounced,
@@ -1272,6 +1284,44 @@ func leadStatusClause(status, cp string) string {
 // completed > processing > undeliverable > queued priority as the row-level
 // derived status.
 // Scoped to the org through the contacts join.
+// leadEngagementClause builds the WHERE predicate for one engagement filter
+// value inside ONE campaign (`cp` is that campaign's bound placeholder). An
+// open counts only when it is human: opened_machine marks automated fetches,
+// the same split the analytics summary reports as machine opens. The negative
+// forms require at least one sent step, so a lead never emailed matches
+// neither side. Returns "" for an unknown value.
+func leadEngagementClause(engagement, cp string) string {
+	has := func(cond string) string {
+		return fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM campaign_contact_progress p WHERE p.campaign_id = %s AND p.contact_id = c.id AND %s)",
+			cp, cond,
+		)
+	}
+	sent := has("p.sent_at IS NOT NULL")
+	opened := has("p.opened_at IS NOT NULL AND NOT p.opened_machine")
+	clicked := has("p.clicked_at IS NOT NULL")
+	replied := has("p.replied_at IS NOT NULL")
+	bounced := has("p.bounced_at IS NOT NULL")
+	switch engagement {
+	case models.LeadEngagementOpened:
+		return opened
+	case models.LeadEngagementNotOpened:
+		return fmt.Sprintf("(%s AND NOT %s)", sent, opened)
+	case models.LeadEngagementClicked:
+		return clicked
+	case models.LeadEngagementNotClicked:
+		return fmt.Sprintf("(%s AND NOT %s)", sent, clicked)
+	case models.LeadEngagementReplied:
+		return replied
+	case models.LeadEngagementNotReplied:
+		return fmt.Sprintf("(%s AND NOT %s)", sent, replied)
+	case models.LeadEngagementBounced:
+		return bounced
+	default:
+		return ""
+	}
+}
+
 func (r *contactRepository) CampaignLeadCounts(ctx context.Context, orgID, campaignID string) (*models.CampaignLeadCounts, *errx.Error) {
 	// A lead is "done" (completed) when every email step has been sent and it
 	// hasn't replied or bounced; "processing" when some but not all steps sent.
@@ -1287,7 +1337,11 @@ func (r *contactRepository) CampaignLeadCounts(ctx context.Context, orgID, campa
 			COUNT(*) FILTER (WHERE %[2]s AND COALESCE(pr.has_sent, false) AND (%[1]s)) AS completed,
 			COUNT(*) FILTER (WHERE %[2]s AND COALESCE(pr.has_sent, false) AND NOT (%[1]s)) AS processing,
 			COUNT(*) FILTER (WHERE %[2]s AND NOT COALESCE(pr.has_sent, false) AND %[3]s) AS undeliverable,
-			COUNT(*) FILTER (WHERE %[2]s AND NOT COALESCE(pr.has_sent, false) AND NOT %[3]s) AS queued
+			COUNT(*) FILTER (WHERE %[2]s AND NOT COALESCE(pr.has_sent, false) AND NOT %[3]s) AS queued,
+			COUNT(*) FILTER (WHERE COALESCE(pr.has_sent, false)) AS contacted,
+			COUNT(*) FILTER (WHERE COALESCE(pr.has_opened, false)) AS opened,
+			COUNT(*) FILTER (WHERE COALESCE(pr.has_clicked, false)) AS clicked,
+			COUNT(*) FILTER (WHERE COALESCE(pr.has_replied, false)) AS replied_any
 		FROM campaign_leads cl
 		JOIN contacts c ON c.id = cl.contact_id AND c.organization_id = $2
 		CROSS JOIN (SELECT COUNT(*) AS total_steps FROM sequences st WHERE st.campaign_id = $1 AND st.kind = 'email') ts
@@ -1296,6 +1350,8 @@ func (r *contactRepository) CampaignLeadCounts(ctx context.Context, orgID, campa
 				bool_or(p.sent_at IS NOT NULL)    AS has_sent,
 				bool_or(p.replied_at IS NOT NULL) AS has_replied,
 				bool_or(p.bounced_at IS NOT NULL) AS has_bounced,
+				bool_or(p.opened_at IS NOT NULL AND NOT p.opened_machine) AS has_opened,
+				bool_or(p.clicked_at IS NOT NULL) AS has_clicked,
 				bool_or(p.sent_at IS NULL AND p.failed_at IS NOT NULL AND p.send_attempts >= $3) AS has_failed,
 				COUNT(*) FILTER (WHERE p.sent_at IS NOT NULL) AS sent_steps
 			FROM campaign_contact_progress p
@@ -1306,6 +1362,7 @@ func (r *contactRepository) CampaignLeadCounts(ctx context.Context, orgID, campa
 	out := &models.CampaignLeadCounts{}
 	if err := r.DB.QueryRow(ctx, query, campaignID, orgID, config.CampaignSendMaxAttempts).Scan(
 		&out.Total, &out.Unsubscribed, &out.Bounced, &out.Replied, &out.Failed, &out.Completed, &out.Processing, &out.Undeliverable, &out.Queued,
+		&out.Contacted, &out.Opened, &out.Clicked, &out.RepliedAny,
 	); err != nil {
 		if err == pgx.ErrNoRows {
 			return out, nil
