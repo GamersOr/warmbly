@@ -43,8 +43,9 @@ pub struct AppState {
     pub hits: Arc<HitForwarder>,
     /// Tighter per-source budget for page views than for pixels
     pub hit_rate_limiter: Arc<RateLimiter>,
-    /// Proxies whose forwarded-IP headers are believed
+    /// Proxies whose forwarded-IP header is believed, and which header
     pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
+    pub client_ip_header: Arc<String>,
 }
 
 impl AppState {
@@ -73,6 +74,7 @@ impl AppState {
             )),
             hit_rate_limiter: Arc::new(RateLimiter::new(config.pagehit_rate_limit_per_min)),
             trusted_proxies: Arc::new(config.trusted_proxies.clone()),
+            client_ip_header: Arc::new(config.client_ip_header.clone()),
         }
     }
 
@@ -123,7 +125,12 @@ pub async fn track_open(
     }
 
     // Extract IP hash for deduplication + rate limiting
-    let ip_hash = Some(hash_ip(&client_ip(peer, &headers, &state.trusted_proxies)));
+    let ip_hash = Some(hash_ip(&client_ip(
+        peer,
+        &headers,
+        &state.trusted_proxies,
+        &state.client_ip_header,
+    )));
 
     // Anti-flood: over-budget sources still get the pixel (real mail clients
     // must never see a broken image), but nothing is published.
@@ -185,7 +192,12 @@ pub async fn track_click(
     }
 
     // Anti-flood: cap total request rate per source
-    let ip_hash = Some(hash_ip(&client_ip(peer, &headers, &state.trusted_proxies)));
+    let ip_hash = Some(hash_ip(&client_ip(
+        peer,
+        &headers,
+        &state.trusted_proxies,
+        &state.client_ip_header,
+    )));
     let source = ip_hash.clone().unwrap_or_else(|| "unknown".to_string());
     if !state.rate_limiter.allow(&source).await {
         return (StatusCode::TOO_MANY_REQUESTS, "Slow down").into_response();
@@ -299,7 +311,12 @@ pub async fn track_page_hit(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let ip = client_ip(peer, &headers, &state.trusted_proxies);
+    let ip = client_ip(
+        peer,
+        &headers,
+        &state.trusted_proxies,
+        &state.client_ip_header,
+    );
     let source = hash_ip(&ip);
 
     // Anti-flood: page views have their own, tighter budget on top of the
@@ -415,27 +432,33 @@ fn pixel_response() -> Response {
         .into_response()
 }
 
-/// The client address. Forwarded headers are believed only when the socket
-/// peer is a trusted proxy; otherwise anyone could pick their own rate-limit
-/// bucket and the location stored with a page view.
-fn client_ip(peer: SocketAddr, headers: &HeaderMap, trusted: &[ipnet::IpNet]) -> String {
+/// The client address. The configured header is believed only when the
+/// socket peer is a trusted proxy, and no other header is consulted, so a
+/// caller cannot pick its rate-limit bucket or the location stored with a
+/// page view by adding a header the proxy passes through.
+fn client_ip(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    trusted: &[ipnet::IpNet],
+    header: &str,
+) -> String {
     let peer_ip = peer.ip();
     if !trusted.iter().any(|net| net.contains(&peer_ip)) {
         return peer_ip.to_string();
     }
-    let header = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|h| h.to_str().ok())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+    let raw = headers
+        .get(header)
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    // A proxy appends the address it saw as the LAST X-Forwarded-For entry;
+    // the earlier ones are whatever the client claimed.
+    let candidate = match raw {
+        Some(v) if header == "x-forwarded-for" => v.rsplit(',').next().map(str::trim),
+        Some(v) => Some(v),
+        None => None,
     };
-    // The proxy appends the address it saw as the LAST X-Forwarded-For entry;
-    // the first is whatever the client claimed.
-    let forwarded = header("cf-connecting-ip")
-        .or_else(|| header("x-forwarded-for").and_then(|v| v.rsplit(',').next().map(str::trim)))
-        .or_else(|| header("x-real-ip"));
-    match forwarded.and_then(|v| v.parse::<IpAddr>().ok()) {
+    match candidate.and_then(|v| v.parse::<IpAddr>().ok()) {
         Some(ip) => ip.to_string(),
         None => peer_ip.to_string(),
     }
@@ -477,19 +500,37 @@ mod tests {
     fn client_ip_ignores_forwarded_headers_from_untrusted_peers() {
         let peer: SocketAddr = "203.0.113.9:4000".parse().unwrap();
         let h = hdr(&[("x-forwarded-for", "1.1.1.1, 2.2.2.2")]);
-        assert_eq!(client_ip(peer, &h, &[]), "203.0.113.9");
+        assert_eq!(client_ip(peer, &h, &[], "x-forwarded-for"), "203.0.113.9");
     }
 
     #[test]
-    fn client_ip_takes_the_proxy_appended_entry_from_trusted_peers() {
+    fn client_ip_reads_only_the_configured_header_from_trusted_peers() {
         let trusted = vec!["10.0.0.0/8".parse::<ipnet::IpNet>().unwrap()];
         let peer: SocketAddr = "10.1.2.3:4000".parse().unwrap();
+        // Proxy-appended last entry wins over what the client claimed.
         let h = hdr(&[("x-forwarded-for", "1.1.1.1, 198.51.100.7")]);
-        assert_eq!(client_ip(peer, &h, &trusted), "198.51.100.7");
-        let h = hdr(&[("cf-connecting-ip", "198.51.100.8")]);
-        assert_eq!(client_ip(peer, &h, &trusted), "198.51.100.8");
+        assert_eq!(
+            client_ip(peer, &h, &trusted, "x-forwarded-for"),
+            "198.51.100.7"
+        );
+        // A client-supplied CF-Connecting-IP passed through a generic proxy is
+        // ignored unless that header is the configured one.
+        let h = hdr(&[
+            ("cf-connecting-ip", "8.8.8.8"),
+            ("x-forwarded-for", "198.51.100.7"),
+        ]);
+        assert_eq!(
+            client_ip(peer, &h, &trusted, "x-forwarded-for"),
+            "198.51.100.7"
+        );
+        assert_eq!(client_ip(peer, &h, &trusted, "cf-connecting-ip"), "8.8.8.8");
+        // Garbage or a missing header falls back to the proxy itself.
         let h = hdr(&[("x-forwarded-for", "not an ip")]);
-        assert_eq!(client_ip(peer, &h, &trusted), "10.1.2.3");
+        assert_eq!(client_ip(peer, &h, &trusted, "x-forwarded-for"), "10.1.2.3");
+        assert_eq!(
+            client_ip(peer, &hdr(&[]), &trusted, "x-forwarded-for"),
+            "10.1.2.3"
+        );
     }
 
     #[test]

@@ -61,6 +61,10 @@ pub struct Config {
     /// CIDRs whose forwarded-IP headers are believed. Empty trusts nothing,
     /// so the socket peer is the client, the same rule as the backend.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// The one header a trusted proxy sets with the client address. Only this
+    /// header is read, so a client-supplied CF-Connecting-IP behind a generic
+    /// proxy is ignored. For x-forwarded-for the proxy-appended last entry wins.
+    pub client_ip_header: String,
 }
 
 impl Config {
@@ -184,7 +188,15 @@ impl Config {
 
         let trusted_proxies =
             parse_trusted_proxies(&env::var("TRACKING_TRUSTED_PROXIES").unwrap_or_default());
-        info!("Trusted proxies: {:?}", trusted_proxies);
+        let client_ip_header = env::var("TRACKING_CLIENT_IP_HEADER")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "x-forwarded-for".to_string());
+        info!(
+            "Trusted proxies: {:?} (client ip header: {})",
+            trusted_proxies, client_ip_header
+        );
 
         Ok(Self {
             env: env_name,
@@ -205,6 +217,7 @@ impl Config {
             rate_limit_per_min,
             pagehit_rate_limit_per_min,
             trusted_proxies,
+            client_ip_header,
         })
     }
 
@@ -283,6 +296,9 @@ impl Config {
             trusted_proxies: parse_trusted_proxies(
                 &env::var("TRACKING_TRUSTED_PROXIES").unwrap_or_default(),
             ),
+            client_ip_header: env::var("TRACKING_CLIENT_IP_HEADER")
+                .unwrap_or_else(|_| "x-forwarded-for".to_string())
+                .to_ascii_lowercase(),
         })
     }
 
