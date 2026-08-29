@@ -286,3 +286,28 @@ func TestLiveOrgRiskStatesBatch(t *testing.T) {
 		t.Errorf("restricted cap multiplier = %v, want 0.25", states[org].CapMultiplier())
 	}
 }
+
+// An operator working from a stale id must be told the organization is gone,
+// not handed an internal error. Every write path answers the same way.
+func TestLiveOrgRiskUnknownOrganizationIsNotAnError(t *testing.T) {
+	repo, _, _ := newRiskOrg(t)
+	ctx := context.Background()
+	gone := uuid.New()
+
+	risk, err := repo.GetOrgRisk(ctx, gone)
+	if err != nil || risk != nil {
+		t.Errorf("GetOrgRisk = %v, %v; want nil, nil", risk, err)
+	}
+	risk, err = repo.SetOrgRiskOverride(ctx, gone, models.OrgRiskSuspended, "x", uuid.Nil)
+	if err != nil || risk != nil {
+		t.Errorf("SetOrgRiskOverride = %v, %v; want nil, nil", risk, err)
+	}
+	risk, err = repo.UpdateOrgRiskSignals(ctx, gone, clearedDerive)
+	if err != nil || risk != nil {
+		t.Errorf("UpdateOrgRiskSignals = %v, %v; want nil, nil", risk, err)
+	}
+	risk, err = repo.ClearOrgRiskOverride(ctx, gone, clearedDerive)
+	if err != nil || risk != nil {
+		t.Errorf("ClearOrgRiskOverride = %v, %v; want nil, nil", risk, err)
+	}
+}

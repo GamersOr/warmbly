@@ -28,10 +28,11 @@ type OrgRiskRepository interface {
 	// UpdateOrgRiskSignals reads, derives and writes in one row-locked
 	// transaction, so two detectors firing at once cannot each compute a band
 	// from a stale signal set. An operator override, when set, wins over the
-	// derived band.
+	// derived band. Returns nil, nil when no such organization exists.
 	UpdateOrgRiskSignals(ctx context.Context, orgID uuid.UUID, derive OrgRiskDerive) (*models.OrgRisk, error)
 	// SetOrgRiskOverride pins the posture until ClearOrgRiskOverride. It leaves
 	// the signals alone: the evidence that led here is still the evidence.
+	// Returns nil, nil when no such organization exists.
 	SetOrgRiskOverride(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string, by uuid.UUID) (*models.OrgRisk, error)
 	// ClearOrgRiskOverride removes the pin and re-derives the posture from the
 	// signals in the same transaction, so the row never reads as pinned-to-
@@ -129,8 +130,12 @@ func (r *orgRiskRepository) rederive(ctx context.Context, orgID uuid.UUID, clear
 	defer tx.Rollback(ctx)
 
 	var rawSignals []byte
-	if err := tx.QueryRow(ctx,
-		`SELECT risk_signals FROM organizations WHERE id = $1 FOR UPDATE`, orgID).Scan(&rawSignals); err != nil {
+	err = tx.QueryRow(ctx,
+		`SELECT risk_signals FROM organizations WHERE id = $1 FOR UPDATE`, orgID).Scan(&rawSignals)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	signals := decodeSignals(rawSignals)
@@ -180,7 +185,7 @@ func (r *orgRiskRepository) SetOrgRiskOverride(ctx context.Context, orgID uuid.U
 		byID = &by
 	}
 	var row riskRow
-	if err := r.DB.Pool.QueryRow(ctx, `
+	err := r.DB.Pool.QueryRow(ctx, `
 		UPDATE organizations
 		   SET risk_state = $2,
 		       risk_reason = NULLIF($3, ''),
@@ -191,7 +196,11 @@ func (r *orgRiskRepository) SetOrgRiskOverride(ctx context.Context, orgID uuid.U
 		       risk_evaluated_at = NOW()
 		 WHERE id = $1
 		RETURNING `+riskColumns, orgID, string(state), reason, byID).
-		Scan(row.dest()...); err != nil {
+		Scan(row.dest()...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	return buildOrgRisk(orgID, &row), nil

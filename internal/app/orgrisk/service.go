@@ -148,13 +148,23 @@ func (s *service) auditTransition(ctx context.Context, orgID uuid.UUID, before, 
 
 func (s *service) Get(ctx context.Context, orgID uuid.UUID) (*models.OrgRisk, *errx.Error) {
 	risk, err := s.repo.GetOrgRisk(ctx, orgID)
-	if err != nil {
-		return nil, errx.InternalError()
-	}
-	if risk == nil {
-		return nil, errx.New(errx.NotFound, "no such organization")
+	if xerr := resolved(risk, err); xerr != nil {
+		return nil, xerr
 	}
 	return risk, nil
+}
+
+// resolved turns a repository answer into the error the caller should give. A
+// missing row is a missing organization, not an internal failure: an operator
+// working from a stale id deserves to be told which it is.
+func resolved(risk *models.OrgRisk, err error) *errx.Error {
+	if err != nil {
+		return errx.InternalError()
+	}
+	if risk == nil {
+		return errx.New(errx.NotFound, "no such organization")
+	}
+	return nil
 }
 
 func (s *service) RecordSignal(ctx context.Context, orgID uuid.UUID, sig Signal) (*models.OrgRisk, *errx.Error) {
@@ -198,8 +208,8 @@ func (s *service) SetOverride(ctx context.Context, orgID uuid.UUID, state models
 	}
 	before, _ := s.repo.GetOrgRisk(ctx, orgID)
 	risk, err := s.repo.SetOrgRiskOverride(ctx, orgID, state, reason, actor)
-	if err != nil {
-		return nil, errx.InternalError()
+	if xerr := resolved(risk, err); xerr != nil {
+		return nil, xerr
 	}
 	s.auditTransition(ctx, orgID, before, risk)
 	return risk, nil
@@ -208,8 +218,8 @@ func (s *service) SetOverride(ctx context.Context, orgID uuid.UUID, state models
 func (s *service) ClearOverride(ctx context.Context, orgID uuid.UUID) (*models.OrgRisk, *errx.Error) {
 	before, _ := s.repo.GetOrgRisk(ctx, orgID)
 	risk, err := s.repo.ClearOrgRiskOverride(ctx, orgID, s.derive)
-	if err != nil {
-		return nil, errx.InternalError()
+	if xerr := resolved(risk, err); xerr != nil {
+		return nil, xerr
 	}
 	s.auditTransition(ctx, orgID, before, risk)
 	return risk, nil
@@ -270,8 +280,8 @@ func (s *service) apply(ctx context.Context, orgID uuid.UUID, mutate func(map[st
 	risk, err := s.repo.UpdateOrgRiskSignals(ctx, orgID, func(signals map[string]any) (map[string]any, models.OrgRiskState, int, string) {
 		return s.derive(mutate(signals))
 	})
-	if err != nil {
-		return nil, errx.InternalError()
+	if xerr := resolved(risk, err); xerr != nil {
+		return nil, xerr
 	}
 	s.auditTransition(ctx, orgID, before, risk)
 	return risk, nil

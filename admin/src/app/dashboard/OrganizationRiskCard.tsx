@@ -9,6 +9,8 @@ import { Pin, PinOff, ShieldAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAdminPerm } from "@/hooks/useAdminPerm";
+import { AdminPerm } from "@/lib/auth/permissions";
 import {
     clearOrganizationRiskOverride,
     clearOrganizationRiskSignal,
@@ -43,6 +45,10 @@ export function RiskBadge({ state }: { state: OrgRiskState }) {
 export function OrganizationRiskCard({ orgId }: { orgId: string }) {
     const qc = useQueryClient();
     const [editing, setEditing] = useState(false);
+    // Reading the evidence needs only view_organizations; every write below is
+    // gated on manage_organizations, so an admin without it is shown the
+    // record rather than buttons that can only answer 403.
+    const canManage = useAdminPerm(AdminPerm.ManageOrganizations);
 
     const riskQuery = useQuery({
         queryKey: ["admin", "organizations", orgId, "risk"],
@@ -116,23 +122,25 @@ export function OrganizationRiskCard({ orgId }: { orgId: string }) {
                         </div>
                     )}
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                    {pinned && (
-                        <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => liftMutation.mutate()}
-                            disabled={liftMutation.isPending}
-                        >
-                            <PinOff className="size-3.5" />
-                            {liftMutation.isPending ? "Lifting…" : "Lift override"}
+                {canManage && (
+                    <div className="flex items-center gap-2 shrink-0">
+                        {pinned && (
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => liftMutation.mutate()}
+                                disabled={liftMutation.isPending}
+                            >
+                                <PinOff className="size-3.5" />
+                                {liftMutation.isPending ? "Lifting…" : "Lift override"}
+                            </Button>
+                        )}
+                        <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+                            <ShieldAlert className="size-3.5" />
+                            Set posture
                         </Button>
-                    )}
-                    <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
-                        <ShieldAlert className="size-3.5" />
-                        Set posture
-                    </Button>
-                </div>
+                    </div>
+                )}
             </div>
 
             {pinned && (
@@ -149,16 +157,18 @@ export function OrganizationRiskCard({ orgId }: { orgId: string }) {
 
             <SignalsTable
                 signals={signals}
-                onRetract={(key) => retractMutation.mutate(key)}
+                onRetract={canManage ? (key) => retractMutation.mutate(key) : undefined}
                 busyKey={retractMutation.isPending ? retractMutation.variables : undefined}
             />
 
-            <OrganizationRiskDialog
-                orgId={orgId}
-                risk={risk}
-                open={editing}
-                onOpenChange={setEditing}
-            />
+            {canManage && (
+                <OrganizationRiskDialog
+                    orgId={orgId}
+                    risk={risk}
+                    open={editing}
+                    onOpenChange={setEditing}
+                />
+            )}
         </div>
     );
 }
@@ -169,7 +179,8 @@ function SignalsTable({
     busyKey,
 }: {
     signals: [string, OrgRiskSignal][];
-    onRetract: (key: string) => void;
+    // Absent when the admin can read the evidence but not change it.
+    onRetract?: (key: string) => void;
     busyKey?: string;
 }) {
     if (signals.length === 0) {
@@ -191,7 +202,7 @@ function SignalsTable({
                     <th className="text-right px-3 py-2 font-medium">Weight</th>
                     <th className="text-left px-3 py-2 font-medium">Finding</th>
                     <th className="text-left px-3 py-2 font-medium">Ages out</th>
-                    <th className="px-3 py-2 w-8" />
+                    {onRetract && <th className="px-3 py-2 w-8" />}
                 </tr>
             </thead>
             <tbody>
@@ -222,17 +233,19 @@ function SignalsTable({
                                     "only when retracted"
                                 )}
                             </td>
-                            <td className="px-3 py-2">
-                                <button
-                                    type="button"
-                                    title="Retract this finding"
-                                    onClick={() => onRetract(key)}
-                                    disabled={busyKey === key}
-                                    className="text-muted-foreground hover:text-red-600 disabled:opacity-40"
-                                >
-                                    <X className="size-3.5" />
-                                </button>
-                            </td>
+                            {onRetract && (
+                                <td className="px-3 py-2">
+                                    <button
+                                        type="button"
+                                        title="Retract this finding"
+                                        onClick={() => onRetract(key)}
+                                        disabled={busyKey === key}
+                                        className="text-muted-foreground hover:text-red-600 disabled:opacity-40"
+                                    >
+                                        <X className="size-3.5" />
+                                    </button>
+                                </td>
+                            )}
                         </tr>
                     );
                 })}
