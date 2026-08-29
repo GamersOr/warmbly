@@ -54,6 +54,8 @@ const ROUTE_TITLES: Record<string, string> = {
 
   // Settings
   "/app/settings/profile": "Profile",
+  "/app/settings/warmbly-cloud": "Warmbly Cloud",
+  "/connect": "Connect",
   "/app/settings/notifications": "Notifications",
   "/app/settings/security": "Security",
   "/app/settings/members": "Members",

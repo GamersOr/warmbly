@@ -10,6 +10,7 @@ import (
 	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -79,6 +80,13 @@ func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
 	}
 	if account == nil {
 		return errx.ErrNotFound
+	}
+	// A mailbox enrolled in Warmbly Cloud is warmed there; the local chain
+	// ends here and the reconciler will not reseed it.
+	if s.cloudLink != nil && s.cloudLink.IsEnrolled(ctx, account.ID) {
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+		executionStatus = "skipped_cloud_warmup"
+		return nil
 	}
 	// Keep the warmup chain alive while the mailbox is actively warming OR
 	// while it backs a live campaign (the low-volume health-check lane). Once
@@ -487,6 +495,17 @@ func (s *tasksService) selectWarmupPartner(ctx context.Context, account Email) (
 		return nil, err
 	}
 
+	// A thin tier borrows the other tier's proven-healthy mailboxes so a
+	// paid sender never starves and a free sender still finds partners; the
+	// fallback set is age- and health-gated in SQL, nothing unproven crosses.
+	fallbackIDs := []uuid.UUID{}
+	if len(participantIDs) < config.WarmupPoolTierFallbackFloor {
+		if extra, ferr := s.warmupRepo.GetPoolFallbackRecipients(ctx, poolType, config.WarmupPoolFallbackMinAgeDays*24*time.Hour); ferr == nil {
+			fallbackIDs = extra
+			participantIDs = append(participantIDs, extra...)
+		}
+	}
+
 	if len(participantIDs) == 0 {
 		return nil, fmt.Errorf("no warmup partners available")
 	}
@@ -504,6 +523,15 @@ func (s *tasksService) selectWarmupPartner(ctx context.Context, account Email) (
 		// Diversity weighting is best-effort. Fall back to uniform on lookup error.
 		domainsByID = nil
 	}
+	if len(fallbackIDs) > 0 && domainsByID != nil {
+		if other, oerr := s.warmupRepo.GetPoolParticipantDomains(ctx, otherPoolType(poolType), true); oerr == nil {
+			for _, id := range fallbackIDs {
+				if d, ok := other[id]; ok {
+					domainsByID[id] = d
+				}
+			}
+		}
+	}
 
 	// This sender's recent record per recipient provider. Best-effort: a lookup
 	// error leaves the maps empty and weighting degrades to domain diversity.
@@ -512,6 +540,15 @@ func (s *tasksService) selectWarmupPartner(ctx context.Context, account Email) (
 	providersByID, provErr := s.warmupRepo.GetPoolParticipantProviders(ctx, poolType, false)
 	if provErr != nil {
 		providersByID = nil
+	}
+	if len(fallbackIDs) > 0 && providersByID != nil {
+		if other, oerr := s.warmupRepo.GetPoolParticipantProviders(ctx, otherPoolType(poolType), false); oerr == nil {
+			for _, id := range fallbackIDs {
+				if pv, ok := other[id]; ok {
+					providersByID[id] = pv
+				}
+			}
+		}
 	}
 	placementByProvider, placeErr := s.warmupRepo.SenderPlacementByProvider(ctx, account.ID, time.Now().Add(-providerPlacementWindow))
 	if placeErr != nil {
@@ -1119,4 +1156,12 @@ func (s *tasksService) orgBlocksSending(ctx context.Context, orgID *uuid.UUID) b
 		return false
 	}
 	return states[*orgID].BlocksSending()
+}
+
+// otherPoolType is the tier a thin pool borrows from.
+func otherPoolType(poolType string) string {
+	if poolType == "premium" {
+		return "free"
+	}
+	return "premium"
 }

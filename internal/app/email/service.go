@@ -77,6 +77,10 @@ type EmailService interface {
 	WireSyncState(repo repository.EmailSyncStateRepository)
 	WireMailboxes(repo repository.MailboxRepository)
 	WireSyncBudget(src SyncBudgetSource)
+	WirePoolLink(repo repository.PoolLinkRepository)
+	// LoadAccountOntoWorker assigns a worker if needed and ships the mailbox
+	// to it (idempotent; the reconciler calls it too).
+	LoadAccountOntoWorker(ctx context.Context, accountID uuid.UUID) error
 	// GetSyncState is the dashboard's view of a mailbox's sync: nil state when
 	// the worker has not reported yet.
 	GetSyncState(ctx context.Context, userID, emailID string) (*models.SyncState, models.SyncPolicy, *errx.Error)
@@ -104,6 +108,9 @@ type emailService struct {
 	syncState          repository.EmailSyncStateRepository
 	mailboxes          repository.MailboxRepository
 	syncBudget         SyncBudgetSource
+	// poolLink marks warmup-only mirrors of a linked instance's mailboxes,
+	// which sync with no history at all.
+	poolLink repository.PoolLinkRepository
 	// webhookService is optional. When non-nil, account lifecycle events
 	// (email_account.connected, email_account.removed) are dispatched to
 	// subscribed customer webhooks.
@@ -133,6 +140,12 @@ func (s *emailService) WireMailboxes(repo repository.MailboxRepository) {
 // WireSyncBudget attaches the instance settings the sync policy is read from.
 func (s *emailService) WireSyncBudget(src SyncBudgetSource) {
 	s.syncBudget = src
+}
+
+// WirePoolLink attaches the pool-link repository so linked mailboxes get the
+// warmup-only sync policy.
+func (s *emailService) WirePoolLink(repo repository.PoolLinkRepository) {
+	s.poolLink = repo
 }
 
 // WireThrottle attaches the daily-creation throttle after construction

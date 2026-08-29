@@ -1,0 +1,81 @@
+---
+title: Warmbly Cloud for self-hosted instances
+description: "Warm the mailboxes on your own Warmbly instance in the hosted warmup pool, while campaigns, contacts and inbox stay on your server."
+---
+
+A self-hosted Warmbly instance warms mailboxes only against the other mailboxes on that same instance, which for most installs is a handful. Linking the instance to Warmbly Cloud lets those mailboxes warm in the hosted pool instead: thousands of real, monitored mailboxes exchanging natural-looking mail, with replies and inbox engagement handled for you.
+
+Only warmup moves to the cloud. Campaigns, contacts, the unibox, tracking and every stored message stay on your server exactly as before.
+
+<Callout type="info" title="Pricing">
+  Linking is free for up to 10 mailboxes. Unlimited mailboxes cost $15 a month per linked workspace. Nothing else about self-hosting changes.
+</Callout>
+
+## How it works
+
+Your instance keeps a single link to a Warmbly Cloud workspace. When you enroll a mailbox, the instance sends that mailbox's SMTP/IMAP credential to the cloud, sealed in transit and at rest with the same envelope encryption the hosted product uses for every customer mailbox. From then on:
+
+- Warmbly Cloud sends the mailbox's warmup mail, replies to partners, and rescues, opens and stars the warmup mail it receives, on Warmbly's own workers
+- the cloud reads only verified warmup mail from the mailbox. Everything else that arrives is dropped unread; no history is imported and nothing is stored
+- your instance stops its own warmup for that mailbox and keeps sending campaigns from it as usual
+- health, daily volume and 7 day totals show up in your instance's settings as the cloud reports them
+
+Unenrolling a mailbox, or disconnecting the instance, deletes the credential on the cloud immediately.
+
+## Linking your instance
+
+1. On your instance, open **Settings > Warmbly Cloud** and press **Connect to Warmbly Cloud**. The instance shows an eight character code.
+2. Press **Open Warmbly Cloud**, or go to `app.warmbly.com/connect`, sign in with your Warmbly account (create one if you do not have it, it is free), enter the code and pick the workspace to link to. The workspace needs the manage settings permission.
+3. Your instance notices the approval within a few seconds and moves on to mailbox selection. Switch on the mailboxes you want warmed.
+
+The whole flow takes about a minute. A code expires after 15 minutes if nobody approves it; start again from the instance.
+
+## Which mailboxes can be enrolled
+
+Mailboxes connected with **SMTP/IMAP** (including Google Workspace and Microsoft 365 through an app password) can be enrolled.
+
+Mailboxes connected through **Sign in with Google** or **Sign in with Microsoft** cannot be enrolled yet. Their refresh grant is bound to the OAuth app that issued it, which on a self-hosted instance is your own, so the cloud could never refresh the token. Reconnect such a mailbox with SMTP/IMAP to enroll it.
+
+## What your instance shows
+
+**Settings > Warmbly Cloud** lists every active mailbox with a switch for whether it is in the pool. For enrolled mailboxes it shows the cloud's view:
+
+| Column | Meaning |
+|--------|---------|
+| Health | The pool's reputation state for the mailbox: healthy, watch, throttled, quarantined or blocked. The same bands the hosted product uses, see [warmup](/guides/warmup/#pool-safety) |
+| Today | Warmup mail sent today against today's ramp target |
+| 7 days | Total sent, and how many landed in spam at partners |
+
+Pause and resume per mailbox from the same row. Warmup settings (start volume, daily increase, ceiling, reply rate, window, days) are taken from the mailbox's own settings on your instance at enrollment time.
+
+## Free and paid tiers
+
+| Tier | Mailboxes | Partners |
+|------|-----------|----------|
+| Free | Up to 10 per linked workspace | The pool's free tier, plus proven healthy mailboxes from the paid tier whenever the free tier runs thin |
+| Paid ($15 a month) | Unlimited | The paid tier first; proven healthy free mailboxes fill in only when the paid tier runs thin |
+
+Paid workspaces are always served first. Cross-tier partners are limited to mailboxes that have been healthy pool members for at least three days, so nothing unproven ever reaches a paying mailbox.
+
+Upgrade from the link card on your instance, or from **Settings > Billing** on Warmbly Cloud. The workspace's regular hosted plan, if it has one, also counts as paid.
+
+## Safety and enforcement
+
+Enrolled mailboxes are ordinary members of the hosted pool and are held to the same rules: verification tokens on every warmup message, spam placement and complaint tracking, and automatic quarantine or blocking when a mailbox starts hurting partners. A mailbox that gets quarantined on the cloud shows that state on your instance, stops being offered to partners, and re-enters on the same probation terms as any hosted mailbox.
+
+## Unlinking
+
+On your instance, **Settings > Warmbly Cloud > Disconnect** removes every enrolled mailbox from the pool, deletes their credentials on the cloud and lets local warmup take over. On Warmbly Cloud, **Settings > Linked instances** lists the instances linked to a workspace and can unlink any of them from the other side.
+
+## Self-hosting notes
+
+- Traffic is outbound only: the instance calls `WARMBLY_CLOUD_URL` (default `https://api.warmbly.com`) over HTTPS. Nothing needs to reach the instance from the internet
+- The instance token is stored sealed with `CREDENTIALS_ENCRYPTION_KEY`. Rotating that key invalidates the stored token; reconnect afterwards
+- The link and the enrollment list are properties of the instance, not of a workspace, so they are not part of a [workspace export](/guides/workspace-export-import/). Reconnect after moving a workspace to a new instance
+- `INSTANCE_NAME` sets the name shown on the approval page; the hostname is used when unset
+
+## Related guides
+
+- [Warmup](/guides/warmup/)
+- [Mailboxes](/guides/mailboxes/)
+- [Configuration reference](/development/configuration/)

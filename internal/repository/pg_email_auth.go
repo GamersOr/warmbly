@@ -188,3 +188,29 @@ func (r *emailRepository) RefreshBoxToken(ctx context.Context, id uuid.UUID, acc
 	}
 	return nil
 }
+
+func (r *emailRepository) ReplaceSMTPIMAPCredentials(ctx context.Context, id uuid.UUID, creds *models.SmtpImap) error {
+	if creds == nil || creds.SMTP == nil || creds.IMAP == nil {
+		return errors.New("smtp and imap credentials are required")
+	}
+	sealed := make([]string, 0, 6)
+	for _, plain := range []string{creds.SMTP.Host, creds.SMTP.Username, creds.SMTP.Password, creds.IMAP.Host, creds.IMAP.Username, creds.IMAP.Password} {
+		v, err := r.sealCredential(plain)
+		if err != nil {
+			db.CaptureError(err, "", nil, "encrypt-smtp-imap")
+			return err
+		}
+		sealed = append(sealed, v)
+	}
+	query := `
+		UPDATE email_accounts_smtp_imap
+		SET smtp_host = $1, smtp_port = $2, smtp_user = $3, smtp_password = $4,
+		    imap_host = $5, imap_port = $6, imap_user = $7, imap_password = $8
+		WHERE email_account_id = $9
+	`
+	if _, err := r.DB.Exec(ctx, query, sealed[0], creds.SMTP.Port, sealed[1], sealed[2], sealed[3], creds.IMAP.Port, sealed[4], sealed[5], id); err != nil {
+		db.CaptureError(err, query, nil, "exec")
+		return err
+	}
+	return nil
+}

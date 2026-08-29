@@ -215,6 +215,15 @@ func Run(
 	// of this file stays for non-versioned callers.
 	v1.GET("/invitations/lookup", h.PreviewInvitation)
 
+	// Pool link handshake for self-hosted instances: unauthenticated by
+	// nature (the instance has no token yet), so it shares the per-IP budget.
+	poolLinkPublic := v1.Group("/pool-link")
+	poolLinkPublic.Use(m.AuthIPRateLimitMiddleware())
+	{
+		poolLinkPublic.POST("/codes", h.PoolLinkStart)
+		poolLinkPublic.POST("/poll", h.PoolLinkPoll)
+	}
+
 	auth := v1.Group("/auth")
 	// Every unauthenticated auth route shares one per-IP budget. Nothing
 	// throttled these before: RateLimitMiddleware is keyed on the user id and
@@ -1074,6 +1083,45 @@ func Run(
 				ai.PATCH("/connections/:id", m.RequirePermission(models.PermManageSettings), h.UpdateMCPServer)
 				ai.DELETE("/connections/:id", m.RequirePermission(models.PermManageSettings), h.DeleteMCPServer)
 				ai.POST("/connections/:id/refresh", m.RequirePermission(models.PermManageSettings), h.RefreshMCPServer)
+			}
+
+			// Cloud side of the self-hosted warmup pool link: a member approves
+			// a code, and the workspace manages its linked instances.
+			poolLink := jwtOnly.Group("/pool-link")
+			poolLink.Use(m.RateLimitMiddleware(models.RateLimitWrite))
+			{
+				poolLink.GET("/codes/:code", h.PoolLinkDescribeCode)
+				poolLink.POST("/codes/:code/approve", h.PoolLinkApproveCode)
+				poolLink.POST("/codes/:code/deny", h.PoolLinkDenyCode)
+				poolLink.GET("/instances", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.PoolLinkListInstances)
+				poolLink.DELETE("/instances/:id", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.PoolLinkRevokeInstance)
+			}
+			// The linked instance's own surface, authenticated by its token.
+			poolLinkInstance := base.Group("/pool-link/instance")
+			poolLinkInstance.Use(m.PoolLinkAuthMiddleware())
+			{
+				poolLinkInstance.GET("", h.PoolLinkInstanceInfo)
+				poolLinkInstance.DELETE("", h.PoolLinkInstanceDisconnect)
+				poolLinkInstance.GET("/mailboxes", h.PoolLinkInstanceMailboxes)
+				poolLinkInstance.POST("/mailboxes", h.PoolLinkEnroll)
+				poolLinkInstance.GET("/mailboxes/:remoteId", h.PoolLinkGetMailbox)
+				poolLinkInstance.PATCH("/mailboxes/:remoteId", h.PoolLinkPatchMailbox)
+				poolLinkInstance.DELETE("/mailboxes/:remoteId", h.PoolLinkUnenroll)
+			}
+
+			// Self-hosted side: Settings > Warmbly Cloud.
+			cloudLink := jwtOnly.Group("/cloud-link")
+			cloudLink.Use(m.RateLimitMiddleware(models.RateLimitWrite), m.RequireOrganization(), m.RequirePermission(models.PermManageSettings))
+			{
+				cloudLink.GET("", h.CloudLinkStatus)
+				cloudLink.POST("/connect", h.CloudLinkConnectStart)
+				cloudLink.POST("/connect/poll", h.CloudLinkConnectPoll)
+				cloudLink.DELETE("", h.CloudLinkDisconnect)
+				cloudLink.GET("/mailboxes", h.CloudLinkMailboxes)
+				cloudLink.POST("/mailboxes/:id/enroll", h.CloudLinkEnroll)
+				cloudLink.DELETE("/mailboxes/:id/enroll", h.CloudLinkUnenroll)
+				cloudLink.POST("/mailboxes/:id/pause", h.CloudLinkPause)
+				cloudLink.POST("/mailboxes/:id/resume", h.CloudLinkResume)
 			}
 
 			subscriptions := jwtOnly.Group("/subscription")

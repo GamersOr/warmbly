@@ -130,6 +130,9 @@ type EmailRepository interface {
 	NewOauthAccount(ctx context.Context, userID string, data models.NewOauthAccount) (*models.Email, *errx.Error)
 	NewSMTPIMAPAccount(ctx context.Context, userID string, data models.NewSMTPIMAPAccount) (*models.Email, *errx.Error)
 	RefreshBoxToken(ctx context.Context, id uuid.UUID, accessToken, refreshToken string, expiresAt time.Time) error
+	// ReplaceSMTPIMAPCredentials overwrites a mailbox's SMTP/IMAP credential
+	// row, sealed on the same terms as at connect time.
+	ReplaceSMTPIMAPCredentials(ctx context.Context, id uuid.UUID, creds *models.SmtpImap) error
 
 	// ExistsForUser checks whether the given (user_id, email) pair is already connected.
 	ExistsForUser(ctx context.Context, userID, email string) (bool, *errx.Error)
@@ -1333,7 +1336,13 @@ func (r *emailRepository) SetWarmupLifecycle(ctx context.Context, userID, emailA
 		return nil, errx.ErrNotFound
 	}
 
-	return r.Get(ctx, userID, emailAccountID)
+	// Get is organization-scoped; the ownership check already happened in
+	// the UPDATE's WHERE clause, so re-read by id.
+	id, perr := uuid.Parse(emailAccountID)
+	if perr != nil {
+		return nil, errx.ErrUuid
+	}
+	return r.GetByID(ctx, id)
 }
 
 func (r *emailRepository) GetByID(ctx context.Context, emailAccountID uuid.UUID) (*models.Email, *errx.Error) {

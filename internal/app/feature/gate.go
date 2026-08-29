@@ -84,6 +84,14 @@ type featureGateService struct {
 	// sending is unlimited. Stripe deployments (BILLING_PROVIDER=stripe) keep the
 	// subscription-based gating below.
 	selfHost bool
+	// poolLink entitles a workspace with a linked self-hosted instance to warm
+	// its enrolled mailboxes without a paid plan. Nil when not wired.
+	poolLink PoolLinkReader
+}
+
+// PoolLinkReader answers whether a workspace has a live self-hosted link.
+type PoolLinkReader interface {
+	HasActiveLink(ctx context.Context, orgID uuid.UUID) bool
 }
 
 func NewService(subRepo repository.SubscriptionRepository, planRepo repository.PlanRepository) FeatureGateService {
@@ -93,6 +101,9 @@ func NewService(subRepo repository.SubscriptionRepository, planRepo repository.P
 		selfHost: config.BillingProvider() == "none",
 	}
 }
+
+// WirePoolLink attaches the pool-link entitlement after construction.
+func (s *featureGateService) WirePoolLink(r PoolLinkReader) { s.poolLink = r }
 
 // CanSendCampaignEmail checks if an organization can send campaign emails
 func (s *featureGateService) CanSendCampaignEmail(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error) {
@@ -134,10 +145,14 @@ func (s *featureGateService) CanUseWarmup(ctx context.Context, orgID uuid.UUID) 
 	if err != nil {
 		return false, errx.New(errx.Internal, "failed to get subscription")
 	}
-	if sub == nil {
-		return false, nil
+	if sub != nil && sub.CanUseWarmup() {
+		return true, nil
 	}
-	return sub.CanUseWarmup(), nil
+	// A linked self-hosted instance warms for free (up to its allowance).
+	if s.poolLink != nil && s.poolLink.HasActiveLink(ctx, orgID) {
+		return true, nil
+	}
+	return false, nil
 }
 
 // CanUseUnibox checks if an organization can use the unibox feature.

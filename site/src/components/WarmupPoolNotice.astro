@@ -13,7 +13,7 @@ import Icon from './Icon.astro';
 interface Props {
   /** extra margin/utility classes on the outer card */
   class?: string;
-  /** show the cloud waitlist link (default true) */
+  /** show the "connect your instance" link (default true) */
   showWaitlist?: boolean;
 }
 const { class: className = '', showWaitlist = true } = Astro.props;
@@ -29,11 +29,11 @@ const { class: className = '', showWaitlist = true } = Astro.props;
         The shared warmup pool runs on Warmbly Cloud, and self-hosted instances connect to it too. It works because a large base of vetted mailboxes send and reply to each other, and any mailbox that starts landing in spam gets quarantined, so pool quality holds no matter where your instance runs.
       </p>
       <p class="mt-2.5 text-[14px] text-foreground/80 leading-relaxed">
-        There is a free tier to start warming, and everything else runs on your own infrastructure: sending, sequences, the unified inbox, CRM, tracking, and the API.
+        Self-hosting is free. When Warmbly Cloud launches, link your instance from Settings and we run warmup for up to 10 of your mailboxes at no cost, or unlimited for $15 a month. Everything else runs on your own infrastructure: sending, sequences, the unified inbox, CRM, tracking, and the API.
       </p>
       {showWaitlist && (
         <a href="https://app.warmbly.com" class="mt-3 inline-flex items-center gap-1.5 text-[13px] font-medium text-[#0369a1] hover:text-[#075985]">
-          Connect your instance to the pool
+          Join the cloud waitlist
           <Icon name="arrowRight" size={12} />
         </a>
       )}

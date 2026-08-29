@@ -292,6 +292,7 @@ These never accept an API key. They depend on a human-bound session: billing flo
 - `GET /invitations`, `POST /invitations/accept`
 - All of `/organization/*` (create, switch, members, invitations, transfer ownership, avatar, danger zone)
 - All of `/subscription/*` (checkout, portal, cancel, change-plan, preview-change, enterprise-inquiry, discounts, referrals, etc.)
+- All of `/pool-link/*` and `/cloud-link/*` (the self-hosted warmup pool link: approving an instance's code, listing and unlinking instances, and on a self-hosted instance the connect flow and mailbox enrollment). `POST /pool-link/codes` and `POST /pool-link/poll` are public and per-IP rate limited: they are the device-code handshake an instance uses before it has a token, and `/pool-link/instance/*` accepts only an instance token
 - All of `/admin/*`
 
 ### Referrals and discounts

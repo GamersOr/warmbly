@@ -38,6 +38,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/bootstrap"
 	"github.com/warmbly/warmbly/internal/app/campaign"
 	"github.com/warmbly/warmbly/internal/app/cipher"
+	"github.com/warmbly/warmbly/internal/app/cloudlink"
 	"github.com/warmbly/warmbly/internal/app/compose"
 	"github.com/warmbly/warmbly/internal/app/contact"
 	"github.com/warmbly/warmbly/internal/app/credits"
@@ -70,6 +71,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/orgtransfer"
 	"github.com/warmbly/warmbly/internal/app/passkey"
 	"github.com/warmbly/warmbly/internal/app/placement"
+	"github.com/warmbly/warmbly/internal/app/poollink"
 	"github.com/warmbly/warmbly/internal/app/provisioning"
 	"github.com/warmbly/warmbly/internal/app/ratelimit"
 	"github.com/warmbly/warmbly/internal/app/referral"
@@ -152,6 +154,8 @@ func main() {
 	var externalAuthProviders models.ExternalAuthProviders
 	var userService user.UserService
 	var emailService email.EmailService
+	var poolLinkService poollink.Service
+	var cloudLinkService cloudlink.Service
 	var campaignService campaign.CampaignService
 	var analyticsService analytics.AnalyticsService
 	var rateLimitService ratelimit.RateLimitService
@@ -1157,6 +1161,17 @@ func main() {
 			aware.WireLifecycle(repository.NewSendLifecycleRepository(primaryDB))
 		}
 
+		// Self-hosted warmup pool link, both roles. The cloud side hands out
+		// codes and runs enrolled mailboxes as warmup-only accounts; the
+		// self-hosted side keeps the link and mirrors the cloud's state.
+		poolLinkRepository := repository.NewPoolLinkRepository(primaryDB.Pool)
+		poolLinkService = poollink.NewService(poolLinkRepository, emailRepostory, emailService, analyticsService, warmupRepository, featureGateService, organizationService, planRepository)
+		emailService.WirePoolLink(poolLinkRepository)
+		if g, ok := featureGateService.(interface{ WirePoolLink(feature.PoolLinkReader) }); ok {
+			g.WirePoolLink(poolLinkService)
+		}
+		cloudLinkService = cloudlink.NewService(repository.NewCloudLinkRepository(primaryDB.Pool, credEncrypter), emailRepostory)
+
 		rateLimitRepository := repository.NewRateLimitRepository(primaryDB)
 		rateLimitService = ratelimit.NewService(cache, rateLimitRepository)
 		sequenceService = sequence.NewService(sequenceRepostory)
@@ -1458,6 +1473,14 @@ func main() {
 		if instanceSettings != nil {
 			tasksService.SetDomainAuthPolicy(instanceSettings)
 		}
+		if cloudLinkService != nil {
+			tasksService.SetCloudLink(cloudLinkService)
+		}
+		if w, ok := poolLinkService.(interface {
+			WireScheduler(poollink.WarmupScheduler)
+		}); ok {
+			w.WireScheduler(tasksService)
+		}
 
 		// Admin outreach composer — sends from the platform mailer
 		// (SES/SMTP) with a configurable Reply-To, audits every send.
@@ -1725,6 +1748,9 @@ func main() {
 		InstanceChecks:   instanceChecks,
 		InstanceSettings: instanceSettings,
 
+		PoolLinkService:  poolLinkService,
+		CloudLinkService: cloudLinkService,
+
 		TokenService:     tokenService,
 		PasskeyService:   passkeyService,
 		UserService:      userService,
@@ -1872,6 +1898,7 @@ func main() {
 		OrganizationService: organizationService,
 		OAuthService:        oauthService,
 		Cache:               authCache,
+		PoolLinkService:     poolLinkService,
 	}
 
 	oidcH := &middleware.OidcHandler{

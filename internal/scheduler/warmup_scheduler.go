@@ -11,6 +11,7 @@ import (
 
 	"github.com/warmbly/warmbly/internal/app/behavior"
 	"github.com/warmbly/warmbly/internal/app/warmupramp"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
 )
 
@@ -232,7 +233,15 @@ func (s *schedulerService) CalculateNextWarmupTime(ctx context.Context, accountI
 	// here, so operators can add inbound capacity without making those
 	// mailboxes warmup senders.
 	if s.warmupRepo != nil {
-		eligibleRecipients, err := s.warmupRepo.CountEligibleRecipients(ctx, warmupPoolTypeForAccount(account), accountID)
+		poolType := warmupPoolTypeForAccount(account)
+		eligibleRecipients, err := s.warmupRepo.CountEligibleRecipients(ctx, poolType, accountID)
+		if err == nil && eligibleRecipients < config.WarmupPoolTierFallbackFloor {
+			// A thin tier borrows the other tier's proven mailboxes, the same
+			// set the partner selector will offer.
+			if fallback, ferr := s.warmupRepo.GetPoolFallbackRecipients(ctx, poolType, config.WarmupPoolFallbackMinAgeDays*24*time.Hour); ferr == nil {
+				eligibleRecipients += len(fallback)
+			}
+		}
 		if err == nil {
 			if eligibleRecipients <= 0 {
 				return recipientRecheckTime(), nil

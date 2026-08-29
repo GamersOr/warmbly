@@ -184,6 +184,9 @@ type WarmupRepository interface {
 	// runs its mail, in the same vocabulary as SenderPlacementByProvider.
 	GetPoolParticipantProviders(ctx context.Context, poolType string, excludeBlocked bool) (map[uuid.UUID]string, error)
 	CountEligibleRecipients(ctx context.Context, poolType string, excludeAccountID uuid.UUID) (int, error)
+	// GetPoolFallbackRecipients is the other tier's proven-healthy recipients,
+	// used only when the sender's own tier is below the fallback floor.
+	GetPoolFallbackRecipients(ctx context.Context, ownPoolType string, minAge time.Duration) ([]uuid.UUID, error)
 	GetRecentPartnerDomainCounts(ctx context.Context, accountID uuid.UUID, since time.Time) (map[string]int, error)
 
 	// Tampering protection: track delivered warmup mail so a later deletion or
@@ -1583,4 +1586,37 @@ func (r *warmupRepository) GetPoolHealthCounts(ctx context.Context) (map[string]
 		avgScore = totalScore / float64(totalCount)
 	}
 	return counts, avgScore, rows.Err()
+}
+
+// GetPoolFallbackRecipients returns the OTHER pool's recipients that may fill
+// in when a tier runs thin: strictly healthy, never blocked, and members for
+// at least minAge. Paying senders reach proven free mailboxes and free senders
+// reach proven paid ones, but nothing unproven crosses the line.
+func (r *warmupRepository) GetPoolFallbackRecipients(ctx context.Context, ownPoolType string, minAge time.Duration) ([]uuid.UUID, error) {
+	query := `
+		SELECT wpp.email_account_id
+		FROM warmup_pool_participants wpp
+		JOIN warmup_pools wp ON wpp.pool_id = wp.id
+		JOIN email_accounts ea ON ea.id = wpp.email_account_id
+		WHERE wp.pool_type <> $1
+		  AND wpp.participant_role IN ('sender_receiver', 'recipient_only')
+		  AND ea.status = 'active'
+		  AND wpp.health_state = 'healthy'
+		  AND wpp.blocked_at IS NULL
+		  AND wpp.joined_at <= NOW() - make_interval(secs => $2::double precision)
+	`
+	rows, err := r.db.Query(ctx, query, ownPoolType, minAge.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

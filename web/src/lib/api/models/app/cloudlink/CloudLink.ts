@@ -1,0 +1,155 @@
+// Shapes for the self-hosted warmup pool link, both sides.
+//
+// Self-hosted side:  GET/POST /cloud-link/*   (Settings > Warmbly Cloud)
+// Cloud side:        GET/POST /pool-link/*    (the /connect approval page and
+//                    the workspace's linked instances)
+
+export type PoolLinkCodeStatus = "pending" | "approved" | "claimed" | "denied";
+
+export interface PoolLinkOrgInfo {
+    id: string;
+    name: string;
+}
+
+export interface PoolLinkInstance {
+    id: string;
+    organization_id: string;
+    name: string;
+    url: string;
+    version: string;
+    created_at: Date;
+    last_seen_at?: Date | null;
+    revoked_at?: Date | null;
+    mailbox_count: number;
+}
+
+export interface PoolLinkPlan {
+    tier: "free" | "paid";
+    /** null when unlimited */
+    mailbox_limit: number | null;
+    enrolled: number;
+    price_usd: number;
+    upgrade_url?: string;
+    warmup_entitled: boolean;
+}
+
+export interface PoolLinkInstanceInfo {
+    instance: PoolLinkInstance;
+    organization: PoolLinkOrgInfo;
+    plan: PoolLinkPlan;
+}
+
+export interface PoolLinkCode {
+    id: string;
+    user_code: string;
+    instance_name: string;
+    instance_url: string;
+    instance_version: string;
+    status: PoolLinkCodeStatus;
+    organization_id?: string;
+    expires_at: Date;
+    created_at: Date;
+}
+
+export interface PoolLinkWarmupSettings {
+    base: number;
+    max: number;
+    increase: number;
+    reply_rate: number;
+    start_time: string;
+    end_time: string;
+    days: number;
+    timezone: string;
+}
+
+export interface PoolLinkWarmupStatus {
+    enabled: boolean;
+    paused: boolean;
+    paused_at?: Date | null;
+    started_at: Date;
+    current_volume: number;
+    target_volume: number;
+    max_volume: number;
+    reply_rate: number;
+    days_active: number;
+}
+
+export interface PoolLinkWarmupHealth {
+    state: "healthy" | "watch" | "throttled" | "quarantined" | "blocked";
+    score: number;
+    reason?: string;
+    spam_score: number;
+    blocked_until?: Date | null;
+    evaluated_at?: Date | null;
+}
+
+export interface PoolLinkMailboxError {
+    id: string;
+    error_code: string;
+    severity: string;
+    title: string;
+    message: string;
+    action_required?: string | null;
+    created_at: Date;
+}
+
+export interface PoolLinkMailboxState {
+    remote_id: string;
+    email_account_id: string;
+    email: string;
+    provider: string;
+    status: string;
+    enrolled_at: Date;
+    warmup?: PoolLinkWarmupStatus | null;
+    health?: PoolLinkWarmupHealth | null;
+    sent_today: number;
+    sent_7d: number;
+    replied_7d: number;
+    spam_placed_7d: number;
+    errors?: PoolLinkMailboxError[];
+    auth_state: string;
+    settings: PoolLinkWarmupSettings;
+}
+
+export interface CloudLink {
+    cloud_url: string;
+    instance_id: string;
+    organization_name: string;
+    connected_at: Date;
+    last_synced_at?: Date | null;
+    last_error?: string;
+}
+
+export interface CloudLinkStatus {
+    connected: boolean;
+    link?: CloudLink | null;
+    info?: PoolLinkInstanceInfo | null;
+    reachable: boolean;
+    error?: string;
+    default_cloud_url: string;
+}
+
+export interface CloudLinkPendingConnect {
+    user_code: string;
+    verification_url: string;
+    cloud_url: string;
+    expires_at: Date;
+    interval: number;
+}
+
+export interface CloudLinkPollResult {
+    status: PoolLinkCodeStatus;
+    link?: CloudLink | null;
+    info?: PoolLinkInstanceInfo | null;
+}
+
+export interface CloudLinkMailboxRow {
+    id: string;
+    email: string;
+    name: string;
+    provider: string;
+    status: string;
+    enrolled: boolean;
+    enrolled_at?: Date | null;
+    cloud?: PoolLinkMailboxState | null;
+}

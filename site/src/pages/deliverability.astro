@@ -103,12 +103,12 @@ const toneClass = (t: string) => {
 const pools = [
   {
     name: 'Free pool',     accent: '#94a3b8',
-    when: 'Free trial',
-    summary: 'Trial mailboxes only, held to the same thresholds as paid ones.',
+    when: 'Trials and linked self-hosted instances',
+    summary: 'Trial and free linked mailboxes, held to the same thresholds as paid ones.',
     rules: [
-      'Only warms up with other free-plan mailboxes.',
-      'Never sends to a premium mailbox.',
-      'Kept out of the premium health scoring.',
+      'Warms up with other free-tier mailboxes first.',
+      'Borrows proven premium mailboxes only when the tier runs thin.',
+      'Held to the same quarantine bands as premium.',
     ],
   },
   {
@@ -193,8 +193,8 @@ const approach = [
     b: 'Warmup only helps if it is real. Every warmup message carries a signed token that we check when the reply comes back, so a mailbox cannot fake good behaviour by quietly replying to itself.' },
   { h: 'We pull a mailbox before the provider does.',
     b: 'Once Google or SES throttles a domain, the damage has already gone out. We watch each mailbox on a rolling window and act on our own thresholds, which sit weeks earlier than the public ones.' },
-  { h: 'Trials never share a pool with paying customers.',
-    b: 'A trial account should never warm up in the same loop as a paying one. If it picks up bad habits, that is its own problem to work off in recovery.' },
+  { h: 'Paying customers are served first, and never by unproven mailboxes.',
+    b: 'A paid mailbox warms with the premium pool first. Only when a tier runs thin does selection borrow from the other tier, and then only mailboxes that have been healthy members for days. A trial that picks up bad habits works them off in recovery, away from everyone.' },
 ];
 
 // =========================================================================
@@ -539,7 +539,7 @@ const numbers = [
           How mailboxes stay separated.
         </h2>
         <p class="mt-4 text-[15px] text-foreground/70 leading-relaxed">
-          There are two warmup pools, free and premium, and a mailbox does not move between them on its own. A trial warms up only with other trials. When a paid mailbox crosses a band it cools off in recovery before it touches healthy traffic again. Dedicated customers get their own worker and IP, and still warm up inside the premium pool.
+          There are two warmup pools, free and premium, and a mailbox does not move between them on its own. Trials and free linked self-hosted mailboxes warm in the free pool; hosted plans and the pool plan warm in premium, which is always served first. A thin tier borrows only proven healthy mailboxes from the other. When a paid mailbox crosses a band it cools off in recovery before it touches healthy traffic again. Dedicated customers get their own worker and IP, and still warm up inside the premium pool.
         </p>
       </div>
 

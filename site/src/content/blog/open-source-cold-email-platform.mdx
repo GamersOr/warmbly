@@ -50,8 +50,8 @@ You own the domains and their auth. SPF has a 10 DNS-lookup limit, and going ove
 
 You own deliverability monitoring. Warmbly runs its own [open and click tracking](/analytics/) and reports the signals, but you decide what to do when complaint rate climbs toward Amazon SES's 0.1% review line or Google's 0.10% reported-spam threshold. The product's defaults help: a 50 emails/mailbox/day cold cap (hard max 100), a minimum 600 seconds between sends from one mailbox, and warmup that starts at 10/day and ramps +1/day to a 40/day ceiling. A brand-new mailbox typically takes 3 to 6 weeks to reach a stable warmed state. Those numbers ship in the code. Whether your IPs and domains can sustain them is your call. See [how many mailboxes and domains you need](/blog/how-many-mailboxes-and-domains-cold-email/) and [budgets, not server settings](/blog/mailbox-budgets-not-server-settings/).
 
-<Callout title="The shared warmup pool is a cloud feature, not a self-host feature" variant="warn">
-  A warmup pool works by pairing your mailboxes with other participants so providers see two-way conversation. A single self-hosted instance is one organization, so its mailboxes can only talk to each other, which providers learn to recognize. The pool mechanics (partner selection from the same pool, recent partners excluded for 7 days, HMAC-signed verification tokens, health-band quarantine) are in the code, but the network effect that makes a pool credible needs many organizations. That's the [hosted cloud](/pricing/), coming soon.
+<Callout title="The shared warmup pool: link your instance, we run it" variant="info">
+  A warmup pool works by pairing your mailboxes with other participants so providers see two-way conversation. A single self-hosted instance is one organization, so on its own its mailboxes can only talk to each other, which providers learn to recognize. The pool mechanics (partner selection, recent partners excluded, verification tokens, health-band quarantine) are in the code, but the network effect needs many organizations. So a self-hosted instance will link to Warmbly Cloud instead, once it launches: you approve a one-time code, pick the mailboxes to enroll, and Warmbly runs their warmup in the shared pool while everything else stays on your server. Free for up to 10 mailboxes, $15 a month for unlimited. [How it works](https://docs.warmbly.com/guides/warmbly-cloud/).
 </Callout>
 
 ## How the encryption model keeps credentials and message content private
@@ -69,11 +69,11 @@ Two properties matter for self-hosting. First, workers never open a Postgres con
 | Who runs the six services? | You | Warmbly |
 | Who owns the IPs and domains? | You | You (mailboxes), Warmbly (sending infra) |
 | Who holds the KMS key? | You | Warmbly |
-| Shared warmup pool? | No, single-org only | Yes, cross-org pool |
+| Shared warmup pool? | Yes, by linking the instance once the cloud launches (free for 10 mailboxes, $15/month unlimited) | Yes, cross-org pool |
 | Deliverability monitoring? | You watch and react | Managed with the same thresholds |
 | Best fit | You want full data custody and control, and can run infra | You want to send without operating Kafka and IP pools |
 
-Neither is strictly better. If you can run distributed infrastructure and you want your credentials never to leave keys you hold, self-host. If you want sending plus a real warmup pool without operating any of it, the [cloud waitlist](https://app.warmbly.com) is open, and the [14-day trial](/pricing/) gives you 3 mailboxes with no credit card. The free tier exists to try the product, not to run production, and its warmup pool is deliberately not filled.
+Neither is strictly better. If you can run distributed infrastructure and you want your data and campaign credentials to stay on keys you hold, self-host: it is free, and once the cloud launches, linking the instance gets you the real warmup pool too. The [cloud waitlist](https://app.warmbly.com) is open. If you want sending plus warmup without operating any of it, the hosted plans on the [pricing page](/pricing/) come with a 14-day trial and no credit card.
 
 ## Where the code lives and what Apache 2.0 lets you do
 

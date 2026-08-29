@@ -79,6 +79,14 @@ type TasksService interface {
 	// stops warmup sends from a domain that has been failing SPF/DMARC past
 	// the operator's grace window. Nil leaves the state observe-only.
 	SetDomainAuthPolicy(p DomainAuthPolicy)
+	// SetCloudLink wires the self-hosted side of the warmup pool link: a
+	// mailbox the cloud warms gets no local warmup chain.
+	SetCloudLink(r CloudLinkReader)
+}
+
+// CloudLinkReader reports whether Warmbly Cloud warms a mailbox.
+type CloudLinkReader interface {
+	IsEnrolled(ctx context.Context, accountID uuid.UUID) bool
 }
 
 // AIToolSource yields the read-only web tools (search_web, fetch_url) a
@@ -147,6 +155,8 @@ type tasksService struct {
 	// Optional/nil-safe: without it the persisted auth state stays
 	// observe-only and no warmup send is ever blocked.
 	domainAuth DomainAuthPolicy
+	// cloudLink is nil on instances that are not linked to Warmbly Cloud.
+	cloudLink CloudLinkReader
 }
 
 // DomainAuthPolicy resolves whether the sending-domain authentication gate is
@@ -232,6 +242,11 @@ func (s *tasksService) SetAITools(src AIToolSource) {
 // SetDomainAuthPolicy wires the sending-domain authentication gate.
 func (s *tasksService) SetDomainAuthPolicy(p DomainAuthPolicy) {
 	s.domainAuth = p
+}
+
+// SetCloudLink wires the cloud-warmed mailbox check.
+func (s *tasksService) SetCloudLink(r CloudLinkReader) {
+	s.cloudLink = r
 }
 
 // domainAuthBlocked reports whether this mailbox may not send because its

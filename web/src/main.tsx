@@ -80,6 +80,8 @@ import OnboardingLayout from './app/onboarding/layout';
 import OnboardingPage from './app/onboarding/page';
 import SelectOrgPage from './app/select-org/page';
 import InviteAcceptPage from './app/invite/page';
+import ConnectPage from './app/connect/page';
+import WarmblyCloudSettingsPage from './app/app/settings/warmbly-cloud/page';
 import SetupPage from './app/setup/page';
 import SSOCallbackPage from './app/auth/sso/page';
 
@@ -193,6 +195,10 @@ const router = createBrowserRouter([
       {
         path: "invite",
         element: <InviteAcceptPage />,
+      },
+      {
+        path: "connect",
+        element: <ConnectPage />,
       },
       {
         // First-run claim link printed by the backend on an empty database.
@@ -339,6 +345,7 @@ const router = createBrowserRouter([
               { path: "limits", element: <LimitsSettingsPage /> },
               { path: "sending", element: <SendingSettingsPage /> },
               { path: "roles", element: <RolesSettingsPage /> },
+              { path: "warmbly-cloud", element: <WarmblyCloudSettingsPage /> },
               { path: "oauth-apps", element: <OAuthAppsPage /> },
               { path: "webhooks", element: <WebhooksSettingsPage /> },
               { path: "connections", element: <ConnectionsSettingsPage /> },

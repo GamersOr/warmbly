@@ -5,6 +5,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/idempotency"
 	"github.com/warmbly/warmbly/internal/app/oauth"
 	"github.com/warmbly/warmbly/internal/app/organization"
+	"github.com/warmbly/warmbly/internal/app/poollink"
 	"github.com/warmbly/warmbly/internal/app/ratelimit"
 	"github.com/warmbly/warmbly/internal/app/token"
 	"github.com/warmbly/warmbly/internal/infrastructure/cache"
@@ -23,4 +24,7 @@ type Handler struct {
 	// RateLimitService because that one is keyed on a user id that does not
 	// exist yet.
 	Cache *cache.Cache
+	// PoolLinkService authenticates linked self-hosted instances (nil-safe:
+	// the instance routes answer 501 when unset).
+	PoolLinkService poollink.Service
 }
