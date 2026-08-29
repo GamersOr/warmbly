@@ -130,3 +130,32 @@ func TestScoreStillCountsPlainTextURLs(t *testing.T) {
 		t.Errorf("five bare URLs in a plain body were not counted: %+v", res.Issues)
 	}
 }
+
+func TestScoreCountsAnchorsAndBareURLsTogether(t *testing.T) {
+	// Labeled anchors and bare URLs are different destinations. Counting only
+	// the larger of the two sets let six distinct links score a clean 100.
+	body := strings.Repeat("A real sentence about the recipient's work. ", 10)
+	html := "<p>" + body + "</p><p>" +
+		`<a href="https://a.com/1">one</a> <a href="https://b.com/2">two</a> <a href="https://c.com/3">three</a> ` +
+		"https://d.com/4 https://e.com/5 https://f.com/6</p>"
+	plain := body + " one two three https://d.com/4 https://e.com/5 https://f.com/6"
+
+	res := Score("Quick question", html, plain)
+	if !hasIssue(res, "too_many_links") {
+		t.Errorf("three anchors plus three bare URLs were not counted as six: %+v", res.Issues)
+	}
+}
+
+func TestScoreIgnoresTrailingPunctuationWhenMatchingAnchors(t *testing.T) {
+	// A URL that ends a sentence in the plain text is the same link as the
+	// anchor's destination, so it must not count a second time.
+	body := strings.Repeat("A real sentence about the recipient's work. ", 10)
+	html := "<p>" + body + "</p><p>" +
+		`<a href="https://a.com/1">https://a.com/1</a>, <a href="https://b.com/2">https://b.com/2</a>.` + "</p>"
+	plain := body + " https://a.com/1, https://b.com/2."
+
+	res := Score("Quick question", html, plain)
+	if hasIssue(res, "too_many_links") {
+		t.Errorf("two self-linking anchors counted as more than two: %+v", res.Issues)
+	}
+}

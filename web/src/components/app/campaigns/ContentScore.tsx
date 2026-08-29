@@ -1,8 +1,7 @@
-// Advisory campaign-template content check. Scores the current subject + body
-// against /templates/score and renders a 0-100 score (higher = safer) plus a
-// list of non-blocking issues. It re-scores as the copy changes, on the same
-// debounce the composer's live preview uses. Purely advisory: it never blocks
-// saving or sending, it just surfaces deliverability hints.
+// Advisory campaign-template content check: scores the current subject + body
+// against /templates/score and renders a 0-100 score (higher = safer) plus the
+// non-blocking issues found, re-scored on the debounce the composer's preview
+// uses. It never blocks saving or sending.
 
 import * as React from "react";
 import { ShieldCheckIcon, AlertTriangleIcon, AlertCircleIcon } from "lucide-react";
@@ -50,13 +49,14 @@ export default function ContentScore({
         // A step with nothing written yet is not a content problem, so hold the
         // panel quiet rather than scoring an empty draft as spam.
         if (!subject.trim() && !bodyPlain.trim()) {
+            // Clears pending too: a cancelled request can no longer do it.
             setData(null);
+            setPending(false);
             setFailed(false);
             return;
         }
         let cancelled = false;
-        // Pending is set inside the timer, not on every keystroke, so the
-        // spinner marks a request in flight rather than flickering as you type.
+        // Set inside the timer so the spinner marks a request, not a keystroke.
         const t = setTimeout(() => {
             setPending(true);
             scoreTemplate({ subject, body_html: bodyHtml, body_plain: bodyPlain })

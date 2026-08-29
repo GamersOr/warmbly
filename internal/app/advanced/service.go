@@ -166,9 +166,8 @@ type service struct {
 	// audienceRepo measures a campaign's list for the preflight report.
 	// Optional/nil-safe: without it the list check is simply absent.
 	audienceRepo repository.CampaignAudienceRepository
-	// attachmentRepo counts a campaign's attachments so preflight scores copy
-	// the way the send path does. Optional/nil-safe: without it the content
-	// check simply scores zero attachments.
+	// attachmentRepo lets preflight weigh attachments as the send path does.
+	// Optional/nil-safe: without it the content check scores none.
 	attachmentRepo   repository.AttachmentRepository
 	notifier         Notifier
 	realtime         ReplyRealtimePublisher
@@ -1766,11 +1765,9 @@ func (s *service) ProcessRetryableDeadLetters(ctx context.Context) (int, *errx.E
 	return retried, nil
 }
 
-// worstStepContentScore scores each email step's copy and returns the lowest
-// score, that step's number, its leading issue, and how many steps were scored.
-// Only email steps carry copy: a wait or action node has no subject or body and
-// would otherwise score as the campaign's worst content. Step numbers are the
-// step's position, the same number the per-send warning reports.
+// worstStepContentScore returns the lowest-scoring email step's score, number,
+// leading issue, and how many steps were scored. Only email steps carry copy: a
+// wait or action node would otherwise score as the campaign's worst content.
 func worstStepContentScore(seqs []models.Sequence, attachments int) (worst, worstStep int, issue string, scored int) {
 	worst = 101
 	for _, seq := range seqs {
@@ -1800,9 +1797,8 @@ func worstStepContentScore(seqs []models.Sequence, attachments int) (worst, wors
 // it could not read reports as FAILED, not passed: a check that did not run
 // must never look like one that succeeded.
 func (s *service) contentScoreCheck(ctx context.Context, campaignID uuid.UUID, floor int, recommendations *[]string) models.PreflightCheckResult {
+	// Out of range means a row written before the floor was clamped.
 	if floor <= 0 || floor > 100 {
-		// Out of range means a row written before the floor was clamped; fall
-		// back to the default rather than honoring a floor nothing can clear.
 		floor = 60
 	}
 	seqs, err := s.campaignRepo.GetSequencesByCampaignID(ctx, campaignID)
@@ -1829,9 +1825,19 @@ func (s *service) contentScoreCheck(ctx context.Context, campaignID uuid.UUID, f
 	// weighs them too rather than reporting a score the feed later contradicts.
 	attachments := 0
 	if s.attachmentRepo != nil {
-		if atts, aerr := s.attachmentRepo.ListByCampaign(ctx, campaignID); aerr == nil {
-			attachments = len(atts)
+		atts, aerr := s.attachmentRepo.ListByCampaign(ctx, campaignID)
+		if aerr != nil {
+			// Scoring as none would pass copy the send path then warns about.
+			*recommendations = append(*recommendations, "Re-run preflight; the campaign's attachments could not be read.")
+			return models.PreflightCheckResult{
+				Key:         "content_score",
+				Passed:      false,
+				Severity:    "warning",
+				Message:     "Could not read the campaign's attachments to score its copy.",
+				Remediation: "Re-run preflight.",
+			}
 		}
+		attachments = len(atts)
 	}
 
 	worst, worstStep, issue, scored := worstStepContentScore(seqs, attachments)
@@ -1913,6 +1919,5 @@ type AttachmentAware interface {
 	WireAttachments(r repository.AttachmentRepository)
 }
 
-// The wiring in main is a type assertion, so a receiver change would silently
-// stop attaching the repository rather than fail the build.
+// main attaches this by type assertion, which fails silently, so pin it here.
 var _ AttachmentAware = (*service)(nil)

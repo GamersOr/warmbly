@@ -13,8 +13,8 @@ import (
 var (
 	stackedPunct = regexp.MustCompile(`[!?]{2,}`)
 	wordToken    = regexp.MustCompile(`[a-z0-9%]+`)
-	linkPattern  = regexp.MustCompile(`https?://`)
-	hrefPattern  = regexp.MustCompile(`(?i)href\s*=\s*["']?\s*https?://`)
+	linkPattern  = regexp.MustCompile(`https?://[^\s"'<>)\]]*`)
+	hrefPattern  = regexp.MustCompile(`(?i)href\s*=\s*["']?\s*(https?://[^\s"'<>]*)`)
 	htmlTag      = regexp.MustCompile(`(?i)<[a-z!/][^>]*>`)
 	imgTag       = regexp.MustCompile(`(?i)<img\b[^>]*>`)
 )
@@ -188,16 +188,29 @@ func isAllCaps(s string) bool {
 	return letters >= 4
 }
 
-// countLinks counts the links the recipient can click. An anchor carries its
-// URL in the href, which stripping tags throws away, so the text alone reports
-// zero links for a normal HTML email; take the larger of the two counts so a
-// URL used as its own anchor text is not counted twice.
+// countLinks counts every anchor plus any bare URL in the text that is not
+// already an anchor's destination. Stripping tags throws hrefs away, so the text
+// alone reports zero links for an HTML email; matching destinations keeps a URL
+// used as its own anchor text from counting twice.
 func countLinks(text, bodyHTML string) int {
-	n := len(linkPattern.FindAllString(text, -1))
-	if h := len(hrefPattern.FindAllString(bodyHTML, -1)); h > n {
-		n = h
+	destinations := map[string]struct{}{}
+	n := 0
+	for _, m := range hrefPattern.FindAllStringSubmatch(bodyHTML, -1) {
+		destinations[trimURL(m[1])] = struct{}{}
+		n++
+	}
+	for _, u := range linkPattern.FindAllString(text, -1) {
+		if _, seen := destinations[trimURL(u)]; !seen {
+			n++
+		}
 	}
 	return n
+}
+
+// trimURL drops the sentence punctuation a URL picks up in prose, so the same
+// link matches whether it was written inline or as an anchor's destination.
+func trimURL(u string) string {
+	return strings.TrimRight(u, ".,;:!?)]}\"'")
 }
 
 func countTriggerTerms(text string) int {
