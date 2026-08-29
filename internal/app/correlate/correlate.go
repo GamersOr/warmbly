@@ -34,8 +34,8 @@ const (
 	MailboxBurstWindow = 24 * time.Hour
 )
 
-// Recipient-outcome bands. Unlike the shape above, these are what the
-// organization did to real people, so a band here is allowed to cost it volume.
+// Recipient-outcome bands: what the organization did to real people, which is
+// the evidence a band is allowed to act on.
 const (
 	// HarmSample is the send count below which a rate means nothing, and
 	// HarmWindow is how far back outcomes are read.
@@ -157,8 +157,7 @@ func clusterFindings(clusters []repository.Cluster, minMembers, weight int, deta
 }
 
 // harmFindings reads each organization's bounce and complaint rates against the
-// provider bands. Both are measured on the same sends, so a rate here is what
-// the recipients of that window actually did.
+// provider bands. Both are measured on the same sends.
 func harmFindings(outcomes []repository.OrgConduct) map[uuid.UUID]finding {
 	out := make(map[uuid.UUID]finding)
 	for _, o := range outcomes {

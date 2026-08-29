@@ -27,20 +27,22 @@ type Signal struct {
 	// Class is what kind of evidence this is. An empty class falls back to the
 	// key, so a detector that forgets it cannot accidentally restrict anyone.
 	Class SignalClass
+	// Evidence is structured facts a detector reads back on its next run, such
+	// as the counts a running assessment accumulates. Never scored.
+	Evidence map[string]any
 }
 
-// SignalClass separates evidence about how a workspace LOOKS from evidence of
-// what it DID. An agency onboarding clients looks exactly like a ring (#245),
-// so only the second kind may take something away from a customer.
+// SignalClass separates how a workspace looks from what it did. An agency and
+// a ring look alike, so only the second kind may cost a customer anything.
 type SignalClass string
 
 const (
-	// ClassCircumstantial is shape: one office address, one operator opening
-	// several workspaces, a burst of mailboxes. Every one has an ordinary
-	// explanation, so shape accumulates as evidence and restricts nothing.
+	// ClassCircumstantial is shape: a shared address, a shared operator
+	// identity, a burst of mailboxes. All have ordinary explanations, so shape
+	// accumulates as evidence and restricts nothing.
 	ClassCircumstantial SignalClass = "circumstantial"
-	// ClassSubstantive is what an ordinary customer does not do: sign up from a
-	// throwaway domain, import a dead list, draw complaints from recipients.
+	// ClassSubstantive is what an ordinary customer does not do: a throwaway
+	// signup domain, a dead list, complaints from recipients.
 	ClassSubstantive SignalClass = "substantive"
 )
 
@@ -51,27 +53,27 @@ const (
 	RestrictedScore = 50
 	SuspendedScore  = 85
 
-	// CircumstantialCap bounds what shape evidence contributes in total. Four
-	// benign-explainable findings must not add up to a verdict.
+	// CircumstantialCap bounds what shape contributes in total, so several
+	// benign-explainable findings cannot add up to a verdict.
 	CircumstantialCap = 40
 	// SubstantiveFloor is the substantive evidence a band needs before it takes
 	// anything away. Below it the posture tops out at watch.
 	SubstantiveFloor = 25
 )
 
-// substantiveKeys classifies findings whose class did not travel with them:
-// rows written before the class existed, and any detector that leaves it empty.
+// substantiveKeys classifies findings whose class did not travel with them.
 // Anything not listed reads as circumstantial.
 var substantiveKeys = map[string]bool{
-	"signup":         true,
-	"list_quality":   true,
-	"recipient_harm": true,
+	// The aggregate written before the disposable finding was split out.
+	"signup":            true,
+	"signup_disposable": true,
+	"list_quality":      true,
+	"recipient_harm":    true,
 }
 
-// families are detectors that describe ONE fact from two angles: an operator
-// opening several workspaces is found by address AND by identity, and counting
-// both charges an agency twice for one thing. A family contributes its heaviest
-// member once per class.
+// families are detectors that describe one fact from two angles: one operator
+// opening several workspaces is found by address and by identity. A family
+// contributes its heaviest member once per class rather than twice.
 var families = map[string]string{
 	"cluster_signup_ip":       "signup_cluster",
 	"cluster_signup_identity": "signup_cluster",
@@ -175,9 +177,13 @@ func (s *service) RecordSignal(ctx context.Context, orgID uuid.UUID, sig Signal)
 		class = classOf(sig.Key, nil)
 	}
 	return s.apply(ctx, orgID, func(signals map[string]any) map[string]any {
-		signals[sig.Key] = map[string]any{
+		entry := map[string]any{
 			"weight": sig.Weight, "detail": sig.Detail, "class": string(class),
 		}
+		if len(sig.Evidence) > 0 {
+			entry["evidence"] = sig.Evidence
+		}
+		signals[sig.Key] = entry
 		return signals
 	})
 }
@@ -227,10 +233,8 @@ func (s *service) apply(ctx context.Context, orgID uuid.UUID, mutate func(map[st
 	return risk, nil
 }
 
-// Evaluate fuses the evidence into the band and the score to store. Shape
-// evidence raises the score, but only substantive evidence lets a band take
-// something away: a normal agency onboarding clients from one office produces
-// the whole cross-account shape on its own (#245).
+// Evaluate fuses the evidence into the band and score to store. Shape raises
+// the score; only substantive evidence lets a band take something away.
 func Evaluate(signals map[string]any) (models.OrgRiskState, int) {
 	circumstantial, substantive := fuse(signals)
 	if circumstantial > CircumstantialCap {
@@ -255,8 +259,7 @@ func Score(signals map[string]any) int {
 }
 
 // fuse reduces the evidence to one weight per family and totals each class.
-// The heaviest is taken per class, not per family, so a shape finding can never
-// hide a lighter conduct finding filed under the same family.
+// Heaviest per class, so shape can never hide conduct filed in the same family.
 func fuse(signals map[string]any) (circumstantial, substantive int) {
 	type member struct {
 		family string
@@ -368,7 +371,33 @@ func Reason(signals map[string]any) string {
 	return out
 }
 
-// weightOf reads a weight back out of jsonb, where a Go int round-trips as a
+// HasSignal reports whether a detector's finding is currently recorded.
+func HasSignal(risk *models.OrgRisk, key string) bool {
+	if risk == nil {
+		return false
+	}
+	_, ok := risk.Signals[key].(map[string]any)
+	return ok
+}
+
+// EvidenceInt reads one number a detector stored beside its finding. Zero when
+// the finding, the evidence or the field is absent.
+func EvidenceInt(risk *models.OrgRisk, key, field string) int {
+	if risk == nil {
+		return 0
+	}
+	entry, ok := risk.Signals[key].(map[string]any)
+	if !ok {
+		return 0
+	}
+	evidence, ok := entry["evidence"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	return weightOf(evidence[field])
+}
+
+// weightOf reads a number back out of jsonb, where a Go int round-trips as a
 // float64.
 func weightOf(raw any) int {
 	switch v := raw.(type) {

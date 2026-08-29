@@ -20,9 +20,9 @@ type OrgConduct struct {
 }
 
 // OrgConductRepository reads what an organization's mail did to the people who
-// received it. This is the evidence the fused posture may act on: every other
+// received it. This is the evidence the fused posture may act on; every other
 // org-level detector describes how a workspace looks, which an agency and a
-// ring share (#245).
+// ring share.
 type OrgConductRepository interface {
 	// OrgRecipientOutcomes returns per-organization send, bounce and complaint
 	// counts over a window, for organizations past a sample floor. Below the

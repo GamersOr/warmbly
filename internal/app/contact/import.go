@@ -506,30 +506,7 @@ func (s *contactService) ImportCommit(
 
 	res.EndedAt = time.Now().UTC()
 
-	// File the finding on the workspace's posture. Import quality alone can
-	// only reach `watch`, which changes nothing a customer can feel; it takes
-	// several detectors agreeing to restrict anything.
-	if s.orgRisk != nil {
-		switch {
-		case quality.Flagged:
-			if _, err := s.orgRisk.RecordSignal(ctx, orgID, orgrisk.Signal{
-				Key:    "list_quality",
-				Weight: importRiskWeight(quality.BadSharePct),
-				Detail: quality.Summary,
-				// Substantive: this is what the workspace intends to mail.
-				Class: orgrisk.ClassSubstantive,
-			}); err != nil {
-				log.Warn().Str("organization_id", orgID.String()).Msg("could not record the import quality signal")
-			}
-		case quality.Total >= listquality.MinSample:
-			// The newest list big enough to measure is the current answer. Without
-			// this, a first bad import weighs on a workspace forever, which is
-			// half of how an ordinary agency ended up restricted (#245).
-			if _, err := s.orgRisk.ClearSignal(ctx, orgID, "list_quality"); err != nil {
-				log.Warn().Str("organization_id", orgID.String()).Msg("could not retract the import quality signal")
-			}
-		}
-	}
+	s.updateListQuality(ctx, orgID, quality)
 
 	if res.Imported > 0 || res.Updated > 0 || len(skippedLinks) > 0 {
 		s.publishContactsReload(ctx, userID, "contacts:import")
@@ -878,6 +855,56 @@ func toImportQuality(q listquality.Summary) *models.ContactImportQuality {
 		Summary:     q.Summary,
 	}
 }
+
+// updateListQuality files the finding on the running unusable share of
+// everything imported, not on the newest file: a small clean upload must not
+// retract a large bad list whose addresses are still stored.
+func (s *contactService) updateListQuality(ctx context.Context, orgID uuid.UUID, quality listquality.Summary) {
+	// A list too small to measure says nothing either way.
+	if s.orgRisk == nil || quality.Total < listquality.MinSample {
+		return
+	}
+	risk, xerr := s.orgRisk.Get(ctx, orgID)
+	if xerr != nil {
+		// Without the running counts this import cannot be judged, and guessing
+		// would either clear a real finding or invent one.
+		log.Warn().Str("organization_id", orgID.String()).Msg("could not read the posture to fold in the import")
+		return
+	}
+
+	imported, unusable := quality.Total, quality.Malformed+quality.Disposable
+	if orgrisk.HasSignal(risk, listQualitySignal) {
+		prior, priorBad := orgrisk.EvidenceInt(risk, listQualitySignal, "imported"),
+			orgrisk.EvidenceInt(risk, listQualitySignal, "unusable")
+		if prior == 0 {
+			// Filed before these counts travelled with it: assume the smallest
+			// list that could have flagged the workspace, at its worst.
+			prior, priorBad = listquality.MinSample, listquality.MinSample
+		}
+		imported, unusable = imported+prior, unusable+priorBad
+	}
+
+	share := float64(unusable) / float64(imported) * 100
+	if share < listquality.FlagSharePct {
+		if _, err := s.orgRisk.ClearSignal(ctx, orgID, listQualitySignal); err != nil {
+			log.Warn().Str("organization_id", orgID.String()).Msg("could not retract the import quality signal")
+		}
+		return
+	}
+	if _, err := s.orgRisk.RecordSignal(ctx, orgID, orgrisk.Signal{
+		Key:    listQualitySignal,
+		Weight: importRiskWeight(share),
+		Detail: fmt.Sprintf("%.0f%% of the %d addresses imported into this workspace are unusable", share, imported),
+		// Substantive: this is what the workspace intends to mail.
+		Class:    orgrisk.ClassSubstantive,
+		Evidence: map[string]any{"imported": imported, "unusable": unusable},
+	}); err != nil {
+		log.Warn().Str("organization_id", orgID.String()).Msg("could not record the import quality signal")
+	}
+}
+
+// listQualitySignal is the detector key the running assessment is filed under.
+const listQualitySignal = "list_quality"
 
 // importRiskWeight scales the org-risk contribution with how bad the list is,
 // capped so one import can never restrict a workspace on its own.

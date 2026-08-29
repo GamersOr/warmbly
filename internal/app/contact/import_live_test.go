@@ -584,10 +584,11 @@ func TestLiveImportOfAnOrdinaryListIsQuiet(t *testing.T) {
 	}
 }
 
-// Issue #245: the import finding has to come back off. A first bad list that
-// weighs on a workspace forever is half of how an ordinary agency ended up
-// restricted, and only the real import path can prove the retraction runs.
-func TestLiveImportQualityFindingIsFiledAndRetracted(t *testing.T) {
+// Issue #245: the finding has to track everything the workspace has imported.
+// A first bad list that weighs on it forever is half of how an ordinary agency
+// ended up restricted, and a small clean file must not retract a large bad one
+// whose addresses are still stored.
+func TestLiveImportQualityFindingTracksTheRunningList(t *testing.T) {
 	f := newImportFixture(t)
 	handle, err := db.New(context.Background(), os.Getenv("WARMBLY_TEST_DB"))
 	if err != nil {
@@ -597,18 +598,29 @@ func TestLiveImportQualityFindingIsFiledAndRetracted(t *testing.T) {
 	riskRepo := repository.NewOrgRiskRepository(handle)
 	f.svc.(OrgRiskAware).WireOrgRisk(orgrisk.NewService(riskRepo))
 
-	bad := append(repeatEmails("junk%d-not-an-email", 30), repeatEmails("throwaway%d@mailinator.com", 30)...)
-	bad = append(bad, repeatEmails("real%d@acme.test", 40)...)
-	if _, msg := f.commit(t, simpleCSV(bad), &models.ContactImportCommit{
-		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
-	}); msg != "" {
-		t.Fatalf("import rejected: %s", msg)
+	imp := func(emails []string) {
+		t.Helper()
+		if _, msg := f.commit(t, simpleCSV(emails), &models.ContactImportCommit{
+			Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
+		}); msg != "" {
+			t.Fatalf("import rejected: %s", msg)
+		}
+	}
+	posture := func() *models.OrgRisk {
+		t.Helper()
+		risk, rerr := riskRepo.GetOrgRisk(context.Background(), f.org)
+		if rerr != nil {
+			t.Fatalf("GetOrgRisk: %v", rerr)
+		}
+		return risk
 	}
 
-	risk, rerr := riskRepo.GetOrgRisk(context.Background(), f.org)
-	if rerr != nil {
-		t.Fatalf("GetOrgRisk: %v", rerr)
-	}
+	// 60 of 100 addresses unusable.
+	bad := append(repeatEmails("junk%d-not-an-email", 30), repeatEmails("throwaway%d@mailinator.com", 30)...)
+	bad = append(bad, repeatEmails("real%d@acme.test", 40)...)
+	imp(bad)
+
+	risk := posture()
 	entry, ok := risk.Signals["list_quality"].(map[string]any)
 	if !ok {
 		t.Fatalf("the import quality finding was not filed: %v", risk.Signals)
@@ -616,45 +628,96 @@ func TestLiveImportQualityFindingIsFiledAndRetracted(t *testing.T) {
 	if entry["class"] != string(orgrisk.ClassSubstantive) {
 		t.Errorf("class = %v, want substantive", entry["class"])
 	}
+	if got := orgrisk.EvidenceInt(risk, "list_quality", "imported"); got != 100 {
+		t.Errorf("imported = %d, want the running count of 100", got)
+	}
+	if got := orgrisk.EvidenceInt(risk, "list_quality", "unusable"); got != 60 {
+		t.Errorf("unusable = %d, want 60", got)
+	}
 	// A bad list is conduct, but one import is still not enough to restrict.
 	if risk.State != models.OrgRiskWatch {
 		t.Errorf("state = %q, want watch: one import restricts nothing on its own", risk.State)
 	}
 
-	if _, msg := f.commit(t, simpleCSV(repeatEmails("clean%d@acme.test", 40)), &models.ContactImportCommit{
-		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
-	}); msg != "" {
-		t.Fatalf("second import rejected: %s", msg)
+	// 40 clean addresses leave 60 of 140 unusable, which still reads as a bad
+	// list. The finding must survive it.
+	imp(repeatEmails("clean%d@acme.test", 40))
+	risk = posture()
+	if !orgrisk.HasSignal(risk, "list_quality") {
+		t.Fatal("a small clean file retracted a finding the stored list still supports")
+	}
+	if got := orgrisk.EvidenceInt(risk, "list_quality", "imported"); got != 140 {
+		t.Errorf("imported = %d, want 140", got)
 	}
 
-	risk, rerr = riskRepo.GetOrgRisk(context.Background(), f.org)
-	if rerr != nil {
-		t.Fatalf("GetOrgRisk: %v", rerr)
+	// A list too small to measure says nothing either way.
+	imp(repeatEmails("tiny%d@acme.test", 5))
+	if got := orgrisk.EvidenceInt(posture(), "list_quality", "imported"); got != 140 {
+		t.Errorf("imported = %d, want a 5-address file to be ignored", got)
 	}
-	if _, still := risk.Signals["list_quality"]; still {
-		t.Error("the finding survived a clean import of the same workspace")
+
+	// Once the workspace has imported enough good data, 60 of 340 is an
+	// ordinary list and the finding comes off.
+	imp(repeatEmails("more%d@acme.test", 200))
+	risk = posture()
+	if orgrisk.HasSignal(risk, "list_quality") {
+		t.Errorf("the finding survived a list that is now 18%% unusable: %v", risk.Signals)
 	}
 	if risk.State != models.OrgRiskTrusted || risk.Score != 0 {
 		t.Errorf("state = %q/%d, want trusted/0", risk.State, risk.Score)
 	}
+}
 
-	// A list too small to measure says nothing either way, so it must not
-	// clear a finding that is still true.
-	if _, msg := f.commit(t, simpleCSV(bad), &models.ContactImportCommit{
-		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupUpdate, HasHeader: true,
-	}); msg != "" {
-		t.Fatalf("third import rejected: %s", msg)
+// A finding filed before the running counts existed must not be retractable by
+// one clean file either: it is treated as the smallest list that could have
+// flagged the workspace, at its worst, and decays with volume.
+func TestLiveImportQualityFoldsInALegacyFinding(t *testing.T) {
+	f := newImportFixture(t)
+	handle, err := db.New(context.Background(), os.Getenv("WARMBLY_TEST_DB"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
 	}
-	if _, msg := f.commit(t, simpleCSV(repeatEmails("tiny%d@acme.test", 5)), &models.ContactImportCommit{
-		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
-	}); msg != "" {
-		t.Fatalf("fourth import rejected: %s", msg)
+	t.Cleanup(func() { handle.Pool.Close() })
+	riskRepo := repository.NewOrgRiskRepository(handle)
+	f.svc.(OrgRiskAware).WireOrgRisk(orgrisk.NewService(riskRepo))
+
+	ctx := context.Background()
+	if _, err := riskRepo.UpdateOrgRiskSignals(ctx, f.org,
+		func(signals map[string]any) (map[string]any, models.OrgRiskState, int, string) {
+			// Exactly what the previous release wrote: no class, no evidence.
+			signals["list_quality"] = map[string]any{
+				"weight": 30, "detail": "62% of this list is unusable",
+			}
+			state, score := orgrisk.Evaluate(signals)
+			return signals, state, score, orgrisk.Reason(signals)
+		}); err != nil {
+		t.Fatalf("seed legacy finding: %v", err)
 	}
-	risk, rerr = riskRepo.GetOrgRisk(context.Background(), f.org)
+
+	imp := func(emails []string) {
+		t.Helper()
+		if _, msg := f.commit(t, simpleCSV(emails), &models.ContactImportCommit{
+			Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
+		}); msg != "" {
+			t.Fatalf("import rejected: %s", msg)
+		}
+	}
+
+	imp(repeatEmails("clean%d@acme.test", 40))
+	risk, rerr := riskRepo.GetOrgRisk(ctx, f.org)
 	if rerr != nil {
 		t.Fatalf("GetOrgRisk: %v", rerr)
 	}
-	if _, still := risk.Signals["list_quality"]; !still {
-		t.Error("a 5-address import cleared a finding it is too small to speak to")
+	if !orgrisk.HasSignal(risk, "list_quality") {
+		t.Fatal("one clean file retracted a finding of unknown size")
+	}
+
+	imp(repeatEmails("more%d@acme.test", 200))
+	risk, rerr = riskRepo.GetOrgRisk(ctx, f.org)
+	if rerr != nil {
+		t.Fatalf("GetOrgRisk: %v", rerr)
+	}
+	if orgrisk.HasSignal(risk, "list_quality") {
+		t.Errorf("the finding survived enough good data to outweigh it: %v", risk.Signals)
 	}
 }

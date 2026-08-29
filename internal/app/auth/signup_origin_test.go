@@ -103,27 +103,46 @@ func (c *capturingRisk) RecordSignal(_ context.Context, _ uuid.UUID, sig orgrisk
 	return &models.OrgRisk{}, nil
 }
 
-// Issue #245: a signup's soft findings describe how it looks, and shape must
-// not be able to restrict a workspace. Only the throwaway domain is conduct.
-func TestSignupRiskClassifiesOnlyDisposableAsSubstantive(t *testing.T) {
+// Only the throwaway domain is evidence about the account. The softer findings
+// describe how a signup looked, and shape must not restrict a workspace, so the
+// two are filed separately instead of fused into one classed score.
+func TestSignupRiskFilesEachClassSeparately(t *testing.T) {
 	for _, tt := range []struct {
+		name  string
 		email string
 		ip    string
-		want  orgrisk.SignalClass
+		want  map[string]orgrisk.Signal
 	}{
-		{"ada.lovelace+signup@gmail.com", "", orgrisk.ClassCircumstantial},
-		{"ops@agency", "203.0.113.5", orgrisk.ClassCircumstantial},
-		{"grow@mailinator.com", "203.0.113.5", orgrisk.ClassSubstantive},
+		{"an ordinary signup files nothing", "ada@acme.com", "203.0.113.5", map[string]orgrisk.Signal{}},
+		{"soft findings only", "ada.lovelace+signup@gmail.com", "", map[string]orgrisk.Signal{
+			"signup": {Weight: 10, Class: orgrisk.ClassCircumstantial},
+		}},
+		{"a throwaway domain with a soft finding beside it", "grow@mailinator.com", "", map[string]orgrisk.Signal{
+			"signup_disposable": {Weight: 35, Class: orgrisk.ClassSubstantive},
+			"signup":            {Weight: 5, Class: orgrisk.ClassCircumstantial},
+		}},
 	} {
-		risk := &capturingRisk{}
-		svc := &authService{orgRisk: risk}
-		svc.recordSignupRisk(context.Background(), uuid.New(), tt.email, SignupOrigin{IP: tt.ip})
+		t.Run(tt.name, func(t *testing.T) {
+			risk := &capturingRisk{}
+			svc := &authService{orgRisk: risk}
+			svc.recordSignupRisk(context.Background(), uuid.New(), tt.email, SignupOrigin{IP: tt.ip})
 
-		if len(risk.got) != 1 {
-			t.Fatalf("%s filed %d signals, want exactly one", tt.email, len(risk.got))
-		}
-		if risk.got[0].Class != tt.want {
-			t.Errorf("%s class = %q, want %q", tt.email, risk.got[0].Class, tt.want)
-		}
+			if len(risk.got) != len(tt.want) {
+				t.Fatalf("filed %d signals, want %d: %+v", len(risk.got), len(tt.want), risk.got)
+			}
+			for _, got := range risk.got {
+				want, ok := tt.want[got.Key]
+				if !ok {
+					t.Errorf("unexpected signal %q", got.Key)
+					continue
+				}
+				if got.Weight != want.Weight || got.Class != want.Class {
+					t.Errorf("%s = %d/%q, want %d/%q", got.Key, got.Weight, got.Class, want.Weight, want.Class)
+				}
+				if got.Detail == "" {
+					t.Errorf("%s carries no reason for review", got.Key)
+				}
+			}
+		})
 	}
 }

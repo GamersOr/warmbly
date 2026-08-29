@@ -133,7 +133,7 @@ Signals come in two kinds, and only one of them can cost you volume.
 
 **What a workspace does to recipients** is what a posture acts on: an import that is mostly unusable addresses, a bounce rate at or above `5%`, or a complaint rate at or above `0.1%`. Rates are measured over at least `100` sends in the last `30 days`, because below that a percentage is noise. A rate past the point providers themselves act on, `10%` bounces or `0.3%` complaints, is enough to restrict a workspace on its own.
 
-Postures are re-derived nightly, so a restriction lifts on its own once the evidence behind it no longer holds. A suspension is the exception: it stays until it is reviewed, because time passing is not evidence that anything changed.
+Import quality is measured across everything a workspace has imported rather than per file, so one clean upload does not erase a bad list that is still stored, and the finding fades as good data outweighs it. Postures are re-derived nightly, so a restriction lifts on its own once the evidence behind it no longer holds. A suspension is the exception: it stays until it is reviewed, because time passing is not evidence that anything changed.
 
 ## How to read it
 
