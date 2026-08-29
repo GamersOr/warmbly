@@ -105,8 +105,7 @@ func (h *Handler) renderOAuthCallback(c *gin.Context, provider string) {
 	state := c.Query("state")
 	providerErr := c.Query("error")
 
-	// A brokered consent (linked instance) completes here and lands back on
-	// the instance; there is no opener on our origin to post to.
+	// A brokered consent has no opener on our origin; it completes here and redirects to the instance.
 	if h.PoolLinkService != nil && strings.HasPrefix(state, poollink.BrokerStatePrefix) {
 		if to := h.PoolLinkService.CompleteOAuthCallback(c.Request.Context(), provider, code, state, providerErr); to != "" {
 			c.Redirect(http.StatusFound, to)

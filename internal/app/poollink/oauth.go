@@ -110,8 +110,7 @@ func (s *service) StartOAuth(ctx context.Context, inst *models.PoolLinkInstance,
 	return &models.PoolLinkOAuthStartResponse{URL: authURL, Session: session}, nil
 }
 
-// CompleteOAuthCallback finishes a brokered consent server-side and returns
-// where to send the browser. Never errors: every outcome lands on the instance.
+// CompleteOAuthCallback finishes a brokered consent; every outcome redirects to the instance.
 func (s *service) CompleteOAuthCallback(ctx context.Context, provider, code, state, providerErr string) string {
 	if s.cache == nil {
 		return ""
@@ -181,7 +180,7 @@ func (s *service) connectBrokered(ctx context.Context, st brokerState, code stri
 	return remoteID, nil
 }
 
-// startWarmup brings a freshly linked mailbox into the pool; failures are retried by the reconciler.
+// startWarmup: failures here are retried by the reconciler.
 func (s *service) startWarmup(ctx context.Context, userID string, accountID uuid.UUID) {
 	if _, xerr := s.emailSvc.SetWarmupLifecycle(ctx, userID, accountID.String(), "start"); xerr != nil {
 		log.Warn().Str("account_id", accountID.String()).Msg("pool link: warmup start failed after enrollment")
@@ -218,9 +217,7 @@ func (s *service) FinishOAuth(ctx context.Context, inst *models.PoolLinkInstance
 	return s.GetMailbox(ctx, inst, res.RemoteID)
 }
 
-// AccessToken mints a short-lived provider token for a managed mailbox. This
-// is the enforcement point: a revoked link, a removed or inactive mailbox, or
-// a hard-blocked one gets no token and the instance stops sending from it.
+// AccessToken is the enforcement point: a revoked link or a removed, inactive or blocked mailbox gets no token.
 func (s *service) AccessToken(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) (*models.PoolLinkAccessToken, *errx.Error) {
 	m, err := s.repo.GetMailboxByRemote(ctx, inst.ID, remoteID)
 	if err != nil {
@@ -286,4 +283,24 @@ func (s *service) Adopt(ctx context.Context, inst *models.PoolLinkInstance, req 
 		s.startWarmup(ctx, userID, acc.ID)
 	}
 	return s.GetMailbox(ctx, inst, req.RemoteID)
+}
+
+// VerifyWarmupToken lets a linked instance tell the cloud's warmup mail apart
+// from anything else arriving in a mailbox it warms.
+func (s *service) VerifyWarmupToken(ctx context.Context, inst *models.PoolLinkInstance, remoteID, token uuid.UUID) (bool, *errx.Error) {
+	m, err := s.repo.GetMailboxByRemote(ctx, inst.ID, remoteID)
+	if err != nil {
+		return false, errx.InternalError()
+	}
+	if m == nil {
+		return false, ErrMailboxNotFound
+	}
+	if s.warmup == nil {
+		return false, nil
+	}
+	t, err := s.warmup.FindWarmupToken(ctx, token)
+	if err != nil {
+		return false, errx.InternalError()
+	}
+	return t != nil && t.RecipientAccountID == m.EmailAccountID, nil
 }

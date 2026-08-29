@@ -13,8 +13,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// Brokered OAuth: the cloud runs a consent on its own OAuth app for a linked
-// instance, keeps the grant, and mints access tokens on request.
+// Brokered OAuth: consent on this deployment's OAuth app for a linked instance; the grant stays here.
 
 func (s *emailService) OAuthAuthorizeURL(provider models.InboxProvider, state string) (string, *errx.Error) {
 	cfg, xerr := s.oauthConfigFor(provider)
@@ -74,8 +73,7 @@ func (s *emailService) OAuthConnectWithCode(ctx context.Context, userID string, 
 	return acc, nil
 }
 
-// OAuthAccessToken returns a live access token, refreshing and re-sealing the
-// stored grant when it is within two minutes of expiry.
+// OAuthAccessToken refreshes and re-seals the grant when within two minutes of expiry.
 func (s *emailService) OAuthAccessToken(ctx context.Context, accountID uuid.UUID) (*oauth2.Token, *errx.Error) {
 	acc, xerr := s.emailRepository.GetByID(ctx, accountID)
 	if xerr != nil {

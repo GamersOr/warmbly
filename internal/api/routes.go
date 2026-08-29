@@ -1130,6 +1130,7 @@ func Run(
 				poolLinkInstance.POST("/oauth/start", h.PoolLinkOAuthStart)
 				poolLinkInstance.POST("/oauth/finish", h.PoolLinkOAuthFinish)
 				poolLinkInstance.GET("/mailboxes/:remoteId/token", h.PoolLinkAccessToken)
+				poolLinkInstance.GET("/mailboxes/:remoteId/warmup-tokens/:token", h.PoolLinkVerifyWarmupToken)
 				poolLinkInstance.GET("/workspace-mailboxes", h.PoolLinkWorkspaceMailboxes)
 				poolLinkInstance.POST("/mailboxes/adopt", h.PoolLinkAdopt)
 			}

@@ -393,3 +393,26 @@ func (h *Handler) PoolLinkAdopt(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, state)
 }
+
+func (h *Handler) PoolLinkVerifyWarmupToken(c *gin.Context) {
+	inst := middleware.GetPoolLinkInstance(c)
+	if inst == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	remoteID, ok := poolLinkRemoteID(c)
+	if !ok {
+		return
+	}
+	token, err := uuid.Parse(c.Param("token"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"valid": false})
+		return
+	}
+	valid, xerr := h.PoolLinkService.VerifyWarmupToken(c.Request.Context(), inst, remoteID, token)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"valid": valid})
+}

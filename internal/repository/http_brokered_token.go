@@ -14,9 +14,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// BrokeredTokenClient is the worker's way to a credential for a mailbox that
-// Warmbly Cloud manages: the backend brokers a short-lived access token, the
-// refresh grant never reaches this process.
+// BrokeredTokenClient fetches short-lived access tokens for cloud-managed mailboxes; no refresh grant reaches the worker.
 type BrokeredTokenClient interface {
 	Token(ctx context.Context, accountID uuid.UUID) (*oauth2.Token, error)
 	// Source adapts a mailbox to oauth2; the returned source caches until expiry.
@@ -44,8 +42,7 @@ func NewHTTPBrokeredTokenClient(baseURL, token string) (BrokeredTokenClient, err
 	}, nil
 }
 
-// BrokeredTokenRefused is a definitive no from the cloud (revoked, blocked,
-// removed): callers should treat it as an authentication failure, not a blip.
+// BrokeredTokenRefused is a definitive no from the cloud, not a transient failure.
 type BrokeredTokenRefused struct {
 	Code    string
 	Message string

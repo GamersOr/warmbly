@@ -3,6 +3,7 @@ package cloudlink
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,9 +14,7 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 )
 
-// Cloud-managed mailboxes: Google and Microsoft sign-in runs on Warmbly
-// Cloud's OAuth app, the grant stays there, and this instance sends with
-// access tokens it draws from the cloud.
+// Cloud-managed mailboxes: the grant lives on Warmbly Cloud; this instance sends with brokered access tokens.
 
 var (
 	ErrNotManaged   = errx.NewWithIdentifier(errx.NotFound, "cloud_link_not_managed", "This mailbox is not managed by Warmbly Cloud.")
@@ -98,7 +97,7 @@ func (s *service) mirror(ctx context.Context, l *models.CloudLink, orgID, userID
 		Email:          state.Email,
 	})
 	if xerr != nil {
-		// The cloud side exists without a local twin: release it so the next attempt is clean.
+		// Release the cloud side so the next attempt is clean.
 		if rerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+state.RemoteID.String(), nil, nil); rerr != nil {
 			log.Error().Str("remote_id", state.RemoteID.String()).Str("code", rerr.Identifier).Msg("cloud link: local mirror failed and the cloud link could not be released")
 		}
@@ -146,8 +145,7 @@ func (s *service) Adopt(ctx context.Context, orgID, userID, cloudAccountID uuid.
 	return s.mirror(ctx, l, orgID, userID, &state)
 }
 
-// AccessToken is what the worker (through the backend) sends and syncs with.
-// Cached until two minutes before expiry so a busy mailbox does not hammer the cloud.
+// AccessToken is the worker's credential for a managed mailbox, cached briefly.
 func (s *service) AccessToken(ctx context.Context, accountID uuid.UUID) (*models.PoolLinkAccessToken, *errx.Error) {
 	s.mu.Lock()
 	if c, ok := s.tokens[accountID]; ok && time.Now().Before(c.expires) {
@@ -171,7 +169,7 @@ func (s *service) AccessToken(ctx context.Context, accountID uuid.UUID) (*models
 	if xerr := s.clientFor(l).do(ctx, http.MethodGet, "/instance/mailboxes/"+m.RemoteID.String()+"/token", nil, &tok); xerr != nil {
 		return nil, xerr
 	}
-	// Cap the cache so a revocation or block on the cloud bites within minutes, not an hour.
+	// Capped so a cloud-side revocation bites within minutes.
 	until := tok.ExpiresAt.Add(-2 * time.Minute)
 	if cap := time.Now().Add(tokenCacheMax); until.After(cap) {
 		until = cap
@@ -202,4 +200,23 @@ func (s *service) removeManaged(ctx context.Context, userID string, m *models.Cl
 		}
 	}
 	return nil
+}
+
+// VerifyWarmupToken asks the cloud whether warmup mail in an enrolled mailbox is its own.
+func (s *service) VerifyWarmupToken(ctx context.Context, accountID uuid.UUID, token string) (bool, error) {
+	m, err := s.repo.GetByAccount(ctx, accountID)
+	if err != nil || m == nil {
+		return false, err
+	}
+	l, xerr := s.link(ctx)
+	if xerr != nil {
+		return false, xerr
+	}
+	var out struct {
+		Valid bool `json:"valid"`
+	}
+	if xerr := s.clientFor(l).do(ctx, http.MethodGet, "/instance/mailboxes/"+m.RemoteID.String()+"/warmup-tokens/"+url.PathEscape(token), nil, &out); xerr != nil {
+		return false, xerr
+	}
+	return out.Valid, nil
 }

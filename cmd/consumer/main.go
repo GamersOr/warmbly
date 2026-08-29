@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/warmbly/warmbly/internal/app/cloudlink"
 	"log"
 	"os"
 	"os/signal"
@@ -373,7 +374,7 @@ func main() {
 		EmailAccountErrorRepository: emailAccountErrorRepo,
 		WarmupRepo:                  warmupRepo,
 		PoolLinkRepo:                repository.NewPoolLinkRepository(primaryDB.Pool),
-		CloudLinkRepo:               repository.NewCloudLinkRepository(primaryDB.Pool, credEncrypter),
+		CloudLink:                   cloudlink.NewService(repository.NewCloudLinkRepository(primaryDB.Pool, credEncrypter), emailRepo, nil),
 		WarmupContentRepo:           repository.NewWarmupContentRepository(primaryDB.Pool),
 		WarmupEngagementRepo:        repository.NewWarmupEngagementRepository(primaryDB.Pool),
 		WarmupService:               warmupService,

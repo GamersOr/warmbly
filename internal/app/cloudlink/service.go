@@ -109,6 +109,8 @@ type Service interface {
 
 	// IsEnrolled is the local warmup scheduler's stand-down check; fails closed to false.
 	IsEnrolled(ctx context.Context, accountID uuid.UUID) bool
+	// VerifyWarmupToken is the consumer's check that warmup mail in an enrolled mailbox is the cloud's.
+	VerifyWarmupToken(ctx context.Context, accountID uuid.UUID, token string) (bool, error)
 }
 
 type service struct {
@@ -257,14 +259,24 @@ func (s *service) clearPending(p *PendingConnect) {
 	s.mu.Unlock()
 }
 
+// linkAlreadyGone: the cloud no longer recognises the instance, so nothing is left to release there.
+func linkAlreadyGone(xerr *errx.Error) bool {
+	switch xerr.Identifier {
+	case "pool_link_revoked", "pool_link_instance_not_found", "unauthorized":
+		return true
+	}
+	return false
+}
+
 func (s *service) Disconnect(ctx context.Context) *errx.Error {
 	l, xerr := s.link(ctx)
 	if xerr != nil {
 		return xerr
 	}
-	// Best effort: an unreachable or revoked cloud must not keep the instance chained to it.
-	if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance", nil, nil); xerr != nil {
-		log.Warn().Str("code", xerr.Identifier).Msg("cloud link: remote disconnect failed; clearing local link anyway")
+	// The cloud must confirm (or already have dropped) the link before local
+	// state goes, or managed mailboxes stay owned there with no way to retry.
+	if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance", nil, nil); xerr != nil && !linkAlreadyGone(xerr) {
+		return xerr
 	}
 	// Managed mirrors have no credential of their own; they end with the link.
 	if rows, err := s.repo.List(ctx); err == nil {

@@ -273,8 +273,7 @@ func (s *emailService) buildAddWorkerEmail(ctx context.Context, acc *models.Emai
 		SaveToSent: &saveToSent,
 	}
 
-	// A managed mailbox has no local credential: the worker draws access
-	// tokens from the backend, which brokers them from the cloud.
+	// A managed mailbox has no local credential; the worker draws brokered tokens.
 	if s.cloudLink != nil {
 		if m, err := s.cloudLink.GetByAccount(ctx, acc.ID); err == nil && m != nil && m.Managed {
 			out.Brokered = true

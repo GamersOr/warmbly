@@ -13,10 +13,8 @@
 // OAuth popup posts {type:"email_oauth_callback", code, state} back here
 // via window.postMessage; we then call OAuth-finish with the user's bearer.
 //
-// On a self-hosted instance linked to Warmbly Cloud, Google and Microsoft
-// sign-in runs on the cloud's OAuth app instead (no BOX_* setup): the popup
-// comes back to /cloud-oauth/done, which posts {type:"cloud_oauth_callback",
-// session} and we redeem the session with /cloud-link/oauth/finish.
+// Linked to Warmbly Cloud: the consent runs on the cloud's app, the popup
+// returns to /cloud-oauth/done, and we redeem its session via /cloud-link/oauth/finish.
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
