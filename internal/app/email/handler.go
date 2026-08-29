@@ -360,7 +360,7 @@ func (s *emailService) canUseWarmupPool(ctx context.Context, account *models.Ema
 }
 
 // orgSuspendedOrRestricted reports whether the workspace's posture bars the
-// paid warmup pool. Fails open, like every other risk read.
+// paid warmup pool. Fails open.
 func (s *emailService) orgSuspendedOrRestricted(ctx context.Context, orgID uuid.UUID) bool {
 	if s.orgRiskRepo == nil {
 		return false
@@ -381,8 +381,8 @@ func (s *emailService) resolveWarmupPoolType(ctx context.Context, account *model
 	if account.OrganizationID == nil {
 		return "free"
 	}
-	// A restricted organization warms in the free pool whatever it pays; the
-	// stored tier is checked after, since it is always set (issue #242).
+	// A restricted organization leaves the paid pool whatever it pays. Checked
+	// before the stored tier, which is never empty and would short-circuit it.
 	if s.orgSuspendedOrRestricted(ctx, *account.OrganizationID) {
 		return "free"
 	}

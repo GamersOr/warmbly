@@ -47,9 +47,8 @@ func adjustmentFor(state models.WarmupHealthState) healthAdjustment {
 	}
 }
 
-// warmupPoolTypeForAccount is the pool the mailbox actually warms in. A
-// restricted organization is held in the free pool whatever tier its mailbox
-// carries, matching the task service's resolution (issue #242).
+// warmupPoolTypeForAccount is the pool the mailbox actually warms in: a restricted
+// organization is held in free whatever tier it carries.
 func (s *schedulerService) warmupPoolTypeForAccount(ctx context.Context, account *models.Email) string {
 	if account == nil {
 		return "premium"

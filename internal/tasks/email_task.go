@@ -744,11 +744,8 @@ func (s *tasksService) resolveWarmupPoolType(ctx context.Context, account *Email
 	if account.OrganizationID == nil {
 		return "free"
 	}
-	// A restricted organization leaves the paid pool whatever it pays: the
-	// shared reputation paying customers depend on is not for spending on a
-	// risky tenant. Checked before the stored tier, which is always set
-	// (schema default 'free', worker assignment writes it) and so would
-	// otherwise short-circuit this gate (issue #242).
+	// A restricted organization leaves the paid pool whatever it pays. Checked
+	// before the stored tier, which is never empty and would short-circuit it.
 	if s.orgSuspendedOrRestricted(ctx, *account.OrganizationID) {
 		return "free"
 	}

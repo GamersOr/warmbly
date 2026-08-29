@@ -123,8 +123,7 @@ type OrgRiskAware interface {
 	WireOrgRisk(r repository.OrgRiskRepository)
 }
 
-// The backend attaches the posture through a type assertion, so a silently
-// unsatisfied interface would leave restricted workspaces in the paid pool.
+// main.go attaches the posture by type assertion, which fails silently.
 var _ OrgRiskAware = (*emailService)(nil)
 
 // SyncBudgetSource is the operator-editable sync fair-use section, satisfied

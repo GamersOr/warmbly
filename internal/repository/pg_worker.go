@@ -496,9 +496,8 @@ func (r *workerRepository) ClearEmailAccountWorker(ctx context.Context, emailAcc
 // UpdateEmailAccountWarmupPoolType writes the tier and moves the mailbox's pool membership to
 // match in one transaction: they record the same fact, and updating only the column left
 // downgraded mailboxes in the premium pool (issue #211). A mailbox in no pool stays in none.
-// The membership move into premium is refused while the owning organization is restricted or
-// suspended, so a worker rebalance cannot readmit a risky tenant to the paid pool (issue #242).
-// The tier column is still written: it records what the workspace pays for, not where it warms.
+// The move into premium is refused while the organization is restricted (issue #242); the tier
+// column is still written, since it records what the workspace pays for, not where it warms.
 func (r *workerRepository) UpdateEmailAccountWarmupPoolType(ctx context.Context, emailAccountID uuid.UUID, poolType string) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
