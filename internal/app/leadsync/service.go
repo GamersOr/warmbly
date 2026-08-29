@@ -303,6 +303,8 @@ func (s *service) SyncNow(ctx context.Context, triggeringUserID, orgID, sourceID
 		CategoryIDs:       src.CategoryIDs,
 		CampaignIDs:       campaignIDs,
 		SubscribedDefault: &subscribed,
+		Source:            models.ContactSourceSheetSync,
+		SourceDetail:      src.SheetTitle,
 	}
 
 	result, ierr := s.contacts.ImportCommit(ctx, triggeringUserID.String(), orgID, bytes.NewReader(csvBytes), "google-sheets-sync.csv", opts)

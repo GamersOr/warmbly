@@ -1,0 +1,151 @@
+package contact
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/scheduler"
+)
+
+// SetNextSendPreviewer wires the scheduler's read-only preview. Optional: with
+// no previewer the campaign state still lists steps and status, just without
+// a next action.
+func (s *contactService) SetNextSendPreviewer(p scheduler.ContactSendPreviewer) { s.previewer = p }
+
+// CampaignStates is the per-campaign panel of the contact drawer: the flow,
+// this contact's progress, the lead status, and a scheduler-backed next
+// action.
+func (s *contactService) CampaignStates(ctx context.Context, orgID, contactID uuid.UUID) ([]models.ContactCampaignState, *errx.Error) {
+	states, xerr := s.contactRepository.ListCampaignStates(ctx, orgID, contactID)
+	if xerr != nil {
+		return nil, xerr
+	}
+	for i := range states {
+		s.fillNextAction(ctx, &states[i], contactID)
+	}
+	return states, nil
+}
+
+func (s *contactService) fillNextAction(ctx context.Context, st *models.ContactCampaignState, contactID uuid.UUID) {
+	switch st.LeadStatus {
+	case models.LeadStatusUnsubscribed:
+		st.EndedReason = "Unsubscribed, sending stopped"
+		return
+	case models.LeadStatusBounced:
+		st.EndedReason = "Bounced, sending stopped"
+		return
+	case models.LeadStatusReplied:
+		st.EndedReason = "Replied, sending stopped"
+		return
+	case models.LeadStatusFailed:
+		st.EndedReason = "Dropped after every send attempt failed"
+		return
+	case models.LeadStatusUndeliverable:
+		st.EndedReason = "Address failed verification, so the campaign skips it"
+		return
+	}
+	if s.previewer == nil {
+		return
+	}
+	pv, err := s.previewer.PreviewContactSend(ctx, st.CampaignID, contactID)
+	if err != nil {
+		// The panel still shows the flow and status; only the preview is missing.
+		log.Warn().Err(err).Str("campaign_id", st.CampaignID.String()).Str("contact_id", contactID.String()).Msg("contact next-send preview failed")
+		return
+	}
+	route := pv.Route
+	if route.Excluded == "suppressed" {
+		st.EndedReason = "Suppressed, sending stopped"
+		return
+	}
+	current := "the current step"
+	if st.CurrentStep != nil {
+		current = st.CurrentStep.Label
+	}
+	if route.Target == nil {
+		if route.WaitUntil != nil {
+			st.Next = &models.ContactNextAction{
+				StepLabel:  "Depends on their response",
+				State:      models.NextActionWaiting,
+				NotBefore:  route.WaitUntil,
+				Constraint: "Waiting to see how they respond to " + current,
+			}
+			return
+		}
+		if st.LeadStatus == models.LeadStatusCompleted {
+			st.EndedReason = "Every step has been sent"
+		} else if st.CurrentStep != nil {
+			st.EndedReason = "Reached the end of the flow"
+		} else {
+			st.EndedReason = "The campaign has no steps"
+		}
+		return
+	}
+
+	next := &models.ContactNextAction{
+		StepID:      route.Target,
+		StepLabel:   "Next step",
+		State:       pv.State,
+		ScheduledAt: pv.ScheduledAt,
+		NotBefore:   pv.NotBefore,
+	}
+	for _, step := range st.Steps {
+		if step.ID == *route.Target {
+			next.StepLabel, next.Kind, next.Subject = step.Label, step.Kind, step.Subject
+			break
+		}
+	}
+	next.Constraint = constraintCopy(pv.Constraint, st, route.DueAt, current)
+	st.Next = next
+}
+
+// constraintCopy turns the scheduler's gate into the sentence the drawer shows.
+func constraintCopy(c scheduler.ContactSendConstraint, st *models.ContactCampaignState, dueAt *time.Time, current string) string {
+	switch c {
+	case scheduler.ConstraintStepWait:
+		if st.CurrentStep != nil && st.CurrentStep.SentAt != nil && dueAt != nil {
+			days := int(math.Round(dueAt.Sub(*st.CurrentStep.SentAt).Hours() / 24))
+			if days >= 1 {
+				unit := "days"
+				if days == 1 {
+					unit = "day"
+				}
+				return fmt.Sprintf("Waiting %d %s after %s", days, unit, current)
+			}
+		}
+		return "Waiting for the step's delay after " + current
+	case scheduler.ConstraintConditionWindow:
+		return "Waiting to see how they respond to " + current
+	case scheduler.ConstraintStartDate:
+		return "Waiting for the campaign's start date"
+	case scheduler.ConstraintSendingWindow:
+		return "Outside the campaign's sending window"
+	case scheduler.ConstraintNewLeadCap:
+		return "Today's new-lead limit is reached"
+	case scheduler.ConstraintCapacity:
+		return "No mailbox can take it right now (daily cap, spacing, or health)"
+	case scheduler.ConstraintCampaignInactive:
+		switch st.CampaignStatus {
+		case "draft":
+			return "Campaign has not been started"
+		case "completed":
+			return "Campaign has finished"
+		case "paused_guardrail":
+			return "Campaign was auto-paused by a guardrail"
+		}
+		return "Campaign is paused"
+	case scheduler.ConstraintNoMailbox:
+		return "No sending mailbox is attached to the campaign"
+	case scheduler.ConstraintDomainAuth:
+		return "Every sending domain fails SPF/DMARC authentication"
+	case scheduler.ConstraintCampaignEnded:
+		return "Campaign is past its end date"
+	}
+	return ""
+}

@@ -75,6 +75,9 @@ type ContactRepository interface {
 	GetDetail(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID) (*models.ContactDetail, *errx.Error)
 	ListSentEmails(ctx context.Context, userID, contactID uuid.UUID, limit int, beforeSentAt *time.Time, beforeTaskID *uuid.UUID) (*models.ContactSentEmailsResult, *errx.Error)
 	ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, before *time.Time) (*models.ContactTimelineResult, *errx.Error)
+	// ListCampaignStates returns the contact's campaigns with their flow,
+	// this contact's progress on every step, and the derived lead status.
+	ListCampaignStates(ctx context.Context, orgID, contactID uuid.UUID) ([]models.ContactCampaignState, *errx.Error)
 }
 
 type contactRepository struct {
@@ -220,6 +223,16 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			cats = append(cats, cid)
 		}
 
+		// First-touch attribution. Every creation path stamps one; an empty
+		// value is recorded honestly rather than guessed.
+		if lead.Source == "" {
+			lead.Source = models.ContactSourceUnknown
+		}
+		if !lead.Source.Valid() {
+			return nil, errx.New(errx.BadRequest, "invalid contact source")
+		}
+		lead.SourceDetail = strings.TrimSpace(lead.SourceDetail)
+
 		normalized = append(normalized, lead)
 		campaignIDs = append(campaignIDs, cids)
 		categoryIDs = append(categoryIDs, cats)
@@ -241,9 +254,11 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			// inference sites for one placeholder, so it is passed twice with
 			// explicit casts. NULL means "leave the flag alone".
 			`INSERT INTO contacts (
-			 id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields, subscribed
+			 id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields, subscribed,
+			 source, source_detail, first_seen_at
 			 ) VALUES (
-			  gen_random_uuid(), $1, $2, $3, $4, LOWER($5), $6, $7, $8, COALESCE($9::boolean, TRUE)
+			  gen_random_uuid(), $1, $2, $3, $4, LOWER($5), $6, $7, $8, COALESCE($9::boolean, TRUE),
+			  $11, $12, NOW()
 			 )
 			 ON CONFLICT (user_id, (LOWER(email))) DO UPDATE SET
 			  organization_id = COALESCE(contacts.organization_id, EXCLUDED.organization_id),
@@ -256,24 +271,29 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			  custom_fields = contacts.custom_fields || EXCLUDED.custom_fields,
 			  subscribed = COALESCE($10::boolean, contacts.subscribed),
 			  updated_at = NOW()
-			 RETURNING id, first_name, last_name, email, company, phone, custom_fields, subscribed, updated_at, created_at`,
+			 -- xmax = 0 only on a fresh row: the source is first-touch, so an
+			 -- upsert that hit an existing contact is not a creation.
+			 RETURNING id, first_name, last_name, email, company, phone, custom_fields, subscribed, updated_at, created_at, (xmax = 0)`,
 			userID, orgID, lead.FirstName, lead.LastName, lead.Email, lead.Company, lead.Phone, lead.CustomFields,
-			lead.Subscribed, lead.Subscribed,
+			lead.Subscribed, lead.Subscribed, string(lead.Source), lead.SourceDetail,
 		)
 	}
 
 	br := tx.SendBatch(ctx, &insertBatch)
 
 	ncontacts := make([]models.Contact, 0, len(normalized))
+	var createdIDs []uuid.UUID
+	created := make([]bool, 0, len(normalized))
 	for range normalized {
 		ncon := models.Contact{
 			Campaigns:  []models.MiniCampaign{},
 			Categories: []models.MiniCategory{},
 			Subscribed: true,
 		}
+		var inserted bool
 		if err := br.QueryRow().Scan(
 			&ncon.ID, &ncon.FirstName, &ncon.LastName, &ncon.Email, &ncon.Company,
-			&ncon.Phone, &ncon.CustomFields, &ncon.Subscribed, &ncon.UpdatedAt, &ncon.CreatedAt,
+			&ncon.Phone, &ncon.CustomFields, &ncon.Subscribed, &ncon.UpdatedAt, &ncon.CreatedAt, &inserted,
 		); err != nil {
 			br.Close()
 			db.CaptureError(err, "", nil, "batch queryrow")
@@ -285,11 +305,19 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			ncon.CustomFields = map[string]string{}
 		}
 		ncontacts = append(ncontacts, ncon)
+		created = append(created, inserted)
+		if inserted {
+			createdIDs = append(createdIDs, ncon.ID)
+		}
 	}
 	if err := br.Close(); err != nil {
 		db.CaptureError(err, "", nil, "batch close")
 		return nil, errx.InternalError()
 	}
+
+	// Lifecycle events for the activity timeline, written in this transaction.
+	actor := actorID(userID)
+	var campaignLinks, categoryLinks []contactLink
 
 	// Link campaigns. Original code's RETURNING clause referenced a
 	// non-inserted table, which is invalid SQL; resolve by inserting
@@ -300,15 +328,35 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		if len(cids) == 0 {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `
+		lrows, err := tx.Query(ctx, `
 			INSERT INTO campaign_leads (contact_id, campaign_id)
 			SELECT $1, c.id
 			FROM   campaigns c
 			WHERE  c.id = ANY($2) AND c.organization_id = $3
 			ON CONFLICT (campaign_id, contact_id) DO NOTHING
-		`, ncontacts[i].ID, cids, orgID); err != nil {
+			RETURNING campaign_id
+		`, ncontacts[i].ID, cids, orgID)
+		if err != nil {
 			db.CaptureError(err, "", nil, "campaign_leads insert")
 			return nil, errx.InternalError()
+		}
+		added, err := collectLinks(lrows, ncontacts[i].ID)
+		if err != nil {
+			db.CaptureError(err, "", nil, "campaign_leads returning")
+			return nil, errx.InternalError()
+		}
+		campaignLinks = append(campaignLinks, added...)
+		// A contact created from a campaign's Leads tab is attributed to that
+		// campaign by name, resolved here rather than trusted from the client.
+		if created[i] && normalized[i].Source == models.ContactSourceCampaign && normalized[i].SourceDetail == "" && len(added) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE contacts SET source_detail = cam.name
+				FROM   campaigns cam
+				WHERE  contacts.id = $1 AND cam.id = $2
+			`, ncontacts[i].ID, added[0].LinkID); err != nil {
+				db.CaptureError(err, "", nil, "source_detail from campaign")
+				return nil, errx.InternalError()
+			}
 		}
 
 		rows, err := tx.Query(ctx, `
@@ -345,16 +393,24 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		if len(cats) == 0 {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `
+		crows, err := tx.Query(ctx, `
 			INSERT INTO contact_categories (contact_id, category_id)
 			SELECT $1, cat.id
 			FROM   categories cat
 			WHERE  cat.id = ANY($2) AND cat.user_id = $3
 			ON CONFLICT (contact_id, category_id) DO NOTHING
-		`, ncontacts[i].ID, cats, userID); err != nil {
+			RETURNING category_id
+		`, ncontacts[i].ID, cats, userID)
+		if err != nil {
 			db.CaptureError(err, "", nil, "contact_categories insert")
 			return nil, errx.InternalError()
 		}
+		added, err := collectLinks(crows, ncontacts[i].ID)
+		if err != nil {
+			db.CaptureError(err, "", nil, "contact_categories returning")
+			return nil, errx.InternalError()
+		}
+		categoryLinks = append(categoryLinks, added...)
 
 		rows, err := tx.Query(ctx, `
 			SELECT cat.id, cat.title, cat.color
@@ -383,6 +439,19 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			return nil, errx.InternalError()
 		}
 		ncontacts[i].Categories = linked
+	}
+
+	if err := logContactCreated(ctx, tx, orgID, actor, createdIDs); err != nil {
+		db.CaptureError(err, "", nil, "contact_created activity")
+		return nil, errx.InternalError()
+	}
+	if err := logCampaignLinks(ctx, tx, orgID, actor, models.ActivityCampaignAdded, campaignLinks); err != nil {
+		db.CaptureError(err, "", nil, "campaign_added activity")
+		return nil, errx.InternalError()
+	}
+	if err := logCategoryLinks(ctx, tx, orgID, actor, models.ActivityCategoryAdded, categoryLinks); err != nil {
+		db.CaptureError(err, "", nil, "category_added activity")
+		return nil, errx.InternalError()
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1367,6 +1436,9 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		return nil, errx.InternalError()
 	}
 
+	// Membership changes, written to the activity timeline before commit.
+	var campaignsAdded, campaignsRemoved, categoriesAdded, categoriesRemoved []contactLink
+
 	// Unmarshal current campaigns
 	if len(campaignsJSON) > 0 {
 		var campaigns []struct {
@@ -1499,12 +1571,20 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 				  AND cl.campaign_id = cam.id
 				  AND cam.id = ANY($2::uuid[])
 				  AND cam.organization_id = $3
+				RETURNING cl.campaign_id
 			`
 			params := []any{contactID, toDelete, orgID}
-			if _, err = tx.Exec(ctx, query, params...); err != nil {
+			rows, err := tx.Query(ctx, query, params...)
+			if err != nil {
 				db.CaptureError(err, query, params, "exec")
 				return nil, errx.InternalError()
 			}
+			removed, err := collectLinks(rows, c.ID)
+			if err != nil {
+				db.CaptureError(err, query, params, "returning")
+				return nil, errx.InternalError()
+			}
+			campaignsRemoved = append(campaignsRemoved, removed...)
 		}
 
 		if len(toInsert) > 0 {
@@ -1514,12 +1594,20 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 				FROM campaigns cam
 				WHERE cam.id = ANY($2::uuid[]) AND cam.organization_id = $3
 				ON CONFLICT (campaign_id, contact_id) DO NOTHING
+				RETURNING campaign_id
 			`
 			params := []any{contactID, toInsert, orgID}
-			if _, err = tx.Exec(ctx, query, params...); err != nil {
+			rows, err := tx.Query(ctx, query, params...)
+			if err != nil {
 				db.CaptureError(err, query, params, "exec")
 				return nil, errx.InternalError()
 			}
+			added, err := collectLinks(rows, c.ID)
+			if err != nil {
+				db.CaptureError(err, query, params, "returning")
+				return nil, errx.InternalError()
+			}
+			campaignsAdded = append(campaignsAdded, added...)
 		}
 	}
 
@@ -1576,22 +1664,43 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		if perr != nil {
 			return nil, perr
 		}
-		// Wipe then insert; scoped to user-owned categories.
-		if _, err := tx.Exec(ctx, `DELETE FROM contact_categories WHERE contact_id = $1`, contactID); err != nil {
+		// Drop everything not in the (user-owned) wanted set, then insert the
+		// rest; RETURNING on both sides is what feeds the timeline.
+		drows, err := tx.Query(ctx, `
+			DELETE FROM contact_categories
+			WHERE contact_id = $1
+			  AND category_id NOT IN (SELECT id FROM categories WHERE id = ANY($2) AND user_id = $3)
+			RETURNING category_id
+		`, contactID, ids, userID)
+		if err != nil {
 			db.CaptureError(err, "", nil, "categories wipe")
 			return nil, errx.InternalError()
 		}
+		removed, err := collectLinks(drows, c.ID)
+		if err != nil {
+			db.CaptureError(err, "", nil, "categories wipe returning")
+			return nil, errx.InternalError()
+		}
+		categoriesRemoved = append(categoriesRemoved, removed...)
 		if len(ids) > 0 {
-			if _, err := tx.Exec(ctx, `
+			irows, err := tx.Query(ctx, `
 				INSERT INTO contact_categories (contact_id, category_id)
 				SELECT $1, cat.id
 				FROM   categories cat
 				WHERE  cat.id = ANY($2) AND cat.user_id = $3
 				ON CONFLICT (contact_id, category_id) DO NOTHING
-			`, contactID, ids, userID); err != nil {
+				RETURNING category_id
+			`, contactID, ids, userID)
+			if err != nil {
 				db.CaptureError(err, "", nil, "categories insert")
 				return nil, errx.InternalError()
 			}
+			added, err := collectLinks(irows, c.ID)
+			if err != nil {
+				db.CaptureError(err, "", nil, "categories insert returning")
+				return nil, errx.InternalError()
+			}
+			categoriesAdded = append(categoriesAdded, added...)
 		}
 		categoriesChanged = true
 	} else {
@@ -1600,16 +1709,24 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 			if perr != nil {
 				return nil, perr
 			}
-			if _, err := tx.Exec(ctx, `
+			irows, err := tx.Query(ctx, `
 				INSERT INTO contact_categories (contact_id, category_id)
 				SELECT $1, cat.id
 				FROM   categories cat
 				WHERE  cat.id = ANY($2) AND cat.user_id = $3
 				ON CONFLICT (contact_id, category_id) DO NOTHING
-			`, contactID, ids, userID); err != nil {
+				RETURNING category_id
+			`, contactID, ids, userID)
+			if err != nil {
 				db.CaptureError(err, "", nil, "categories add")
 				return nil, errx.InternalError()
 			}
+			added, err := collectLinks(irows, c.ID)
+			if err != nil {
+				db.CaptureError(err, "", nil, "categories add returning")
+				return nil, errx.InternalError()
+			}
+			categoriesAdded = append(categoriesAdded, added...)
 			categoriesChanged = true
 		}
 		if len(data.RemoveCategories) > 0 {
@@ -1617,13 +1734,21 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 			if perr != nil {
 				return nil, perr
 			}
-			if _, err := tx.Exec(ctx, `
+			drows, err := tx.Query(ctx, `
 				DELETE FROM contact_categories
 				WHERE contact_id = $1 AND category_id = ANY($2)
-			`, contactID, ids); err != nil {
+				RETURNING category_id
+			`, contactID, ids)
+			if err != nil {
 				db.CaptureError(err, "", nil, "categories remove")
 				return nil, errx.InternalError()
 			}
+			removed, err := collectLinks(drows, c.ID)
+			if err != nil {
+				db.CaptureError(err, "", nil, "categories remove returning")
+				return nil, errx.InternalError()
+			}
+			categoriesRemoved = append(categoriesRemoved, removed...)
 			categoriesChanged = true
 		}
 	}
@@ -1655,6 +1780,23 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		}
 	}
 
+	actor := actorID(userID)
+	for _, w := range []struct {
+		typ   models.ActivityType
+		links []contactLink
+		log   func(context.Context, activityWriter, uuid.UUID, *uuid.UUID, models.ActivityType, []contactLink) error
+	}{
+		{models.ActivityCampaignAdded, campaignsAdded, logCampaignLinks},
+		{models.ActivityCampaignRemoved, campaignsRemoved, logCampaignLinks},
+		{models.ActivityCategoryAdded, categoriesAdded, logCategoryLinks},
+		{models.ActivityCategoryRemoved, categoriesRemoved, logCategoryLinks},
+	} {
+		if err := w.log(ctx, tx, orgID, actor, w.typ, w.links); err != nil {
+			db.CaptureError(err, "", nil, string(w.typ)+" activity")
+			return nil, errx.InternalError()
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		db.CaptureError(err, "", nil, "commit")
 		return nil, errx.InternalError()
@@ -1680,22 +1822,45 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 			*data.Subscribe, orgID, data.Contacts)
 	}
 
-	// Campaigns are organization assets: scoping them by the caller made a
-	// teammate's "add to campaign" a silent no-op on campaigns they did not create.
+	// Membership changes run outside the batch: their RETURNING rows are what
+	// the activity timeline records. Campaigns are organization assets:
+	// scoping them by the caller made a teammate's "add to campaign" a silent
+	// no-op on campaigns they did not create.
+	actor := actorID(userID)
+	link := func(sql string, typ models.ActivityType, log func(context.Context, activityWriter, uuid.UUID, *uuid.UUID, models.ActivityType, []contactLink) error, args ...any) *errx.Error {
+		rows, err := tx.Query(ctx, sql, args...)
+		if err != nil {
+			db.CaptureError(err, sql, args, "bulk link")
+			return errx.InternalError()
+		}
+		links, err := collectLinkPairs(rows)
+		if err != nil {
+			db.CaptureError(err, sql, args, "bulk link returning")
+			return errx.InternalError()
+		}
+		if err := log(ctx, tx, orgID, actor, typ, links); err != nil {
+			db.CaptureError(err, "", nil, string(typ)+" activity")
+			return errx.InternalError()
+		}
+		return nil
+	}
 	if len(data.RemoveCampaigns) > 0 {
-		b.Queue(`DELETE FROM campaign_leads cl
+		if xerr := link(`DELETE FROM campaign_leads cl
 		         USING contacts c, campaigns cam
 		         WHERE cl.contact_id = c.id
 		           AND cl.campaign_id = cam.id
 		           AND c.organization_id = $1
 		           AND cam.organization_id = $1
 		           AND cl.contact_id = ANY($2)
-		           AND cl.campaign_id = ANY($3)`,
-			orgID, data.Contacts, data.RemoveCampaigns)
+		           AND cl.campaign_id = ANY($3)
+		         RETURNING cl.contact_id, cl.campaign_id`,
+			models.ActivityCampaignRemoved, logCampaignLinks, orgID, data.Contacts, data.RemoveCampaigns); xerr != nil {
+			return nil, xerr
+		}
 	}
 
 	if len(data.AddCampaigns) > 0 {
-		b.Queue(`INSERT INTO campaign_leads (contact_id, campaign_id)
+		if xerr := link(`INSERT INTO campaign_leads (contact_id, campaign_id)
 		         SELECT c.id, cam.id
 		         FROM contacts c
 		         CROSS JOIN campaigns cam
@@ -1703,22 +1868,28 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 		           AND c.id = ANY($2)
 		           AND cam.id = ANY($3::uuid[])
 		           AND cam.organization_id = $1
-		         ON CONFLICT DO NOTHING`,
-			orgID, data.Contacts, data.AddCampaigns)
+		         ON CONFLICT DO NOTHING
+		         RETURNING contact_id, campaign_id`,
+			models.ActivityCampaignAdded, logCampaignLinks, orgID, data.Contacts, data.AddCampaigns); xerr != nil {
+			return nil, xerr
+		}
 	}
 
 	if len(data.RemoveCategories) > 0 {
-		b.Queue(`DELETE FROM contact_categories cc
+		if xerr := link(`DELETE FROM contact_categories cc
 		         USING contacts c
 		         WHERE cc.contact_id = c.id
 		           AND c.organization_id = $1
 		           AND cc.contact_id = ANY($2)
-		           AND cc.category_id = ANY($3::uuid[])`,
-			orgID, data.Contacts, data.RemoveCategories)
+		           AND cc.category_id = ANY($3::uuid[])
+		         RETURNING cc.contact_id, cc.category_id`,
+			models.ActivityCategoryRemoved, logCategoryLinks, orgID, data.Contacts, data.RemoveCategories); xerr != nil {
+			return nil, xerr
+		}
 	}
 
 	if len(data.AddCategories) > 0 {
-		b.Queue(`INSERT INTO contact_categories (contact_id, category_id)
+		if xerr := link(`INSERT INTO contact_categories (contact_id, category_id)
 		         SELECT c.id, cat.id
 		         FROM contacts c
 		         CROSS JOIN categories cat
@@ -1726,8 +1897,11 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 		           AND c.id = ANY($2)
 		           AND cat.id = ANY($3::uuid[])
 		           AND cat.user_id = $4
-		         ON CONFLICT DO NOTHING`,
-			orgID, data.Contacts, data.AddCategories, userID)
+		         ON CONFLICT DO NOTHING
+		         RETURNING contact_id, category_id`,
+			models.ActivityCategoryAdded, logCategoryLinks, orgID, data.Contacts, data.AddCategories, userID); xerr != nil {
+			return nil, xerr
+		}
 	}
 
 	for _, p := range data.Fields {
@@ -2190,6 +2364,7 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 		SELECT
 			c.id, c.first_name, c.last_name, c.email, c.company, c.phone,
 			c.custom_fields, c.subscribed, c.updated_at, c.created_at,
+			c.source, c.source_detail, c.first_seen_at,
 			COALESCE(
 				(
 					SELECT json_agg(json_build_object('id', cam.id, 'name', cam.name))
@@ -2216,7 +2391,9 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 	err := r.DB.QueryRow(ctx, mainQuery, mainArgs...).Scan(
 		&detail.ID, &detail.FirstName, &detail.LastName, &detail.Email,
 		&detail.Company, &detail.Phone, &detail.CustomFields, &detail.Subscribed,
-		&detail.UpdatedAt, &detail.CreatedAt, &campaignsJSON, &categoriesJSON,
+		&detail.UpdatedAt, &detail.CreatedAt,
+		&detail.Source, &detail.SourceDetail, &detail.FirstSeenAt,
+		&campaignsJSON, &categoriesJSON,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -2419,6 +2596,8 @@ func (r *contactRepository) ListSentEmails(ctx context.Context, userID, contactI
 //   - deliverability_events           → bounce / complaint
 //   - suppressed_recipients           → suppression added
 //   - contact_notes                   → CRM notes
+//   - meeting_bookings                → meetings
+//   - contact_activities              → creation and campaign / category membership
 //
 // We pull up to (limit) candidates from each source ordered by time
 // DESC, then merge-sort in Go. This avoids a 5-way UNION with
@@ -2717,6 +2896,64 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		mrows.Close()
+
+		// 7. Lifecycle: creation (with its first-touch source) and campaign /
+		//    category membership changes, from contact_activities. Names were
+		//    resolved when the row was written, so a renamed or deleted
+		//    campaign still reads correctly.
+		lifeQuery := `
+			SELECT created_at, user_id, activity_type, metadata
+			FROM contact_activities
+			WHERE contact_id = $1
+			  AND organization_id = $2
+			  AND activity_type IN ('contact_created', 'campaign_added', 'campaign_removed', 'category_added', 'category_removed')
+			  AND created_at < $3
+			ORDER BY created_at DESC
+			LIMIT $4
+		`
+		lrows, err := r.DB.Query(ctx, lifeQuery, contactID, *orgID, bound, limit)
+		if err != nil {
+			db.CaptureError(err, lifeQuery, nil, "ListTimeline lifecycle")
+			return nil, errx.InternalError()
+		}
+		for lrows.Next() {
+			var ev models.ContactTimelineEvent
+			var typ string
+			var meta map[string]any
+			if err := lrows.Scan(&ev.At, &ev.UserID, &typ, &meta); err != nil {
+				lrows.Close()
+				db.CaptureError(err, "", nil, "ListTimeline lifecycle scan")
+				return nil, errx.InternalError()
+			}
+			ev.Type = models.ContactTimelineEventType(typ)
+			str := func(k string) *string {
+				if v, ok := meta[k].(string); ok && v != "" {
+					return &v
+				}
+				return nil
+			}
+			id := func(k string) *uuid.UUID {
+				if v, ok := meta[k].(string); ok {
+					if u, perr := uuid.Parse(v); perr == nil {
+						return &u
+					}
+				}
+				return nil
+			}
+			switch ev.Type {
+			case models.TimelineContactCreated:
+				ev.Source = str("source")
+				ev.SourceDetail = str("source_detail")
+			case models.TimelineCampaignAdded, models.TimelineCampaignRemoved:
+				ev.CampaignID = id("campaign_id")
+				ev.CampaignName = str("campaign_name")
+			case models.TimelineCategoryAdded, models.TimelineCategoryRemoved:
+				ev.CategoryID = id("category_id")
+				ev.CategoryTitle = str("category_title")
+			}
+			events = append(events, ev)
+		}
+		lrows.Close()
 	}
 
 	// Merge sort: newest first.

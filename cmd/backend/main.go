@@ -1258,6 +1258,11 @@ func main() {
 		// and Cloud Tasks client exist.
 		if contactService != nil {
 			contactService.SetCampaignWaker(campaignService)
+			// The contact drawer's "next action" is a read-only pass through
+			// the scheduler's own constraints, never a stored time.
+			if previewer, ok := schedulerService.(scheduler.ContactSendPreviewer); ok {
+				contactService.SetNextSendPreviewer(previewer)
+			}
 		}
 		emailSendService = emailsend.NewService(taskRepository, emailRepostory, userRepostory, schedulerService, tasksClient, featureGateService, dailyThrottleService)
 		if aware, ok := emailSendService.(emailsend.OrgRiskAware); ok {

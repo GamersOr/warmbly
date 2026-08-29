@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/api/middleware"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/models"
 )
 
 // GetContact returns the hydrated contact 360 payload. Used by the
@@ -112,6 +113,28 @@ func (h *Handler) ListContactEmails(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, res)
+}
+
+// ListContactCampaignStates returns, for every campaign the contact is a
+// lead of, the flow with this contact's progress and a scheduler-derived next
+// action. Org-scoped, like the timeline.
+func (h *Handler) ListContactCampaignStates(c *gin.Context) {
+	contactID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		errx.Handle(c, errx.ErrUuid)
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+	states, xerr := h.ContactService.CampaignStates(c.Request.Context(), *orgID, contactID)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, models.ContactCampaignStatesResult{Data: states})
 }
 
 // ListContactTimeline returns the merged activity feed for a contact.

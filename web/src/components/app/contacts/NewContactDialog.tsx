@@ -62,6 +62,7 @@ export function NewContactDialog({ open, onClose, campaign }: Props) {
             campaigns: campaign ? [campaign.id] : [],
             categories,
             custom_fields: {},
+            source: campaign ? "campaign" : "manual",
         };
         try {
             await toast.promise(add.mutateAsync([contact]), {

@@ -100,6 +100,11 @@ type ContactImportCommit struct {
 	// SubscribedDefault is what new contacts inherit when no
 	// subscribed column was mapped. Defaults to true server-side.
 	SubscribedDefault *bool `json:"subscribed_default,omitempty"`
+
+	// Source / SourceDetail stamp new contacts' first-touch attribution. Set by
+	// the caller (file import, Google Sheets sync), never from the request.
+	Source       ContactSource `json:"-"`
+	SourceDetail string        `json:"-"`
 }
 
 // ContactImportRowError is a row that couldn't be imported. The line
