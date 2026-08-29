@@ -18,6 +18,8 @@ RUN apk add --no-cache musl-dev && \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+# include_str! reads static/tracking.js at compile time, so it must be in the context.
+COPY static ./static
 
 # The binary is copied out of the (cache-mounted) target dir before the mount is
 # released, so the runtime stage can COPY it.
