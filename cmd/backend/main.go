@@ -1293,6 +1293,11 @@ func main() {
 		if aware, ok := advancedService.(advanced.AudienceAware); ok {
 			aware.WireAudience(campaignAudienceRepository)
 		}
+		// Preflight's content check weighs attachments the way the send path
+		// does, so the launch dialog and the campaign feed agree on the score.
+		if aware, ok := advancedService.(advanced.AttachmentAware); ok {
+			aware.WireAttachments(attachmentRepoForHandler)
+		}
 
 		// Shared AI tool registry: every tool calls a service-layer function as
 		// the invoking user, so the dashboard agent (M3) and MCP server (M8) can
