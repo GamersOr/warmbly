@@ -1148,6 +1148,10 @@ func main() {
 		if instanceSettings != nil {
 			emailService.WireSyncBudget(instanceSettings)
 		}
+		// A restricted organization's mailboxes join the free pool on connect.
+		if aware, ok := emailService.(email.OrgRiskAware); ok {
+			aware.WireOrgRisk(orgRiskRepository)
+		}
 		analyticsRepository := repository.NewAnalyticsRepository(primaryDB)
 		emailAccountErrorRepository := repository.NewEmailAccountErrorRepository(primaryDB)
 		analyticsService = analytics.NewService(analyticsRepository, emailRepostory, campaignRepostory, emailAccountErrorRepository, warmupRepository)
