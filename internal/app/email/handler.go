@@ -106,6 +106,36 @@ func (s *emailService) SetWarmupLifecycle(ctx context.Context, userID, emailAcco
 	return account, nil
 }
 
+// SetSendHold moves a mailbox into or out of reserve. force is set because
+// this IS the owner's decision the rebalancer's guard exists to protect;
+// releasing lands on active and the next rebalancer pass rests it again if
+// its health still warrants that.
+func (s *emailService) SetSendHold(ctx context.Context, orgID, emailAccountID string, hold bool) (*models.SendLifecycleState, *errx.Error) {
+	if s.lifecycleRepo == nil {
+		return nil, errx.New(errx.Conflict, "Holding a mailbox is not available on this install.")
+	}
+	account, xerr := s.emailRepository.Get(ctx, orgID, emailAccountID)
+	if xerr != nil {
+		return nil, xerr
+	}
+	next, reason := models.SendLifecycleActive, "released by its owner"
+	if hold {
+		next, reason = models.SendLifecycleReserve, "held back by its owner"
+	}
+	if _, err := s.lifecycleRepo.SetSendLifecycle(ctx, account.ID, next, reason, true); err != nil {
+		log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not set send hold")
+		return nil, errx.InternalError()
+	}
+	states, err := s.lifecycleRepo.GetSendLifecycles(ctx, []uuid.UUID{account.ID})
+	if err != nil {
+		log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not read send lifecycle")
+		return nil, errx.InternalError()
+	}
+	state := states[account.ID]
+	s.publishAccountEvent(ctx, pubsub.EventAccountSynced, account)
+	return &state, nil
+}
+
 // UpdateTrackingDomain sets or clears a mailbox's custom tracking domain and
 // resolves it immediately. The host it has to point at is this install's
 // TRACKING_DOMAIN, not a hardcoded warmbly.com name: a self-hosted deployment

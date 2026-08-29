@@ -14,7 +14,7 @@ func TestSendsCold(t *testing.T) {
 	if !SendLifecycle("").SendsCold() {
 		t.Error("an unset lifecycle must send cold")
 	}
-	for _, l := range []SendLifecycle{SendLifecycleWarming, SendLifecycleResting, SendLifecycleReserve} {
+	for _, l := range []SendLifecycle{SendLifecycleResting, SendLifecycleReserve} {
 		if l.SendsCold() {
 			t.Errorf("%q must not be offered cold traffic", l)
 		}
@@ -26,10 +26,6 @@ func TestAutoManaged(t *testing.T) {
 	// mailbox out of it.
 	if SendLifecycleReserve.AutoManaged() {
 		t.Error("reserve must not be automatically managed")
-	}
-	// Warming follows the mailbox's own warmup settings, not the rebalancer.
-	if SendLifecycleWarming.AutoManaged() {
-		t.Error("warming must not be automatically managed")
 	}
 	for _, l := range []SendLifecycle{SendLifecycleActive, SendLifecycleResting, ""} {
 		if !l.AutoManaged() {
@@ -62,12 +58,12 @@ func TestReadyToResume(t *testing.T) {
 }
 
 func TestValid(t *testing.T) {
-	for _, l := range []SendLifecycle{SendLifecycleWarming, SendLifecycleActive, SendLifecycleResting, SendLifecycleReserve} {
+	for _, l := range []SendLifecycle{SendLifecycleActive, SendLifecycleResting, SendLifecycleReserve} {
 		if !l.Valid() {
 			t.Errorf("%q should be valid", l)
 		}
 	}
-	for _, l := range []SendLifecycle{"", "paused", "nonsense"} {
+	for _, l := range []SendLifecycle{"", "warming", "paused", "nonsense"} {
 		if l.Valid() {
 			t.Errorf("%q should not be valid", l)
 		}

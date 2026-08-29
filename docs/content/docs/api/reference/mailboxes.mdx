@@ -357,6 +357,54 @@ The updated mailbox object, with warmup disabled.
 }
 ```
 
+## Hold a mailbox
+
+`POST /emails/:id/hold`
+
+Takes the mailbox out of campaign sending until it is released. Warmup keeps running. This is the owner's decision: the automatic rest and resume logic never touches a held mailbox. Bodyless and idempotent, so it takes no `Idempotency-Key`; holding an already held mailbox returns its current state.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The mailbox's cold-rotation state.
+
+```json
+{
+  "state": "reserve",
+  "since": "2026-08-28T10:15:00Z",
+  "reason": "held back by its owner"
+}
+```
+
+## Release a mailbox
+
+`POST /emails/:id/release`
+
+Puts a held mailbox back into campaign sending. It lands in `active`; if its warmup health is still throttled or worse, the next rebalancer pass moves it to `resting` until it recovers. Bodyless and idempotent.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The mailbox's cold-rotation state.
+
+```json
+{
+  "state": "active",
+  "since": "2026-08-28T11:40:00Z",
+  "reason": "released by its owner"
+}
+```
+
 ## Check domain authentication
 
 `GET /emails/:id/auth-check`

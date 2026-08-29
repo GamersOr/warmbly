@@ -49,16 +49,13 @@ func TestDecideResumesOnlyAfterProbation(t *testing.T) {
 }
 
 // Reserve is the owner's decision, in both directions.
-func TestDecideNeverTouchesReserveOrWarming(t *testing.T) {
+func TestDecideNeverTouchesReserve(t *testing.T) {
 	now := time.Now()
 	for _, h := range []models.WarmupHealthState{
 		models.WarmupHealthHealthy, models.WarmupHealthThrottled, models.WarmupHealthBlocked,
 	} {
 		if d := Decide(models.SendLifecycleReserve, nil, h, now); d.Next != models.SendLifecycleReserve {
 			t.Errorf("health %q moved a reserved mailbox to %q", h, d.Next)
-		}
-		if d := Decide(models.SendLifecycleWarming, nil, h, now); d.Next != models.SendLifecycleWarming {
-			t.Errorf("health %q moved a warming mailbox to %q", h, d.Next)
 		}
 	}
 }
@@ -100,7 +97,7 @@ func TestDecideRestartsProbationWhileStillUnhealthy(t *testing.T) {
 func TestDecideDoesNotRestartProbationForOtherStates(t *testing.T) {
 	now := time.Now()
 	for _, state := range []models.SendLifecycle{
-		models.SendLifecycleActive, models.SendLifecycleReserve, models.SendLifecycleWarming, "",
+		models.SendLifecycleActive, models.SendLifecycleReserve, "",
 	} {
 		if d := Decide(state, nil, models.WarmupHealthWatch, now); d.RestartProbation {
 			t.Errorf("state %q asked to restart probation", state)

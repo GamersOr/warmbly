@@ -47,6 +47,7 @@ import useAccountStatus from "@/lib/api/hooks/app/analytics/useAccountStatus";
 import useWarmupAnalytics from "@/lib/api/hooks/app/analytics/useWarmupAnalytics";
 import useUpdateEmail from "@/lib/api/hooks/app/emails/useUpdateEmail";
 import useWarmupLifecycle from "@/lib/api/hooks/app/emails/useWarmupLifecycle";
+import useSendHold from "@/lib/api/hooks/app/emails/useSendHold";
 import useWarmupBanStatus from "@/lib/api/hooks/app/emails/useWarmupBanStatus";
 import useAppealWarmupBan from "@/lib/api/hooks/app/emails/useAppealWarmupBan";
 import useAuthCheck from "@/lib/api/hooks/app/emails/useAuthCheck";
@@ -116,26 +117,51 @@ function RampHoldNotice({ hold }: { hold: import("@/lib/api/models/app/analytics
 }
 
 // A mailbox that has quietly stopped receiving campaign sends looks broken.
+// The reserve state is the owner's own hold, so it explains itself without the
+// stored reason and points at the control that undoes it.
 function LifecycleNotice({ state }: { state: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState }) {
-    const resting = state.state === "resting";
-    const copy = resting
-        ? "This mailbox is resting: it keeps its warmup traffic to rebuild reputation, but campaigns are not sending from it. It returns on its own once it has recovered and held steady for three days."
-        : state.state === "reserve"
-            ? "This mailbox is held in reserve, so campaigns will not send from it until you put it back."
-            : "This mailbox is still warming up, so campaigns are not sending from it yet.";
+    const reserve = state.state === "reserve";
+    const copy = reserve
+        ? "You are holding this mailbox out of campaigns. Warmup keeps running. Turn the hold off below to put it back into rotation."
+        : "This mailbox is resting: it keeps its warmup traffic to rebuild reputation, but campaigns are not sending from it. It returns on its own once it has recovered and held steady for three days.";
     return (
         <div className="px-5 pb-4">
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 flex items-start gap-2">
                 <PauseIcon className="w-3.5 h-3.5 mt-px shrink-0 text-slate-500" />
                 <div className="min-w-0">
                     <p className="text-[12.5px] font-medium text-slate-900">
-                        Not sending campaigns ({state.state})
+                        Not sending campaigns ({reserve ? "held" : state.state})
                     </p>
                     <p className="text-[11.5px] text-slate-600 leading-relaxed mt-0.5">
                         {copy}
-                        {state.reason ? ` ${state.reason}.` : ""}
+                        {!reserve && state.reason ? ` ${state.reason}.` : ""}
                     </p>
                 </div>
+            </div>
+        </div>
+    );
+}
+
+// The owner's switch for the reserve lifecycle state. Off means the rebalancer
+// decides (active, or resting while health is poor); on overrides it.
+function SendHoldControl({ mailboxId, state }: { mailboxId: string; state?: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState }) {
+    const hold = useSendHold(mailboxId);
+    const held = state?.state === "reserve";
+    const toggle = (v: boolean) =>
+        hold.mutate(v, {
+            onSuccess: () => toast.success(v ? "Mailbox held out of campaigns" : "Mailbox back in campaign rotation"),
+            onError: (e) => toast.error(buildError(e as unknown as AppError)),
+        });
+    return (
+        <div className="px-5 py-4 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+                <div className="text-[12.5px] font-medium text-slate-900">Hold from campaigns</div>
+                <div className="text-[11px] text-slate-400">
+                    Keeps this mailbox out of campaign sending until you turn the hold off. Warmup is not affected, and Warmbly never releases a hold on its own.
+                </div>
+            </div>
+            <div className="shrink-0">
+                <Toggle value={held} onChange={toggle} disabled={hold.isPending} />
             </div>
         </div>
     );
@@ -511,6 +537,7 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
             {ws?.ramp_hold && <RampHoldNotice hold={ws.ramp_hold} />}
             {status?.send_lifecycle && <LifecycleNotice state={status.send_lifecycle} />}
             {status?.cold_ramp && <ColdRampNotice ramp={status.cold_ramp} />}
+            {status && <SendHoldControl mailboxId={mailbox.id} state={status.send_lifecycle} />}
 
             {/* Errors */}
             {status?.errors && status.errors.length > 0 && (
