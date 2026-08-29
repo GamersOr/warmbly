@@ -1,10 +1,12 @@
-// Advisory campaign-template content check. A "Check content" button POSTs the
-// current subject + body to /templates/score and renders a 0-100 score (higher
-// = safer) plus a list of non-blocking issues. Purely advisory — it never
-// blocks saving or sending, it just surfaces deliverability hints.
+// Advisory campaign-template content check: scores the current subject + body
+// against /templates/score and renders a 0-100 score (higher = safer) plus the
+// non-blocking issues found, re-scored on the debounce the composer's preview
+// uses. It never blocks saving or sending.
 
+import * as React from "react";
 import { ShieldCheckIcon, AlertTriangleIcon, AlertCircleIcon } from "lucide-react";
-import useScoreTemplate from "@/lib/api/hooks/app/campaigns/useScoreTemplate";
+import scoreTemplate from "@/lib/api/client/app/campaigns/scoreTemplate";
+import type TemplateScore from "@/lib/api/models/app/campaigns/TemplateScore";
 import type { TemplateScoreIssue } from "@/lib/api/models/app/campaigns/TemplateScore";
 import { Loading } from "@/components/loader";
 import { cn } from "@/lib/utils";
@@ -39,11 +41,42 @@ export default function ContentScore({
     bodyHtml: string;
     bodyPlain: string;
 }) {
-    const score = useScoreTemplate();
-    const data = score.data;
+    const [data, setData] = React.useState<TemplateScore | null>(null);
+    const [pending, setPending] = React.useState(false);
+    const [failed, setFailed] = React.useState(false);
 
-    const run = () =>
-        score.mutate({ subject, body_html: bodyHtml, body_plain: bodyPlain });
+    React.useEffect(() => {
+        // A step with nothing written yet is not a content problem, so hold the
+        // panel quiet rather than scoring an empty draft as spam.
+        if (!subject.trim() && !bodyPlain.trim()) {
+            // Clears pending too: a cancelled request can no longer do it.
+            setData(null);
+            setPending(false);
+            setFailed(false);
+            return;
+        }
+        let cancelled = false;
+        // Set inside the timer so the spinner marks a request, not a keystroke.
+        const t = setTimeout(() => {
+            setPending(true);
+            scoreTemplate({ subject, body_html: bodyHtml, body_plain: bodyPlain })
+                .then((res) => {
+                    if (cancelled) return;
+                    setData(res);
+                    setFailed(false);
+                })
+                .catch(() => {
+                    if (!cancelled) setFailed(true);
+                })
+                .finally(() => {
+                    if (!cancelled) setPending(false);
+                });
+        }, 600);
+        return () => {
+            cancelled = true;
+            clearTimeout(t);
+        };
+    }, [subject, bodyHtml, bodyPlain]);
 
     const tone = data ? scoreTone(data.score) : null;
 
@@ -52,21 +85,13 @@ export default function ContentScore({
             <div className="flex items-center justify-between gap-3 px-3 py-2.5">
                 <div className="min-w-0">
                     <div className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">Content check</div>
-                    <p className="mt-0.5 text-[11px] text-slate-400 leading-relaxed">Advisory deliverability score — never blocks sending.</p>
+                    <p className="mt-0.5 text-[11px] text-slate-400 leading-relaxed">Advisory deliverability score. It never blocks sending.</p>
                 </div>
-                <button
-                    type="button"
-                    onClick={run}
-                    disabled={score.isPending}
-                    className="h-8 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] font-medium text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors disabled:opacity-60 shrink-0"
-                >
-                    {score.isPending ? <Loading className="!w-3.5 h-3.5" /> : <ShieldCheckIcon className="w-3.5 h-3.5" />}
-                    {data ? "Re-check" : "Check content"}
-                </button>
+                {pending && <Loading className="!w-3.5 h-3.5 shrink-0" />}
             </div>
 
-            {score.isError && (
-                <div className="px-3 pb-3 text-[11.5px] text-rose-600">Couldn&apos;t score this template. Try again.</div>
+            {failed && (
+                <div className="px-3 pb-3 text-[11.5px] text-rose-600">Couldn&apos;t score this template.</div>
             )}
 
             {data && tone && (

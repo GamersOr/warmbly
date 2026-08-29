@@ -75,6 +75,9 @@ Returned when the request cannot be processed due to invalid syntax.
 
 | `code` | Meaning |
 |--------|---------|
+| `invalid_lead_status` | `POST /contacts/search` or `POST /contacts/export` was given a `lead_status` that is not one of the documented values |
+| `invalid_engagement` | `POST /contacts/search` or `POST /contacts/export` was given an `engagement` that is not one of the documented values |
+| `lead_filter_requires_campaign` | `lead_status` or `engagement` was set without exactly one `campaign_ids` entry; both filters describe a contact inside one campaign |
 | `no_organization` | The request needs a workspace and the caller has none selected. Every entitlement, limit and suppression rule is scoped to a workspace, so a write that would run unscoped is refused rather than run without those checks. API keys always carry their workspace; a dashboard session picks one at sign-in, so this normally means the session predates the workspace being chosen. Select a workspace and retry |
 
 ### 401 Unauthorized

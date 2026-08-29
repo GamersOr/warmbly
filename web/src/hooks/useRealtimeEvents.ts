@@ -154,6 +154,13 @@ export function useRealtimeEvents() {
         return
       }
 
+      // A website page view for an identified contact: only that contact's
+      // timeline moves.
+      if (event === 'PAGE_HIT') {
+        if (contactId) invalidate([['contacts', contactId, 'timeline']])
+        return
+      }
+
       if (
         includes(
           'CAMPAIGN',
@@ -365,7 +372,9 @@ export function useRealtimeEvents() {
           // or a teammate applying/snoozing/dismissing one. Refreshes every
           // strip and every nav badge at once.
           advisor_finding: [['advisor']],
-          settings: [['organizations', 'current']],
+          // Org settings, including the autosaving website tracking page, so
+          // a teammate's edit lands live.
+          settings: [['organizations', 'current'], ['website-tracking']],
           // Workspace archives: an export starting or an import landing changes
           // both lists on the settings Data page.
           org_archive: [

@@ -11,6 +11,7 @@ import (
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
+	"github.com/warmbly/warmbly/internal/scheduler"
 )
 
 type ContactService interface {
@@ -28,7 +29,7 @@ type ContactService interface {
 	// Export streams every contact matching the request into the given
 	// writer. The format / filename / content-type are returned so the
 	// handler can set headers correctly.
-	Export(ctx context.Context, userID string, req *models.ContactExportRequest, w io.Writer) (filename, contentType string, count int, err *errx.Error)
+	Export(ctx context.Context, orgID string, req *models.ContactExportRequest, w io.Writer) (filename, contentType string, count int, err *errx.Error)
 
 	// ImportPreview parses an uploaded CSV/XLSX file and reports back
 	// the columns + first N rows + suggested mapping — no DB writes.
@@ -72,6 +73,13 @@ type ContactService interface {
 	// running campaign wakes that campaign's parked send chain. Optional: with
 	// no waker the leads still send, just not until the chain's next tick.
 	SetCampaignWaker(w CampaignWaker)
+
+	// CampaignStates returns the contact's campaigns with steps, progress,
+	// lead status and a scheduler-backed next action.
+	CampaignStates(ctx context.Context, orgID, contactID uuid.UUID) ([]models.ContactCampaignState, *errx.Error)
+	// SetNextSendPreviewer wires the scheduler preview behind CampaignStates.
+	// Optional; without it the panel carries no next action.
+	SetNextSendPreviewer(p scheduler.ContactSendPreviewer)
 }
 
 // CampaignWaker pulls the parked wakeup of a running campaign forward when
@@ -89,6 +97,7 @@ type contactService struct {
 	planRepo           repository.PlanRepository
 	streamingPublisher *pubsub.StreamingPublisher
 	campaignWaker      CampaignWaker
+	previewer          scheduler.ContactSendPreviewer
 	// orgRisk files import-quality findings on the workspace's posture.
 	// Optional/nil-safe: without it a bad import is reported but not fused.
 	orgRisk orgrisk.Service

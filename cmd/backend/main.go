@@ -97,6 +97,7 @@ import (
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
 	"github.com/warmbly/warmbly/internal/app/webhook"
+	"github.com/warmbly/warmbly/internal/app/websitetracking"
 	"github.com/warmbly/warmbly/internal/app/worker"
 	"github.com/warmbly/warmbly/internal/app/worker_orchestrator"
 	"github.com/warmbly/warmbly/internal/config"
@@ -161,6 +162,7 @@ func main() {
 	var rateLimitService ratelimit.RateLimitService
 	var sequenceService sequence.SequenceService
 	var contactService contact.ContactService
+	var websiteTrackingService websitetracking.Service
 	var socketService socket.SocketService
 	var uniboxService unibox.UniboxService
 	var cipherService cipher.CipherService
@@ -1152,6 +1154,14 @@ func main() {
 		if instanceSettings != nil {
 			emailService.WireSyncBudget(instanceSettings)
 		}
+		// A restricted organization's mailboxes join the free pool on connect.
+		if aware, ok := emailService.(email.OrgRiskAware); ok {
+			aware.WireOrgRisk(orgRiskRepository)
+		}
+		// The owner's hold shares the lifecycle the rebalancer moves.
+		if aware, ok := emailService.(email.LifecycleAware); ok {
+			aware.WireLifecycle(repository.NewSendLifecycleRepository(primaryDB))
+		}
 		analyticsRepository := repository.NewAnalyticsRepository(primaryDB)
 		emailAccountErrorRepository := repository.NewEmailAccountErrorRepository(primaryDB)
 		analyticsService = analytics.NewService(analyticsRepository, emailRepostory, campaignRepostory, emailAccountErrorRepository, warmupRepository)
@@ -1265,6 +1275,11 @@ func main() {
 		// and Cloud Tasks client exist.
 		if contactService != nil {
 			contactService.SetCampaignWaker(campaignService)
+			// The contact drawer's "next action" is a read-only pass through
+			// the scheduler's own constraints, never a stored time.
+			if previewer, ok := schedulerService.(scheduler.ContactSendPreviewer); ok {
+				contactService.SetNextSendPreviewer(previewer)
+			}
 		}
 		emailSendService = emailsend.NewService(taskRepository, emailRepostory, userRepostory, schedulerService, tasksClient, featureGateService, dailyThrottleService)
 		if aware, ok := emailSendService.(emailsend.OrgRiskAware); ok {
@@ -1303,6 +1318,11 @@ func main() {
 		// the dialog cannot say one thing and the launch another.
 		if aware, ok := advancedService.(advanced.AudienceAware); ok {
 			aware.WireAudience(campaignAudienceRepository)
+		}
+		// Preflight's content check weighs attachments the way the send path
+		// does, so the launch dialog and the campaign feed agree on the score.
+		if aware, ok := advancedService.(advanced.AttachmentAware); ok {
+			aware.WireAttachments(attachmentRepoForHandler)
 		}
 
 		// Shared AI tool registry: every tool calls a service-layer function as
@@ -1584,6 +1604,13 @@ func main() {
 		auditRetentionJob := jobs.NewAuditRetentionJob(auditRepository, 90*24*time.Hour)
 		auditRetentionScheduler := jobs.NewAuditRetentionScheduler(auditRetentionJob, 6*time.Hour)
 		go auditRetentionScheduler.Start(ctx)
+
+		// Website tracking: the snippet's settings, the ingest path the tracking
+		// service forwards page views to, and the per-workspace retention sweep
+		// that keeps the window promised on the settings page.
+		websiteTrackingRepo := repository.NewWebsiteTrackingRepository(primaryDB.Pool)
+		websiteTrackingService = websitetracking.NewService(websiteTrackingRepo, geoloc, streamingPublisher)
+		go jobs.NewWebsiteTrackingRetentionJob(websiteTrackingRepo).Start(ctx, 6*time.Hour)
 
 		// Warmup content generator: tops the AI thread bank up toward the
 		// admin-configured per-pool/segment targets. The internal cadence gate
@@ -1869,6 +1896,7 @@ func main() {
 		EmailMessageMap:          emailMessageMapForHandler,
 		EmailSyncState:           emailSyncStateRepository,
 		TrackedLinks:             trackedLinkRepository,
+		WebsiteTrackingService:   websiteTrackingService,
 		UserRepo:                 userRepoForHandler,
 		OrgRepo:                  organizationRepoForHandler,
 		AttachmentRepo:           attachmentRepoForHandler,

@@ -82,6 +82,8 @@ Produced by the Rust tracking service when a pixel loads or a tracked link is cl
 
 `event_type` is `EMAIL_OPENED` or `EMAIL_CLICKED`; `original_url` is set only for clicks; IPs are stored as hashes, never raw. The struct is `events.TrackingEvent` in `internal/events/schemas.go`, mirrored in `tracking/src/events.rs`.
 
+Website page views do not ride this topic. The tracking service forwards each accepted view to the backend's internal API (`POST /api/v1/internal/page-hits`) instead, because the backend is where the user agent and IP are turned into device and location, and the IP must not sit in a durable stream on the way there.
+
 ## Analytics events
 
 The backend records sends on two write-only streams for downstream analytics: `email-events` carries `EMAIL_SENT` records (task, account, campaign, contact, message ID, recipient), and `warmup-events` carries `WARMUP_EMAIL_SENT` records (sender and target accounts, whether it was a reply). Nothing in the repo consumes them today; they exist so an external pipeline can tap the stream.

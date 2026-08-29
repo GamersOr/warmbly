@@ -58,6 +58,15 @@ const STANDARD_FIELDS: { id: string; label: string; preset: "basic" | "full" | "
     { id: "id",           label: "Contact ID",    preset: "full" },
 ];
 
+// Per-lead engagement inside the campaign the export is scoped to. Only
+// offered when the filters name exactly one campaign; blank otherwise.
+const CAMPAIGN_FIELDS: { id: string; label: string }[] = [
+    { id: "lead_status",  label: "Lead status" },
+    { id: "lead_opened",  label: "Opened" },
+    { id: "lead_clicked", label: "Clicked" },
+    { id: "lead_replied", label: "Replied" },
+];
+
 const PRESETS: { id: "basic" | "full" | "campaign-ready" | "custom"; label: string; hint: string }[] = [
     { id: "basic",          label: "Basic",          hint: "Core contact details — what most CRMs expect." },
     { id: "full",           label: "Full",           hint: "Every standard column including categories + campaigns." },
@@ -91,6 +100,8 @@ function hasActiveFilters(f: SearchContacts): boolean {
         (f.campaign_ids?.length ?? 0) > 0 ||
         (f.category_ids?.length ?? 0) > 0 ||
         f.subscribed !== undefined ||
+        !!f.lead_status ||
+        !!f.engagement ||
         f.min_campaigns !== undefined ||
         f.max_campaigns !== undefined ||
         !!f.created_after ||
@@ -107,6 +118,7 @@ export default function ExportDialog({
     selectedIds,
     totalKnown,
 }: Props) {
+    const inCampaign = (filters.campaign_ids?.length ?? 0) === 1;
     const [format, setFormat] = React.useState<ExportFormat>("csv");
     const [scope, setScope] = React.useState<ExportScope>(() =>
         selectedIds.length > 0 ? "selected" : hasActiveFilters(filters) ? "filtered" : "all",
@@ -163,11 +175,13 @@ export default function ExportDialog({
         }
         setLoading(true);
         try {
+            // A selected-rows export from a campaign still sends the filters so
+            // the server can fill the lead_* columns for that campaign.
             const result = await exportContacts({
                 format,
                 scope,
                 contact_ids: scope === "selected" ? selectedIds : undefined,
-                filters: scope === "filtered" ? filters : undefined,
+                filters: scope === "filtered" || (scope === "selected" && inCampaign) ? filters : undefined,
                 fields: effective,
                 filename: filename.trim() || undefined,
             });
@@ -299,7 +313,7 @@ export default function ExportDialog({
                                 </div>
 
                                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                                    {STANDARD_FIELDS.map((f) => {
+                                    {[...STANDARD_FIELDS, ...(inCampaign ? CAMPAIGN_FIELDS : [])].map((f) => {
                                         const checked = fields.includes(f.id);
                                         return (
                                             <label

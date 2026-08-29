@@ -73,6 +73,30 @@ It supports type-ahead search, and typing an unmatched name offers **Create** to
 
 Categories also drive automation: a sequence can run **Add tag** or **Remove tag** as a contact moves through a flow, so a label can be applied automatically on a positive reply.
 
+## Where a contact came from
+
+Every contact records its first-touch source: how it entered the workspace, with a detail you would recognise, and when it was first seen. It is shown on the contact's **Overview** tab and as the first event of its activity timeline, and it never changes afterwards, however the contact is edited or re-imported.
+
+| Source | Set when | Detail |
+| --- | --- | --- |
+| Manual | Added with **Add contact** on the Contacts page | |
+| Campaign | Added with **Add lead** on a campaign's Leads tab | The campaign |
+| Import | Created by the file import wizard | The file name |
+| Sheet sync | Created by a Google Sheets sync source | The sheet |
+| API | Created through the API with an API key | The key's name |
+| AI assistant | Created by the assistant on your behalf | |
+| Unknown | Created before Warmbly recorded sources | |
+
+Only new contacts get a source. An import or API call that matches an existing contact updates its fields and leaves the original source in place, so an address that arrived by hand and later turned up in a file still reads as manual.
+
+## Activity timeline
+
+The **Activity** tab of a contact is one feed, newest first, of everything Warmbly knows about them: every campaign email sent, opened, clicked, replied to or bounced (with the campaign, step, subject and sending mailbox), replies with their classified intent, deliverability and suppression events, notes, meetings, and the contact's lifecycle: when it was created and how, and each time it joined or left a campaign or a category.
+
+Filter chips narrow the feed (**Emails**, **Replies**, **Deliv.**, **Notes**, **Meetings**, **Campaigns**, **Lifecycle**), the search box matches subjects, campaigns, steps, mailboxes, categories and reasons, and the date picker bounds it. Each row stays to one line until you click it; expanded, it shows every detail the event carries. The feed updates live as teammates and the schedulers write to it.
+
+At the top of the tab sits the campaign panel: for each campaign the contact is in, its flow with this contact's progress, the lead status, and what the scheduler will do next. See [Campaigns](/guides/campaigns/) for how the next action is worked out and what its states mean.
+
 ## Deals and pipelines
 
 A **pipeline** is a named, ordered sequence of **stages** a deal advances through. On the Pipelines page you create pipelines (new ones start with `Open`, `Qualified`, `Won`), then add, rename, recolor, and delete stages, each showing its deal count. Stage order is the left-to-right column order on the board.

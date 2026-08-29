@@ -831,9 +831,45 @@ export interface AdminOrgListItem {
     email_account_count: number;
     campaign_count: number;
     active_campaigns: number;
+    risk_state?: OrgRiskState | null;
     plan_name?: string | null;
     plan_public?: boolean | null;
     is_enterprise: boolean;
+}
+
+/** The workspace's fused abuse posture. */
+export type OrgRiskState = "trusted" | "watch" | "restricted" | "suspended";
+
+/** One detector's finding. `expires_at` is absent when only a sweep or an
+ *  operator can retract it. */
+export interface OrgRiskSignal {
+    weight?: number;
+    detail?: string;
+    expires_at?: string;
+}
+
+/** An operator's pin over the derived posture. */
+export interface OrgRiskOverride {
+    state: OrgRiskState;
+    reason?: string;
+    by?: string | null;
+    at?: string | null;
+}
+
+/** The operator view of a workspace's posture, evidence included. */
+export interface OrgRisk {
+    organization_id: string;
+    state: OrgRiskState;
+    score: number;
+    reason?: string;
+    signals?: Record<string, OrgRiskSignal> | null;
+    evaluated_at?: string | null;
+    override?: OrgRiskOverride | null;
+}
+
+export interface SetOrgRiskOverrideRequest {
+    state: OrgRiskState;
+    reason: string;
 }
 
 export interface OrganizationLimits {
@@ -930,6 +966,8 @@ export interface AdminOrgSearch {
     created_within?: number; // days; omit for any
     has_overrides?: boolean;
     enterprise?: boolean;
+    risk_state?: OrgRiskState | "";
+    risk_flagged?: boolean;
     // Subscription state
     subscription_status?: string;
     cancel_at_period_end?: boolean;

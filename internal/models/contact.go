@@ -67,9 +67,11 @@ type ContactCampaignProgress struct {
 	//   bounced      — a send hard-bounced (terminal/negative)
 	//   failed       — the mailbox could not send a step after every retry (terminal/negative)
 	//   unsubscribed — the contact is unsubscribed/suppressed (terminal)
-	Status         string     `json:"status"`
-	Sent           int        `json:"sent"`
+	Status string `json:"status"`
+	Sent   int    `json:"sent"`
+	// Opened counts human opens only; automated fetches are in MachineOpened.
 	Opened         int        `json:"opened"`
+	MachineOpened  int        `json:"machine_opened"`
 	Clicked        int        `json:"clicked"`
 	Replied        int        `json:"replied"`
 	Bounced        int        `json:"bounced"`
@@ -110,6 +112,30 @@ func ValidLeadStatus(s string) bool {
 	}
 }
 
+// Lead engagement filter values for SearchContacts.Engagement. Each is a
+// predicate over the contact's progress rows in one campaign; the negative
+// forms only match leads that were sent at least one step, so a lead never
+// emailed is neither "opened" nor "not opened".
+const (
+	LeadEngagementOpened     = "opened"
+	LeadEngagementNotOpened  = "not_opened"
+	LeadEngagementClicked    = "clicked"
+	LeadEngagementNotClicked = "not_clicked"
+	LeadEngagementReplied    = "replied"
+	LeadEngagementNotReplied = "not_replied"
+	LeadEngagementBounced    = "bounced"
+)
+
+// ValidLeadEngagement reports whether s is one of the engagement filter values.
+func ValidLeadEngagement(s string) bool {
+	switch s {
+	case LeadEngagementOpened, LeadEngagementNotOpened, LeadEngagementClicked, LeadEngagementNotClicked, LeadEngagementReplied, LeadEngagementNotReplied, LeadEngagementBounced:
+		return true
+	default:
+		return false
+	}
+}
+
 type ContactsResult struct {
 	Data       []Contact  `json:"data"`
 	Pagination Pagination `json:"pagination"`
@@ -141,6 +167,13 @@ type CampaignLeadCounts struct {
 	Unsubscribed int `json:"unsubscribed"`
 	// Undeliverable: address verification refused it, so routing skips it.
 	Undeliverable int `json:"undeliverable"`
+	// Engagement totals, matching the `engagement` search filter: leads sent
+	// at least one step, and of those the ones with a human open, a click, or
+	// a reply on any step.
+	Contacted  int `json:"contacted"`
+	Opened     int `json:"opened"`
+	Clicked    int `json:"clicked"`
+	RepliedAny int `json:"replied_any"`
 }
 
 // ContactsCounts are org-wide contact facet totals for the browse sidebar.
@@ -193,6 +226,11 @@ type ContactDetail struct {
 	Contact
 	Engagement  ContactEngagement   `json:"engagement"`
 	Suppression *ContactSuppression `json:"suppression,omitempty"`
+
+	// First-touch attribution. Source never changes after creation.
+	Source       ContactSource `json:"source"`
+	SourceDetail string        `json:"source_detail"`
+	FirstSeenAt  time.Time     `json:"first_seen_at"`
 }
 
 // ContactSentEmail is one row in the "Emails sent to this contact"
@@ -250,6 +288,19 @@ const (
 	TimelineMeetingBooked      ContactTimelineEventType = "meeting_booked"
 	TimelineMeetingRescheduled ContactTimelineEventType = "meeting_rescheduled"
 	TimelineMeetingCanceled    ContactTimelineEventType = "meeting_canceled"
+
+	// Lifecycle events, read from contact_activities. contact_created carries
+	// the first-touch Source (and SourceDetail), which is how "imported" and
+	// "created via API" are told apart without a type per origin.
+	TimelineContactCreated  ContactTimelineEventType = "contact_created"
+	TimelineCampaignAdded   ContactTimelineEventType = "campaign_added"
+	TimelineCampaignRemoved ContactTimelineEventType = "campaign_removed"
+	TimelineCategoryAdded   ContactTimelineEventType = "category_added"
+	TimelineCategoryRemoved ContactTimelineEventType = "category_removed"
+
+	// A page view from the website tracking snippet, tied to the contact
+	// through an email-link ticket. Detail rides in PageHit.
+	TimelinePageHit ContactTimelineEventType = "page_hit"
 )
 
 // ContactTimelineEvent is one entry in the merged activity feed. The
@@ -287,7 +338,17 @@ type ContactTimelineEvent struct {
 	JoinURL      *string    `json:"join_url,omitempty"`      // video/conference link
 	MeetingState *string    `json:"meeting_state,omitempty"` // booked / rescheduled / canceled
 
-	// Author (notes).
+	// Lifecycle events: the category a contact joined or left, and the
+	// free-form detail behind a contact_created source (file name, campaign,
+	// API key).
+	CategoryID    *uuid.UUID `json:"category_id,omitempty"`
+	CategoryTitle *string    `json:"category_title,omitempty"`
+	SourceDetail  *string    `json:"source_detail,omitempty"`
+
+	// Website page view (page_hit): URL, referrer, device, UTM, location.
+	PageHit *WebsitePageHit `json:"page_hit,omitempty"`
+
+	// Author (notes, lifecycle events).
 	UserID *uuid.UUID `json:"user_id,omitempty"`
 }
 
@@ -327,6 +388,45 @@ type AddContact struct {
 	// whatever it already had. Set explicitly by the importer when the file
 	// carries a subscribed column.
 	Subscribed *bool `json:"subscribed,omitempty"`
+
+	// Source is the first-touch origin stamped on a NEW contact (an existing
+	// one keeps its original). Dashboard callers may say "manual" or
+	// "campaign"; every other value is decided server-side by the creation
+	// path, and an API-key request is always "api". SourceDetail is never
+	// read from the request body.
+	Source       ContactSource `json:"source,omitempty"`
+	SourceDetail string        `json:"-"`
+}
+
+// ContactSource is where a contact first came from. Mirrors the CHECK on
+// contacts.source; ContactSourceUnknown is the honest value for rows created
+// before attribution existed.
+type ContactSource string
+
+const (
+	ContactSourceUnknown     ContactSource = "unknown"
+	ContactSourceManual      ContactSource = "manual"
+	ContactSourceCampaign    ContactSource = "campaign"
+	ContactSourceImport      ContactSource = "import"
+	ContactSourceSheetSync   ContactSource = "sheet_sync"
+	ContactSourceAPI         ContactSource = "api"
+	ContactSourceAIAssistant ContactSource = "ai_assistant"
+)
+
+// Valid reports whether the value is one the database accepts.
+func (s ContactSource) Valid() bool {
+	switch s {
+	case ContactSourceUnknown, ContactSourceManual, ContactSourceCampaign, ContactSourceImport,
+		ContactSourceSheetSync, ContactSourceAPI, ContactSourceAIAssistant:
+		return true
+	}
+	return false
+}
+
+// RequestSettable reports whether a dashboard request body may claim the
+// source. Only the two origins a dashboard user can actually be in.
+func (s ContactSource) RequestSettable() bool {
+	return s == ContactSourceManual || s == ContactSourceCampaign
 }
 
 type SearchContactsFilterType string
@@ -349,6 +449,7 @@ type SearchContacts struct {
 	CustomFieldFilters []SearchContactsFilter `json:"custom_field_filters"` // Custom Field Filters
 	CampaignIDs        []string               `json:"campaign_ids"`         // Contacts must be in ALL these campaigns
 	LeadStatus         string                 `json:"lead_status"`          // Filter by derived lead status; requires exactly one campaign_id
+	Engagement         string                 `json:"engagement"`           // Filter by lead engagement (opened, not_opened, ...); ANDed with lead_status; requires exactly one campaign_id
 	CategoryIDs        []string               `json:"category_ids"`         // Contacts must have ALL these categories
 	MinCampaigns       *int                   `json:"min_campaigns"`        // Minimum number of associated campaigns
 	MaxCampaigns       *int                   `json:"max_campaigns"`        // Maximum number of associated campaigns

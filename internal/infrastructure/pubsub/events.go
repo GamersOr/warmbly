@@ -60,6 +60,10 @@ const (
 	// A human reply landed for a campaign contact (org-scoped pulse).
 	EventEmailReplied EventType = "EMAIL_REPLIED"
 
+	// A website page view landed for an identified contact (org-scoped; the
+	// dashboard refreshes that contact's timeline).
+	EventPageHit EventType = "PAGE_HIT"
+
 	// Task progress events
 	EventTaskProgress EventType = "TASK_PROGRESS"
 
@@ -210,6 +214,31 @@ type TrackingEventPayload struct {
 	// Machine marks an automated open (Apple MPP prefetch, UA-less fetcher)
 	// so live views can badge it instead of presenting it as a human open.
 	Machine bool `json:"machine,omitempty"`
+}
+
+// PageHitEvent is a website page view tied to a contact.
+type PageHitEvent struct {
+	BaseEvent
+	OrgID     string `json:"org_id"`
+	ContactID string `json:"contact_id"`
+	URL       string `json:"url"`
+	Title     string `json:"title,omitempty"`
+}
+
+// PublishPageHit tells the org that a contact viewed a page. No user id: the
+// event belongs to the workspace, not to any member.
+func (p *StreamingPublisher) PublishPageHit(ctx context.Context, event *PageHitEvent) {
+	if p.client == nil {
+		return
+	}
+	event.EventType = EventPageHit
+	event.Timestamp = time.Now()
+	attrs := map[string]string{
+		"org_id":     event.OrgID,
+		"contact_id": event.ContactID,
+		"event_type": string(event.EventType),
+	}
+	_ = p.client.Publish(ctx, TopicCampaignUpdate, event, attrs)
 }
 
 // TaskProgressEvent for detailed campaign task progress

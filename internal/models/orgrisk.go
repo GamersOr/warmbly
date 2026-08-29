@@ -63,6 +63,17 @@ type OrgRisk struct {
 	// band; Score and State do.
 	Signals     map[string]any `json:"signals,omitempty"`
 	EvaluatedAt *time.Time     `json:"evaluated_at,omitempty"`
+	// Override is the operator's pin. While set, State is its State whatever
+	// the detectors write; nil means the score decides.
+	Override *OrgRiskOverride `json:"override,omitempty"`
+}
+
+// OrgRiskOverride records who pinned the posture, to what, and why.
+type OrgRiskOverride struct {
+	State  OrgRiskState `json:"state"`
+	Reason string       `json:"reason,omitempty"`
+	By     *uuid.UUID   `json:"by,omitempty"`
+	At     *time.Time   `json:"at,omitempty"`
 }
 
 // Restricted reports whether the organization is feeling any restriction.

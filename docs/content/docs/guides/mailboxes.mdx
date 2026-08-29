@@ -141,11 +141,24 @@ A mailbox now has a cold-rotation state, separate from its health:
 | `active` | In cold rotation. The default, and where every mailbox starts |
 | `resting` | Out of cold rotation to recover. Warmup keeps running, so its reputation stays alive |
 | `reserve` | Held back by you. Never entered or left automatically |
-| `warming` | Building reputation and not yet taking campaign traffic |
 
 A mailbox rests when its warmup health reaches `throttled` or worse, and returns on its own once it is healthy again **and** has held steady for three days. One good hour does not put it back at full cold volume.
 
+Resting only makes sense while the mailbox is in a warmup pool, because pool health is the signal it recovers on. If a resting mailbox leaves its pool (the workspace loses warmup when a trial ends or a plan changes), there is no health signal to wait for, so the mailbox returns on its own three days after its last rest stamp rather than staying out indefinitely. Pausing warmup on the mailbox does not remove it from the pool, so its health keeps being tracked and the normal three healthy days still apply.
+
+### Putting a resting mailbox back yourself
+
+You do not have to wait. A resting mailbox's notice in the drawer has a **Put back into campaigns** button. It lands in `active` unless its warmup health is still `throttled` or worse, in which case it stays resting and the drawer says so: a mailbox that warmup can see is struggling should not send cold mail, and there is no override for that short of the health recovering.
+
+API keys get the same exit through `POST /emails/:id/release`, which works on a resting mailbox as well as a held one.
+
 It does not rest on the `watch` band. That band is deliberately the one that changes nothing you can feel, and leaving cold rotation is very much something you feel.
+
+### Holding a mailbox yourself
+
+To keep a mailbox out of campaigns on your own terms (a domain you are moving, an inbox you want to keep for replies only, a sender you are about to retire), open its drawer and turn on **Hold from campaigns** on the Overview tab. The mailbox goes into `reserve`: campaigns stop picking it, warmup carries on as before, and nothing automatic ever releases it. Turn the hold off to put it back; if its warmup health is still poor at that point, it rests until it recovers rather than returning straight to full volume.
+
+The same hold is available to API keys as `POST /emails/:id/hold` and `POST /emails/:id/release`. Releasing a mailbox that is `resting` rather than held works the same way and is the manual exit from a rest.
 
 <Callout type="info" title="Separate from where a mailbox runs">
 This is not the same as the risk band that decides which sending worker and IP host a mailbox. A resting mailbox is usually still on a clean worker; it is simply not being offered campaign sends. The mailbox drawer says which state it is in and why.

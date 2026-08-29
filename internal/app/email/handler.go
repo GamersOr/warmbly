@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/app/lifecycle"
 	"github.com/warmbly/warmbly/internal/app/worker"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
@@ -104,6 +105,47 @@ func (s *emailService) SetWarmupLifecycle(ctx context.Context, userID, emailAcco
 	s.syncWarmupPoolMembership(ctx, account)
 	s.publishAccountEvent(ctx, pubsub.EventAccountSynced, account)
 	return account, nil
+}
+
+// SetSendHold: force is set because this is the owner's decision the rebalancer's guard protects.
+// A release also serves as the manual exit from resting (issue #243).
+func (s *emailService) SetSendHold(ctx context.Context, orgID, emailAccountID string, hold bool) (*models.SendLifecycleState, *errx.Error) {
+	if s.lifecycleRepo == nil {
+		return nil, errx.New(errx.Conflict, "Holding a mailbox is not available on this install.")
+	}
+	account, xerr := s.emailRepository.Get(ctx, orgID, emailAccountID)
+	if xerr != nil {
+		return nil, xerr
+	}
+	next, reason := models.SendLifecycleReserve, "held back by its owner"
+	if !hold {
+		// A release lands where the rebalancer would put the mailbox now.
+		candidate, err := s.lifecycleRepo.GetLifecycleCandidate(ctx, account.ID)
+		if err != nil {
+			log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not read send lifecycle")
+			return nil, errx.InternalError()
+		}
+		d := lifecycle.Decide(models.SendLifecycleActive, nil, candidate.HealthState, time.Now())
+		next, reason = d.Next, "released by its owner"
+		if candidate.Current == models.SendLifecycleResting {
+			reason = "put back by its owner"
+		}
+		if d.Reason != "" {
+			reason = "released by its owner; " + d.Reason
+		}
+	}
+	if _, err := s.lifecycleRepo.SetSendLifecycle(ctx, account.ID, next, reason, true); err != nil {
+		log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not set send hold")
+		return nil, errx.InternalError()
+	}
+	states, err := s.lifecycleRepo.GetSendLifecycles(ctx, []uuid.UUID{account.ID})
+	if err != nil {
+		log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not read send lifecycle")
+		return nil, errx.InternalError()
+	}
+	state := states[account.ID]
+	s.publishAccountEvent(ctx, pubsub.EventAccountSynced, account)
+	return &state, nil
 }
 
 // UpdateTrackingDomain sets or clears a mailbox's custom tracking domain and
@@ -216,8 +258,8 @@ func (s *emailService) resolveTrackingDomain(ctx context.Context, domain string)
 
 // CheckDomainAuth runs a live SPF/DKIM/DMARC lookup for a mailbox's sending
 // domain and reports it without writing anything.
-func (s *emailService) CheckDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
-	_, res, xerr := s.resolveDomainAuth(ctx, userID, emailAccountID)
+func (s *emailService) CheckDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
+	_, res, xerr := s.resolveDomainAuth(ctx, orgID, emailAccountID)
 	return res, xerr
 }
 
@@ -229,8 +271,8 @@ func (s *emailService) CheckDomainAuth(ctx context.Context, userID, emailAccount
 // their DNS would keep being blocked until the background sweep next reached
 // their domain, which can be a day away, and "I fixed it and nothing happened"
 // is how a correct gate still becomes a support incident.
-func (s *emailService) RefreshDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
-	domain, res, xerr := s.resolveDomainAuth(ctx, userID, emailAccountID)
+func (s *emailService) RefreshDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
+	domain, res, xerr := s.resolveDomainAuth(ctx, orgID, emailAccountID)
 	if xerr != nil {
 		return nil, xerr
 	}
@@ -247,11 +289,10 @@ func (s *emailService) RefreshDomainAuth(ctx context.Context, userID, emailAccou
 	return res, nil
 }
 
-// resolveDomainAuth loads the caller's mailbox and runs the DNS lookup for its
-// sending domain, returning the domain alongside the result so the persisting
-// caller does not re-derive it.
-func (s *emailService) resolveDomainAuth(ctx context.Context, userID, emailAccountID string) (string, *dnsauth.Result, *errx.Error) {
-	account, xerr := s.emailRepository.Get(ctx, userID, emailAccountID)
+// resolveDomainAuth loads the organization's mailbox (Get is org-scoped, never user-scoped)
+// and runs the DNS lookup, returning the domain so the persisting caller does not re-derive it.
+func (s *emailService) resolveDomainAuth(ctx context.Context, orgID, emailAccountID string) (string, *dnsauth.Result, *errx.Error) {
+	account, xerr := s.emailRepository.Get(ctx, orgID, emailAccountID)
 	if xerr != nil {
 		return "", nil, xerr
 	}
@@ -361,17 +402,35 @@ func (s *emailService) canUseWarmupPool(ctx context.Context, account *models.Ema
 	return err == nil && canWarmup
 }
 
+// orgSuspendedOrRestricted reports whether the workspace's posture bars the
+// paid warmup pool. Fails open.
+func (s *emailService) orgSuspendedOrRestricted(ctx context.Context, orgID uuid.UUID) bool {
+	if s.orgRiskRepo == nil {
+		return false
+	}
+	states, err := s.orgRiskRepo.GetOrgRiskStates(ctx, []uuid.UUID{orgID})
+	if err != nil {
+		return false
+	}
+	return states[orgID].ForcesFreeWarmupPool()
+}
+
 func (s *emailService) resolveWarmupPoolType(ctx context.Context, account *models.Email) string {
 	if account == nil {
 		return "premium"
-	}
-	if account.WarmupPoolType != "" {
-		return account.WarmupPoolType
 	}
 	// No organization means no entitlement to check, so the mailbox gets the
 	// lower-trust pool rather than defaulting into the paid one.
 	if account.OrganizationID == nil {
 		return "free"
+	}
+	// A restricted organization leaves the paid pool whatever it pays. Checked
+	// before the stored tier, which is never empty and would short-circuit it.
+	if s.orgSuspendedOrRestricted(ctx, *account.OrganizationID) {
+		return "free"
+	}
+	if account.WarmupPoolType != "" {
+		return account.WarmupPoolType
 	}
 	if s.featureGate != nil {
 		isPaid, err := s.featureGate.IsPaidOrganization(ctx, *account.OrganizationID)

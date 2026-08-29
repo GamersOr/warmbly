@@ -265,6 +265,20 @@ var Tables = []Table{
 		Name: "contact_research_runs", Group: models.OrgDataGroupContacts,
 		Scope: scopeOrgAlt,
 	},
+	{
+		// Core rather than events: the site key is what the customer's own
+		// website already carries, so it has to survive the move or every
+		// installed snippet goes dark.
+		Name: "website_tracking_settings", Group: models.OrgDataGroupCore,
+		Scope: scopeOrg,
+		Note:  "The site key travels so snippets already installed keep reporting once the tracking host follows.",
+	},
+	{
+		// After contacts: contact_id is nullable, so a contacts-less run
+		// blanks it rather than aborting, and the visits arrive anonymous.
+		Name: "website_visitors", Group: models.OrgDataGroupEvents,
+		Scope: scopeOrg,
+	},
 
 	// ---------- campaigns ----------
 	{
@@ -604,6 +618,14 @@ var Tables = []Table{
 	{
 		Name: "api_key_usage_logs", Group: models.OrgDataGroupEvents,
 		Scope: `api_key_id IN ` + orgAPIKeys,
+	},
+	{
+		// Bounded by the workspace's own retention window, so even a busy
+		// site adds at most a year of rows; the events group is already the
+		// opt-out for volume.
+		Name: "website_page_hits", Group: models.OrgDataGroupEvents,
+		Scope: scopeOrg,
+		Note:  "Page views collected under the workspace's consent setting. The retention sweep on the destination keeps pruning them by the imported window.",
 	},
 
 	// ---------- logs ----------

@@ -88,7 +88,7 @@ export interface ColdRampInfo {
     held: boolean;
 }
 
-export type SendLifecycle = "warming" | "active" | "resting" | "reserve";
+export type SendLifecycle = "active" | "resting" | "reserve";
 
 // Why a mailbox is not being offered cold sends.
 export interface SendLifecycleState {

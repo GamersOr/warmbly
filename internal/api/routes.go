@@ -121,6 +121,11 @@ func Run(
 		// here instead of touching Postgres (read-only, heavily cached there).
 		internal.GET("/tracked-links/:id", h.InternalGetTrackedLink)
 
+		// Website page views: the tracking service forwards each counted hit
+		// here after its own rate limiting and filtering. Enrichment (user
+		// agent, IP location) and storage happen on this side.
+		internal.POST("/page-hits", h.InternalIngestPageHit)
+
 		// Worker mailbox-sync messageId -> internal email map (replaces the
 		// former DynamoDB EmailMessageData table). Workers read/write it here.
 		internal.GET("/email-message-map", h.InternalGetEmailMessageMap)
@@ -388,6 +393,9 @@ func Run(
 				emails.POST("/:id/warmup/pause", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.PauseWarmup)
 				emails.POST("/:id/warmup/resume", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.ResumeWarmup)
 				emails.POST("/:id/warmup/stop", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.StopWarmup)
+				// The owner's hold on campaign sending. Bodyless and idempotent, so no Idempotency-Key.
+				emails.POST("/:id/hold", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.HoldEmail)
+				emails.POST("/:id/release", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.ReleaseEmail)
 				emails.GET("/:id/auth-check", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.GetEmailAuthCheck)
 				// Write-scoped: recording the verdict is what lifts the cold-send
 				// and warmup gate, so a read-only key must not reach it.
@@ -562,6 +570,7 @@ func Run(
 				contacts.GET("/:id", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetContact)
 				contacts.GET("/:id/emails", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactEmails)
 				contacts.GET("/:id/timeline", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactTimeline)
+				contacts.GET("/:id/campaigns", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactCampaignStates)
 
 				// AI contact research (dedicated AI_RESEARCH scope; JWT callers by
 				// the matching contact permission). Batch queues and drains in the
@@ -1033,6 +1042,13 @@ func Run(
 			// to silence the Advisor for a whole workspace.
 			jwtOnly.PATCH("/advisor/settings", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.UpdateAdvisorSettings)
 
+			// Website tracking is privacy governance (consent mode, retention,
+			// what the snippet may collect), so it is JWT-only like the other
+			// org settings. The rotate is bodyless and idempotent per call.
+			jwtOnly.GET("/website-tracking/settings", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.GetWebsiteTrackingSettings)
+			jwtOnly.PATCH("/website-tracking/settings", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.UpdateWebsiteTrackingSettings)
+			jwtOnly.POST("/website-tracking/settings/rotate-key", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.RotateWebsiteTrackingKey)
+
 			// The agent fix is JWT-only for the same reason the dashboard agent
 			// is: it acts as a named member, inside their permissions, and there
 			// is no API scope that should let a key spend credits rewriting a
@@ -1205,6 +1221,14 @@ func Run(
 		adminRoutes.GET("/organizations/:id/members", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminGetOrganizationMembers)
 		adminRoutes.GET("/organizations/:id/overrides", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminGetOrgOverrides)
 		adminRoutes.PUT("/organizations/:id/overrides", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminUpdateOrgOverrides)
+
+		// Workspace abuse posture. The customer route withholds the evidence;
+		// this is where an operator reads it, pins a decision over it, and
+		// lifts one.
+		adminRoutes.GET("/organizations/:id/risk", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminGetOrgRisk)
+		adminRoutes.PUT("/organizations/:id/risk", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminSetOrgRiskOverride)
+		adminRoutes.DELETE("/organizations/:id/risk", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminClearOrgRiskOverride)
+		adminRoutes.DELETE("/organizations/:id/risk/signals/:key", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminClearOrgRiskSignal)
 
 		// Limit-increase request queue. Approval writes the override
 		// row via the same SetLimitOverrides path used by direct

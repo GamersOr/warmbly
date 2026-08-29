@@ -865,12 +865,11 @@ func (r *warmupRepository) PoolSpamPlacementRate(ctx context.Context, since time
 	return float64(placements) / float64(sent) * 100, nil
 }
 
-// PoolSpamPlacementsByProvider returns spam-placement counts grouped by the
-// recipient provider over the window, so the admin overview can show where
-// warmup mail is being filtered (e.g. mostly at Outlook vs Gmail).
+// PoolSpamPlacementsByProvider counts spam placements in the window keyed by who
+// runs the recipient's mail, not the stored connect method.
 func (r *warmupRepository) PoolSpamPlacementsByProvider(ctx context.Context, since time.Time) (map[string]int, error) {
 	query := `
-		SELECT COALESCE(NULLIF(recipient_provider, ''), 'unknown'), COUNT(*)
+		SELECT recipient_domain, COUNT(*)
 		FROM warmup_spam_reports
 		WHERE report_type = 'spam_placement' AND created_at >= $1
 		GROUP BY 1
@@ -883,12 +882,17 @@ func (r *warmupRepository) PoolSpamPlacementsByProvider(ctx context.Context, sin
 
 	out := make(map[string]int)
 	for rows.Next() {
-		var provider string
+		var domain string
 		var n int
-		if err := rows.Scan(&provider, &n); err != nil {
+		if err := rows.Scan(&domain, &n); err != nil {
 			return nil, err
 		}
-		out[provider] = n
+		// A domainless row belongs to no provider, so it stays out of custom.
+		key := "unknown"
+		if domain != "" {
+			key = string(models.ClassifyProvider(domain))
+		}
+		out[key] += n
 	}
 	return out, rows.Err()
 }
@@ -941,10 +945,13 @@ func (r *warmupRepository) SenderPlacementByProvider(ctx context.Context, sender
 		return nil, err
 	}
 
+	// A blank domain is unattributable and the send side never produces one, so
+	// counting it would demote every custom-domain partner for nobody's failure.
 	placementRows, err := r.db.Query(ctx, `
 		SELECT recipient_domain, COUNT(*)
 		FROM warmup_spam_reports
 		WHERE reported_account_id = $1 AND report_type = 'spam_placement' AND created_at >= $2
+		  AND recipient_domain <> ''
 		GROUP BY 1
 	`, senderAccountID, since)
 	if err != nil {

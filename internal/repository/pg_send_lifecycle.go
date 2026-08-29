@@ -23,6 +23,8 @@ type SendLifecycleRepository interface {
 	// the warmup health that decides where they go, oldest-checked first so
 	// every mailbox is reached rather than the same page every pass.
 	ListLifecycleCandidates(ctx context.Context, limit int) ([]LifecycleCandidate, error)
+	// GetLifecycleCandidate is ListLifecycleCandidates for one mailbox.
+	GetLifecycleCandidate(ctx context.Context, accountID uuid.UUID) (*LifecycleCandidate, error)
 	// MarkLifecycleChecked records that the rebalancer looked at these
 	// mailboxes, which is what rotates the candidate window.
 	MarkLifecycleChecked(ctx context.Context, accountIDs []uuid.UUID) error
@@ -134,6 +136,26 @@ func (r *sendLifecycleRepository) ListLifecycleCandidates(ctx context.Context, l
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (r *sendLifecycleRepository) GetLifecycleCandidate(ctx context.Context, accountID uuid.UUID) (*LifecycleCandidate, error) {
+	var c LifecycleCandidate
+	var state string
+	var health *string
+	err := r.DB.Pool.QueryRow(ctx, `
+		SELECT ea.id, ea.send_lifecycle, ea.send_lifecycle_since, wpp.health_state
+		  FROM email_accounts ea
+		  LEFT JOIN warmup_pool_participants wpp ON wpp.email_account_id = ea.id
+		 WHERE ea.id = $1
+	`, accountID).Scan(&c.EmailAccountID, &state, &c.Since, &health)
+	if err != nil {
+		return nil, err
+	}
+	c.Current = models.SendLifecycle(state)
+	if health != nil {
+		c.HealthState = models.WarmupHealthState(*health)
+	}
+	return &c, nil
 }
 
 func (r *sendLifecycleRepository) MarkLifecycleChecked(ctx context.Context, accountIDs []uuid.UUID) error {

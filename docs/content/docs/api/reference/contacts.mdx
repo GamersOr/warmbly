@@ -28,7 +28,8 @@ Every field is optional; an empty body matches all contacts in the organization.
 | `query` | string | No | Text search across core fields (name, email, company). |
 | `custom_field_filters` | array | No | Per custom-field filters: `{ "name", "value", "type" }` where `type` is one of `equal`, `starts_with`, `ends_with`, `contains`. |
 | `campaign_ids` | string[] | No | Contact must be in ALL of these campaigns. |
-| `lead_status` | string | No | Filter to one derived lead status: `pending`, `active`, `completed`, `replied`, `bounced`, `failed`, `undeliverable`, or `unsubscribed`. Requires exactly one `campaign_ids` entry, otherwise the request is rejected. |
+| `lead_status` | string | No | Filter to one derived lead status: `pending`, `active`, `completed`, `replied`, `bounced`, `failed`, `undeliverable`, or `unsubscribed`. Requires exactly one `campaign_ids` entry, otherwise the request is rejected with `lead_filter_requires_campaign`; an unknown value is rejected with `invalid_lead_status`. |
+| `engagement` | string | No | Filter by engagement inside that campaign: `opened`, `not_opened`, `clicked`, `not_clicked`, `replied`, `not_replied`, or `bounced`. `opened` means a human open (machine opens never count); the `not_*` values match only leads sent at least one step. Combines with `lead_status` as AND. Requires exactly one `campaign_ids` entry (`lead_filter_requires_campaign`); an unknown value is rejected with `invalid_engagement`. |
 | `category_ids` | string[] | No | Contact must have ALL of these categories. |
 | `min_campaigns` | integer | No | Minimum number of associated campaigns. |
 | `max_campaigns` | integer | No | Maximum number of associated campaigns. |
@@ -85,9 +86,9 @@ Returns a `data` array of contacts plus a `pagination` envelope.
 }
 ```
 
-When the search filters by exactly one campaign, each contact additionally carries a `campaign_lead` object with its processing state inside that campaign (`status`, `sent`, `opened`, `clicked`, `replied`, `bounced`, `current_step`, `last_activity_at`, and `failure_reason` when failed). The `status` derivation, highest priority first, is `unsubscribed` (not subscribed), then `bounced`, `replied`, `failed` (a step could not be sent after every retry; `failure_reason` carries the sending worker's reason), `completed` (every email step sent, no reply), `active` (some steps sent, more to send), `undeliverable` (pre-send verification refused the address, so the campaign skips the lead and never sends to it), and `pending` (queued, nothing sent). A step counts as sent only once the sending worker has delivered it to the mailbox provider; a send the worker could not complete is retried on the campaign's next pass and never shows as sent. The `lead_status` filter narrows to one of these buckets.
+When the search filters by exactly one campaign, each contact additionally carries a `campaign_lead` object with its processing state inside that campaign (`status`, `sent`, `opened`, `machine_opened`, `clicked`, `replied`, `bounced`, `current_step`, `last_activity_at`, and `failure_reason` when failed). `opened` counts steps opened by a person; steps fetched automatically by a mail client (Apple Mail Privacy Protection and similar) are in `machine_opened` instead, matching the machine opens the analytics summary reports. The `status` derivation, highest priority first, is `unsubscribed` (not subscribed), then `bounced`, `replied`, `failed` (a step could not be sent after every retry; `failure_reason` carries the sending worker's reason), `completed` (every email step sent, no reply), `active` (some steps sent, more to send), `undeliverable` (pre-send verification refused the address, so the campaign skips the lead and never sends to it), and `pending` (queued, nothing sent). A step counts as sent only once the sending worker has delivered it to the mailbox provider; a send the worker could not complete is retried on the campaign's next pass and never shows as sent. The `lead_status` filter narrows to one of these buckets.
 
-When the search filters by exactly one campaign, the first page (no `cursor`) also includes a `lead_counts` object: per-status lead totals for that campaign, independent of the `lead_status` filter so every scope's total is available at once.
+When the search filters by exactly one campaign, the first page (no `cursor`) also includes a `lead_counts` object: per-status lead totals for that campaign, independent of the `lead_status` and `engagement` filters so every scope's total is available at once. Alongside the status buckets it carries engagement totals that match the `engagement` filter: `contacted` (leads sent at least one step), `opened` (a human open on any step), `clicked`, and `replied_any` (a reply on any step, whatever the derived status).
 
 ```json
 {
@@ -267,8 +268,10 @@ Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
 | `scope` | string | Yes | `all`, `filtered`, or `selected`. |
 | `contact_ids` | string[] | No | Contact IDs when `scope` is `selected`. |
 | `filters` | object | No | A search-contacts filter body when `scope` is `filtered`. |
-| `fields` | string[] | No | Column identifiers in display order (built-ins like `email`, `first_name`, or `custom:<key>`). Empty uses the default columns. |
+| `fields` | string[] | No | Column identifiers in display order (built-ins like `email`, `first_name`, or `custom:<key>`). Empty uses the default columns. `lead_status`, `lead_opened`, `lead_clicked` and `lead_replied` are the contact's engagement inside the one campaign named in `filters.campaign_ids`; they are blank when the filters do not name exactly one campaign. |
 | `filename` | string | No | Filename without extension. Sanitized server-side; empty falls back to `contacts-<YYYY-MM-DD>`. |
+
+With `scope` set to `selected`, `filters` is optional and is applied on top of `contact_ids`; pass the campaign there to populate the `lead_*` columns for the selected rows.
 
 ```json
 {
@@ -462,6 +465,9 @@ Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
   "esp_provider": "gmail",
   "updated_at": "2026-06-10T12:00:00Z",
   "created_at": "2026-05-01T09:30:00Z",
+  "source": "import",
+  "source_detail": "q3-leads.csv",
+  "first_seen_at": "2026-05-01T09:30:00Z",
   "engagement": {
     "total_sent": 4,
     "total_opened": 3,
@@ -602,7 +608,7 @@ Returns a `data` array plus a `pagination` envelope.
 
 `GET /contacts/:id/timeline`
 
-Returns the merged activity feed for a contact: sends, opens, clicks, replies, bounces, deliverability and suppression events, notes, and meeting bookings. Requires a selected organization (org-scoped events would otherwise be hidden), so a request with no organization returns `400`.
+Returns the merged activity feed for a contact: sends, opens, clicks, replies, bounces, deliverability and suppression events, notes, meeting bookings, and lifecycle events (the contact's creation with its first-touch source, and every time it joined or left a campaign or a category). Requires a selected organization (org-scoped events would otherwise be hidden), so a request with no organization returns `400`.
 
 Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
 
@@ -634,13 +640,86 @@ Returns a `data` array and a `has_more` flag (not a cursor envelope). Paginate b
       "at": "2026-06-08T16:30:00Z",
       "content": "Met at the conference, wants a follow-up in July.",
       "user_id": "u1..."
+    },
+    {
+      "type": "campaign_added",
+      "at": "2026-05-01T09:31:00Z",
+      "campaign_id": "c1...",
+      "campaign_name": "Q3 Outbound",
+      "user_id": "u1..."
+    },
+    {
+      "type": "contact_created",
+      "at": "2026-05-01T09:30:00Z",
+      "source": "import",
+      "source_detail": "q3-leads.csv",
+      "user_id": "u1..."
     }
   ],
   "has_more": false
 }
 ```
 
-`type` is one of `email_sent`, `email_opened`, `email_clicked`, `email_replied`, `email_bounced`, `reply_received`, `deliverability`, `suppressed`, `note`, `meeting_booked`, `meeting_rescheduled`, or `meeting_canceled`. Fields not relevant to an event type are omitted.
+`type` is one of `email_sent`, `email_opened`, `email_clicked`, `email_replied`, `email_bounced`, `reply_received`, `deliverability`, `suppressed`, `note`, `meeting_booked`, `meeting_rescheduled`, `meeting_canceled`, `contact_created`, `campaign_added`, `campaign_removed`, `category_added`, or `category_removed`. Fields not relevant to an event type are omitted.
+
+Lifecycle events carry the name of what changed as it was at the time (`campaign_name`, or `category_id` plus `category_title`), so a later rename or deletion does not rewrite history. A `contact_created` event carries `source` (`manual`, `campaign`, `import`, `sheet_sync`, `api`, `ai_assistant`, or `unknown` for contacts that predate attribution) and `source_detail` (the file, campaign, sheet or API key name). The same values are on the contact itself as `source`, `source_detail` and `first_seen_at`, and never change after creation.
+
+## Get a contact's campaign state
+
+`GET /contacts/:id/campaigns`
+
+Returns, for every campaign the contact is a lead of, the flow with this contact's progress on each step, the derived lead status, the last thing that happened, and what happens next. Requires a selected organization.
+
+The next action is derived on read by the scheduler through the same constraints a real send goes through (the step's wait, the campaign's start date and sending windows, mailbox caps and spacing, the new-lead limit); a campaign is one self-perpetuating task, so nothing per contact is stored. `next.state` says how firm the timing is: `due` carries `scheduled_at`, the slot the scheduler would give the step on its next pass (leads ahead in the queue can still push it later); `waiting` carries `not_before` and a `constraint`; `paused` and `blocked` carry only the reason. `next` is absent once the flow has ended for the contact, and `ended_reason` says why.
+
+Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | UUID | Contact ID. |
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "campaign_id": "c1...",
+      "campaign_name": "Q3 Outbound",
+      "campaign_status": "active",
+      "lead_status": "active",
+      "steps": [
+        {
+          "id": "s1...",
+          "label": "Email 1",
+          "kind": "email",
+          "position": 0,
+          "subject": "Quick question",
+          "sent_at": "2026-06-09T08:00:00Z",
+          "opened_at": "2026-06-09T08:14:00Z"
+        },
+        { "id": "s2...", "label": "Email 2", "kind": "email", "position": 1, "subject": "Following up" }
+      ],
+      "completed_steps": 1,
+      "total_steps": 2,
+      "current_step": { "id": "s1...", "label": "Email 1", "kind": "email", "position": 0, "subject": "Quick question", "sent_at": "2026-06-09T08:00:00Z", "opened_at": "2026-06-09T08:14:00Z" },
+      "last_action": "Opened",
+      "last_action_at": "2026-06-09T08:14:00Z",
+      "next": {
+        "step_id": "s2...",
+        "step_label": "Email 2",
+        "kind": "email",
+        "subject": "Following up",
+        "state": "waiting",
+        "not_before": "2026-06-12T08:00:00Z",
+        "constraint": "Waiting 3 days after Email 1"
+      }
+    }
+  ]
+}
+```
+
+`lead_status` uses the same values as the campaign Leads view: `pending`, `active`, `completed`, `replied`, `bounced`, `failed`, `unsubscribed`, or `undeliverable`. Each step carries whichever of `sent_at`, `opened_at`, `clicked_at`, `replied_at`, `bounced_at` and `failed_at` apply, plus `attempts` and `in_flight` (reserved for a worker whose result has not come back). While a branch condition is undecided, `next.step_id` is absent and `next.step_label` says the step depends on the contact's response.
 
 ## List a contact's activities
 
@@ -679,7 +758,7 @@ Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
 }
 ```
 
-`activity_type` is a closed enum including `email_sent`, `email_opened`, `email_clicked`, `email_replied`, `email_bounced`, `note_added`, `note_updated`, `deal_created`, `deal_stage_changed`, `deal_won`, `deal_lost`, `task_created`, `task_completed`, `contact_created`, `contact_updated`, `campaign_added`, and `campaign_removed`.
+`activity_type` is a closed enum including `email_sent`, `email_opened`, `email_clicked`, `email_replied`, `email_bounced`, `note_added`, `note_updated`, `deal_created`, `deal_stage_changed`, `deal_won`, `deal_lost`, `task_created`, `task_completed`, `contact_created`, `contact_updated`, `campaign_added`, `campaign_removed`, `category_added`, and `category_removed`.
 
 ## List a contact's notes
 

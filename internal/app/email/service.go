@@ -32,6 +32,9 @@ type EmailService interface {
 	// SetWarmupLifecycle starts, pauses, resumes, or disables warmup for a
 	// mailbox. start/resume preserve ramp progress; disable turns warmup off.
 	SetWarmupLifecycle(ctx context.Context, userID, emailAccountID, action string) (*models.Email, *errx.Error)
+	// SetSendHold holds a mailbox in reserve or releases it; a release lands
+	// wherever its warmup health says, so an unhealthy mailbox rests.
+	SetSendHold(ctx context.Context, orgID, emailAccountID string, hold bool) (*models.SendLifecycleState, *errx.Error)
 	// UpdateTrackingDomain sets or clears the custom open/click tracking
 	// domain and resolves it once, persisting the verdict.
 	UpdateTrackingDomain(ctx context.Context, orgID, emailAccountID, domain string) (*models.TrackingDomainStatus, *errx.Error)
@@ -48,11 +51,11 @@ type EmailService interface {
 	StartTrackingDomainSweep(ctx context.Context, interval, staleAfter time.Duration)
 	// CheckDomainAuth runs a live SPF/DKIM/DMARC lookup for a mailbox's
 	// sending domain and returns it without touching stored state.
-	CheckDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error)
+	CheckDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error)
 	// RefreshDomainAuth does the same and PERSISTS the verdict. That write can
 	// lift the cold-send and warmup gate, so it sits behind the write
 	// permission while CheckDomainAuth stays readable.
-	RefreshDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error)
+	RefreshDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error)
 	Delete(ctx context.Context, userID, emailAccountID string) *errx.Error
 
 	// Onboarding flow
@@ -115,7 +118,35 @@ type emailService struct {
 	// (email_account.connected, email_account.removed) are dispatched to
 	// subscribed customer webhooks.
 	webhookService webhook.Service
+	// orgRiskRepo bars a restricted organization from the paid warmup pool.
+	// Optional/nil-safe.
+	orgRiskRepo repository.OrgRiskRepository
+	// lifecycleRepo backs the owner's hold; without it SetSendHold refuses.
+	lifecycleRepo repository.SendLifecycleRepository
 }
+
+// WireLifecycle attaches the cold-sending lifecycle.
+func (s *emailService) WireLifecycle(r repository.SendLifecycleRepository) {
+	s.lifecycleRepo = r
+}
+
+// LifecycleAware is the optional capability the caller uses to attach it.
+type LifecycleAware interface {
+	WireLifecycle(r repository.SendLifecycleRepository)
+}
+
+// WireOrgRisk attaches the organization risk posture.
+func (s *emailService) WireOrgRisk(r repository.OrgRiskRepository) {
+	s.orgRiskRepo = r
+}
+
+// OrgRiskAware is the optional capability the caller uses to attach org risk.
+type OrgRiskAware interface {
+	WireOrgRisk(r repository.OrgRiskRepository)
+}
+
+// main.go attaches the posture by type assertion, which fails silently.
+var _ OrgRiskAware = (*emailService)(nil)
 
 // SyncBudgetSource is the operator-editable sync fair-use section, satisfied
 // by instancesettings.Service. Injected post-construction; when unset the

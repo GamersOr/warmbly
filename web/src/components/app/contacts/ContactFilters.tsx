@@ -13,6 +13,7 @@ import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import type SearchContactsFilter from "@/lib/api/models/app/contacts/SearchContactsFilter";
 import type { SearchContactsFilterType, SearchContactsSortBy } from "@/lib/api/models/app/contacts/search-contacts.types";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
+import type { LeadEngagement, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -266,6 +267,31 @@ export default function ContactFilters({
                                 </p>
                             </div>
 
+                            {activeCampaign && (
+                                <>
+                                    <Section label="Lead status" />
+                                    <div className="px-4 py-3">
+                                        <ChoiceRow
+                                            value={draft.lead_status}
+                                            onChange={(v) => setDraft((s) => ({ ...s, lead_status: v }))}
+                                            options={LEAD_STATUS_OPTIONS}
+                                        />
+                                    </div>
+
+                                    <Section label="Engagement" />
+                                    <div className="px-4 py-3">
+                                        <ChoiceRow
+                                            value={draft.engagement}
+                                            onChange={(v) => setDraft((s) => ({ ...s, engagement: v }))}
+                                            options={ENGAGEMENT_OPTIONS}
+                                        />
+                                        <p className="text-[10.5px] text-slate-400 mt-1.5 leading-tight">
+                                            Opens count people, not mail clients: automatic prefetches are ignored. Not opened, not clicked and not replied only cover leads that have been sent at least one email.
+                                        </p>
+                                    </div>
+                                </>
+                            )}
+
                             <Section label="Subscription" />
                             <div className="px-4 py-3">
                                 <Toggle3
@@ -419,6 +445,65 @@ function FilterRow({
     );
 }
 
+// Lead status and engagement choices for the campaign Leads view. "Any" is
+// `undefined` so the field is dropped from the request.
+const LEAD_STATUS_OPTIONS: { id: LeadStatus | undefined; label: string }[] = [
+    { id: undefined, label: "Any" },
+    { id: "pending", label: "Queued" },
+    { id: "active", label: "Processing" },
+    { id: "completed", label: "Done" },
+    { id: "replied", label: "Replied" },
+    { id: "bounced", label: "Bounced" },
+    { id: "failed", label: "Failed" },
+    { id: "undeliverable", label: "Undeliverable" },
+    { id: "unsubscribed", label: "Unsubscribed" },
+];
+
+const ENGAGEMENT_OPTIONS: { id: LeadEngagement | undefined; label: string }[] = [
+    { id: undefined, label: "Any" },
+    { id: "opened", label: "Opened" },
+    { id: "not_opened", label: "Not opened" },
+    { id: "clicked", label: "Clicked" },
+    { id: "not_clicked", label: "Not clicked" },
+    { id: "replied", label: "Replied" },
+    { id: "not_replied", label: "Not replied" },
+    { id: "bounced", label: "Bounced" },
+];
+
+// Wrapping single-choice chips for option sets too long for Toggle3's pill.
+function ChoiceRow<T extends string | undefined>({
+    value,
+    onChange,
+    options,
+}: {
+    value: T;
+    onChange: (v: T) => void;
+    options: { id: T; label: string }[];
+}) {
+    return (
+        <div className="flex flex-wrap gap-1">
+            {options.map((o) => {
+                const on = value === o.id;
+                return (
+                    <button
+                        key={String(o.id)}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => onChange(o.id)}
+                        className={`h-6 px-2 rounded-md border text-[11.5px] font-medium transition-colors ${
+                            on
+                                ? "border-sky-200 bg-sky-50 text-sky-700"
+                                : "border-slate-200 text-slate-500 hover:text-slate-900 hover:border-slate-300"
+                        }`}
+                    >
+                        {o.label}
+                    </button>
+                );
+            })}
+        </div>
+    );
+}
+
 function Toggle3<T extends boolean | undefined>({
     value,
     onChange,
@@ -544,6 +629,8 @@ function countActiveFilters(f: SearchContacts, hasCampaignContext: boolean): num
     if (f.query) n++;
     n += f.filters.length;
     if (f.subscribed !== undefined) n++;
+    if (f.lead_status) n++;
+    if (f.engagement) n++;
     if (f.min_campaigns !== undefined) n++;
     if (f.max_campaigns !== undefined) n++;
     if (f.created_after) n++;

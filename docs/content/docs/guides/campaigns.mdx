@@ -75,6 +75,29 @@ The **Leads** tab takes contacts four ways. **From contacts** opens a picker ove
 
 A lead is **Processing** only while steps remain, so a finished campaign reads as done rather than stuck mid-flight.
 
+### Who opened, clicked and replied
+
+Next to each lead's status, the Leads list shows three engagement columns: **Opened**, **Clicked** and **Replied**, each with the number of emails in the sequence the person engaged with. A dash means the lead was emailed and has not engaged; the cell is blank for a lead not emailed yet. An open counts only when a person opened the email. Mail clients that fetch every image automatically (Apple Mail Privacy Protection, for example) show as **auto** instead, the same opens the campaign overview reports as automatic, so they never pass for engagement.
+
+The chips above the list are filters. Click a status chip (**Processing**, **Done**, **Replied**, **Queued**, **Bounced**, **Unsub**) or an engagement chip (**Opened**, **Not opened**, **Clicked**, **Not clicked**, **Replied**, **Not replied**) to show only those leads; click it again to clear. One status and one engagement chip can be active at once and both must match. The numbers on the chips are campaign-wide totals, and filtering happens on the server, so a scope shows every matching lead however long the list is. **Not opened**, **Not clicked** and **Not replied** only cover leads that have been sent at least one email: a queued lead has not had the chance. The same filters live in the **Filters** sheet under **Lead status** and **Engagement**.
+
+Engagement updates live as opens, clicks and replies arrive; no refresh is needed. **Export** from the Leads tab offers four extra columns (**Lead status**, **Opened**, **Clicked**, **Replied**), whether you export the current scope or selected rows.
+
+### What one lead is doing next
+
+Open a contact and go to **Activity**: the panel at the top lists every campaign the contact is in, with the flow drawn step by step (sent, opened, clicked, replied, bounced or failed on each), the lead status, the last thing that happened, and the next action.
+
+The next action is worked out on the spot by the scheduler, through the same rules a real send goes through: the step's wait, the campaign's start date and sending windows, each mailbox's daily cap and spacing, and the new-lead limit. Nothing is stored per contact, because a campaign is a single task that picks the next lead each time it runs. So the panel shows one of:
+
+| State | Meaning |
+|-------|---------|
+| Due | The step is due now. The time shown is the slot the scheduler would give it on the next pass; leads queued ahead of this one can still push it later |
+| Waiting | A hard constraint holds the step back. The panel names it (`Waiting 3 days after Email 1`, `Outside the campaign's sending window`, `Today's new-lead limit is reached`) and shows the earliest the step can go, not a promised time |
+| Paused | The campaign is not running, so nothing is scheduled |
+| Blocked | The campaign cannot send at all right now: no mailbox attached, every sending domain failing authentication, or past its end date |
+
+When a step's branches are still undecided (`if they open within 3 days`), the panel says the next step depends on their response and when that window closes. A lead that has finished, replied, bounced, failed or unsubscribed shows why the flow ended instead.
+
 A step counts as sent only once the sending worker has handed it to the mailbox provider. If the worker cannot send (the mailbox was still loading, the provider refused the message, a storage hiccup), the step goes back to the queue, the failure appears in **Needs attention** with the reason, and the next pass retries it. After five failed attempts the lead is marked **Failed** and dropped from the campaign, so a mailbox that can never send does not loop forever. A recipient the mail server refuses outright is not retried: it is recorded as a **Bounced** lead straight away and goes through the same bounce handling (suppression, guardrails, webhooks) as a bounce notice. A campaign that finished while a send was still in flight reopens to retry it.
 
 No contact is emailed the same step twice. Each step is recorded as attempted before the send is handed to a worker, so a crash, a restart, or a database hiccup in the moment between the two cannot make the step look unsent and send it again. The trade-off is a step whose outcome is genuinely unknown, when the worker stops responding mid-send: after 30 minutes with no answer the step is treated as a failed attempt, appears in **Needs attention**, and is retried like any other failure.
@@ -138,13 +161,13 @@ Warmbly scores each step's copy out of 100 for the signals spam filters weight: 
 
 You see it in three places:
 
-- **In the editor**, live as you write a step.
-- **In the launch dialog**, alongside the other pre-send checks, with the lowest-scoring step named.
+- **In the editor**, re-scored as you write a step.
+- **In the launch dialog**, alongside the other pre-send checks, with the lowest-scoring step named. Only email steps are scored; wait and action steps carry no copy.
 - **In the campaign activity feed**, if the copy that actually goes out scores below your floor.
 
 That last one catches what the first two cannot. The editor scores the template; the send path scores the message after merge fields, spintax, A/B selection and AI blocks have resolved, which is where a clean template becomes "Hi ," or picks the one spammy spintax branch. It logs once per step per day, not once per recipient.
 
-**Settings** > **Sending** > **Content checks** turns it off or moves the floor, which defaults to `60`.
+**Settings** > **Sending** > **Content checks** turns it off or moves the floor, which defaults to `60` and accepts `1` to `100`.
 
 <Callout type="info" title="Advisory, not a gate">
 A low score never blocks or delays a send. It is a signal to rewrite, not a verdict: a legitimate email can score badly, and a well-scoring one sent to a bad list will still fail.

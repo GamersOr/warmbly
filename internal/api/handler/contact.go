@@ -39,6 +39,10 @@ func (h *Handler) AddContacts(c *gin.Context) {
 		return
 	}
 
+	for i := range data {
+		data[i].Source, data[i].SourceDetail = contactSourceFor(c, data[i].Source)
+	}
+
 	resp, err := h.ContactService.Add(c.Request.Context(), userIDStr, *orgID, data)
 	if err != nil {
 		errx.Handle(c, err)
@@ -49,6 +53,20 @@ func (h *Handler) AddContacts(c *gin.Context) {
 	h.auditOrg(c, models.AuditActionImport, models.AuditEntityContact, nil, nil, map[string]string{"count": fmt.Sprintf("%d", len(data))})
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// contactSourceFor decides a new contact's first-touch source from the
+// request: an API key is always "api" (named after the key), a dashboard
+// session may say "campaign" when adding from a campaign's Leads tab, and
+// anything else is a manual create.
+func contactSourceFor(c *gin.Context, claimed models.ContactSource) (models.ContactSource, string) {
+	if middleware.GetAPIKeyID(c) != nil {
+		return models.ContactSourceAPI, middleware.GetAPIKeyName(c)
+	}
+	if claimed.RequestSettable() {
+		return claimed, ""
+	}
+	return models.ContactSourceManual, ""
 }
 
 func (h *Handler) SearchContacts(c *gin.Context) {

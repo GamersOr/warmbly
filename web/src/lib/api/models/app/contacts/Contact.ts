@@ -16,12 +16,27 @@ export type LeadStatus =
     | "unsubscribed"
     | "undeliverable";
 
+// LeadEngagement mirrors models.SearchContacts.Engagement. "opened" is a human
+// open (machine opens never count); the not_* forms match leads that were sent
+// at least one step, so a queued lead is neither opened nor not opened.
+export type LeadEngagement =
+    | "opened"
+    | "not_opened"
+    | "clicked"
+    | "not_clicked"
+    | "replied"
+    | "not_replied"
+    | "bounced";
+
 // ContactCampaignProgress is set only on contacts returned by a single-campaign
 // (Leads view) search; it summarises how far the lead is through the campaign.
 export interface ContactCampaignProgress {
     status: LeadStatus;
     sent: number;
+    // Human opens; automated fetches (Apple MPP prefetch, UA-less clients)
+    // are counted apart in machine_opened.
     opened: number;
+    machine_opened: number;
     clicked: number;
     replied: number;
     bounced: number;

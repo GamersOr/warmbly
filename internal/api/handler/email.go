@@ -185,6 +185,39 @@ func (h *Handler) warmupLifecycle(c *gin.Context, action string) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// HoldEmail serves POST /emails/:id/hold: the owner takes the mailbox out of
+// campaign sending until they release it. Warmup is untouched.
+func (h *Handler) HoldEmail(c *gin.Context) { h.sendHold(c, true) }
+
+// ReleaseEmail serves POST /emails/:id/release, putting a held or resting
+// mailbox back into campaign rotation.
+func (h *Handler) ReleaseEmail(c *gin.Context) { h.sendHold(c, false) }
+
+func (h *Handler) sendHold(c *gin.Context, hold bool) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+	emailAccountID := c.Param("id")
+
+	state, err := h.EmailService.SetSendHold(c.Request.Context(), orgID.String(), emailAccountID, hold)
+	if err != nil {
+		errx.Handle(c, err)
+		return
+	}
+
+	action := "released"
+	if hold {
+		action = "held"
+	}
+	if accountID, perr := uuid.Parse(emailAccountID); perr == nil {
+		h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityEmailAccount, &accountID, map[string]string{"send_hold": action}, nil)
+	}
+
+	c.JSON(http.StatusOK, state)
+}
+
 // GetEmailTrackingDomain serves GET /emails/:id/track: the mailbox's stored
 // tracking-domain state plus the CNAME target this install expects. Read-only,
 // so it does no DNS work; VerifyEmailTrackingDomain is the live check.

@@ -48,8 +48,16 @@ func adjustmentFor(state models.WarmupHealthState) healthAdjustment {
 	}
 }
 
-func warmupPoolTypeForAccount(account *models.Email) string {
-	if account != nil && account.WarmupPoolType != "" {
+// warmupPoolTypeForAccount is the pool the mailbox actually warms in: a restricted
+// organization is held in free whatever tier it carries.
+func (s *schedulerService) warmupPoolTypeForAccount(ctx context.Context, account *models.Email) string {
+	if account == nil {
+		return "premium"
+	}
+	if s.orgRiskState(ctx, account.OrganizationID).ForcesFreeWarmupPool() {
+		return "free"
+	}
+	if account.WarmupPoolType != "" {
 		return account.WarmupPoolType
 	}
 	return "premium"
@@ -233,7 +241,7 @@ func (s *schedulerService) CalculateNextWarmupTime(ctx context.Context, accountI
 	// here, so operators can add inbound capacity without making those
 	// mailboxes warmup senders.
 	if s.warmupRepo != nil {
-		poolType := warmupPoolTypeForAccount(account)
+		poolType := s.warmupPoolTypeForAccount(ctx, account)
 		eligibleRecipients, err := s.warmupRepo.CountEligibleRecipients(ctx, poolType, accountID)
 		if err == nil && eligibleRecipients < config.WarmupPoolTierFallbackFloor {
 			// A thin tier borrows the other tier's proven mailboxes, the same

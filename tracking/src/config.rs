@@ -55,6 +55,16 @@ pub struct Config {
     pub internal_api_token: String,
     /// Per-source request budget for both tracking endpoints (default 300/min).
     pub rate_limit_per_min: u32,
+    /// Page-view ingest budget per source per minute. Lower than the pixel
+    /// budget: a person does not view a page a second, a script does.
+    pub pagehit_rate_limit_per_min: u32,
+    /// CIDRs whose forwarded-IP headers are believed. Empty trusts nothing,
+    /// so the socket peer is the client, the same rule as the backend.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// The one header a trusted proxy sets with the client address. Only this
+    /// header is read, so a client-supplied CF-Connecting-IP behind a generic
+    /// proxy is ignored. For x-forwarded-for the proxy-appended last entry wins.
+    pub client_ip_header: String,
 }
 
 impl Config {
@@ -167,6 +177,27 @@ impl Config {
             .unwrap_or(300);
         info!("Per-source rate limit: {}/min", rate_limit_per_min);
 
+        let pagehit_rate_limit_per_min: u32 = env::var("TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        info!(
+            "Per-source page-hit rate limit: {}/min",
+            pagehit_rate_limit_per_min
+        );
+
+        let trusted_proxies =
+            parse_trusted_proxies(&env::var("TRACKING_TRUSTED_PROXIES").unwrap_or_default());
+        let client_ip_header = env::var("TRACKING_CLIENT_IP_HEADER")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "x-forwarded-for".to_string());
+        info!(
+            "Trusted proxies: {:?} (client ip header: {})",
+            trusted_proxies, client_ip_header
+        );
+
         Ok(Self {
             env: env_name,
             host,
@@ -184,6 +215,9 @@ impl Config {
             backend_internal_url,
             internal_api_token,
             rate_limit_per_min,
+            pagehit_rate_limit_per_min,
+            trusted_proxies,
+            client_ip_header,
         })
     }
 
@@ -258,6 +292,13 @@ impl Config {
             backend_internal_url,
             internal_api_token,
             rate_limit_per_min: 300,
+            pagehit_rate_limit_per_min: 60,
+            trusted_proxies: parse_trusted_proxies(
+                &env::var("TRACKING_TRUSTED_PROXIES").unwrap_or_default(),
+            ),
+            client_ip_header: env::var("TRACKING_CLIENT_IP_HEADER")
+                .unwrap_or_else(|_| "x-forwarded-for".to_string())
+                .to_ascii_lowercase(),
         })
     }
 
@@ -351,4 +392,17 @@ impl Config {
             _ => None,
         }
     }
+}
+
+/// Parses a comma-separated CIDR list; a bare address is a /32 or /128.
+pub fn parse_trusted_proxies(raw: &str) -> Vec<ipnet::IpNet> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .filter_map(|v| {
+            v.parse::<ipnet::IpNet>()
+                .ok()
+                .or_else(|| v.parse::<std::net::IpAddr>().ok().map(ipnet::IpNet::from))
+        })
+        .collect()
 }
