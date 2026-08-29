@@ -862,10 +862,8 @@ func (r *warmupRepository) PoolSpamPlacementRate(ctx context.Context, since time
 	return float64(placements) / float64(sent) * 100, nil
 }
 
-// PoolSpamPlacementsByProvider returns spam-placement counts over the window
-// keyed by who RUNS the recipient's mail, the same vocabulary partner routing
-// reads. The stored recipient_provider column is the connect method, which
-// files every custom-domain Microsoft 365 mailbox under smtp_imap.
+// PoolSpamPlacementsByProvider counts spam placements in the window keyed by who
+// runs the recipient's mail, not the stored connect method.
 func (r *warmupRepository) PoolSpamPlacementsByProvider(ctx context.Context, since time.Time) (map[string]int, error) {
 	query := `
 		SELECT recipient_domain, COUNT(*)
@@ -886,8 +884,7 @@ func (r *warmupRepository) PoolSpamPlacementsByProvider(ctx context.Context, sin
 		if err := rows.Scan(&domain, &n); err != nil {
 			return nil, err
 		}
-		// Unattributable rows stay their own bucket rather than inflating
-		// custom, which would read as a real provider surface.
+		// A domainless row belongs to no provider, so it stays out of custom.
 		key := "unknown"
 		if domain != "" {
 			key = string(models.ClassifyProvider(domain))
@@ -945,9 +942,8 @@ func (r *warmupRepository) SenderPlacementByProvider(ctx context.Context, sender
 		return nil, err
 	}
 
-	// A blank recipient domain is unattributable, and the send side can never
-	// produce one, so counting it would charge a numerator with no denominator
-	// to ProviderCustom and demote every custom-domain partner for it.
+	// A blank domain is unattributable and the send side never produces one, so
+	// counting it would demote every custom-domain partner for nobody's failure.
 	placementRows, err := r.db.Query(ctx, `
 		SELECT recipient_domain, COUNT(*)
 		FROM warmup_spam_reports
