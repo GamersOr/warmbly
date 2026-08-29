@@ -61,8 +61,22 @@ type PreflightValidationSettings struct {
 	// and again per send against the rendered text. Advisory: it warns, it
 	// never blocks a send.
 	CheckContentScore bool `json:"check_content_score"`
-	// MinContentScore is the 0-100 floor below which copy is flagged.
+	// MinContentScore is the 1-100 floor below which copy is flagged.
 	MinContentScore int `json:"min_content_score"`
+}
+
+// Normalize clamps the settings an API caller can put out of range, so a stored
+// value can never make every campaign fail the check or none of them.
+func (s *AdvancedOutreachSettings) Normalize() {
+	if s == nil {
+		return
+	}
+	if s.Preflight.MinContentScore > 100 {
+		s.Preflight.MinContentScore = 100
+	}
+	if s.Preflight.MinContentScore < 1 {
+		s.Preflight.MinContentScore = 1
+	}
 }
 
 type DeliverabilityDashboardSettings struct {
