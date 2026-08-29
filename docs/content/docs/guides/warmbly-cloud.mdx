@@ -24,7 +24,9 @@ Unenrolling a mailbox, or disconnecting the instance, deletes the credential on 
 
 ## Linking your instance
 
-1. On your instance, open **Settings > Warmbly Cloud** and press **Connect to Warmbly Cloud**. The instance shows an eight character code.
+The link is offered in three places on a self-hosted instance: as the last step of onboarding when you first sign in, as a banner on **Mailboxes** until you connect or dismiss it, and under **Settings > Warmbly Cloud** at any time. Whichever you use, the steps are the same:
+
+1. Press **Connect to Warmbly Cloud**. The instance shows an eight character code.
 2. Press **Open Warmbly Cloud**, or go to `app.warmbly.com/connect`, sign in with your Warmbly account (create one if you do not have it, it is free), enter the code and pick the workspace to link to. The workspace needs the manage settings permission.
 3. Your instance notices the approval within a few seconds and moves on to mailbox selection. Switch on the mailboxes you want warmed.
 
@@ -37,6 +39,8 @@ Mailboxes connected with **SMTP/IMAP** (including Google Workspace and Microsoft
 Mailboxes connected through **Sign in with Google** or **Sign in with Microsoft** cannot be enrolled yet. Their refresh grant is bound to the OAuth app that issued it, which on a self-hosted instance is your own, so the cloud could never refresh the token. Reconnect such a mailbox with SMTP/IMAP to enroll it.
 
 ## What your instance shows
+
+Once linked, the **Mailboxes** page marks every enrolled mailbox with a blue **Cloud** badge, shows the cloud's daily count in the warmup column, and offers **Warm in Warmbly Cloud**, pause, resume and remove in each row's warmup menu. The mailbox drawer's Warmup tab shows the same block with the cloud's numbers in place of the local controls. Any member can see this; enrolling needs the manage mailboxes permission and linking needs manage settings.
 
 **Settings > Warmbly Cloud** lists every active mailbox with a switch for whether it is in the pool. For enrolled mailboxes it shows the cloud's view:
 

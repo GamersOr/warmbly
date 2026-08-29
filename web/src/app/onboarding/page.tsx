@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import toast from "react-hot-toast";
+import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
+import CloudLinkCard from "@/components/app/cloud/CloudLinkCard";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 
@@ -46,7 +48,7 @@ type OnboardingForm = z.infer<typeof schema>;
 
 const INPUT = "w-full h-11 rounded-lg border border-slate-200 bg-white px-4 text-[15px] text-slate-900 placeholder:text-slate-400 outline-none transition-colors duration-200 focus:border-sky-400 focus:ring-4 focus:ring-sky-400/15";
 
-const STEPS = [
+const BASE_STEPS = [
     {
         fields: ["first_name", "last_name"] as const,
         title: "Welcome to Warmbly",
@@ -68,6 +70,14 @@ const STEPS = [
         subtitle: "Optional. Get a realtime HTTP callback when things happen in your workspace. You can skip this and add it later.",
     },
 ];
+
+// Self-hosted instances get one more step: linking to Warmbly Cloud so the
+// pool warms their mailboxes. Skippable; Settings > Warmbly Cloud has it too.
+const CLOUD_STEP = {
+    fields: [] as const,
+    title: "Warm your mailboxes in the Warmbly pool",
+    subtitle: "Optional. Link this instance to Warmbly Cloud and we run warmup for up to 10 mailboxes for free. Everything else stays on this server.",
+};
 
 const ROLES = [
     { value: "founder", label: "Founder" },
@@ -161,6 +171,13 @@ export default function OnboardingPage() {
     const updateOrganization = useUpdateOrganization();
     const { data: org } = useCurrentOrganization();
 
+    const authConfig = useAuthConfig();
+    const selfHosted = authConfig.data?.self_hosted === true;
+    const STEPS = useMemo(() => (selfHosted ? [...BASE_STEPS, CLOUD_STEP] : BASE_STEPS), [selfHosted]);
+    const cloudStep = selfHosted ? STEPS.length - 1 : -1;
+    const [cloudLinked, setCloudLinked] = useState(false);
+    const [cloudOrg, setCloudOrg] = useState("");
+
     const [step, setStep] = useState(0);
     const isLast = step === STEPS.length - 1;
 
@@ -240,7 +257,7 @@ export default function OnboardingPage() {
                     <span className="w-7 h-7 -ml-1" />
                 )}
                 <div className="flex-1 flex gap-1.5">
-                    {STEPS.map((_, i) => (
+                    {STEPS.map((_: unknown, i: number) => (
                         <span key={i} className="h-1 flex-1 rounded-full bg-slate-200 overflow-hidden">
                             <motion.span
                                 className="block h-full rounded-full bg-sky-500"
@@ -332,6 +349,19 @@ export default function OnboardingPage() {
                             </div>
                         )}
 
+                        {step === cloudStep && (
+                            <div className="rounded-lg border border-slate-200 bg-white p-4">
+                                <CloudLinkCard
+                                    compact
+                                    linked={cloudLinked}
+                                    orgName={cloudOrg}
+                                    onLinked={(name) => {
+                                        setCloudOrg(name);
+                                        setCloudLinked(true);
+                                    }}
+                                />
+                            </div>
+                        )}
                         {step === 3 && (
                             <div>
                                 <FieldLabel>Webhook URL</FieldLabel>

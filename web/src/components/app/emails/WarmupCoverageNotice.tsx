@@ -19,15 +19,21 @@ export default function WarmupCoverageNotice({
     totalCount,
     canWarmup,
     onAdd,
+    onConnectCloud,
+    cloudConnected = false,
 }: {
     warmupCount: number;
     totalCount: number;
     canWarmup: boolean;
     onAdd: () => void;
+    /** Self-hosted and not linked: opens the connect dialog instead of the marketing site. */
+    onConnectCloud?: () => void;
+    /** Linked already: the pool advice is moot, so the notice stays quiet. */
+    cloudConnected?: boolean;
 }) {
     // Only relevant once at least one mailbox is actually warming, the org can
     // use warmup, and the pool is below a believable size.
-    if (!canWarmup || warmupCount < 1 || warmupCount >= HEALTHY_MIN) return null;
+    if (!canWarmup || cloudConnected || warmupCount < 1 || warmupCount >= HEALTHY_MIN) return null;
 
     const critical = warmupCount < 2;
     const hasIdle = totalCount > warmupCount;
@@ -59,14 +65,20 @@ export default function WarmupCoverageNotice({
                     <span className="text-amber-800/90">
                         {hasIdle ? " (or turn warmup on for the ones you already have)" : ""}, or let{" "}
                     </span>
-                    <a
-                        href="https://warmbly.com"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-medium underline underline-offset-2 hover:text-amber-950"
-                    >
-                        Warmbly Cloud
-                    </a>
+                    {onConnectCloud ? (
+                        <button type="button" onClick={onConnectCloud} className="font-medium underline underline-offset-2 hover:text-amber-950">
+                            Warmbly Cloud
+                        </button>
+                    ) : (
+                        <a
+                            href="https://warmbly.com"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-medium underline underline-offset-2 hover:text-amber-950"
+                        >
+                            Warmbly Cloud
+                        </a>
+                    )}
                     <span className="text-amber-800/90"> warm them against its large shared pool.</span>
                 </div>
             </div>

@@ -1126,18 +1126,20 @@ func Run(
 			}
 
 			// Self-hosted side: Settings > Warmbly Cloud.
+			// Reads are member-visible (no secrets travel); linking is a settings
+			// change and per-mailbox enrollment is a mailbox change.
 			cloudLink := jwtOnly.Group("/cloud-link")
-			cloudLink.Use(m.RateLimitMiddleware(models.RateLimitWrite), m.RequireOrganization(), m.RequirePermission(models.PermManageSettings))
+			cloudLink.Use(m.RateLimitMiddleware(models.RateLimitWrite), m.RequireOrganization())
 			{
 				cloudLink.GET("", h.CloudLinkStatus)
-				cloudLink.POST("/connect", h.CloudLinkConnectStart)
-				cloudLink.POST("/connect/poll", h.CloudLinkConnectPoll)
-				cloudLink.DELETE("", h.CloudLinkDisconnect)
 				cloudLink.GET("/mailboxes", h.CloudLinkMailboxes)
-				cloudLink.POST("/mailboxes/:id/enroll", h.CloudLinkEnroll)
-				cloudLink.DELETE("/mailboxes/:id/enroll", h.CloudLinkUnenroll)
-				cloudLink.POST("/mailboxes/:id/pause", h.CloudLinkPause)
-				cloudLink.POST("/mailboxes/:id/resume", h.CloudLinkResume)
+				cloudLink.POST("/connect", m.RequirePermission(models.PermManageSettings), h.CloudLinkConnectStart)
+				cloudLink.POST("/connect/poll", m.RequirePermission(models.PermManageSettings), h.CloudLinkConnectPoll)
+				cloudLink.DELETE("", m.RequirePermission(models.PermManageSettings), h.CloudLinkDisconnect)
+				cloudLink.POST("/mailboxes/:id/enroll", m.RequirePermission(models.PermManageEmails), h.CloudLinkEnroll)
+				cloudLink.DELETE("/mailboxes/:id/enroll", m.RequirePermission(models.PermManageEmails), h.CloudLinkUnenroll)
+				cloudLink.POST("/mailboxes/:id/pause", m.RequirePermission(models.PermManageEmails), h.CloudLinkPause)
+				cloudLink.POST("/mailboxes/:id/resume", m.RequirePermission(models.PermManageEmails), h.CloudLinkResume)
 			}
 
 			subscriptions := jwtOnly.Group("/subscription")
