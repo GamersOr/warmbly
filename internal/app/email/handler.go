@@ -380,7 +380,9 @@ func (s *emailService) syncWarmupPoolMembership(ctx context.Context, account *mo
 	if account.Warmup != nil {
 		role = "sender_receiver"
 	}
-	_ = s.warmupService.EnsurePoolMembershipWithRole(ctx, account.ID, s.resolveWarmupPoolType(ctx, account), role)
+	if xerr := s.warmupService.EnsurePoolMembershipWithRole(ctx, account.ID, s.resolveWarmupPoolType(ctx, account), role); xerr != nil {
+		log.Warn().Str("account_id", account.ID.String()).Str("error", xerr.Message).Msg("warmup pool membership sync failed")
+	}
 }
 
 func (s *emailService) removeFromAllWarmupPools(ctx context.Context, account *models.Email) {

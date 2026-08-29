@@ -14,6 +14,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/behavior"
 	"github.com/warmbly/warmbly/internal/app/bootstrap"
 	"github.com/warmbly/warmbly/internal/app/campaign"
+	"github.com/warmbly/warmbly/internal/app/cloudlink"
 	"github.com/warmbly/warmbly/internal/app/compose"
 	"github.com/warmbly/warmbly/internal/app/contact"
 	"github.com/warmbly/warmbly/internal/app/credits"
@@ -38,6 +39,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/orgtransfer"
 	"github.com/warmbly/warmbly/internal/app/passkey"
 	"github.com/warmbly/warmbly/internal/app/placement"
+	"github.com/warmbly/warmbly/internal/app/poollink"
 	"github.com/warmbly/warmbly/internal/app/ratelimit"
 	"github.com/warmbly/warmbly/internal/app/referral"
 	"github.com/warmbly/warmbly/internal/app/releases"
@@ -293,6 +295,10 @@ type Handler struct {
 	// Workspace archives: export an organization to a portable file and import
 	// one back, for moving between instances. Nil disables the endpoints.
 	OrgTransferService orgtransfer.Service
+
+	// PoolLinkService (cloud side) and CloudLinkService (self-hosted side) are nil-safe: routes answer 501.
+	PoolLinkService  poollink.Service
+	CloudLinkService cloudlink.Service
 
 	// Infrastructure liveness probes for the admin System Status page.
 	// Wired in cmd/backend/main.go where the concrete clients live.

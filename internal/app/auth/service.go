@@ -49,7 +49,7 @@ type AuthService interface {
 	WireTwoFA(t TwoFAChallenger)
 
 	RegistrationStart(ctx context.Context, data *AuthData, origin SignupOrigin) (*models.AuthSession, *errx.Error)
-	RegistrationConfirm(ctx context.Context, data *ConfirmData, session string, origin SignupOrigin) *errx.Error
+	RegistrationConfirm(ctx context.Context, data *ConfirmData, session string, origin SignupOrigin) (*models.AuthSession, *errx.Error)
 	// WireReferral attaches the referral attributor (post-construction; nil = no
 	// referral attribution at signup).
 	WireReferral(r ReferralAttributor)

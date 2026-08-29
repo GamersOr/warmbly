@@ -123,6 +123,12 @@ const (
 	// background evaluation that opened or resolved findings. Rides the audit
 	// spine so every teammate's advisor strips and nav badges stay live.
 	AuditEntityAdvisorFinding AuditEntityType = "advisor_finding"
+
+	// Pool link: a self-hosted instance linked to this cloud (cloud side) or
+	// this instance's link to the cloud (self-hosted side). Both ride the audit
+	// spine so the settings page and mailbox lists refresh for every member.
+	AuditEntityPoolLink  AuditEntityType = "pool_link"
+	AuditEntityCloudLink AuditEntityType = "cloud_link"
 )
 
 // AuditActor is the minimal identity of the member who performed an action,

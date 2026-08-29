@@ -107,6 +107,10 @@ An import runs as one transaction. If anything fails, nothing lands and the work
 If you have shell access to the source, `warmblyctl org export` writes the same archive straight to a file without going through a browser, which is the easier route for a large workspace. See the [warmblyctl reference](/development/warmblyctl/).
 </Callout>
 
+## What does not travel
+
+A few things belong to the instance rather than the workspace and are left out on purpose: the instance's link to Warmbly Cloud and which mailboxes it enrolled in the hosted pool ([Warmbly Cloud](/guides/warmbly-cloud/)), linked self-hosted instances on a cloud workspace, live sessions, in-flight OAuth handshakes and the organization's wrapped data key. Reconnect to Warmbly Cloud after the move.
+
 ## Limits
 
 - One export and one import can run per workspace at a time.

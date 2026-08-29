@@ -74,7 +74,7 @@ interface NavItem {
     icon: LucideIcon;
     badgeStoreKey?: "unseenCount";
     /** Feature gate key — when set, sidebar dims the row and shows a plan badge. */
-    requires?: "inbox" | "advanced";
+    requires?: "inbox" | "advanced" | "subscription";
     /** Role gate — when set, sidebar hides the row entirely for non-matching roles. */
     rolesAllowed?: "manage";
     /** Permission gate — when the member lacks it, the row shows a lock and a
@@ -112,6 +112,7 @@ interface NavItem {
 //   advanced → Business (15k/day + dedicated IPs tier)
 const REQUIRES_TO_BADGE: Record<NonNullable<NavItem["requires"]>, { label: string; classes: string }> = {
     inbox:    { label: "Starter",  classes: "bg-emerald-50 text-emerald-700 border-emerald-100" },
+    subscription: { label: "Starter", classes: "bg-emerald-50 text-emerald-700 border-emerald-100" },
     advanced: { label: "Business", classes: "bg-indigo-50 text-indigo-700 border-indigo-100" },
 };
 
@@ -137,29 +138,29 @@ const sections: NavSection[] = [
         label: "Email",
         items: [
             { title: "Accounts", url: "/app/emails", icon: MailIcon, indicator: "accounts", advisorSurface: "emails", permission: "MANAGE_EMAILS", permissionLabel: "Manage mailboxes" },
-            { title: "Campaigns", url: "/app/campaigns", icon: MegaphoneIcon, indicator: "campaigns", advisorSurface: "campaigns", permission: "VIEW_CAMPAIGNS", permissionLabel: "View campaigns" },
-            { title: "Contacts", url: "/app/contacts", icon: UsersIcon, indicator: "contacts", advisorSurface: "contacts", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
-            { title: "Analytics", url: "/app/analytics", icon: BarChart3Icon, indicator: "analytics", permission: "VIEW_ANALYTICS", permissionLabel: "View analytics" },
-            { title: "Deliverability", url: "/app/deliverability", icon: ShieldCheckIcon, advisorSurface: "deliverability", permission: "VIEW_ANALYTICS", permissionLabel: "View analytics" },
+            { title: "Campaigns", requires: "subscription", url: "/app/campaigns", icon: MegaphoneIcon, indicator: "campaigns", advisorSurface: "campaigns", permission: "VIEW_CAMPAIGNS", permissionLabel: "View campaigns" },
+            { title: "Contacts", requires: "subscription", url: "/app/contacts", icon: UsersIcon, indicator: "contacts", advisorSurface: "contacts", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
+            { title: "Analytics", requires: "subscription", url: "/app/analytics", icon: BarChart3Icon, indicator: "analytics", permission: "VIEW_ANALYTICS", permissionLabel: "View analytics" },
+            { title: "Deliverability", requires: "subscription", url: "/app/deliverability", icon: ShieldCheckIcon, advisorSurface: "deliverability", permission: "VIEW_ANALYTICS", permissionLabel: "View analytics" },
         ],
     },
     {
         label: "CRM",
         items: [
-            { title: "Pipelines", url: "/app/crm/pipelines", icon: GitBranchIcon, indicator: "pipelines", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
-            { title: "Deals", url: "/app/crm/deals", icon: CircleDollarSignIcon, indicator: "deals", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
-            { title: "Tasks", url: "/app/crm/tasks", icon: CheckSquareIcon, indicator: "tasks", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
-            { title: "Meetings", url: "/app/crm/meetings", icon: CalendarClockIcon, indicator: "meetings", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
+            { title: "Pipelines", requires: "subscription", url: "/app/crm/pipelines", icon: GitBranchIcon, indicator: "pipelines", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
+            { title: "Deals", requires: "subscription", url: "/app/crm/deals", icon: CircleDollarSignIcon, indicator: "deals", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
+            { title: "Tasks", requires: "subscription", url: "/app/crm/tasks", icon: CheckSquareIcon, indicator: "tasks", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
+            { title: "Meetings", requires: "subscription", url: "/app/crm/meetings", icon: CalendarClockIcon, indicator: "meetings", permission: "VIEW_CONTACTS", permissionLabel: "View contacts" },
         ],
     },
     {
         label: "Resources",
         items: [
-            { title: "Templates", url: "/app/templates", icon: FileTextIcon, indicator: "templates" },
-            { title: "Integrations", url: "/app/integrations", icon: CableIcon, indicator: "integrations", permission: "USE_INTEGRATIONS", permissionLabel: "Use integrations" },
-            { title: "Automations", url: "/app/automations", icon: ZapIcon, permission: "USE_INTEGRATIONS", permissionLabel: "Use integrations" },
-            { title: "API Keys", url: "/app/api-keys", icon: KeyIcon, indicator: "apikeys", permission: "MANAGE_API_KEYS", permissionLabel: "Manage API keys" },
-            { title: "Audit log", url: "/app/audit", icon: ListChecksIcon, rolesAllowed: "manage" },
+            { title: "Templates", requires: "subscription", url: "/app/templates", icon: FileTextIcon, indicator: "templates" },
+            { title: "Integrations", requires: "subscription", url: "/app/integrations", icon: CableIcon, indicator: "integrations", permission: "USE_INTEGRATIONS", permissionLabel: "Use integrations" },
+            { title: "Automations", requires: "subscription", url: "/app/automations", icon: ZapIcon, permission: "USE_INTEGRATIONS", permissionLabel: "Use integrations" },
+            { title: "API Keys", requires: "subscription", url: "/app/api-keys", icon: KeyIcon, indicator: "apikeys", permission: "MANAGE_API_KEYS", permissionLabel: "Manage API keys" },
+            { title: "Audit log", requires: "subscription", url: "/app/audit", icon: ListChecksIcon, rolesAllowed: "manage" },
         ],
     },
 ];
@@ -209,7 +210,8 @@ function NavRow({ item }: { item: NavItem }) {
     // the user knows the feature exists.
     const locked =
         (item.requires === "inbox" && !access.hasInbox) ||
-        (item.requires === "advanced" && !access.hasAdvanced);
+        (item.requires === "advanced" && !access.hasAdvanced) ||
+        (item.requires === "subscription" && access.locked);
 
     const planBadge = locked && item.requires ? REQUIRES_TO_BADGE[item.requires] : null;
 

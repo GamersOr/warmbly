@@ -97,13 +97,7 @@ func (s *emailService) guardInboxLimit(ctx context.Context, orgID *uuid.UUID) *e
 	if allowed {
 		return nil
 	}
-	// Disambiguate the message: if they're past the cap during trial, say so;
-	// if their trial is over (or they never had one), say that.
-	status, xerr := s.featureGate.GetSubscriptionStatus(ctx, *orgID)
-	if xerr == nil && status != nil && status.IsInFreeTrial && !status.IsPaidSubscriber {
-		return errx.ErrEmailOnboardInboxLimit
-	}
-	return errx.ErrEmailOnboardTrialExpired
+	return errx.ErrEmailOnboardInboxLimit
 }
 
 // OAuthFinish validates the state, exchanges the code for tokens, fetches the inbox owner,

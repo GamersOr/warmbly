@@ -47,6 +47,14 @@ func (s *JobsService) HandleNewEmail(ctx context.Context, e *models.JobEventNewE
 		return nil
 	}
 
+	// A pool-linked mailbox is warmup-only: everything else is dropped unread.
+	if s.PoolLinkRepo != nil {
+		if linked, lerr := s.PoolLinkRepo.GetMailboxByAccount(ctx, e.Message.EmailID); lerr == nil && linked != nil {
+			log.Debug().Str("email_account_id", e.Message.EmailID.String()).Msg("dropping non-warmup mail for pool-linked mailbox")
+			return nil
+		}
+	}
+
 	// Normal email processing
 	if err := s.UniboxRepository.CreateEntry(ctx, e.UserID, e.Message); err != nil {
 		CaptureError(e.UserID, e.Message.EmailID, err)

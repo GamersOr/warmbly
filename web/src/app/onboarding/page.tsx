@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "motion/react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import toast from "react-hot-toast";
+import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
+import CloudLinkCard from "@/components/app/cloud/CloudLinkCard";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 
@@ -12,7 +14,6 @@ import AuthButton from "@/components/auth/button";
 import useCompleteOnboarding from "@/lib/api/hooks/auth/useCompleteOnboarding";
 import useUpdateOrganization from "@/lib/api/hooks/app/organizations/useUpdateOrganization";
 import useCurrentOrganization from "@/lib/api/hooks/app/organizations/useCurrentOrganization";
-import createWebhook from "@/lib/api/client/app/webhooks/createWebhook";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 
@@ -31,22 +32,13 @@ const schema = z.object({
     referral_source: z.enum(["reddit", "x", "facebook", "google", "other"], {
         error: "Let us know how you found us",
     }),
-    // Optional final step: connect a webhook. Skippable, so an empty value is OK;
-    // when present it must look like a URL.
-    webhook_url: z
-        .string()
-        .trim()
-        .url("Enter a valid URL (https://…)")
-        .refine((u) => u.startsWith("https://"), "Webhook URLs must use https")
-        .optional()
-        .or(z.literal("")),
 });
 
 type OnboardingForm = z.infer<typeof schema>;
 
 const INPUT = "w-full h-11 rounded-lg border border-slate-200 bg-white px-4 text-[15px] text-slate-900 placeholder:text-slate-400 outline-none transition-colors duration-200 focus:border-sky-400 focus:ring-4 focus:ring-sky-400/15";
 
-const STEPS = [
+const BASE_STEPS = [
     {
         fields: ["first_name", "last_name"] as const,
         title: "Welcome to Warmbly",
@@ -62,12 +54,15 @@ const STEPS = [
         title: "A few quick questions",
         subtitle: "This helps us tailor Warmbly to how you send.",
     },
-    {
-        fields: ["webhook_url"] as const,
-        title: "Connect a webhook",
-        subtitle: "Optional. Get a realtime HTTP callback when things happen in your workspace. You can skip this and add it later.",
-    },
 ];
+
+// Self-hosted instances get one more step: linking to Warmbly Cloud so the
+// pool warms their mailboxes. Skippable; Settings > Warmbly Cloud has it too.
+const CLOUD_STEP = {
+    fields: [] as const,
+    title: "Warm up your mailboxes",
+    subtitle: "Get started links this instance to Warmbly Cloud so it warms your mailboxes. You can skip it.",
+};
 
 const ROLES = [
     { value: "founder", label: "Founder" },
@@ -161,6 +156,14 @@ export default function OnboardingPage() {
     const updateOrganization = useUpdateOrganization();
     const { data: org } = useCurrentOrganization();
 
+    const authConfig = useAuthConfig();
+    const selfHosted = authConfig.data?.self_hosted === true;
+    const STEPS = useMemo(() => (selfHosted ? [...BASE_STEPS, CLOUD_STEP] : BASE_STEPS), [selfHosted]);
+    const cloudStep = selfHosted ? STEPS.length - 1 : -1;
+    const [cloudLinked, setCloudLinked] = useState(false);
+    const [cloudOrg, setCloudOrg] = useState("");
+    const [cloudStart, setCloudStart] = useState(0);
+
     const [step, setStep] = useState(0);
     const isLast = step === STEPS.length - 1;
 
@@ -197,16 +200,6 @@ export default function OnboardingPage() {
                 role: data.role,
                 team_size: data.team_size,
             });
-            // Optional webhook. Best effort: an empty URL skips it, and a hiccup
-            // here must never block completing onboarding.
-            const webhookUrl = (data.webhook_url ?? "").trim();
-            if (webhookUrl) {
-                try {
-                    await createWebhook({ url: webhookUrl, event_types: [], enabled: true });
-                } catch {
-                    /* keep going — onboarding completion matters more */
-                }
-            }
             queryClient.removeQueries({ queryKey: ["auth", "me"] });
             navigate("/app/emails");
         } catch (e) {
@@ -219,6 +212,11 @@ export default function OnboardingPage() {
         if (pending) return;
         const ok = await trigger(STEPS[step].fields as unknown as (keyof OnboardingForm)[]);
         if (!ok) return;
+        if (step === cloudStep && !cloudLinked) {
+            // First press asks the cloud for a code; the card then waits for approval.
+            setCloudStart((n) => n + 1);
+            return;
+        }
         if (isLast) await finish();
         else setStep((s) => s + 1);
     };
@@ -240,7 +238,7 @@ export default function OnboardingPage() {
                     <span className="w-7 h-7 -ml-1" />
                 )}
                 <div className="flex-1 flex gap-1.5">
-                    {STEPS.map((_, i) => (
+                    {STEPS.map((_: unknown, i: number) => (
                         <span key={i} className="h-1 flex-1 rounded-full bg-slate-200 overflow-hidden">
                             <motion.span
                                 className="block h-full rounded-full bg-sky-500"
@@ -332,34 +330,31 @@ export default function OnboardingPage() {
                             </div>
                         )}
 
-                        {step === 3 && (
-                            <div>
-                                <FieldLabel>Webhook URL</FieldLabel>
-                                <input
-                                    type="url"
-                                    placeholder="https://acme.com/webhooks/warmbly"
-                                    className={INPUT}
-                                    autoFocus
-                                    {...register("webhook_url")}
+                        {step === cloudStep && (
+                            <div className="rounded-lg border border-slate-200 bg-white p-4">
+                                <CloudLinkCard
+                                    compact
+                                    minimal
+                                    startSignal={cloudStart}
+                                    linked={cloudLinked}
+                                    orgName={cloudOrg}
+                                    onLinked={(name) => {
+                                        setCloudOrg(name);
+                                        setCloudLinked(true);
+                                    }}
                                 />
-                                <FieldError message={errors.webhook_url?.message} />
-                                <p className="text-sm text-slate-400 mt-2 leading-relaxed">
-                                    We'll POST a signed callback here for every workspace event. Subscribe to specific events and
-                                    manage signing secrets later in Settings. You can skip this for now.
-                                </p>
                             </div>
                         )}
                     </motion.div>
                 </AnimatePresence>
 
-                <AuthButton loading={isLast && pending}>{isLast ? "Get started" : "Continue"}</AuthButton>
+                <AuthButton loading={isLast && pending}>{step === cloudStep && cloudStart > 0 && !cloudLinked ? "Waiting for approval" : isLast ? "Get started" : "Continue"}</AuthButton>
 
-                {isLast && (
+                {isLast && step === cloudStep && (
                     <button
                         type="button"
                         onClick={() => {
                             if (pending) return;
-                            setValue("webhook_url", "");
                             void finish();
                         }}
                         disabled={pending}

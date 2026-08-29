@@ -38,6 +38,9 @@ func (s *tasksService) ReconcileWarmupSchedules(ctx context.Context, limit int) 
 		if xerr != nil || account == nil || account.OrganizationID == nil {
 			continue
 		}
+		if s.cloudLink != nil && s.cloudLink.IsEnrolled(ctx, account.ID) {
+			continue
+		}
 		if s.featureGate != nil {
 			canWarmup, xerr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
 			if !canWarmup {

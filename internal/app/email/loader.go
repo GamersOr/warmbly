@@ -352,6 +352,13 @@ func (s *emailService) syncDataFor(ctx context.Context, emailID uuid.UUID) *mode
 			OrgDailyMessages: budget.DailyMessagesPerOrg,
 		},
 	}
+	// A pool-linked mailbox is a warmup-only mirror: no history import.
+	if s.poolLink != nil {
+		if linked, err := s.poolLink.GetMailboxByAccount(ctx, emailID); err == nil && linked != nil {
+			data.Policy.BackfillDays = 1
+			data.Policy.BackfillMessages = 25
+		}
+	}
 	if s.syncState != nil {
 		if saved, err := s.syncState.Get(ctx, emailID); err == nil {
 			data.State = saved

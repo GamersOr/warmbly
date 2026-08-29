@@ -17,6 +17,7 @@
 
 import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
+import SubscriptionGate from "./SubscriptionGate";
 import { SkyChrome } from "./SkyChrome";
 import { AppHeader } from "./AppHeader";
 import { AppNav } from "./AppNav";
@@ -80,7 +81,9 @@ export function AppShell() {
                                         the query lands (only a reload fixes
                                         it). This is that boundary. */}
                                     <Suspense fallback={<RouteFallback />}>
-                                        <Outlet />
+                                        <SubscriptionGate>
+                                            <Outlet />
+                                        </SubscriptionGate>
                                     </Suspense>
                                 </RouteBoundary>
                             </div>

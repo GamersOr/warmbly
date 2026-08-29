@@ -388,6 +388,8 @@ export function useRealtimeEvents() {
           crm_deal: [['crm', 'deals'], ['contacts']],
           crm_task: [['crm', 'tasks'], ['crm', 'deals']],
           warmup_routing_rule: [['analytics', 'warmup']],
+    cloud_link: [['cloud-link'], ['emails']],
+    pool_link: [['pool-link'], ['emails']],
           // Folders / tags / categories ride the user payload.
           folder: [['auth', 'me']],
           tag: [['auth', 'me']],

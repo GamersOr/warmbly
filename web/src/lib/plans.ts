@@ -33,11 +33,11 @@ export const PLAN_CATALOG: Record<PlanID, PlanDef> = {
     free: {
         id: "free",
         label: "Free",
-        description: "No active subscription — try one out.",
+        description: "Warm up to 10 mailboxes, link self-hosted instances.",
         priceMonthly: 0,
         priceAnnual: 0,
         sendsPerDay: 0,
-        bullets: ["Limited preview", "No active sending"],
+        bullets: ["Up to 10 mailboxes with warmup", "Link self-hosted instances", "No sending"],
         accent: "slate",
         dedicatedIps: false,
     },

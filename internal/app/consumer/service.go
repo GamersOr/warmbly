@@ -31,10 +31,12 @@ type JobsService struct {
 	EmailSyncStateRepository    repository.EmailSyncStateRepository
 	EmailAccountErrorRepository repository.EmailAccountErrorRepository
 	WarmupRepo                  repository.WarmupRepository
-	WarmupContentRepo           repository.WarmupContentRepository
-	WarmupEngagementRepo        repository.WarmupEngagementRepository
-	WarmupService               warmupapp.Service
-	WorkerRepo                  repository.WorkerRepository
+	// PoolLinkRepo marks warmup-only mailboxes of linked instances; nil when unused.
+	PoolLinkRepo         repository.PoolLinkRepository
+	WarmupContentRepo    repository.WarmupContentRepository
+	WarmupEngagementRepo repository.WarmupEngagementRepository
+	WarmupService        warmupapp.Service
+	WorkerRepo           repository.WorkerRepository
 	// LifecycleRepo moves mailboxes in and out of cold rotation. Nil disables
 	// the lifecycle rebalancer entirely.
 	LifecycleRepo repository.SendLifecycleRepository

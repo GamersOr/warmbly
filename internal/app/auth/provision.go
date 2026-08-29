@@ -30,10 +30,10 @@ type SignupOrigin struct {
 	UserAgent string
 }
 
-func (s *authService) createAccount(ctx context.Context, address, passwordHash, referralCode, invite string, origin SignupOrigin) *errx.Error {
+func (s *authService) createAccount(ctx context.Context, address, passwordHash, referralCode, invite string, origin SignupOrigin) (*models.User, *errx.Error) {
 	email, perr := mail.ParseAddress(address)
 	if perr != nil {
-		return errx.ErrEmail
+		return nil, errx.ErrEmail
 	}
 
 	// Whether the invitation is the only thing that permitted this signup.
@@ -44,11 +44,11 @@ func (s *authService) createAccount(ctx context.Context, address, passwordHash, 
 	u, xerr := s.userRepository.CreateUser(ctx, email, passwordHash)
 	if xerr != nil {
 		sentry.CaptureException(xerr)
-		return errx.InternalError()
+		return nil, errx.InternalError()
 	}
 
 	if err := s.userService.SaveUser(ctx, u); err != nil {
-		return err
+		return nil, err
 	}
 
 	s.recordSignupOrigin(ctx, u.ID, u.Email, origin)
@@ -59,10 +59,10 @@ func (s *authService) createAccount(ctx context.Context, address, passwordHash, 
 	// would have accepted the signup anyway.
 	if invite != "" && s.organizationService != nil {
 		if _, err := s.organizationService.AcceptInvitation(ctx, invite, u.ID, u.Email); err == nil {
-			return nil
+			return u, nil
 		}
 		if inviteRequired {
-			return errx.ErrInvitationInvalid
+			return nil, errx.ErrInvitationInvalid
 		}
 	}
 
@@ -105,7 +105,7 @@ func (s *authService) createAccount(ctx context.Context, address, passwordHash, 
 		}
 	}
 
-	return nil
+	return u, nil
 }
 
 // signupAllowed enforces DISABLE_REGISTRATION.

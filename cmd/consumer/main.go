@@ -372,6 +372,7 @@ func main() {
 		EmailSyncStateRepository:    repository.NewEmailSyncStateRepository(primaryDB),
 		EmailAccountErrorRepository: emailAccountErrorRepo,
 		WarmupRepo:                  warmupRepo,
+		PoolLinkRepo:                repository.NewPoolLinkRepository(primaryDB.Pool),
 		WarmupContentRepo:           repository.NewWarmupContentRepository(primaryDB.Pool),
 		WarmupEngagementRepo:        repository.NewWarmupEngagementRepository(primaryDB.Pool),
 		WarmupService:               warmupService,

@@ -198,7 +198,16 @@ const (
 	// product utility.
 	DailyThrottleNewCampaigns = 20 // new campaigns per org per day
 	DailyThrottleNewMailboxes = 5  // newly connected mailboxes per org per day
-	DailyThrottleNewOrgs      = 3  // new workspaces per owner per day
+
+	// Pool link: mailboxes a self-hosted instance may enroll in the hosted
+	// warmup pool without a paid pool plan, and the handshake lifetimes.
+	PoolLinkCodeTTLMinutes       = 15
+	PoolLinkPollIntervalSeconds  = 3
+	PoolLinkPlanID               = "00000000-0000-0000-0000-000000000002"
+	PoolLinkPlanPriceUSD         = 15
+	WarmupPoolTierFallbackFloor  = 25 // below this many same-tier recipients, healthy other-tier mailboxes fill in
+	WarmupPoolFallbackMinAgeDays = 3  // other-tier mailboxes must be this old before they fill in
+	DailyThrottleNewOrgs         = 3  // new workspaces per owner per day
 
 	// DailyThrottleNewScheduledSends caps how many NEW scheduled-send
 	// schedules a single user can create in a rolling 24h window. The

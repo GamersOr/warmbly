@@ -14,7 +14,7 @@ const plans = [
     summary: 'For small teams getting started with cold outreach.',
     sendsPerDay: 150,
     href: 'https://app.warmbly.com/register?plan=starter',
-    cta: 'Start free trial',
+    cta: 'Choose plan',
     highlight: false,
     features: [
       'Unlimited mailboxes',
@@ -31,7 +31,7 @@ const plans = [
     summary: 'For teams scaling outreach across multiple senders.',
     sendsPerDay: 3000,
     href: 'https://app.warmbly.com/register?plan=grow',
-    cta: 'Start free trial',
+    cta: 'Choose plan',
     highlight: false,
     features: [
       'Everything in Starter',
@@ -48,7 +48,7 @@ const plans = [
     summary: 'For established teams with serious sending volume.',
     sendsPerDay: 15000,
     href: 'https://app.warmbly.com/register?plan=business',
-    cta: 'Start free trial',
+    cta: 'Choose plan',
     highlight: true,
     features: [
       'Everything in Grow',
@@ -127,7 +127,7 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
 ---
 <Layout
   title="Pricing - Unlimited Mailboxes & Warmup | Warmbly"
-  description="Four plans, mailbox-based. Pay monthly or save 20% annually. Unlimited mailboxes and unlimited warmup on every paid plan."
+  description="Self-host Warmbly for free and link it to the Warmbly warmup pool. Hosted plans are mailbox-based, with unlimited mailboxes and unlimited warmup."
 >
   <!-- ============================================================
        HERO — same HeroAtmosphere as home, pricing-specific copy
@@ -139,9 +139,9 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
     <div class="container-page relative pt-16 md:pt-24 pb-40 md:pb-52 text-center">
       <div class="inline-flex items-center gap-2 h-7 pl-1 pr-3 rounded-full bg-white/15 backdrop-blur ring-1 ring-white/25 text-[12px] text-white/95 shadow-[0_4px_14px_-4px_rgba(0,0,0,0.25)]">
         <span class="inline-flex items-center h-5 px-1.5 rounded-full text-[10.5px] font-semibold uppercase tracking-[0.06em] bg-white text-[color:var(--sky-6)]">
-          14 days free
+          Free to self-host
         </span>
-        No credit card · cancel anytime
+        Link your instance when Warmbly Cloud launches and we run the warmup · every hosted workspace starts free
       </div>
 
       <h1 class="mt-8 md:mt-10 text-[44px] sm:text-6xl md:text-[72px] lg:text-[80px] font-semibold tracking-[-0.04em] leading-[0.98] text-white max-w-4xl mx-auto">
@@ -250,10 +250,61 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
       </div>
 
       <p class="mt-9 text-center text-[13.5px] text-foreground/65 max-w-2xl mx-auto leading-relaxed">
-        Want to try it first? The free tier runs the core product so you can see how sending, the inbox and
-        campaigns work. It is limited, and its warmup pool is not filled, so treat it as a way to evaluate
-        Warmbly, not a production sender. Warmup performs on a paid plan, where the premium pool is full.
+        Rather run it yourself? Self-hosting is free, forever. Once Warmbly Cloud launches, link your instance and we run the
+        warmup for your mailboxes in the shared pool, free for up to 10 mailboxes and $15 a month for unlimited.
+        Everything else, sending, inbox, campaigns and data, stays on your server.
       </p>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       SELF-HOSTED — free platform, pool link priced separately
+  ============================================================ -->
+  <section class="relative py-16 md:py-20 border-t border-[color:var(--border)]">
+    <div class="container-page">
+      <div class="relative rounded-[18px] bg-white ring-1 ring-[color:var(--border)] shadow-[var(--shadow-sm)] overflow-hidden">
+        <div class="grid lg:grid-cols-12 gap-8 p-6 md:p-10 items-center">
+          <div class="lg:col-span-7">
+            <div class="text-[10.5px] uppercase tracking-[0.18em] font-mono text-muted-foreground">Self-hosted</div>
+            <h2 class="mt-3 text-[28px] md:text-[40px] font-semibold tracking-[-0.025em] leading-[1.06] text-heading">
+              Free to run. We handle the warmup.
+            </h2>
+            <p class="mt-4 text-[15px] text-foreground/70 leading-relaxed max-w-xl">
+              The whole platform is Apache 2.0 and costs nothing to self-host. When Warmbly Cloud launches, link your instance
+              from Settings and the mailboxes you choose warm up in the shared pool, with thousands of real mailboxes sending,
+              replying and rescuing from spam, while campaigns, contacts and inbox never leave your server.
+            </p>
+            <ul class="mt-6 grid sm:grid-cols-2 gap-x-6 gap-y-2.5 text-[13.5px] text-foreground/80">
+              <li class="flex items-start gap-2"><span class="mt-[7px] w-1.5 h-1.5 rounded-full bg-[color:var(--brand)] shrink-0"></span>Unlimited mailboxes, campaigns and contacts on your instance</li>
+              <li class="flex items-start gap-2"><span class="mt-[7px] w-1.5 h-1.5 rounded-full bg-[color:var(--brand)] shrink-0"></span>Link in about a minute with a one-time code</li>
+              <li class="flex items-start gap-2"><span class="mt-[7px] w-1.5 h-1.5 rounded-full bg-[color:var(--brand)] shrink-0"></span>Only the mailbox credential travels, encrypted, for warmup</li>
+              <li class="flex items-start gap-2"><span class="mt-[7px] w-1.5 h-1.5 rounded-full bg-[color:var(--brand)] shrink-0"></span>Unenroll or disconnect any time; the cloud forgets it immediately</li>
+            </ul>
+          </div>
+          <div class="lg:col-span-5">
+            <div class="grid sm:grid-cols-2 lg:grid-cols-1 gap-3">
+              <div class="rounded-[14px] ring-1 ring-[color:var(--border)] p-5">
+                <div class="text-[12px] font-medium text-muted-foreground">Warmup pool · Free</div>
+                <div class="mt-1 text-[30px] font-semibold tracking-[-0.03em] text-heading">$0</div>
+                <div class="mt-1 text-[13px] text-foreground/70">Up to 10 mailboxes warming in the pool.</div>
+              </div>
+              <div class="rounded-[14px] ring-2 ring-[color:var(--brand)]/40 p-5 bg-[color:var(--brand-soft)]/40">
+                <div class="text-[12px] font-medium text-muted-foreground">Warmup pool · Unlimited</div>
+                <div class="mt-1 text-[30px] font-semibold tracking-[-0.03em] text-heading">$15<span class="text-[14px] font-medium text-muted-foreground"> / month</span></div>
+                <div class="mt-1 text-[13px] text-foreground/70">Unlimited mailboxes, paid tier partners first.</div>
+              </div>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-3">
+              <a href="https://app.warmbly.com" class="inline-flex h-10 px-4 items-center gap-2 rounded-[10px] text-[13.5px] font-medium bg-foreground text-background hover:bg-foreground/85 transition-colors">
+                Join the cloud waitlist
+              </a>
+              <a href="https://github.com/warmbly/warmbly" target="_blank" rel="noopener noreferrer" class="inline-flex h-10 px-4 items-center rounded-[10px] text-[13.5px] font-medium text-heading bg-white ring-1 ring-[color:var(--border)] hover:ring-[color:var(--border-strong)] transition-colors">
+                Self-host guide
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -365,10 +416,12 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
       <div class="divide-y divide-[color:var(--border)]" data-faq>
         {[
           ['Do you charge per email sent?',  'No. Each plan includes a fixed daily send budget. Unused volume does not carry over.'],
-          ['Is warmup metered separately?',  'No. Warmup is unlimited on every paid plan and runs against the premium pool.'],
+          ['Is warmup metered separately?',  'No. Warmup is unlimited on every hosted plan and runs against the premium pool.'],
+          ['What does self-hosting cost?',   'Nothing. The platform is Apache 2.0 and free to run on your own servers, with unlimited mailboxes. The only paid part is the warmup pool link: free for 10 mailboxes, $15 a month for unlimited.'],
+          ['Can a self-hosted instance use the warmup pool?', 'Yes, once Warmbly Cloud launches. Open Settings, Warmbly Cloud on your instance, approve the code here, and pick the mailboxes to enroll. Warmbly runs their warmup in the shared pool; sending, contacts and inbox stay on your server.'],
           ['Is there a per-seat charge?',    'No. Add as many teammates as you want. Roles and audit log unlock on Business.'],
           ['Annual billing?',                'Yes, with 20% off. Toggle is at the top of this page.'],
-          ['What is the free trial?',        '14 days, 3 mailboxes. No credit card. Converts to your chosen plan after.'],
+          ['Is there a free plan?',          'Yes. A hosted workspace starts free with up to 10 mailboxes and warmup, no card and no time limit. Sending, the inbox and CRM unlock when you pick a plan. Self-hosting is free too.'],
           ['Refund policy?',                 'Full refund inside 14 days of a paid purchase if the platform did not work for you.'],
           ['Startup pricing?',               '50% off Grow for one year for pre-seed and seed companies on YC, Antler, EF, Techstars or similar.'],
         ].map(([q, a]) => (
@@ -429,14 +482,14 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
         Start sending in five minutes.
       </h2>
       <p class="mt-5 text-[15.5px] md:text-[17px] text-white/80 max-w-md mx-auto">
-        14 days free · 3 mailboxes · no credit card.
+        Free to self-host · free hosted workspace with 10 mailboxes · no credit card.
       </p>
       <div class="mt-10 flex flex-wrap items-center justify-center gap-3">
         <a
           href="https://app.warmbly.com/register"
           class="inline-flex h-11 px-5 items-center gap-2 rounded-[10px] text-[14.5px] font-semibold bg-white !text-[#075985] hover:bg-white hover:!text-[#0c4a6e] hover:-translate-y-0.5 hover:shadow-[0_12px_28px_-6px_rgba(0,0,0,0.3)] transition-all duration-200 ease-out shadow-[0_4px_14px_-2px_rgba(0,0,0,0.18)]"
         >
-          <span class="text-[#075985]" style="color:#075985;">Start free trial</span>
+          <span class="text-[#075985]" style="color:#075985;">Start free</span>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#075985" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
           </svg>

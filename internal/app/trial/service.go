@@ -80,20 +80,18 @@ func (s *trialService) StartFreeTrialWithOrg(ctx context.Context, userID uuid.UU
 		return nil
 	}
 
-	// Create new subscription with free trial
-	now := time.Now()
-	trialEnds := now.Add(TrialDuration)
+	// A new workspace starts on the free plan with no trial: mailboxes and
+	// warmup (up to the free allowance) work, everything else waits for a
+	// subscription.
 	freePlanUUID, _ := uuid.Parse(FreePlanID)
 
 	sub := &models.Subscription{
-		ID:                 uuid.New(),
-		UserID:             userID,
-		OrganizationID:     orgID,
-		PlanID:             freePlanUUID,
-		StripeCustomerID:   "", // Will be set when user subscribes
-		Status:             models.SubscriptionStatusTrialing,
-		FreeTrialStartedAt: &now,
-		FreeTrialEndsAt:    &trialEnds,
+		ID:               uuid.New(),
+		UserID:           userID,
+		OrganizationID:   orgID,
+		PlanID:           freePlanUUID,
+		StripeCustomerID: "", // Will be set when user subscribes
+		Status:           models.SubscriptionStatusIncomplete,
 	}
 
 	if err := s.subRepo.Create(ctx, sub); err != nil {

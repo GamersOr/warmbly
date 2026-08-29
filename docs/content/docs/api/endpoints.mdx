@@ -298,6 +298,7 @@ These never accept an API key. They depend on a human-bound session: billing flo
 - All of `/organization/*` (create, switch, members, invitations, transfer ownership, avatar, danger zone)
 - `GET /website-tracking/settings`, `PATCH /website-tracking/settings`, `POST /website-tracking/settings/rotate-key` (the [website tracking](/guides/website-tracking/) snippet's consent mode, location precision, allowed hosts and retention; JWT permission `MANAGE_SETTINGS`. The rotate is bodyless and safe to repeat, each call issues a new key)
 - All of `/subscription/*` (checkout, portal, cancel, change-plan, preview-change, enterprise-inquiry, discounts, referrals, etc.)
+- All of `/pool-link/*` and `/cloud-link/*` (the self-hosted warmup pool link: approving an instance's code, listing and unlinking instances, and on a self-hosted instance the connect flow and mailbox enrollment). `POST /pool-link/codes` and `POST /pool-link/poll` are public and per-IP rate limited: they are the device-code handshake an instance uses before it has a token, and `/pool-link/instance/*` accepts only an instance token
 - All of `/admin/*`
 
 ### Referrals and discounts

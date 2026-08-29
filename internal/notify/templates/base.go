@@ -17,9 +17,9 @@ import (
 var (
 	CompanyName    = brandEnv("EMAIL_BRAND_NAME", "Warmbly")
 	LegalEntity    = brandEnv("EMAIL_BRAND_LEGAL_ENTITY", "Mindroot Ltd")
-	CompanyNumber  = brandEnv("EMAIL_BRAND_COMPANY_NUMBER", "00000000")
+	CompanyNumber  = brandEnv("EMAIL_BRAND_COMPANY_NUMBER", "16543299")
 	PlaceOfReg     = brandEnv("EMAIL_BRAND_PLACE_OF_REG", "England and Wales")
-	RegisteredAddr = brandEnv("EMAIL_BRAND_ADDRESS", "1 Example Street, London, W1A 1AA")
+	RegisteredAddr = brandEnv("EMAIL_BRAND_ADDRESS", "71-75 Shelton Street, London, England, WC2H 9JQ")
 	WebsiteURL     = brandEnv("EMAIL_BRAND_WEBSITE_URL", "https://warmbly.com")
 	AppURL         = appURL()
 	SupportEmail   = brandEnv("EMAIL_BRAND_SUPPORT_EMAIL", "team@warmbly.com")

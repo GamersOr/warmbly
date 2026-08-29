@@ -37,7 +37,7 @@ type FeatureGateService interface {
 	CanUseUnibox(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error)
 
 	// CanAddInbox returns whether the org may connect another email account.
-	// Free-trial orgs are capped at FreeTrialInboxLimit connected inboxes.
+	// Free workspaces are capped at FreeWorkspaceMailboxLimit connected mailboxes.
 	// Paid orgs are not gated here (plan limits govern sending volume).
 	CanAddInbox(ctx context.Context, orgID uuid.UUID, currentCount int) (bool, *errx.Error)
 
@@ -84,6 +84,13 @@ type featureGateService struct {
 	// sending is unlimited. Stripe deployments (BILLING_PROVIDER=stripe) keep the
 	// subscription-based gating below.
 	selfHost bool
+	// poolLink entitles a linked workspace to warm without a paid plan; nil when not wired.
+	poolLink PoolLinkReader
+}
+
+// PoolLinkReader answers whether a workspace has a live self-hosted link.
+type PoolLinkReader interface {
+	HasActiveLink(ctx context.Context, orgID uuid.UUID) bool
 }
 
 func NewService(subRepo repository.SubscriptionRepository, planRepo repository.PlanRepository) FeatureGateService {
@@ -93,6 +100,9 @@ func NewService(subRepo repository.SubscriptionRepository, planRepo repository.P
 		selfHost: config.BillingProvider() == "none",
 	}
 }
+
+// WirePoolLink attaches the pool-link entitlement after construction.
+func (s *featureGateService) WirePoolLink(r PoolLinkReader) { s.poolLink = r }
 
 // CanSendCampaignEmail checks if an organization can send campaign emails
 func (s *featureGateService) CanSendCampaignEmail(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error) {
@@ -134,10 +144,14 @@ func (s *featureGateService) CanUseWarmup(ctx context.Context, orgID uuid.UUID) 
 	if err != nil {
 		return false, errx.New(errx.Internal, "failed to get subscription")
 	}
-	if sub == nil {
-		return false, nil
+	if sub != nil && sub.CanUseWarmup() {
+		return true, nil
 	}
-	return sub.CanUseWarmup(), nil
+	// A linked self-hosted instance warms for free (up to its allowance).
+	if s.poolLink != nil && s.poolLink.HasActiveLink(ctx, orgID) {
+		return true, nil
+	}
+	return false, nil
 }
 
 // CanUseUnibox checks if an organization can use the unibox feature.
@@ -156,10 +170,7 @@ func (s *featureGateService) CanUseUnibox(ctx context.Context, orgID uuid.UUID) 
 	return sub.CanUseUnibox(), nil
 }
 
-// CanAddInbox enforces the free-trial inbox cap. Paid orgs are never
-// blocked here. Trial orgs may connect up to models.FreeTrialInboxLimit
-// inboxes; once that cap is reached we refuse so the warmup pool is not
-// seeded with throwaway trial accounts.
+// CanAddInbox: paid workspaces are uncapped, free ones get FreeWorkspaceMailboxLimit.
 func (s *featureGateService) CanAddInbox(ctx context.Context, orgID uuid.UUID, currentCount int) (bool, *errx.Error) {
 	if s.selfHost {
 		return true, nil
@@ -168,16 +179,10 @@ func (s *featureGateService) CanAddInbox(ctx context.Context, orgID uuid.UUID, c
 	if err != nil {
 		return false, errx.New(errx.Internal, "failed to get subscription")
 	}
-	if sub == nil {
-		return false, nil
-	}
-	if sub.HasPaidSubscription() {
+	if sub != nil && sub.HasPaidSubscription() {
 		return true, nil
 	}
-	if sub.IsInFreeTrial() {
-		return currentCount < models.FreeTrialInboxLimit, nil
-	}
-	return false, nil
+	return currentCount < models.FreeWorkspaceMailboxLimit, nil
 }
 
 // GetDailyEmailLimit returns the daily email limit for an organization
