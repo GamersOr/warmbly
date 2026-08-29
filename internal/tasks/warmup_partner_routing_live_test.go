@@ -125,8 +125,8 @@ func newPartnerRoutingFixture(t *testing.T) *partnerRoutingFixture {
 		warmupRepo: repository.NewWarmupRepository(handle.Pool),
 		emailRepo:  repository.NewEmailRepostory(handle, enc),
 	}
-	// WarmupPoolType short-circuits entitlement resolution, so the selector
-	// runs without a feature gate or org-risk repository.
+	// The stored tier picks the pool outright, and the risk read ahead of it
+	// fails open, so the selector runs with no feature gate or org-risk repo.
 	f.sender = models.Email{ID: senderID, OrganizationID: &f.org, WarmupPoolType: "free"}
 	return f
 }
