@@ -273,7 +273,7 @@ Two rules are worth knowing before you use it:
 
 The reason you type is shown to the workspace in its dashboard banner, so write it for them. Internal notes belong in the audit trail, which records who changed a posture, from what to what, and why.
 
-Findings that only ever fire once, such as a signup's origin score or one import's list quality, carry a 30-day expiry and are swept out automatically, so a workspace recovers on its own without anyone touching it.
+Findings that fire once and have nothing that would ever re-check them, such as a signup's origin score or a run of anomalous sign-ins, carry a 30-day expiry and are swept out automatically, so a workspace recovers on its own without anyone touching it. Findings a detector keeps re-checking carry no expiry, because that detector withdraws them itself: import quality is a running assessment across everything the workspace has imported, and the recipient-outcome pass is re-derived from the last 30 days of sends. The panel's **Ages out** column says which kind each finding is.
 
 ## Recovering access
 
