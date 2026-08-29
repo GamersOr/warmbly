@@ -37,7 +37,7 @@ type FeatureGateService interface {
 	CanUseUnibox(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error)
 
 	// CanAddInbox returns whether the org may connect another email account.
-	// Free-trial orgs are capped at FreeTrialInboxLimit connected inboxes.
+	// Free workspaces are capped at FreeWorkspaceMailboxLimit connected mailboxes.
 	// Paid orgs are not gated here (plan limits govern sending volume).
 	CanAddInbox(ctx context.Context, orgID uuid.UUID, currentCount int) (bool, *errx.Error)
 
@@ -170,10 +170,7 @@ func (s *featureGateService) CanUseUnibox(ctx context.Context, orgID uuid.UUID) 
 	return sub.CanUseUnibox(), nil
 }
 
-// CanAddInbox enforces the free-trial inbox cap. Paid orgs are never
-// blocked here. Trial orgs may connect up to models.FreeTrialInboxLimit
-// inboxes; once that cap is reached we refuse so the warmup pool is not
-// seeded with throwaway trial accounts.
+// CanAddInbox: paid workspaces are uncapped, free ones get FreeWorkspaceMailboxLimit.
 func (s *featureGateService) CanAddInbox(ctx context.Context, orgID uuid.UUID, currentCount int) (bool, *errx.Error) {
 	if s.selfHost {
 		return true, nil
@@ -182,16 +179,10 @@ func (s *featureGateService) CanAddInbox(ctx context.Context, orgID uuid.UUID, c
 	if err != nil {
 		return false, errx.New(errx.Internal, "failed to get subscription")
 	}
-	if sub == nil {
-		return false, nil
-	}
-	if sub.HasPaidSubscription() {
+	if sub != nil && sub.HasPaidSubscription() {
 		return true, nil
 	}
-	if sub.IsInFreeTrial() {
-		return currentCount < models.FreeTrialInboxLimit, nil
-	}
-	return false, nil
+	return currentCount < models.FreeWorkspaceMailboxLimit, nil
 }
 
 // GetDailyEmailLimit returns the daily email limit for an organization

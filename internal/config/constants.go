@@ -201,7 +201,6 @@ const (
 
 	// Pool link: mailboxes a self-hosted instance may enroll in the hosted
 	// warmup pool without a paid pool plan, and the handshake lifetimes.
-	PoolLinkFreeMailboxes        = 10
 	PoolLinkCodeTTLMinutes       = 15
 	PoolLinkPollIntervalSeconds  = 3
 	PoolLinkPlanID               = "00000000-0000-0000-0000-000000000002"

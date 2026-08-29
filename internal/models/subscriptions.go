@@ -185,11 +185,10 @@ func (s *Subscription) CanSendEmails() bool {
 	return false
 }
 
-// CanUseWarmup returns true if user can use warmup feature.
-// Free-trial orgs get warmup access during their 14-day window so they can
-// try the product; once the trial expires they need a paid subscription.
+// CanUseWarmup: every workspace may warm its mailboxes (free ones in the free
+// pool, up to FreeWorkspaceMailboxLimit connected mailboxes).
 func (s *Subscription) CanUseWarmup() bool {
-	return s.HasPaidSubscription() || s.IsInFreeTrial()
+	return true
 }
 
 // CanUseUnibox returns true if user can use unibox feature.
@@ -199,12 +198,9 @@ func (s *Subscription) CanUseUnibox() bool {
 	return s.HasPaidSubscription() || s.IsInFreeTrial()
 }
 
-// FreeTrialInboxLimit caps how many email accounts a free-trial org may
-// connect. Paid orgs have no inbox-count cap (their plan governs sending,
-// not connections). Free-trial users get up to two inboxes so they can
-// evaluate the unified inbox across more than one mailbox without seeding
-// the warmup pool with throwaway accounts.
-const FreeTrialInboxLimit = 2
+// FreeWorkspaceMailboxLimit caps the mailboxes an unsubscribed workspace may
+// hold, connected directly or through a linked self-hosted instance.
+const FreeWorkspaceMailboxLimit = 10
 
 // SubscriptionWithLimits includes rate limits for the subscription
 type SubscriptionWithLimits struct {

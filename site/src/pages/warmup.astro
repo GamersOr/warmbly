@@ -36,7 +36,7 @@ const toneClass = (t: string) => {
 
 // Pool model from migration 000010 + pg_warmup.go.
 const pools = [
-  { name: 'Free pool',     when: 'Trials and linked self-hosted instances', features: ['Up to 10 linked mailboxes free', 'Same quarantine thresholds', 'Borrows proven paid mailboxes when thin'] },
+  { name: 'Free pool',     when: 'Free workspaces and linked self-hosted instances', features: ['Up to 10 linked mailboxes free', 'Same quarantine thresholds', 'Borrows proven paid mailboxes when thin'] },
   { name: 'Premium pool',  when: 'Hosted plans and the $15 pool plan', features: ['Vetted mailboxes only', 'Served first, always', 'Recovery pool for cooldown senders'], featured: true },
   { name: 'Dedicated',     when: 'Enterprise',           features: ['Isolated worker + IP', 'Still participates in premium pool', 'Per-mailbox reputation, not infrastructure shortcut'] },
 ];
@@ -452,7 +452,7 @@ for (let wk = 0; wk < 5; wk++) {
           <div class="p-6">
             <div class="flex items-baseline justify-between mb-1">
               <div class="text-[18px] font-semibold tracking-[-0.02em] text-heading">Free pool</div>
-              <div class="text-[10.5px] font-mono uppercase tracking-[0.16em] text-muted-foreground">Free trial</div>
+              <div class="text-[10.5px] font-mono uppercase tracking-[0.16em] text-muted-foreground">Free workspace</div>
             </div>
             <div class="text-[12px] font-mono text-muted-foreground mb-4">trial mailboxes only</div>
             <ul class="space-y-2 text-[13px] text-foreground/75">

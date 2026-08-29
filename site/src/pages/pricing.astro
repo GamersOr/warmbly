@@ -14,7 +14,7 @@ const plans = [
     summary: 'For small teams getting started with cold outreach.',
     sendsPerDay: 150,
     href: 'https://app.warmbly.com/register?plan=starter',
-    cta: 'Start free trial',
+    cta: 'Choose plan',
     highlight: false,
     features: [
       'Unlimited mailboxes',
@@ -31,7 +31,7 @@ const plans = [
     summary: 'For teams scaling outreach across multiple senders.',
     sendsPerDay: 3000,
     href: 'https://app.warmbly.com/register?plan=grow',
-    cta: 'Start free trial',
+    cta: 'Choose plan',
     highlight: false,
     features: [
       'Everything in Starter',
@@ -48,7 +48,7 @@ const plans = [
     summary: 'For established teams with serious sending volume.',
     sendsPerDay: 15000,
     href: 'https://app.warmbly.com/register?plan=business',
-    cta: 'Start free trial',
+    cta: 'Choose plan',
     highlight: true,
     features: [
       'Everything in Grow',
@@ -141,7 +141,7 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
         <span class="inline-flex items-center h-5 px-1.5 rounded-full text-[10.5px] font-semibold uppercase tracking-[0.06em] bg-white text-[color:var(--sky-6)]">
           Free to self-host
         </span>
-        Link your instance when Warmbly Cloud launches and we run the warmup · hosted plans have a 14 day trial
+        Link your instance when Warmbly Cloud launches and we run the warmup · every hosted workspace starts free
       </div>
 
       <h1 class="mt-8 md:mt-10 text-[44px] sm:text-6xl md:text-[72px] lg:text-[80px] font-semibold tracking-[-0.04em] leading-[0.98] text-white max-w-4xl mx-auto">
@@ -421,7 +421,7 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
           ['Can a self-hosted instance use the warmup pool?', 'Yes, once Warmbly Cloud launches. Open Settings, Warmbly Cloud on your instance, approve the code here, and pick the mailboxes to enroll. Warmbly runs their warmup in the shared pool; sending, contacts and inbox stay on your server.'],
           ['Is there a per-seat charge?',    'No. Add as many teammates as you want. Roles and audit log unlock on Business.'],
           ['Annual billing?',                'Yes, with 20% off. Toggle is at the top of this page.'],
-          ['What is the free trial?',        'Hosted plans come with 14 days free, 3 mailboxes, no credit card, converting to your chosen plan after. Self-hosting needs no trial: it is free.'],
+          ['Is there a free plan?',          'Yes. A hosted workspace starts free with up to 10 mailboxes and warmup, no card and no time limit. Sending, the inbox and CRM unlock when you pick a plan. Self-hosting is free too.'],
           ['Refund policy?',                 'Full refund inside 14 days of a paid purchase if the platform did not work for you.'],
           ['Startup pricing?',               '50% off Grow for one year for pre-seed and seed companies on YC, Antler, EF, Techstars or similar.'],
         ].map(([q, a]) => (
@@ -482,14 +482,14 @@ const headers = ['Starter', 'Grow', 'Business', 'Enterprise'];
         Start sending in five minutes.
       </h2>
       <p class="mt-5 text-[15.5px] md:text-[17px] text-white/80 max-w-md mx-auto">
-        Free to self-host · hosted plans 14 days free · no credit card.
+        Free to self-host · free hosted workspace with 10 mailboxes · no credit card.
       </p>
       <div class="mt-10 flex flex-wrap items-center justify-center gap-3">
         <a
           href="https://app.warmbly.com/register"
           class="inline-flex h-11 px-5 items-center gap-2 rounded-[10px] text-[14.5px] font-semibold bg-white !text-[#075985] hover:bg-white hover:!text-[#0c4a6e] hover:-translate-y-0.5 hover:shadow-[0_12px_28px_-6px_rgba(0,0,0,0.3)] transition-all duration-200 ease-out shadow-[0_4px_14px_-2px_rgba(0,0,0,0.18)]"
         >
-          <span class="text-[#075985]" style="color:#075985;">Start free trial</span>
+          <span class="text-[#075985]" style="color:#075985;">Start free</span>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#075985" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
           </svg>

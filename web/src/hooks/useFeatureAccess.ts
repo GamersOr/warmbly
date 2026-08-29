@@ -39,6 +39,9 @@ export interface FeatureAccess {
     billing: boolean;
     /** Active subscription on any paid tier. */
     paid: boolean;
+    /** Hosted workspace without a subscription: only mailboxes, the Warmbly
+     *  Cloud link and settings are open; everything else waits for a plan. */
+    locked: boolean;
     /** Unified inbox — free trial and Starter+. */
     hasInbox: boolean;
     /** Advanced outreach (AB tests, custom rules) — Business+. */
@@ -82,6 +85,7 @@ export default function useFeatureAccess(): FeatureAccess {
             plan: "enterprise",
             billing: false,
             paid: true,
+            locked: false,
             hasInbox: true,
             hasAdvanced: true,
             hasDedicatedIps: true,
@@ -112,6 +116,7 @@ export default function useFeatureAccess(): FeatureAccess {
         plan,
         billing: true,
         paid: isPaid,
+        locked: !sub.isPending && !authConfig.isLoading && !isPaid,
         // Unified inbox is included on the free trial and on every paid tier,
         // so gate it on having an active/trialing subscription (isPaid) rather
         // than the plan-name → catalog map, which doesn't recognise server plan

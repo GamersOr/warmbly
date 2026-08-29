@@ -292,9 +292,11 @@ func (s *service) AuthenticateInstance(ctx context.Context, token, version strin
 }
 
 func (s *service) Plan(ctx context.Context, orgID uuid.UUID) (models.PoolLinkPlan, *errx.Error) {
-	enrolled, err := s.repo.CountMailboxesForOrganization(ctx, orgID)
-	if err != nil {
-		return models.PoolLinkPlan{}, errx.InternalError()
+	// The free allowance is per workspace: mailboxes connected directly and
+	// through linked instances share it.
+	enrolled, xerr := s.emails.CountForOrganization(ctx, orgID)
+	if xerr != nil {
+		return models.PoolLinkPlan{}, xerr
 	}
 	plan := models.PoolLinkPlan{Tier: "free", Enrolled: enrolled, PriceUSD: config.PoolLinkPlanPriceUSD, WarmupEntitled: true}
 	if config.BillingProvider() == "none" {
@@ -309,7 +311,7 @@ func (s *service) Plan(ctx context.Context, orgID uuid.UUID) (models.PoolLinkPla
 		plan.Tier = "paid"
 		return plan, nil
 	}
-	limit := config.PoolLinkFreeMailboxes
+	limit := models.FreeWorkspaceMailboxLimit
 	plan.MailboxLimit = &limit
 	if s.planRepo != nil {
 		if p, err := s.planRepo.GetByID(ctx, uuid.MustParse(config.PoolLinkPlanID)); err == nil && p != nil && p.StripePriceID != nil && *p.StripePriceID != "" {
