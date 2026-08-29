@@ -31,6 +31,14 @@ func (s *JobsService) HandleNewEmail(ctx context.Context, e *models.JobEventNewE
 	if warmupToken == "" {
 		warmupToken = extractHeaderValue(e.Message, "X-Warmbly-Token")
 	}
+	// Warmup mail for a mailbox Warmbly Cloud warms carries the cloud's tokens,
+	// which this instance cannot verify; counting them as forgeries would
+	// poison the mailbox's local score, and filing them would flood the inbox.
+	if warmupToken != "" && s.CloudLinkRepo != nil {
+		if enrolled, lerr := s.CloudLinkRepo.IsEnrolled(ctx, e.Message.EmailID); lerr == nil && enrolled {
+			return nil
+		}
+	}
 	if warmupToken != "" {
 		handled, err := s.handleWarmupEmail(ctx, e, warmupToken)
 		if err != nil {

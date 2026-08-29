@@ -128,6 +128,8 @@ type EmailRepository interface {
 	Delete(ctx context.Context, userID, emailAccountID string, workerLoadRefund float64) *errx.Error
 
 	NewOauthAccount(ctx context.Context, userID string, data models.NewOauthAccount) (*models.Email, *errx.Error)
+	// NewManagedAccount creates an OAuth mailbox whose credential lives on Warmbly Cloud, so no token row is written.
+	NewManagedAccount(ctx context.Context, userID string, data models.NewOauthAccount) (*models.Email, *errx.Error)
 	NewSMTPIMAPAccount(ctx context.Context, userID string, data models.NewSMTPIMAPAccount) (*models.Email, *errx.Error)
 	RefreshBoxToken(ctx context.Context, id uuid.UUID, accessToken, refreshToken string, expiresAt time.Time) error
 	// ReplaceSMTPIMAPCredentials overwrites a mailbox's SMTP/IMAP credential
@@ -424,6 +426,26 @@ func (r *emailRepository) NewOauthAccount(ctx context.Context, userID string, da
 		CreatedAt: t,
 		UpdatedAt: t,
 	}, nil
+}
+
+func (r *emailRepository) NewManagedAccount(ctx context.Context, userID string, data models.NewOauthAccount) (*models.Email, *errx.Error) {
+	if data.Provider != models.InboxProviderGoogle && data.Provider != models.InboxProviderOutlook {
+		sentry.CaptureException(errors.New("managed account: unsupported provider"))
+		return nil, errx.InternalError()
+	}
+	sigplain := utils.GetSignaturePlain(data.Name)
+	sightml := utils.GetSignatureHTML(data.Name)
+	t := time.Now()
+	id := uuid.New()
+	query := `
+		INSERT INTO email_accounts (id, user_id, organization_id, email, name, provider, signature_plain, signature_html, tracking_domain, last_synced_at, created_at, updated_at, warmup_tag)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $10, $11)
+	`
+	if _, err := r.DB.Exec(ctx, query, id, userID, data.OrganizationID, data.Email, data.Name, data.Provider, sigplain, sightml, "", t, ""); err != nil {
+		db.CaptureError(err, query, nil, "exec")
+		return nil, errx.InternalError()
+	}
+	return r.GetByID(ctx, id)
 }
 
 func (r *emailRepository) NewSMTPIMAPAccount(ctx context.Context, userID string, data models.NewSMTPIMAPAccount) (*models.Email, *errx.Error) {

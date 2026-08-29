@@ -180,7 +180,13 @@ func NewWMail(
 			LastHistoryID: data.Google.LastHistoryID,
 		}
 
-		if err := mail.GoogleData.Client.Init(mailCtx, data.Google.Token, data.Cfg); err != nil {
+		if data.TokenSource != nil {
+			// Brokered: the cloud refreshes; there is nothing to persist here.
+			mail.GoogleData.Client.OnTokenRefresh = nil
+			if err := mail.GoogleData.Client.InitWithSource(mailCtx, data.TokenSource); err != nil {
+				return nil, err
+			}
+		} else if err := mail.GoogleData.Client.Init(mailCtx, data.Google.Token, data.Cfg); err != nil {
 			return nil, err
 		}
 	case models.InboxProviderOutlook:
@@ -215,7 +221,12 @@ func NewWMail(
 			},
 		}
 
-		if err := mail.GraphData.Client.Init(mailCtx, token, data.Cfg); err != nil {
+		if data.TokenSource != nil {
+			mail.GraphData.Client.OnTokenRefresh = nil
+			if err := mail.GraphData.Client.InitWithSource(mailCtx, data.TokenSource); err != nil {
+				return nil, err
+			}
+		} else if err := mail.GraphData.Client.Init(mailCtx, token, data.Cfg); err != nil {
 			return nil, err
 		}
 	case models.InboxProviderSMTPIMAP:

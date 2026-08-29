@@ -32,7 +32,9 @@ type JobsService struct {
 	EmailAccountErrorRepository repository.EmailAccountErrorRepository
 	WarmupRepo                  repository.WarmupRepository
 	// PoolLinkRepo marks warmup-only mailboxes of linked instances; nil when unused.
-	PoolLinkRepo         repository.PoolLinkRepository
+	PoolLinkRepo repository.PoolLinkRepository
+	// CloudLinkRepo (self-hosted) marks mailboxes the cloud warms, whose warmup mail is not ours to verify.
+	CloudLinkRepo        repository.CloudLinkRepository
 	WarmupContentRepo    repository.WarmupContentRepository
 	WarmupEngagementRepo repository.WarmupEngagementRepository
 	WarmupService        warmupapp.Service

@@ -172,3 +172,112 @@ func (h *Handler) cloudLinkLifecycle(c *gin.Context, action string, audit models
 	h.auditOrg(c, audit, models.AuditEntityCloudLink, &id, nil, nil)
 	c.JSON(http.StatusOK, row)
 }
+
+// Cloud-managed mailboxes: sign in through Warmbly Cloud, adopt workspace mailboxes.
+
+func (h *Handler) CloudLinkOAuthStart(c *gin.Context) {
+	if !h.cloudLinkReady(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	userID, err := middleware.GetUserUUID(c)
+	if orgID == nil || err != nil {
+		errx.JSON(c, errx.ErrNoOrganization)
+		return
+	}
+	var req struct {
+		Provider models.InboxProvider `json:"provider"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		return
+	}
+	res, xerr := h.CloudLinkService.StartOAuth(c.Request.Context(), *orgID, userID, req.Provider)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusCreated, res)
+}
+
+func (h *Handler) CloudLinkOAuthFinish(c *gin.Context) {
+	if !h.cloudLinkReady(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	userID, err := middleware.GetUserUUID(c)
+	if orgID == nil || err != nil {
+		errx.JSON(c, errx.ErrNoOrganization)
+		return
+	}
+	var req struct {
+		Session string `json:"session"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		return
+	}
+	acc, xerr := h.CloudLinkService.FinishOAuth(c.Request.Context(), *orgID, userID, req.Session)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	h.auditOrg(c, models.AuditActionConnect, models.AuditEntityEmailAccount, &acc.ID, nil, map[string]string{"email": acc.Email, "via": "warmbly_cloud"})
+	c.JSON(http.StatusCreated, acc)
+}
+
+func (h *Handler) CloudLinkWorkspaceMailboxes(c *gin.Context) {
+	if !h.cloudLinkReady(c) {
+		return
+	}
+	list, xerr := h.CloudLinkService.ListWorkspaceMailboxes(c.Request.Context())
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": list})
+}
+
+func (h *Handler) CloudLinkAdopt(c *gin.Context) {
+	if !h.cloudLinkReady(c) {
+		return
+	}
+	id, orgID, ok := cloudLinkAccountID(c)
+	if !ok {
+		return
+	}
+	userID, err := middleware.GetUserUUID(c)
+	if err != nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	acc, xerr := h.CloudLinkService.Adopt(c.Request.Context(), *orgID, userID, id)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	h.auditOrg(c, models.AuditActionConnect, models.AuditEntityEmailAccount, &acc.ID, nil, map[string]string{"email": acc.Email, "via": "warmbly_cloud"})
+	c.JSON(http.StatusCreated, acc)
+}
+
+// InternalCloudLinkToken is the worker's credential for a managed mailbox.
+//
+//	GET /api/v1/internal/cloud-link/token/:id -> 200 {"access_token","expires_at"} | 4xx with the cloud's reason
+func (h *Handler) InternalCloudLinkToken(c *gin.Context) {
+	if h.CloudLinkService == nil {
+		errx.JSON(c, errx.ErrNotFound)
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		errx.JSON(c, errx.ErrUuid)
+		return
+	}
+	tok, xerr := h.CloudLinkService.AccessToken(c.Request.Context(), id)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, tok)
+}

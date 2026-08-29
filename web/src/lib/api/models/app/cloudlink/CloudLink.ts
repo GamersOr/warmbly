@@ -97,9 +97,12 @@ export interface PoolLinkMailboxState {
     remote_id: string;
     email_account_id: string;
     email: string;
+    name: string;
     provider: string;
     status: string;
     enrolled_at: Date;
+    /** The cloud holds the only credential; the instance sends with brokered tokens. */
+    managed: boolean;
     warmup?: PoolLinkWarmupStatus | null;
     health?: PoolLinkWarmupHealth | null;
     sent_today: number;
@@ -151,5 +154,21 @@ export interface CloudLinkMailboxRow {
     status: string;
     enrolled: boolean;
     enrolled_at?: Date | null;
+    managed: boolean;
     cloud?: PoolLinkMailboxState | null;
+}
+
+/** A Google or Microsoft consent started through Warmbly Cloud. */
+export interface CloudLinkOAuthStart {
+    url: string;
+    session: string;
+}
+
+/** A mailbox connected directly on the cloud workspace that this instance can adopt. */
+export interface PoolLinkWorkspaceMailbox {
+    id: string;
+    email: string;
+    name: string;
+    provider: string;
+    status: string;
 }

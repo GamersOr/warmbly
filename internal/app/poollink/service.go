@@ -19,6 +19,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/organization"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/infrastructure/cache"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 )
@@ -64,6 +65,15 @@ type Service interface {
 	PatchMailbox(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID, patch models.PoolLinkMailboxPatch) (*models.PoolLinkMailboxState, *errx.Error)
 	Unenroll(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) *errx.Error
 
+	// Cloud-managed mailboxes for linked instances (oauth.go).
+	StartOAuth(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkOAuthStartRequest) (*models.PoolLinkOAuthStartResponse, *errx.Error)
+	// CompleteOAuthCallback finishes a brokered consent; returns "" when the state is not brokered.
+	CompleteOAuthCallback(ctx context.Context, provider, code, state, providerErr string) string
+	FinishOAuth(ctx context.Context, inst *models.PoolLinkInstance, session string) (*models.PoolLinkMailboxState, *errx.Error)
+	AccessToken(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) (*models.PoolLinkAccessToken, *errx.Error)
+	ListWorkspaceMailboxes(ctx context.Context, inst *models.PoolLinkInstance) ([]models.PoolLinkWorkspaceMailbox, *errx.Error)
+	Adopt(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkAdoptRequest) (*models.PoolLinkMailboxState, *errx.Error)
+
 	// IsLinkedMailbox is the consumer's hot-path warmup-only check.
 	IsLinkedMailbox(ctx context.Context, accountID uuid.UUID) bool
 	// HasActiveLink entitles a workspace to warm its linked mailboxes.
@@ -82,6 +92,7 @@ type service struct {
 	orgs      organization.OrganizationService
 	scheduler WarmupScheduler
 	planRepo  repository.PlanRepository
+	cache     *cache.Cache
 }
 
 func NewService(
@@ -539,9 +550,11 @@ func (s *service) state(ctx context.Context, inst *models.PoolLinkInstance, m *m
 		RemoteID:       m.RemoteID,
 		EmailAccountID: acc.ID,
 		Email:          acc.Email,
+		Name:           acc.Name,
 		Provider:       acc.Provider,
 		Status:         acc.Status,
 		EnrolledAt:     m.EnrolledAt,
+		Managed:        m.Managed,
 		AuthState:      acc.AuthState,
 		Settings: models.PoolLinkWarmupSettings{
 			Base: acc.WarmupBase, Max: acc.WarmupMax, Increase: acc.WarmupIncrease, ReplyRate: acc.WarmupReplyRate,
@@ -629,12 +642,15 @@ func (s *service) Unenroll(ctx context.Context, inst *models.PoolLinkInstance, r
 	if m == nil {
 		return ErrMailboxNotFound
 	}
-	userID, xerr := s.ownerUserID(ctx, inst)
-	if xerr != nil {
-		return xerr
-	}
-	if xerr := s.emailSvc.Delete(ctx, userID, m.EmailAccountID.String()); xerr != nil && xerr != errx.ErrNotFound {
-		return xerr
+	// A managed mailbox belongs to the workspace; only the link goes.
+	if !m.Managed {
+		userID, xerr := s.ownerUserID(ctx, inst)
+		if xerr != nil {
+			return xerr
+		}
+		if xerr := s.emailSvc.Delete(ctx, userID, m.EmailAccountID.String()); xerr != nil && xerr != errx.ErrNotFound {
+			return xerr
+		}
 	}
 	if err := s.repo.DeleteMailbox(ctx, inst.ID, remoteID); err != nil {
 		return errx.InternalError()

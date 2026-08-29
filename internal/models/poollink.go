@@ -54,6 +54,9 @@ type PoolLinkMailbox struct {
 	RemoteID       uuid.UUID `json:"remote_id"`
 	EmailAccountID uuid.UUID `json:"email_account_id"`
 	EnrolledAt     time.Time `json:"enrolled_at"`
+	// Managed: the cloud holds the only credential and the instance sends with brokered tokens.
+	Managed     bool       `json:"managed"`
+	LastTokenAt *time.Time `json:"last_token_at,omitempty"`
 }
 
 // PoolLinkStartRequest is what a self-hosted instance sends to begin linking.
@@ -138,14 +141,56 @@ type PoolLinkEnrollRequest struct {
 	Warmup   PoolLinkWarmupSettings   `json:"warmup"`
 }
 
+// PoolLinkOAuthStartRequest asks the cloud for a Google or Microsoft consent URL on Warmbly's app.
+type PoolLinkOAuthStartRequest struct {
+	Provider  InboxProvider `json:"provider"`
+	ReturnURL string        `json:"return_url"`
+}
+
+// PoolLinkOAuthStartResponse: open URL in the browser; redeem Session once the popup returns.
+type PoolLinkOAuthStartResponse struct {
+	URL     string `json:"url"`
+	Session string `json:"session"`
+}
+
+// PoolLinkOAuthFinishRequest redeems a completed consent for its mailbox.
+type PoolLinkOAuthFinishRequest struct {
+	Session string `json:"session"`
+}
+
+// PoolLinkAdoptRequest links a mailbox already in the workspace to the instance.
+type PoolLinkAdoptRequest struct {
+	RemoteID       uuid.UUID `json:"remote_id"`
+	EmailAccountID uuid.UUID `json:"email_account_id"`
+}
+
+// PoolLinkAccessToken is a short-lived provider token minted for a managed mailbox; never a refresh token.
+type PoolLinkAccessToken struct {
+	AccessToken string    `json:"access_token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	Provider    string    `json:"provider"`
+	Email       string    `json:"email"`
+}
+
+// PoolLinkWorkspaceMailbox is a workspace mailbox an instance may adopt.
+type PoolLinkWorkspaceMailbox struct {
+	ID       uuid.UUID `json:"id"`
+	Email    string    `json:"email"`
+	Name     string    `json:"name"`
+	Provider string    `json:"provider"`
+	Status   string    `json:"status"`
+}
+
 // PoolLinkMailboxState is the per-mailbox view shown in both dashboards.
 type PoolLinkMailboxState struct {
 	RemoteID       uuid.UUID              `json:"remote_id"`
 	EmailAccountID uuid.UUID              `json:"email_account_id"`
 	Email          string                 `json:"email"`
+	Name           string                 `json:"name"`
 	Provider       string                 `json:"provider"`
 	Status         string                 `json:"status"`
 	EnrolledAt     time.Time              `json:"enrolled_at"`
+	Managed        bool                   `json:"managed"`
 	Warmup         *WarmupStatusInfo      `json:"warmup,omitempty"`
 	Health         *WarmupHealthInfo      `json:"health,omitempty"`
 	SentToday      int                    `json:"sent_today"`
@@ -183,6 +228,14 @@ type CloudLinkMailbox struct {
 	EmailAccountID uuid.UUID `json:"email_account_id"`
 	RemoteID       uuid.UUID `json:"remote_id"`
 	EnrolledAt     time.Time `json:"enrolled_at"`
+	// Managed: no local credential; the worker sends with tokens brokered by the cloud.
+	Managed bool `json:"managed"`
+}
+
+// CloudLinkOAuthStart is the instance dashboard's handle on a cloud-brokered consent.
+type CloudLinkOAuthStart struct {
+	URL     string `json:"url"`
+	Session string `json:"session"`
 }
 
 // CloudLinkStatus is the self-hosted dashboard's view of the link.
@@ -206,5 +259,6 @@ type CloudLinkMailboxRow struct {
 	Status     string                `json:"status"`
 	Enrolled   bool                  `json:"enrolled"`
 	EnrolledAt *time.Time            `json:"enrolled_at,omitempty"`
+	Managed    bool                  `json:"managed"`
 	Cloud      *PoolLinkMailboxState `json:"cloud,omitempty"`
 }

@@ -622,7 +622,7 @@ function MailboxRow({
                     <span className="text-[12.5px] font-medium text-slate-900 truncate">{box.email}</span>
                     {inCloud && (
                         <span
-                            title={cloudPaused ? "Paused in Warmbly Cloud" : "Warmed by Warmbly Cloud"}
+                            title={cloud?.managed ? "Signed in through Warmbly Cloud, which warms it" : cloudPaused ? "Paused in Warmbly Cloud" : "Warmed by Warmbly Cloud"}
                             className={`inline-flex items-center gap-1 h-4 px-1.5 rounded-full text-[9.5px] font-medium uppercase tracking-[0.08em] shrink-0 ${cloudPaused ? "bg-amber-50 text-amber-600" : "bg-sky-600 text-white"}`}
                         >
                             <CloudIcon className="w-2.5 h-2.5" /> Cloud
@@ -712,13 +712,18 @@ function MailboxRow({
                                     <PopoverMenuItem
                                         danger
                                         onSelect={() =>
-                                            confirm.show(`Stop warming ${box.email} in the Warmbly pool? The cloud deletes its credential right away.`, async () => {
-                                                await cloudRun(() => cloudUnenroll.mutateAsync(box.id), `${box.email} removed from the pool`);
-                                            })
+                                            confirm.show(
+                                                cloud?.managed
+                                                    ? `Remove ${box.email} from this instance? It stays in your Warmbly Cloud workspace, where its sign-in lives; campaigns here stop sending from it.`
+                                                    : `Stop warming ${box.email} in the Warmbly pool? The cloud deletes its credential right away.`,
+                                                async () => {
+                                                    await cloudRun(() => cloudUnenroll.mutateAsync(box.id), cloud?.managed ? `${box.email} removed from this instance` : `${box.email} removed from the pool`);
+                                                },
+                                            )
                                         }
                                         icon={<CloudIcon className="w-3 h-3" />}
                                     >
-                                        Remove from Warmbly Cloud
+                                        {cloud?.managed ? "Remove from this instance" : "Remove from Warmbly Cloud"}
                                     </PopoverMenuItem>
                                     <PopoverMenuSeparator />
                                 </>

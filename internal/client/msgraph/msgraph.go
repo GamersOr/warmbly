@@ -78,7 +78,12 @@ func (c *Client) Init(ctx context.Context, token *oauth2.Token, cfg oauth2.Confi
 			return c.OnTokenRefresh(context.Background(), t)
 		})
 	}
+	return c.InitWithSource(ctx, ts)
+}
 
+// InitWithSource builds the client on a caller-owned token source (brokered
+// tokens from Warmbly Cloud); nothing is persisted from it.
+func (c *Client) InitWithSource(ctx context.Context, ts oauth2.TokenSource) *errx.MailError {
 	c.hc = oauth2.NewClient(ctx, ts)
 	if c.DeltaLinks == nil {
 		c.DeltaLinks = map[string]string{}

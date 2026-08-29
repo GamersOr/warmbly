@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/app/email"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -98,20 +99,31 @@ type Service interface {
 	Unenroll(ctx context.Context, orgID, accountID uuid.UUID) *errx.Error
 	SetLifecycle(ctx context.Context, orgID, accountID uuid.UUID, action string) (*models.CloudLinkMailboxRow, *errx.Error)
 
+	// Cloud-managed mailboxes: consent through the cloud, tokens brokered from it (managed.go).
+	StartOAuth(ctx context.Context, orgID, userID uuid.UUID, provider models.InboxProvider) (*models.CloudLinkOAuthStart, *errx.Error)
+	FinishOAuth(ctx context.Context, orgID, userID uuid.UUID, session string) (*models.Email, *errx.Error)
+	ListWorkspaceMailboxes(ctx context.Context) ([]models.PoolLinkWorkspaceMailbox, *errx.Error)
+	Adopt(ctx context.Context, orgID, userID, cloudAccountID uuid.UUID) (*models.Email, *errx.Error)
+	// AccessToken is the worker's credential for a managed mailbox, via the internal API.
+	AccessToken(ctx context.Context, accountID uuid.UUID) (*models.PoolLinkAccessToken, *errx.Error)
+
 	// IsEnrolled is the local warmup scheduler's stand-down check; fails closed to false.
 	IsEnrolled(ctx context.Context, accountID uuid.UUID) bool
 }
 
 type service struct {
-	repo   repository.CloudLinkRepository
-	emails repository.EmailRepository
+	repo     repository.CloudLinkRepository
+	emails   repository.EmailRepository
+	emailSvc email.EmailService
 
-	mu      sync.Mutex
-	pending *PendingConnect
+	mu       sync.Mutex
+	pending  *PendingConnect
+	sessions map[string]oauthSession
+	tokens   map[uuid.UUID]cachedToken
 }
 
-func NewService(repo repository.CloudLinkRepository, emails repository.EmailRepository) Service {
-	return &service{repo: repo, emails: emails}
+func NewService(repo repository.CloudLinkRepository, emails repository.EmailRepository, emailSvc email.EmailService) Service {
+	return &service{repo: repo, emails: emails, emailSvc: emailSvc, sessions: map[string]oauthSession{}, tokens: map[uuid.UUID]cachedToken{}}
 }
 
 func (s *service) link(ctx context.Context) (*models.CloudLink, *errx.Error) {
@@ -254,6 +266,18 @@ func (s *service) Disconnect(ctx context.Context) *errx.Error {
 	if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance", nil, nil); xerr != nil {
 		log.Warn().Str("code", xerr.Identifier).Msg("cloud link: remote disconnect failed; clearing local link anyway")
 	}
+	// Managed mirrors have no credential of their own; they end with the link.
+	if rows, err := s.repo.List(ctx); err == nil {
+		for _, m := range rows {
+			if !m.Managed || s.emailSvc == nil {
+				continue
+			}
+			if acc, xerr := s.emails.GetByID(ctx, m.EmailAccountID); xerr == nil {
+				s.forgetToken(m.EmailAccountID)
+				_ = s.emailSvc.Delete(ctx, acc.UserID, acc.ID.String())
+			}
+		}
+	}
 	if err := s.repo.UnenrollAll(ctx); err != nil {
 		return errx.InternalError()
 	}
@@ -302,6 +326,7 @@ func (s *service) ListMailboxes(ctx context.Context, orgID uuid.UUID) ([]models.
 			at := e.EnrolledAt
 			row.Enrolled = true
 			row.EnrolledAt = &at
+			row.Managed = e.Managed
 			row.Cloud = cloudByRemote[e.RemoteID]
 		}
 		rows = append(rows, row)
@@ -365,7 +390,7 @@ func (s *service) Enroll(ctx context.Context, orgID, accountID uuid.UUID) (*mode
 	if xerr := s.clientFor(l).do(ctx, http.MethodPost, "/instance/mailboxes", req, &state); xerr != nil {
 		return nil, xerr
 	}
-	if _, err := s.repo.Enroll(ctx, acc.ID, acc.ID); err != nil {
+	if _, err := s.repo.Enroll(ctx, acc.ID, acc.ID, false); err != nil {
 		// Without the local row the mailbox would warm in both places; undo the cloud side.
 		if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+acc.ID.String(), nil, nil); xerr != nil {
 			log.Error().Str("account_id", acc.ID.String()).Str("code", xerr.Identifier).Msg("cloud link: local enrollment failed and the cloud copy could not be removed; unenroll it from Settings")
@@ -390,6 +415,9 @@ func (s *service) Unenroll(ctx context.Context, orgID, accountID uuid.UUID) *err
 	if m == nil {
 		return nil
 	}
+	if m.Managed {
+		return s.removeManaged(ctx, acc.UserID, m)
+	}
 	// Local row first, so a failed cloud call can be retried from a consistent
 	// state instead of leaving the mailbox with no warmup anywhere.
 	if err := s.repo.Unenroll(ctx, accountID); err != nil {
@@ -397,7 +425,7 @@ func (s *service) Unenroll(ctx context.Context, orgID, accountID uuid.UUID) *err
 	}
 	if l, err := s.repo.Get(ctx); err == nil && l != nil {
 		if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+m.RemoteID.String(), nil, nil); xerr != nil && xerr.Identifier != "pool_link_mailbox_not_found" {
-			if _, rerr := s.repo.Enroll(ctx, accountID, m.RemoteID); rerr != nil {
+			if _, rerr := s.repo.Enroll(ctx, accountID, m.RemoteID, false); rerr != nil {
 				log.Error().Str("account_id", accountID.String()).Msg("cloud link: cloud unenroll failed and the local row could not be restored")
 			}
 			return xerr

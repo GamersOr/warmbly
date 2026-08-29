@@ -24,7 +24,12 @@ type MailManager struct {
 	syncContextRepository     repository.SyncContextRepository
 	cipherService             cipher.CipherService
 	oauthInbox                *config.Oauth2Inbox
+	// tokenBroker serves mailboxes whose credential Warmbly Cloud holds; nil disables them.
+	tokenBroker repository.BrokeredTokenClient
 }
+
+// WireTokenBroker enables cloud-managed mailboxes.
+func (m *MailManager) WireTokenBroker(b repository.BrokeredTokenClient) { m.tokenBroker = b }
 
 func NewMailManager(
 	onEvent func(eventType models.JobEventType, key string, body any) error,

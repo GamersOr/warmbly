@@ -81,6 +81,7 @@ import OnboardingPage from './app/onboarding/page';
 import SelectOrgPage from './app/select-org/page';
 import InviteAcceptPage from './app/invite/page';
 import ConnectPage from './app/connect/page';
+import CloudOAuthDonePage from './app/cloud-oauth/done/page';
 import WarmblyCloudSettingsPage from './app/app/settings/warmbly-cloud/page';
 import SetupPage from './app/setup/page';
 import SSOCallbackPage from './app/auth/sso/page';
@@ -199,6 +200,11 @@ const router = createBrowserRouter([
       {
         path: "connect",
         element: <ConnectPage />,
+      },
+      {
+        // Where Warmbly Cloud sends the Google/Microsoft popup back to on a linked instance.
+        path: "cloud-oauth/done",
+        element: <CloudOAuthDonePage />,
       },
       {
         // First-run claim link printed by the backend on an empty database.

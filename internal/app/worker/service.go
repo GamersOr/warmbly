@@ -34,6 +34,9 @@ type WorkerService struct {
 	// endpoint) the worker needs to refresh delegated tokens locally. Cfg is not
 	// serialized in the AddWorkerEmail payload, so the worker rebuilds it here.
 	OauthInbox *config.Oauth2Inbox
+	// TokenBroker serves mailboxes managed by Warmbly Cloud (brokered access
+	// tokens over the internal API). Optional: nil refuses such mailboxes.
+	TokenBroker repository.BrokeredTokenClient
 
 	mailManager *mailmanager.MailManager
 
@@ -66,6 +69,9 @@ func (s *WorkerService) Init() error {
 		s.CipherService,
 		s.OauthInbox,
 	)
+	if s.TokenBroker != nil {
+		s.mailManager.WireTokenBroker(s.TokenBroker)
+	}
 
 	return nil
 }

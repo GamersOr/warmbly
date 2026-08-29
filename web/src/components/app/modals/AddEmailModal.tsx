@@ -12,6 +12,11 @@
 //
 // OAuth popup posts {type:"email_oauth_callback", code, state} back here
 // via window.postMessage; we then call OAuth-finish with the user's bearer.
+//
+// On a self-hosted instance linked to Warmbly Cloud, Google and Microsoft
+// sign-in runs on the cloud's OAuth app instead (no BOX_* setup): the popup
+// comes back to /cloud-oauth/done, which posts {type:"cloud_oauth_callback",
+// session} and we redeem the session with /cloud-link/oauth/finish.
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -19,6 +24,7 @@ import {
     ArrowLeftIcon,
     CheckIcon,
     ChevronRightIcon,
+    CloudIcon,
     InboxIcon,
     KeyRoundIcon,
     Loader2Icon,
@@ -32,7 +38,7 @@ import {
 import toast from "react-hot-toast";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { Google, Outlook, Logo } from "@/components/svg";
+import { Logo } from "@/components/svg";
 import { TextInput } from "@/components/ui/field";
 import { useUserProfile } from "@/hooks/context/user";
 import { API_URL, APP_URL } from "@/lib/information";
@@ -41,6 +47,11 @@ import buildError from "@/lib/helper/buildError";
 import addEmail from "@/lib/api/client/app/emails/addEmail";
 import onboardOAuthStart from "@/lib/api/client/app/emails/onboardOAuthStart";
 import onboardOAuthFinish from "@/lib/api/client/app/emails/onboardOAuthFinish";
+import { finishCloudOAuth, startCloudOAuth } from "@/lib/api/client/app/cloudlink/cloudLink";
+import { useAdoptCloudMailbox, useCloudWorkspaceMailboxes } from "@/lib/api/hooks/app/cloudlink/useCloudLink";
+import useCloudPool from "@/hooks/useCloudPool";
+import type { CloudOAuthDoneMessage } from "@/app/cloud-oauth/done/page";
+import { Google, Outlook } from "@/components/svg";
 import { cn } from "@/lib/utils";
 
 type View = "pick" | "gmail" | "outlook" | "smtp_imap";
@@ -111,6 +122,10 @@ export default function AddEmailModal() {
     // with a link, not a transient failure.
     const [notConfigured, setNotConfigured] = React.useState<OAuthProvider | null>(null);
     const pendingState = React.useRef<{ provider: OAuthProvider; state: string } | null>(null);
+    // A consent running on Warmbly Cloud's app; redeemed by session, not code.
+    const pendingCloud = React.useRef<{ provider: OAuthProvider; session: string } | null>(null);
+    const pool = useCloudPool();
+    const viaCloud = pool.connected;
 
     // Reset when the modal closes.
     React.useEffect(() => {
@@ -119,8 +134,43 @@ export default function AddEmailModal() {
             setOauthBusy(null);
             setNotConfigured(null);
             pendingState.current = null;
+            pendingCloud.current = null;
         }
     }, [user.addEmail]);
+
+    // The cloud-brokered popup lands on our own origin (/cloud-oauth/done).
+    React.useEffect(() => {
+        function onMessage(event: MessageEvent) {
+            if (event.origin !== window.location.origin) return;
+            const data = event.data as CloudOAuthDoneMessage | undefined;
+            if (!data || data.type !== "cloud_oauth_callback") return;
+            const expected = pendingCloud.current;
+            if (!expected || expected.session !== data.session) return;
+            pendingCloud.current = null;
+            if (data.status !== "ok") {
+                setOauthBusy(null);
+                if (data.error !== "access_denied") {
+                    toast.error(data.message || (data.error ? `Provider error: ${data.error}` : "Connection was cancelled."));
+                }
+                return;
+            }
+            void toast.promise(
+                finishCloudOAuth(data.session).then((inbox) => {
+                    qc.invalidateQueries({ queryKey: ["emails", "list"] });
+                    qc.invalidateQueries({ queryKey: ["cloud-link"] });
+                    user.setAddEmail(false);
+                    return inbox;
+                }),
+                {
+                    loading: "Adding the mailbox…",
+                    success: "Mailbox connected. Warmbly Cloud warms it from now on.",
+                    error: (e: AppError) => buildError(e),
+                },
+            ).finally(() => setOauthBusy(null));
+        }
+        window.addEventListener("message", onMessage);
+        return () => window.removeEventListener("message", onMessage);
+    }, [qc, user]);
 
     // Listen for the OAuth popup's postMessage. We only honour messages from an
     // origin we own and whose state matches the one we issued, which is what
@@ -166,6 +216,23 @@ export default function AddEmailModal() {
         if (oauthBusy) return;
         setOauthBusy(provider);
         setNotConfigured(null);
+        if (viaCloud) {
+            try {
+                const { url, session } = await startCloudOAuth(provider);
+                pendingCloud.current = { provider, session };
+                const popup = openCentered(url, `connect-${provider}`);
+                if (!popup) {
+                    pendingCloud.current = null;
+                    setOauthBusy(null);
+                    toast.error("Could not open the authorization window. Please allow popups and try again.");
+                }
+            } catch (err) {
+                pendingCloud.current = null;
+                setOauthBusy(null);
+                toast.error(buildError(err as AppError));
+            }
+            return;
+        }
         try {
             const { url, state } = await onboardOAuthStart(provider);
             pendingState.current = { provider, state };
@@ -225,25 +292,36 @@ export default function AddEmailModal() {
                                     exit={{ opacity: 0, x: view === "pick" ? 12 : -12 }}
                                     transition={{ duration: 0.18, ease: [0.32, 0.72, 0, 1] }}
                                 >
-                                    {view === "pick" && <PickProvider onPick={setView} />}
+                                    {view === "pick" && (
+                                        <PickProvider
+                                            onPick={setView}
+                                            viaCloud={viaCloud}
+                                            onAdopted={() => {
+                                                qc.invalidateQueries({ queryKey: ["emails", "list"] });
+                                                user.setAddEmail(false);
+                                            }}
+                                        />
+                                    )}
                                     {view === "gmail" && (
                                         notConfigured === "gmail" ? (
-                                            <ProviderNotConfigured provider="gmail" />
+                                            <ProviderNotConfigured provider="gmail" selfHosted={pool.selfHosted} />
                                         ) : (
                                             <OAuthPanel
                                                 provider="gmail"
                                                 busy={oauthBusy === "gmail"}
+                                                viaCloud={viaCloud}
                                                 onConnect={() => startOAuth("gmail")}
                                             />
                                         )
                                     )}
                                     {view === "outlook" && (
                                         notConfigured === "outlook" ? (
-                                            <ProviderNotConfigured provider="outlook" />
+                                            <ProviderNotConfigured provider="outlook" selfHosted={pool.selfHosted} />
                                         ) : (
                                             <OAuthPanel
                                                 provider="outlook"
                                                 busy={oauthBusy === "outlook"}
+                                                viaCloud={viaCloud}
                                                 onConnect={() => startOAuth("outlook")}
                                             />
                                         )
@@ -324,10 +402,24 @@ const PROVIDER_SETUP: Record<OAuthProvider, { label: string; vars: string[] }> =
     },
 };
 
-function ProviderNotConfigured({ provider }: { provider: OAuthProvider }) {
+function ProviderNotConfigured({ provider, selfHosted }: { provider: OAuthProvider; selfHosted: boolean }) {
     const { label, vars } = PROVIDER_SETUP[provider];
     return (
         <div className="p-4">
+            {selfHosted && (
+                <div className="mb-3 rounded-md border border-sky-200 bg-sky-50 p-3 flex items-start gap-2.5">
+                    <CloudIcon className="w-4 h-4 text-sky-600 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                        <p className="text-[12.5px] font-medium text-sky-900">Skip the OAuth setup: connect Warmbly Cloud</p>
+                        <p className="text-[12.5px] text-sky-800 mt-1">
+                            Linked instances sign mailboxes in through Warmbly's own Google and Microsoft apps, and the cloud warms them. Free for 10 mailboxes.
+                        </p>
+                        <a href="/app/settings/warmbly-cloud" className="mt-2 inline-flex h-7 px-2.5 items-center gap-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium transition-colors">
+                            Connect Warmbly Cloud
+                        </a>
+                    </div>
+                </div>
+            )}
             <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
                 <div className="flex items-start gap-2.5">
                     <SettingsIcon className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
@@ -372,7 +464,7 @@ function ProviderNotConfigured({ provider }: { provider: OAuthProvider }) {
     );
 }
 
-function PickProvider({ onPick }: { onPick: (v: View) => void }) {
+function PickProvider({ onPick, viaCloud, onAdopted }: { onPick: (v: View) => void; viaCloud: boolean; onAdopted: () => void }) {
     const rows: Array<{
         key: View;
         icon: React.ReactNode;
@@ -384,14 +476,14 @@ function PickProvider({ onPick }: { onPick: (v: View) => void }) {
             key: "gmail",
             icon: <Google className="w-5 h-5" />,
             title: "Gmail / Google Workspace",
-            sub: "OAuth via Google. Best deliverability for Gmail.",
+            sub: viaCloud ? "Sign in through Warmbly Cloud. Warmup included, no OAuth app needed." : "OAuth via Google. Best deliverability for Gmail.",
             tone: "primary",
         },
         {
             key: "outlook",
             icon: <Outlook className="w-5 h-5" />,
             title: "Outlook / Microsoft 365",
-            sub: "OAuth via Microsoft. Native sync for Outlook accounts.",
+            sub: viaCloud ? "Sign in through Warmbly Cloud. Warmup included, no OAuth app needed." : "OAuth via Microsoft. Native sync for Outlook accounts.",
             tone: "primary",
         },
         {
@@ -424,6 +516,61 @@ function PickProvider({ onPick }: { onPick: (v: View) => void }) {
                     <ChevronRightIcon className="w-4 h-4 text-slate-300 shrink-0 group-hover:text-slate-500 group-hover:translate-x-0.5 transition-all" />
                 </motion.button>
             ))}
+            {viaCloud && <WorkspaceMailboxes onAdopted={onAdopted} />}
+        </div>
+    );
+}
+
+// Mailboxes connected directly on the linked Warmbly Cloud workspace: one
+// click brings each one here, sending with tokens the cloud brokers.
+function WorkspaceMailboxes({ onAdopted }: { onAdopted: () => void }) {
+    const list = useCloudWorkspaceMailboxes();
+    const adopt = useAdoptCloudMailbox();
+    const [busy, setBusy] = React.useState<string | null>(null);
+    const items = list.data ?? [];
+    if (list.isLoading || items.length === 0) return null;
+
+    const run = async (id: string, email: string) => {
+        setBusy(id);
+        try {
+            await adopt.mutateAsync(id);
+            toast.success(`${email} connected`);
+            onAdopted();
+        } catch (e) {
+            toast.error(buildError(e as AppError));
+        } finally {
+            setBusy(null);
+        }
+    };
+
+    return (
+        <div className="px-4 py-3 bg-sky-50/40">
+            <div className="flex items-center gap-1.5 mb-2">
+                <CloudIcon className="w-3.5 h-3.5 text-sky-600" />
+                <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">In your Warmbly Cloud workspace</span>
+            </div>
+            <div className="space-y-1.5">
+                {items.map((m) => (
+                    <div key={m.id} className="flex items-center gap-2.5 rounded-md border border-slate-200 bg-white px-2.5 py-2">
+                        <div className="size-7 rounded-md border border-slate-200 bg-white flex items-center justify-center shrink-0">
+                            {m.provider === "gmail" ? <Google className="w-4 h-4" /> : <Outlook className="w-4 h-4" />}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                            <div className="text-[12.5px] text-slate-900 truncate">{m.email}</div>
+                            <div className="text-[11px] text-slate-500 truncate">Connected on the cloud. Add it here to send campaigns from it.</div>
+                        </div>
+                        <button
+                            type="button"
+                            disabled={busy === m.id}
+                            onClick={() => void run(m.id, m.email)}
+                            className="shrink-0 h-7 px-2.5 rounded-md bg-slate-900 hover:bg-slate-800 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                        >
+                            {busy === m.id ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <CheckIcon className="w-3 h-3" />}
+                            Connect
+                        </button>
+                    </div>
+                ))}
+            </div>
         </div>
     );
 }
@@ -431,10 +578,12 @@ function PickProvider({ onPick }: { onPick: (v: View) => void }) {
 function OAuthPanel({
     provider,
     busy,
+    viaCloud,
     onConnect,
 }: {
     provider: OAuthProvider;
     busy: boolean;
+    viaCloud: boolean;
     onConnect: () => void;
 }) {
     const label = provider === "gmail" ? "Google" : "Microsoft";
@@ -450,16 +599,26 @@ function OAuthPanel({
                         Connect with {label}
                     </div>
                     <div className="text-[11.5px] text-slate-500">
-                        We'll open a {label} window. Approve the scopes and you're done.
+                        {viaCloud
+                            ? `Warmbly Cloud opens the ${label} window on its own app. Approve and you're done.`
+                            : `We'll open a ${label} window. Approve the scopes and you're done.`}
                     </div>
                 </div>
             </div>
 
-            <ul className="text-[11.5px] text-slate-600 space-y-1.5 px-1">
-                <Scope>Send and read mail on your behalf</Scope>
-                <Scope>Track replies and deliveries</Scope>
-                <Scope>Refresh tokens are stored encrypted; revoke any time</Scope>
-            </ul>
+            {viaCloud ? (
+                <ul className="text-[11.5px] text-slate-600 space-y-1.5 px-1">
+                    <Scope>Sends campaigns and syncs replies from this server, as usual</Scope>
+                    <Scope>Warmbly Cloud keeps the sign-in and warms the mailbox in its pool</Scope>
+                    <Scope>The mailbox also appears in your cloud workspace; remove it from either side</Scope>
+                </ul>
+            ) : (
+                <ul className="text-[11.5px] text-slate-600 space-y-1.5 px-1">
+                    <Scope>Send and read mail on your behalf</Scope>
+                    <Scope>Track replies and deliveries</Scope>
+                    <Scope>Refresh tokens are stored encrypted; revoke any time</Scope>
+                </ul>
+            )}
 
             <motion.button
                 type="button"
