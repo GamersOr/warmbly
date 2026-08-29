@@ -24,7 +24,25 @@ type Signal struct {
 	Weight int
 	// Detail is the human sentence an admin reads.
 	Detail string
+	// Class is what kind of evidence this is. An empty class falls back to the
+	// key, so a detector that forgets it cannot accidentally restrict anyone.
+	Class SignalClass
 }
+
+// SignalClass separates evidence about how a workspace LOOKS from evidence of
+// what it DID. An agency onboarding clients looks exactly like a ring (#245),
+// so only the second kind may take something away from a customer.
+type SignalClass string
+
+const (
+	// ClassCircumstantial is shape: one office address, one operator opening
+	// several workspaces, a burst of mailboxes. Every one has an ordinary
+	// explanation, so shape accumulates as evidence and restricts nothing.
+	ClassCircumstantial SignalClass = "circumstantial"
+	// ClassSubstantive is what an ordinary customer does not do: sign up from a
+	// throwaway domain, import a dead list, draw complaints from recipients.
+	ClassSubstantive SignalClass = "substantive"
+)
 
 // Band thresholds, deliberately far apart: nothing is taken away until several
 // detectors agree.
@@ -32,7 +50,32 @@ const (
 	WatchScore      = 25
 	RestrictedScore = 50
 	SuspendedScore  = 85
+
+	// CircumstantialCap bounds what shape evidence contributes in total. Four
+	// benign-explainable findings must not add up to a verdict.
+	CircumstantialCap = 40
+	// SubstantiveFloor is the substantive evidence a band needs before it takes
+	// anything away. Below it the posture tops out at watch.
+	SubstantiveFloor = 25
 )
+
+// substantiveKeys classifies findings whose class did not travel with them:
+// rows written before the class existed, and any detector that leaves it empty.
+// Anything not listed reads as circumstantial.
+var substantiveKeys = map[string]bool{
+	"signup":         true,
+	"list_quality":   true,
+	"recipient_harm": true,
+}
+
+// families are detectors that describe ONE fact from two angles: an operator
+// opening several workspaces is found by address AND by identity, and counting
+// both charges an agency twice for one thing. A family contributes its heaviest
+// member once per class.
+var families = map[string]string{
+	"cluster_signup_ip":       "signup_cluster",
+	"cluster_signup_identity": "signup_cluster",
+}
 
 // BandFor maps a fused score to its posture.
 func BandFor(score int) models.OrgRiskState {
@@ -127,8 +170,14 @@ func (s *service) RecordSignal(ctx context.Context, orgID uuid.UUID, sig Signal)
 	if sig.Weight > 100 {
 		sig.Weight = 100
 	}
+	class := sig.Class
+	if class != ClassCircumstantial && class != ClassSubstantive {
+		class = classOf(sig.Key, nil)
+	}
 	return s.apply(ctx, orgID, func(signals map[string]any) map[string]any {
-		signals[sig.Key] = map[string]any{"weight": sig.Weight, "detail": sig.Detail}
+		signals[sig.Key] = map[string]any{
+			"weight": sig.Weight, "detail": sig.Detail, "class": string(class),
+		}
 		return signals
 	})
 }
@@ -168,8 +217,8 @@ func (s *service) apply(ctx context.Context, orgID uuid.UUID, mutate func(map[st
 	before, _ := s.repo.GetOrgRisk(ctx, orgID)
 	risk, err := s.repo.UpdateOrgRiskSignals(ctx, orgID, func(signals map[string]any) (map[string]any, models.OrgRiskState, int, string) {
 		signals = mutate(signals)
-		score := Score(signals)
-		return signals, BandFor(score), score, Reason(signals)
+		state, score := Evaluate(signals)
+		return signals, state, score, Reason(signals)
 	})
 	if err != nil {
 		return nil, errx.InternalError()
@@ -178,20 +227,102 @@ func (s *service) apply(ctx context.Context, orgID uuid.UUID, mutate func(map[st
 	return risk, nil
 }
 
-// Score sums the recorded weights, capped at 100.
+// Evaluate fuses the evidence into the band and the score to store. Shape
+// evidence raises the score, but only substantive evidence lets a band take
+// something away: a normal agency onboarding clients from one office produces
+// the whole cross-account shape on its own (#245).
+func Evaluate(signals map[string]any) (models.OrgRiskState, int) {
+	circumstantial, substantive := fuse(signals)
+	if circumstantial > CircumstantialCap {
+		circumstantial = CircumstantialCap
+	}
+	score := circumstantial + substantive
+	if score > 100 {
+		score = 100
+	}
+	band := BandFor(score)
+	if substantive < SubstantiveFloor {
+		band = atMost(band, models.OrgRiskWatch)
+	}
+	return band, score
+}
+
+// Score is the fused weight behind the band: one weight per family, shape
+// capped, total capped at 100.
 func Score(signals map[string]any) int {
-	total := 0
-	for _, raw := range signals {
+	_, score := Evaluate(signals)
+	return score
+}
+
+// fuse reduces the evidence to one weight per family and totals each class.
+// The heaviest is taken per class, not per family, so a shape finding can never
+// hide a lighter conduct finding filed under the same family.
+func fuse(signals map[string]any) (circumstantial, substantive int) {
+	type member struct {
+		family string
+		class  SignalClass
+	}
+	heaviest := make(map[member]int, len(signals))
+	for key, raw := range signals {
 		entry, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		total += weightOf(entry["weight"])
+		m := member{family: key, class: classOf(key, entry["class"])}
+		if f, named := families[key]; named {
+			m.family = f
+		}
+		if weight := weightOf(entry["weight"]); weight > heaviest[m] {
+			heaviest[m] = weight
+		}
 	}
-	if total > 100 {
-		return 100
+	for m, weight := range heaviest {
+		if m.class == ClassSubstantive {
+			substantive += weight
+			continue
+		}
+		circumstantial += weight
 	}
-	return total
+	return circumstantial, substantive
+}
+
+// classOf reads a finding's class, falling back to the key for rows written
+// before the class travelled with the weight.
+func classOf(key string, raw any) SignalClass {
+	if s, ok := raw.(string); ok {
+		switch SignalClass(s) {
+		case ClassSubstantive:
+			return ClassSubstantive
+		case ClassCircumstantial:
+			return ClassCircumstantial
+		}
+	}
+	if substantiveKeys[key] {
+		return ClassSubstantive
+	}
+	return ClassCircumstantial
+}
+
+// atMost lowers a band to a ceiling, so a rule can hold a verdict back without
+// knowing which band the score produced.
+func atMost(band, ceiling models.OrgRiskState) models.OrgRiskState {
+	if bandRank(band) > bandRank(ceiling) {
+		return ceiling
+	}
+	return band
+}
+
+func bandRank(state models.OrgRiskState) int {
+	switch state {
+	case models.OrgRiskWatch:
+		return 1
+	case models.OrgRiskRestricted:
+		return 2
+	case models.OrgRiskSuspended:
+		return 3
+	default:
+		return 0
+	}
 }
 
 // Reason is the heaviest signals, in a sentence, so an operator sees WHY

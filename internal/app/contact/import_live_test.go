@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/warmbly/warmbly/internal/app/orgrisk"
 	"github.com/warmbly/warmbly/internal/infrastructure/db"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -580,5 +581,80 @@ func TestLiveImportOfAnOrdinaryListIsQuiet(t *testing.T) {
 	}
 	if res.Imported != 60 {
 		t.Errorf("imported = %d, want 60", res.Imported)
+	}
+}
+
+// Issue #245: the import finding has to come back off. A first bad list that
+// weighs on a workspace forever is half of how an ordinary agency ended up
+// restricted, and only the real import path can prove the retraction runs.
+func TestLiveImportQualityFindingIsFiledAndRetracted(t *testing.T) {
+	f := newImportFixture(t)
+	handle, err := db.New(context.Background(), os.Getenv("WARMBLY_TEST_DB"))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { handle.Pool.Close() })
+	riskRepo := repository.NewOrgRiskRepository(handle)
+	f.svc.(OrgRiskAware).WireOrgRisk(orgrisk.NewService(riskRepo))
+
+	bad := append(repeatEmails("junk%d-not-an-email", 30), repeatEmails("throwaway%d@mailinator.com", 30)...)
+	bad = append(bad, repeatEmails("real%d@acme.test", 40)...)
+	if _, msg := f.commit(t, simpleCSV(bad), &models.ContactImportCommit{
+		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
+	}); msg != "" {
+		t.Fatalf("import rejected: %s", msg)
+	}
+
+	risk, rerr := riskRepo.GetOrgRisk(context.Background(), f.org)
+	if rerr != nil {
+		t.Fatalf("GetOrgRisk: %v", rerr)
+	}
+	entry, ok := risk.Signals["list_quality"].(map[string]any)
+	if !ok {
+		t.Fatalf("the import quality finding was not filed: %v", risk.Signals)
+	}
+	if entry["class"] != string(orgrisk.ClassSubstantive) {
+		t.Errorf("class = %v, want substantive", entry["class"])
+	}
+	// A bad list is conduct, but one import is still not enough to restrict.
+	if risk.State != models.OrgRiskWatch {
+		t.Errorf("state = %q, want watch: one import restricts nothing on its own", risk.State)
+	}
+
+	if _, msg := f.commit(t, simpleCSV(repeatEmails("clean%d@acme.test", 40)), &models.ContactImportCommit{
+		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
+	}); msg != "" {
+		t.Fatalf("second import rejected: %s", msg)
+	}
+
+	risk, rerr = riskRepo.GetOrgRisk(context.Background(), f.org)
+	if rerr != nil {
+		t.Fatalf("GetOrgRisk: %v", rerr)
+	}
+	if _, still := risk.Signals["list_quality"]; still {
+		t.Error("the finding survived a clean import of the same workspace")
+	}
+	if risk.State != models.OrgRiskTrusted || risk.Score != 0 {
+		t.Errorf("state = %q/%d, want trusted/0", risk.State, risk.Score)
+	}
+
+	// A list too small to measure says nothing either way, so it must not
+	// clear a finding that is still true.
+	if _, msg := f.commit(t, simpleCSV(bad), &models.ContactImportCommit{
+		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupUpdate, HasHeader: true,
+	}); msg != "" {
+		t.Fatalf("third import rejected: %s", msg)
+	}
+	if _, msg := f.commit(t, simpleCSV(repeatEmails("tiny%d@acme.test", 5)), &models.ContactImportCommit{
+		Mapping: emailOnlyMapping(), Dedup: models.ContactImportDedupSkip, HasHeader: true,
+	}); msg != "" {
+		t.Fatalf("fourth import rejected: %s", msg)
+	}
+	risk, rerr = riskRepo.GetOrgRisk(context.Background(), f.org)
+	if rerr != nil {
+		t.Fatalf("GetOrgRisk: %v", rerr)
+	}
+	if _, still := risk.Signals["list_quality"]; !still {
+		t.Error("a 5-address import cleared a finding it is too small to speak to")
 	}
 }

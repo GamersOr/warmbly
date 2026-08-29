@@ -302,10 +302,18 @@ func (s *authService) recordSignupRisk(ctx context.Context, orgID uuid.UUID, ema
 	if risk.Score == 0 {
 		return
 	}
+	// Only the throwaway domain is substantive. The softer parts of the score
+	// (a tagged address, an origin we failed to record) describe how the signup
+	// looks and must not be able to cost a real customer volume (#245).
+	class := orgrisk.ClassCircumstantial
+	if risk.Disposable {
+		class = orgrisk.ClassSubstantive
+	}
 	if _, err := s.orgRisk.RecordSignal(ctx, orgID, orgrisk.Signal{
 		Key:    "signup",
 		Weight: risk.Score,
 		Detail: strings.Join(risk.Reasons, "; "),
+		Class:  class,
 	}); err != nil {
 		log.Warn().Str("organization_id", orgID.String()).Msg("could not record the signup risk signal")
 	}

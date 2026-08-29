@@ -509,13 +509,25 @@ func (s *contactService) ImportCommit(
 	// File the finding on the workspace's posture. Import quality alone can
 	// only reach `watch`, which changes nothing a customer can feel; it takes
 	// several detectors agreeing to restrict anything.
-	if quality.Flagged && s.orgRisk != nil {
-		if _, err := s.orgRisk.RecordSignal(ctx, orgID, orgrisk.Signal{
-			Key:    "list_quality",
-			Weight: importRiskWeight(quality.BadSharePct),
-			Detail: quality.Summary,
-		}); err != nil {
-			log.Warn().Str("organization_id", orgID.String()).Msg("could not record the import quality signal")
+	if s.orgRisk != nil {
+		switch {
+		case quality.Flagged:
+			if _, err := s.orgRisk.RecordSignal(ctx, orgID, orgrisk.Signal{
+				Key:    "list_quality",
+				Weight: importRiskWeight(quality.BadSharePct),
+				Detail: quality.Summary,
+				// Substantive: this is what the workspace intends to mail.
+				Class: orgrisk.ClassSubstantive,
+			}); err != nil {
+				log.Warn().Str("organization_id", orgID.String()).Msg("could not record the import quality signal")
+			}
+		case quality.Total >= listquality.MinSample:
+			// The newest list big enough to measure is the current answer. Without
+			// this, a first bad import weighs on a workspace forever, which is
+			// half of how an ordinary agency ended up restricted (#245).
+			if _, err := s.orgRisk.ClearSignal(ctx, orgID, "list_quality"); err != nil {
+				log.Warn().Str("organization_id", orgID.String()).Msg("could not retract the import quality signal")
+			}
 		}
 	}
 

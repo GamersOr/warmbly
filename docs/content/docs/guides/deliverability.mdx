@@ -122,14 +122,18 @@ Individual protections each watch one thing: a rate limit watches one user, warm
 |---------|---------------|--------------|
 | `trusted` | The default | Nothing |
 | `watch` | Enough signal to keep an eye on | Nothing you can feel. It exists so evidence builds before anything is taken away |
-| `restricted` | Several signals agree | Daily volume per mailbox drops to a quarter, and warmup moves to the shared free pool |
+| `restricted` | Evidence of what the workspace sent, not only how it looks | Daily volume per mailbox drops to a quarter, and warmup moves to the shared free pool |
 | `suspended` | Serious or confirmed abuse | Sending stops, pending review |
 
 When a workspace is restricted or suspended, a banner across the top of the dashboard says so and why. Nothing is ever taken away silently.
 
-<Callout type="info" title="Set by review, not automatically">
-Postures are currently set by platform operators. The signals that will feed them automatically are being added detector by detector, each running in observation first, so nothing throttles a real workspace on a scoring rule that has never been watched in practice.
-</Callout>
+Signals come in two kinds, and only one of them can cost you volume.
+
+**How a workspace looks** is evidence, not a verdict. Several workspaces opened from one office address, one person opening all of them, or a batch of mailboxes connected in an afternoon are exactly what an agency onboarding clients looks like, so on their own these can only reach `watch`. They are recorded, they show up in review, and they change nothing you can feel.
+
+**What a workspace does to recipients** is what a posture acts on: an import that is mostly unusable addresses, a bounce rate at or above `5%`, or a complaint rate at or above `0.1%`. Rates are measured over at least `100` sends in the last `30 days`, because below that a percentage is noise. A rate past the point providers themselves act on, `10%` bounces or `0.3%` complaints, is enough to restrict a workspace on its own.
+
+Postures are re-derived nightly, so a restriction lifts on its own once the evidence behind it no longer holds. A suspension is the exception: it stays until it is reviewed, because time passing is not evidence that anything changed.
 
 ## How to read it
 

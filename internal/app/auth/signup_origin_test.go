@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/warmbly/warmbly/internal/app/orgrisk"
 	"github.com/warmbly/warmbly/internal/app/user"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -88,5 +89,41 @@ func TestCreateAccountRecordsACleanSignupToo(t *testing.T) {
 	}
 	if repo.gotNorm != "ada@acme.com" {
 		t.Errorf("normalized = %q", repo.gotNorm)
+	}
+}
+
+// capturingRisk records what the signup filed on the workspace.
+type capturingRisk struct {
+	orgrisk.Service
+	got []orgrisk.Signal
+}
+
+func (c *capturingRisk) RecordSignal(_ context.Context, _ uuid.UUID, sig orgrisk.Signal) (*models.OrgRisk, *errx.Error) {
+	c.got = append(c.got, sig)
+	return &models.OrgRisk{}, nil
+}
+
+// Issue #245: a signup's soft findings describe how it looks, and shape must
+// not be able to restrict a workspace. Only the throwaway domain is conduct.
+func TestSignupRiskClassifiesOnlyDisposableAsSubstantive(t *testing.T) {
+	for _, tt := range []struct {
+		email string
+		ip    string
+		want  orgrisk.SignalClass
+	}{
+		{"ada.lovelace+signup@gmail.com", "", orgrisk.ClassCircumstantial},
+		{"ops@agency", "203.0.113.5", orgrisk.ClassCircumstantial},
+		{"grow@mailinator.com", "203.0.113.5", orgrisk.ClassSubstantive},
+	} {
+		risk := &capturingRisk{}
+		svc := &authService{orgRisk: risk}
+		svc.recordSignupRisk(context.Background(), uuid.New(), tt.email, SignupOrigin{IP: tt.ip})
+
+		if len(risk.got) != 1 {
+			t.Fatalf("%s filed %d signals, want exactly one", tt.email, len(risk.got))
+		}
+		if risk.got[0].Class != tt.want {
+			t.Errorf("%s class = %q, want %q", tt.email, risk.got[0].Class, tt.want)
+		}
 	}
 }
