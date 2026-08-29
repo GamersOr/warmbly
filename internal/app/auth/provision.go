@@ -306,6 +306,7 @@ func (s *authService) recordSignupRisk(ctx context.Context, orgID uuid.UUID, ema
 		Key:    "signup",
 		Weight: risk.Score,
 		Detail: strings.Join(risk.Reasons, "; "),
+		TTL:    orgrisk.DefaultSignalTTL,
 	}); err != nil {
 		log.Warn().Str("organization_id", orgID.String()).Msg("could not record the signup risk signal")
 	}

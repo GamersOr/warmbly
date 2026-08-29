@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -18,13 +20,32 @@ import (
 
 // Signal is one piece of evidence about an organization.
 type Signal struct {
-	// Key identifies the detector. Re-recording a key replaces its value.
+	// Key identifies the detector. Re-recording a key replaces its value,
+	// which also restarts its TTL: the detector saw it again.
 	Key string
 	// Weight is how many points this contributes, 0-100.
 	Weight int
 	// Detail is the human sentence an admin reads.
 	Detail string
+	// TTL is how long the finding stands on its own. A detector that cannot
+	// retract its own finding (a signup's origin, one import's quality) MUST
+	// set one, or its weight is permanent and a workspace can never recover
+	// without an operator. Zero means it stands until something retracts it,
+	// which is only correct for a detector that runs as a sweep.
+	TTL time.Duration
 }
+
+// DefaultSignalTTL is how long a one-shot finding stands. Long enough that a
+// month of bad behaviour still fuses into a band, short enough that a
+// workspace which has since behaved is not held by evidence about its first
+// day forever.
+const DefaultSignalTTL = 30 * 24 * time.Hour
+
+// ExpirySweepInterval is how often expired evidence is swept out. The stored
+// score only falls when the row is re-derived, so without this a signal would
+// keep its weight past its own expiry until some other detector happened to
+// write.
+const ExpirySweepInterval = 6 * time.Hour
 
 // Band thresholds, deliberately far apart: nothing is taken away until several
 // detectors agree.
@@ -57,12 +78,21 @@ type Service interface {
 	// band. Returns the record after the change.
 	RecordSignal(ctx context.Context, orgID uuid.UUID, sig Signal) (*models.OrgRisk, *errx.Error)
 	// ClearSignal removes a detector's finding, for when it no longer holds.
+	// actor is the operator who asked, or uuid.Nil for a sweep.
 	ClearSignal(ctx context.Context, orgID uuid.UUID, key string) (*models.OrgRisk, *errx.Error)
 	// OrgsWithSignal lists organizations carrying a detector's finding, so a
 	// recurring sweep can retract the ones that no longer match.
 	OrgsWithSignal(ctx context.Context, key string) ([]uuid.UUID, *errx.Error)
-	// SetState is an operator's manual override, which outranks the score.
-	SetState(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string) (*models.OrgRisk, *errx.Error)
+	// SetOverride pins the posture to an operator's decision. It outranks the
+	// score and survives every later detector write, until ClearOverride.
+	// actor is the operator, recorded on the record but never in the
+	// organization's own audit feed. See auditTransition.
+	SetOverride(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string, actor uuid.UUID) (*models.OrgRisk, *errx.Error)
+	// ClearOverride removes the pin and hands the posture back to the score.
+	ClearOverride(ctx context.Context, orgID uuid.UUID) (*models.OrgRisk, *errx.Error)
+	// SweepExpired re-derives every organization holding evidence that has
+	// aged out, and returns how many it touched.
+	SweepExpired(ctx context.Context) int
 }
 
 type service struct {
@@ -91,9 +121,16 @@ type AuditAware interface {
 	WireAudit(a AuditLogger)
 }
 
-// auditTransition records a band change. Only a CHANGE is logged: a detector
-// re-recording the same finding must not fill the feed with no-ops.
-func (s *service) auditTransition(ctx context.Context, orgID uuid.UUID, before, after *models.OrgRisk, actor uuid.UUID) {
+// auditTransition records a band change on the ORGANIZATION's feed. Only a
+// CHANGE is logged: a detector re-recording the same finding must not fill the
+// feed with no-ops.
+//
+// The actor is always the platform, never the operator who decided. That feed
+// resolves an actor to a name and an email for the workspace's own members, so
+// naming the operator would hand a tenant the identity of the person who
+// reviewed them. Who acted is recorded where it belongs: the platform admin
+// trail, and risk_override_by on the record itself.
+func (s *service) auditTransition(ctx context.Context, orgID uuid.UUID, before, after *models.OrgRisk) {
 	if s.audit == nil || after == nil {
 		return
 	}
@@ -104,7 +141,7 @@ func (s *service) auditTransition(ctx context.Context, orgID uuid.UUID, before, 
 	if before != nil {
 		from = string(before.State)
 	}
-	s.audit.LogAction(ctx, orgID, actor, models.AuditActionUpdate, models.AuditEntityOrgRisk, &orgID, "", "",
+	s.audit.LogAction(ctx, orgID, uuid.Nil, models.AuditActionUpdate, models.AuditEntityOrgRisk, &orgID, "", "",
 		map[string]string{"risk_state": from + " -> " + string(after.State)},
 		map[string]string{"reason": after.Reason, "score": strconv.Itoa(after.Score)})
 }
@@ -113,6 +150,9 @@ func (s *service) Get(ctx context.Context, orgID uuid.UUID) (*models.OrgRisk, *e
 	risk, err := s.repo.GetOrgRisk(ctx, orgID)
 	if err != nil {
 		return nil, errx.InternalError()
+	}
+	if risk == nil {
+		return nil, errx.New(errx.NotFound, "no such organization")
 	}
 	return risk, nil
 }
@@ -128,7 +168,11 @@ func (s *service) RecordSignal(ctx context.Context, orgID uuid.UUID, sig Signal)
 		sig.Weight = 100
 	}
 	return s.apply(ctx, orgID, func(signals map[string]any) map[string]any {
-		signals[sig.Key] = map[string]any{"weight": sig.Weight, "detail": sig.Detail}
+		entry := map[string]any{"weight": sig.Weight, "detail": sig.Detail}
+		if sig.TTL > 0 {
+			entry["expires_at"] = time.Now().Add(sig.TTL).UTC().Format(time.RFC3339)
+		}
+		signals[sig.Key] = entry
 		return signals
 	})
 }
@@ -148,17 +192,74 @@ func (s *service) OrgsWithSignal(ctx context.Context, key string) ([]uuid.UUID, 
 	return ids, nil
 }
 
-func (s *service) SetState(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string) (*models.OrgRisk, *errx.Error) {
+func (s *service) SetOverride(ctx context.Context, orgID uuid.UUID, state models.OrgRiskState, reason string, actor uuid.UUID) (*models.OrgRisk, *errx.Error) {
 	if !state.Valid() {
 		return nil, errx.New(errx.BadRequest, "unknown risk state")
 	}
 	before, _ := s.repo.GetOrgRisk(ctx, orgID)
-	risk, err := s.repo.SetOrgRiskState(ctx, orgID, state, reason)
+	risk, err := s.repo.SetOrgRiskOverride(ctx, orgID, state, reason, actor)
 	if err != nil {
 		return nil, errx.InternalError()
 	}
-	s.auditTransition(ctx, orgID, before, risk, uuid.Nil)
+	s.auditTransition(ctx, orgID, before, risk)
 	return risk, nil
+}
+
+func (s *service) ClearOverride(ctx context.Context, orgID uuid.UUID) (*models.OrgRisk, *errx.Error) {
+	before, _ := s.repo.GetOrgRisk(ctx, orgID)
+	risk, err := s.repo.ClearOrgRiskOverride(ctx, orgID, s.derive)
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+	s.auditTransition(ctx, orgID, before, risk)
+	return risk, nil
+}
+
+// SweepExpired ages evidence out. Only a re-derive moves the stored score, so
+// a finding past its expiry keeps its weight until this runs.
+func (s *service) SweepExpired(ctx context.Context) int {
+	orgs, err := s.repo.OrgsWithExpiringSignals(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("risk expiry sweep: could not list organizations holding dated evidence")
+		return 0
+	}
+	swept := 0
+	for _, orgID := range orgs {
+		retired := false
+		if _, aerr := s.apply(ctx, orgID, func(signals map[string]any) map[string]any {
+			held := len(signals)
+			signals = PruneExpired(signals, time.Now())
+			retired = len(signals) != held
+			return signals
+		}); aerr != nil {
+			log.Warn().Str("organization_id", orgID.String()).Msg("risk expiry sweep: could not re-derive a posture")
+			continue
+		}
+		if retired {
+			swept++
+		}
+	}
+	if swept > 0 {
+		log.Info().Int("organizations", swept).Msg("risk expiry sweep retired evidence that aged out")
+	}
+	return swept
+}
+
+// StartExpirySweep runs SweepExpired on an interval until the context ends.
+func StartExpirySweep(ctx context.Context, svc Service, interval time.Duration) {
+	if svc == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			svc.SweepExpired(ctx)
+		}
+	}
 }
 
 // apply mutates the signal set and re-derives score, band and reason from it,
@@ -167,15 +268,47 @@ func (s *service) SetState(ctx context.Context, orgID uuid.UUID, state models.Or
 func (s *service) apply(ctx context.Context, orgID uuid.UUID, mutate func(map[string]any) map[string]any) (*models.OrgRisk, *errx.Error) {
 	before, _ := s.repo.GetOrgRisk(ctx, orgID)
 	risk, err := s.repo.UpdateOrgRiskSignals(ctx, orgID, func(signals map[string]any) (map[string]any, models.OrgRiskState, int, string) {
-		signals = mutate(signals)
-		score := Score(signals)
-		return signals, BandFor(score), score, Reason(signals)
+		return s.derive(mutate(signals))
 	})
 	if err != nil {
 		return nil, errx.InternalError()
 	}
-	s.auditTransition(ctx, orgID, before, risk, uuid.Nil)
+	s.auditTransition(ctx, orgID, before, risk)
 	return risk, nil
+}
+
+// derive is the one place a stored posture is computed: evidence that has aged
+// out is dropped first, so a score can fall on its own rather than only when a
+// detector happens to retract.
+func (s *service) derive(signals map[string]any) (map[string]any, models.OrgRiskState, int, string) {
+	signals = PruneExpired(signals, time.Now())
+	score := Score(signals)
+	return signals, BandFor(score), score, Reason(signals)
+}
+
+// PruneExpired drops every finding whose expires_at has passed. An entry with
+// an unreadable expiry is left alone: dated evidence that cannot be read is
+// evidence, and silently discarding it would let a malformed write clear a
+// workspace's record.
+func PruneExpired(signals map[string]any, now time.Time) map[string]any {
+	for key, raw := range signals {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		text, ok := entry["expires_at"].(string)
+		if !ok || text == "" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, text)
+		if err != nil {
+			continue
+		}
+		if now.After(at) {
+			delete(signals, key)
+		}
+	}
+	return signals
 }
 
 // Score sums the recorded weights, capped at 100.

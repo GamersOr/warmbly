@@ -514,6 +514,7 @@ func (s *contactService) ImportCommit(
 			Key:    "list_quality",
 			Weight: importRiskWeight(quality.BadSharePct),
 			Detail: quality.Summary,
+			TTL:    orgrisk.DefaultSignalTTL,
 		}); err != nil {
 			log.Warn().Str("organization_id", orgID.String()).Msg("could not record the import quality signal")
 		}

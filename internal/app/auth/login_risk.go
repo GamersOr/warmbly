@@ -105,6 +105,7 @@ func (s *authService) recordLogin(ctx context.Context, userID uuid.UUID, ipaddr,
 		Key:    "login_anomalies",
 		Weight: 20,
 		Detail: "repeated sign-ins from implausible locations",
+		TTL:    orgrisk.DefaultSignalTTL,
 	}); rerr != nil {
 		log.Warn().Str("organization_id", orgID.String()).Msg("could not record the sign-in anomaly signal")
 	}

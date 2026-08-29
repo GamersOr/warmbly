@@ -127,9 +127,17 @@ Individual protections each watch one thing: a rate limit watches one user, warm
 
 When a workspace is restricted or suspended, a banner across the top of the dashboard says so and why. Nothing is ever taken away silently.
 
-<Callout type="info" title="Set by review, not automatically">
-Postures are currently set by platform operators. The signals that will feed them automatically are being added detector by detector, each running in observation first, so nothing throttles a real workspace on a scoring rule that has never been watched in practice.
-</Callout>
+### How a posture is reached, and how it is lifted
+
+Detectors file findings against the workspace, each carrying a weight. The posture is the band the weights add up to, which is why several individually tolerable problems can restrict a workspace that no single one would.
+
+A posture is not permanent, and there are three ways out of one:
+
+- **Findings age out.** A detector that only ever fires once, such as the score of the address a workspace signed up with or the quality of one imported list, files its finding with an expiry. After 30 days it is retired and the score falls on its own.
+- **Detectors retract.** A finding that is re-checked on a schedule, such as being part of a cluster of workspaces opened from one address, is withdrawn the moment it stops being true.
+- **Review.** A platform operator can read every finding on file, retract any one of them, and set the posture directly. A posture set by review holds against the detectors until an operator lifts it, so a workspace cleared by a human is not re-restricted by the evidence that is still on file.
+
+If your workspace is restricted or suspended and you believe it is wrong, reply to the notice or contact your platform operator and ask for a review. The banner's reason is the same sentence they see.
 
 ## How to read it
 

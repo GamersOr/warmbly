@@ -782,6 +782,8 @@ type AdminOrgSearch struct {
 	PlanVisibility string     `form:"plan_visibility"` // public, private, none
 	CreatedWithin  int        `form:"created_within"`  // days; 0 = any
 	HasOverrides   bool       `form:"has_overrides"`   // has organization_limit_overrides
+	RiskState      string     `form:"risk_state"`      // exact posture: trusted|watch|restricted|suspended
+	RiskFlagged    bool       `form:"risk_flagged"`    // any posture other than trusted
 	Enterprise     bool       `form:"enterprise"`      // has an enterprise subscription
 
 	// Subscription state
@@ -840,6 +842,10 @@ type AdminOrgListItem struct {
 	EmailAccountCount int `json:"email_account_count"`
 	CampaignCount     int `json:"campaign_count"`
 	ActiveCampaigns   int `json:"active_campaigns"`
+
+	// RiskState is the fused abuse posture, inlined so the table can show
+	// which workspaces a detector has acted on without a call per row.
+	RiskState OrgRiskState `json:"risk_state,omitempty"`
 
 	// Plan summary (LEFT JOINed via the org's single active subscription).
 	PlanName     *string `json:"plan_name,omitempty"`

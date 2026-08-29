@@ -23,6 +23,7 @@ import type {
     OrganizationLimitOverrides,
 } from "@/lib/api/models/admin";
 import { OrganizationOverridesDialog } from "./OrganizationOverridesDialog";
+import { OrganizationRiskCard, RiskBadge } from "./OrganizationRiskCard";
 
 export default function OrganizationDetailPage() {
     const { id = "" } = useParams<{ id: string }>();
@@ -128,6 +129,11 @@ export default function OrganizationDetailPage() {
             </div>
 
             <section className="mt-6">
+                <h2 className="text-sm font-semibold mb-2">Abuse posture</h2>
+                <OrganizationRiskCard orgId={org.id} />
+            </section>
+
+            <section className="mt-6">
                 <div className="flex items-center justify-between mb-2">
                     <h2 className="text-sm font-semibold">Usage vs. effective limits</h2>
                     <Button
@@ -221,6 +227,9 @@ function StatusPills({ org }: { org: AdminOrgDetail }) {
                 >
                     enterprise
                 </Badge>
+            )}
+            {org.risk_state && org.risk_state !== "trusted" && (
+                <RiskBadge state={org.risk_state} />
             )}
         </div>
     );
