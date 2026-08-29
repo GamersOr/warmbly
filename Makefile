@@ -22,7 +22,7 @@ PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.1
 PROTO_DIR := internal/tasks/proto
 PROTO_GEN_FILES := $(PROTO_DIR)/tasks.pb.go
 
-.PHONY: setup-tools fmt lint check-migrations proto check-proto \
+.PHONY: poollink-dev poollink-dev-down poollink-dev-reset setup-tools fmt lint check-migrations proto check-proto \
         up claim doctor cli seed-demo seed seed-plan sandbox sandbox-seed sandbox-simulate reset logs status stop down test-seed \
         restart restart-go restart-all infra infra-down app app-down app-logs \
         backend consumer worker run dev tracking realtime web \
@@ -214,6 +214,20 @@ sandbox:
 	$(MAKE) --no-print-directory admin & \
 	$(MAKE) --no-print-directory sandbox-simulate & \
 	wait
+
+# Two-instance environment for the Warmbly Cloud pool link: a prod-like
+# cloud (Stripe gates on, email verification via Mailpit, Sunrise Labs seeded
+# into the pool) next to a fresh, unclaimed self-hosted instance that links to
+# it. Needs `make infra`. Runs in the background; `make poollink-dev-down`
+# stops it, `make poollink-dev-reset` also drops the databases.
+poollink-dev:
+	./scripts/dev-poollink.sh up
+
+poollink-dev-down:
+	./scripts/dev-poollink.sh down
+
+poollink-dev-reset:
+	./scripts/dev-poollink.sh reset
 
 # The simulator on its own (started as part of `make sandbox`). Plays the
 # internet against whatever the running stack has already sent into mailpit.
