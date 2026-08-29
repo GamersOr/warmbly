@@ -226,6 +226,11 @@ type ContactDetail struct {
 	Contact
 	Engagement  ContactEngagement   `json:"engagement"`
 	Suppression *ContactSuppression `json:"suppression,omitempty"`
+
+	// First-touch attribution. Source never changes after creation.
+	Source       ContactSource `json:"source"`
+	SourceDetail string        `json:"source_detail"`
+	FirstSeenAt  time.Time     `json:"first_seen_at"`
 }
 
 // ContactSentEmail is one row in the "Emails sent to this contact"
@@ -283,6 +288,15 @@ const (
 	TimelineMeetingBooked      ContactTimelineEventType = "meeting_booked"
 	TimelineMeetingRescheduled ContactTimelineEventType = "meeting_rescheduled"
 	TimelineMeetingCanceled    ContactTimelineEventType = "meeting_canceled"
+
+	// Lifecycle events, read from contact_activities. contact_created carries
+	// the first-touch Source (and SourceDetail), which is how "imported" and
+	// "created via API" are told apart without a type per origin.
+	TimelineContactCreated  ContactTimelineEventType = "contact_created"
+	TimelineCampaignAdded   ContactTimelineEventType = "campaign_added"
+	TimelineCampaignRemoved ContactTimelineEventType = "campaign_removed"
+	TimelineCategoryAdded   ContactTimelineEventType = "category_added"
+	TimelineCategoryRemoved ContactTimelineEventType = "category_removed"
 )
 
 // ContactTimelineEvent is one entry in the merged activity feed. The
@@ -320,7 +334,14 @@ type ContactTimelineEvent struct {
 	JoinURL      *string    `json:"join_url,omitempty"`      // video/conference link
 	MeetingState *string    `json:"meeting_state,omitempty"` // booked / rescheduled / canceled
 
-	// Author (notes).
+	// Lifecycle events: the category a contact joined or left, and the
+	// free-form detail behind a contact_created source (file name, campaign,
+	// API key).
+	CategoryID    *uuid.UUID `json:"category_id,omitempty"`
+	CategoryTitle *string    `json:"category_title,omitempty"`
+	SourceDetail  *string    `json:"source_detail,omitempty"`
+
+	// Author (notes, lifecycle events).
 	UserID *uuid.UUID `json:"user_id,omitempty"`
 }
 
@@ -360,6 +381,45 @@ type AddContact struct {
 	// whatever it already had. Set explicitly by the importer when the file
 	// carries a subscribed column.
 	Subscribed *bool `json:"subscribed,omitempty"`
+
+	// Source is the first-touch origin stamped on a NEW contact (an existing
+	// one keeps its original). Dashboard callers may say "manual" or
+	// "campaign"; every other value is decided server-side by the creation
+	// path, and an API-key request is always "api". SourceDetail is never
+	// read from the request body.
+	Source       ContactSource `json:"source,omitempty"`
+	SourceDetail string        `json:"-"`
+}
+
+// ContactSource is where a contact first came from. Mirrors the CHECK on
+// contacts.source; ContactSourceUnknown is the honest value for rows created
+// before attribution existed.
+type ContactSource string
+
+const (
+	ContactSourceUnknown     ContactSource = "unknown"
+	ContactSourceManual      ContactSource = "manual"
+	ContactSourceCampaign    ContactSource = "campaign"
+	ContactSourceImport      ContactSource = "import"
+	ContactSourceSheetSync   ContactSource = "sheet_sync"
+	ContactSourceAPI         ContactSource = "api"
+	ContactSourceAIAssistant ContactSource = "ai_assistant"
+)
+
+// Valid reports whether the value is one the database accepts.
+func (s ContactSource) Valid() bool {
+	switch s {
+	case ContactSourceUnknown, ContactSourceManual, ContactSourceCampaign, ContactSourceImport,
+		ContactSourceSheetSync, ContactSourceAPI, ContactSourceAIAssistant:
+		return true
+	}
+	return false
+}
+
+// RequestSettable reports whether a dashboard request body may claim the
+// source. Only the two origins a dashboard user can actually be in.
+func (s ContactSource) RequestSettable() bool {
+	return s == ContactSourceManual || s == ContactSourceCampaign
 }
 
 type SearchContactsFilterType string

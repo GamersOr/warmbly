@@ -14,6 +14,7 @@ import (
 
 const (
 	APIKeyIDKey                   = "api_key_id"
+	APIKeyNameKey                 = "api_key_name"
 	APIKeyPermissionsKey          = "api_key_permissions"
 	APIKeyAllowedEmailAccountsKey = "api_key_allowed_email_accounts"
 	APIKeyUserIDKey               = "api_key_user_id"
@@ -132,6 +133,7 @@ func (h *Handler) validateAPIKey(c *gin.Context, rawKey string) {
 
 	c.Set(AuthTypeKey, AuthTypeAPIKey)
 	c.Set(APIKeyIDKey, key.ID.String())
+	c.Set(APIKeyNameKey, key.Name)
 	c.Set(APIKeyPermissionsKey, key.Permissions)
 	c.Set(APIKeyAllowedEmailAccountsKey, key.AllowedEmailAccounts)
 	c.Set(UserIDKey, key.UserID.String())
@@ -362,6 +364,12 @@ func RequireAPIKeyEmailAccountParam(param string) gin.HandlerFunc {
 // GetAuthType returns "jwt" or "api_key" (empty if unauthenticated).
 func GetAuthType(c *gin.Context) string {
 	return c.GetString(AuthTypeKey)
+}
+
+// GetAPIKeyName returns the authenticating API key's display name, or ""
+// for a session (JWT) request.
+func GetAPIKeyName(c *gin.Context) string {
+	return c.GetString(APIKeyNameKey)
 }
 
 // GetAPIKeyID returns the authenticating API key's ID, or nil when the

@@ -187,6 +187,10 @@ type CampaignProgressRepository interface {
 	// nil, is the soonest time a waiting contact's condition window elapses — the
 	// scheduler should defer and re-check then rather than completing.
 	FindNextRoutedPair(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool) (*ContactSequencePair, *time.Time, error)
+	// RouteContact runs the same routing for ONE contact and reports where
+	// their flow goes next, plus the pre-send gate that excludes them, so a
+	// per-contact preview reads the facts the send path reads.
+	RouteContact(ctx context.Context, campaignID, contactID uuid.UUID) (*ContactRoute, error)
 
 	// CountUndeliverableLeads counts the leads FindNextRoutedPair excludes
 	// because address verification refused them. Reported when a campaign
@@ -833,191 +837,12 @@ func undeliverableClause(cp string) string {
 // condition window closing) so the scheduler defers exactly until then.
 // Returns (nil, nil, nil) when the campaign is genuinely complete.
 func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool) (*ContactSequencePair, *time.Time, error) {
-	// 1. Load steps (position + branch tree + wait) once, ordered by position.
-	type stepInfo struct {
-		id          uuid.UUID
-		bc          models.BranchConditions
-		waitAfter   int
-		waitMinutes int // a "wait" node's own delay, gating the step after it
-	}
-	srows, err := r.db.Query(ctx, `SELECT id, conditions, wait_after, kind, action FROM sequences WHERE campaign_id = $1 ORDER BY position ASC, created_at ASC`, campaignID)
+	router, err := r.loadRouter(ctx, campaignID)
 	if err != nil {
 		return nil, nil, err
 	}
-	var steps []stepInfo
-	idxByID := map[uuid.UUID]int{}
-	for srows.Next() {
-		var si stepInfo
-		var raw, action []byte
-		var kind string
-		if serr := srows.Scan(&si.id, &raw, &si.waitAfter, &kind, &action); serr != nil {
-			srows.Close()
-			return nil, nil, serr
-		}
-		if len(raw) > 0 {
-			_ = json.Unmarshal(raw, &si.bc)
-		}
-		if kind != "email" && len(action) > 0 {
-			var cfg models.ActionConfig
-			if json.Unmarshal(action, &cfg) == nil && cfg.Type == "wait" && cfg.WaitMinutes != nil && *cfg.WaitMinutes > 0 {
-				si.waitMinutes = *cfg.WaitMinutes
-			}
-		}
-		idxByID[si.id] = len(steps)
-		steps = append(steps, si)
-	}
-	srows.Close()
-	if serr := srows.Err(); serr != nil {
-		return nil, nil, serr
-	}
-	if len(steps) == 0 {
+	if router == nil {
 		return nil, nil, nil
-	}
-	entry := steps[0].id
-	now := time.Now()
-
-	// Route-aware stop_on_reply. Rather than blanket-excluding every contact who
-	// has replied (which also kills the reply branch's OWN follow-up steps), a
-	// replied contact keeps moving ONLY while their next routed step is part of the
-	// REPLY FLOW: the subgraph downstream of a reply branch that is NOT also part
-	// of the cold sequence. The normal / fall-through cold sequence stops; the
-	// reply branch's path (its actions AND any follow-up emails) runs to
-	// completion. Compute the reply-flow step set once and load the flag.
-	var stopOnReply bool
-	if serr := r.db.QueryRow(ctx, `SELECT stop_on_reply FROM campaigns WHERE id = $1`, campaignID).Scan(&stopOnReply); serr != nil {
-		return nil, nil, serr
-	}
-	replyFlowSteps := map[uuid.UUID]bool{}
-	if stopOnReply {
-		// bfs walks a directed reachability closure from `seeds`, following the
-		// targets selected by `follow`, and records every visited step into `into`.
-		bfs := func(seeds []uuid.UUID, into map[uuid.UUID]bool, follow func(b *models.Branch) bool) {
-			queue := append([]uuid.UUID(nil), seeds...)
-			for _, s := range seeds {
-				into[s] = true
-			}
-			for len(queue) > 0 {
-				cur := queue[0]
-				queue = queue[1:]
-				idx, ok := idxByID[cur]
-				if !ok {
-					continue
-				}
-				for j := range steps[idx].bc.Branches {
-					b := &steps[idx].bc.Branches[j]
-					if b.TargetSequenceID == nil || into[*b.TargetSequenceID] || !follow(b) {
-						continue
-					}
-					into[*b.TargetSequenceID] = true
-					queue = append(queue, *b.TargetSequenceID)
-				}
-			}
-		}
-
-		// 1. Cold trunk: every step a NON-replier reaches from the entry, i.e.
-		//    following every branch EXCEPT the ones that route on a positive reply.
-		//    A step that also sits here (a reply branch merged back into the cold
-		//    sequence) is NOT reply flow — a replier must stop when they reach it.
-		coldReachable := map[uuid.UUID]bool{}
-		bfs([]uuid.UUID{entry}, coldReachable, func(b *models.Branch) bool {
-			return !branchHasPositiveReplyCondition(b)
-		})
-
-		// 2. Reply flow: everything reachable from a positive-reply branch target
-		//    (following ALL onward branches, so internal reply-flow branching is
-		//    kept), MINUS the cold trunk.
-		var seeds []uuid.UUID
-		for i := range steps {
-			for j := range steps[i].bc.Branches {
-				b := &steps[i].bc.Branches[j]
-				if b.TargetSequenceID != nil && branchHasPositiveReplyCondition(b) && !coldReachable[*b.TargetSequenceID] {
-					seeds = append(seeds, *b.TargetSequenceID)
-				}
-			}
-		}
-		bfs(seeds, replyFlowSteps, func(b *models.Branch) bool {
-			return b.TargetSequenceID != nil && !coldReachable[*b.TargetSequenceID]
-		})
-	}
-
-	// routeResult is the outcome of routing a contact out of their current step:
-	// send `target`, fully `stop`, or `wait` until a condition window elapses.
-	type routeResult struct {
-		target *uuid.UUID
-		stop   bool
-		wait   *time.Time
-	}
-	// routeNext follows the first DECIDABLE branch out of fromID. A branch whose
-	// window is still open leaves the contact waiting (so "if opened within 3d"
-	// gets its 3 days instead of being judged the instant the step is sent).
-	routeNext := func(fromID uuid.UUID, prog *CampaignContactProgress, sentAt time.Time) routeResult {
-		idx, ok := idxByID[fromID]
-		if !ok {
-			return routeResult{stop: true}
-		}
-		bc := steps[idx].bc
-		// Routing is purely the connections the user drew. A step with no
-		// outgoing connection, or whose connections don't match, ends the
-		// contact (STOP). There is NO implicit "advance to the next step by
-		// position" — steps are only linked when explicitly connected, and an
-		// unconditional connection (a branch with no conditions) is the "just go
-		// there after the wait" default.
-		if len(bc.Branches) == 0 {
-			return routeResult{stop: true}
-		}
-		for i := range bc.Branches {
-			b := &bc.Branches[i]
-			st, recheck := evaluateBranchState(b, prog, sentAt, now)
-			if st == BranchNoMatch {
-				continue
-			}
-			if st == BranchUndecided {
-				rc := recheck
-				return routeResult{wait: &rc}
-			}
-			// Matched: a nil / deleted target ends the contact (STOP).
-			if b.TargetSequenceID == nil {
-				return routeResult{stop: true}
-			}
-			if _, live := idxByID[*b.TargetSequenceID]; !live {
-				return routeResult{stop: true}
-			}
-			t := *b.TargetSequenceID
-			return routeResult{target: &t}
-		}
-		// Nothing matched -> the flow ends with STOP.
-		return routeResult{stop: true}
-	}
-
-	// routeReplyOnly is the routing used for a contact who HAS REPLIED but is still
-	// on the cold trunk (stop_on_reply on). It considers ONLY positive-reply
-	// branches that lead into the reply flow, giving them priority regardless of
-	// declared order, and never waits on a cold window. The first such branch that
-	// matches right now routes the contact into the reply flow; anything else means
-	// "no reply handling here for this reply" -> STOP the cold sequence. This is
-	// what lets a non-instant reply branch fire even when an engagement branch is
-	// declared ahead of it, and stops a replier instead of deferring on a cold
-	// "did not open within N days" window forever.
-	routeReplyOnly := func(fromID uuid.UUID, prog *CampaignContactProgress, sentAt time.Time) routeResult {
-		idx, ok := idxByID[fromID]
-		if !ok {
-			return routeResult{stop: true}
-		}
-		for i := range steps[idx].bc.Branches {
-			b := &steps[idx].bc.Branches[i]
-			if b.TargetSequenceID == nil || !branchHasPositiveReplyCondition(b) || !replyFlowSteps[*b.TargetSequenceID] {
-				continue
-			}
-			if st, _ := evaluateBranchState(b, prog, sentAt, now); st != BranchMatch {
-				continue
-			}
-			if _, live := idxByID[*b.TargetSequenceID]; !live {
-				continue
-			}
-			t := *b.TargetSequenceID
-			return routeResult{target: &t}
-		}
-		return routeResult{stop: true}
 	}
 
 	// 2. Ordered candidate contacts + their last-sent step (with engagement) + sent set.
@@ -1112,90 +937,32 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 			nextDue = &at
 		}
 	}
-	// A task fires at (or a breath before) the slot it was scheduled for, so
-	// "due" tolerates the same grace the scheduler's hard-floor check does.
-	dueBy := now.Add(config.CampaignNotDueGraceSeconds * time.Second)
 	for rows.Next() {
+		var in routeInput
 		var contactID uuid.UUID
-		var lastSeq *uuid.UUID
-		var sentAt, openedAt, clickedAt, repliedAt *time.Time
-		var replyClass, aiLabel string
-		var sentIDs []uuid.UUID
-		var hasReplied bool
-		if serr := rows.Scan(&contactID, &lastSeq, &sentAt, &openedAt, &clickedAt, &repliedAt, &replyClass, &aiLabel, &sentIDs, &hasReplied); serr != nil {
+		if serr := rows.Scan(&contactID, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.sentIDs, &in.hasReplied); serr != nil {
 			return nil, nil, serr
 		}
-
-		isNew := lastSeq == nil
-		var res routeResult
-		if isNew {
-			if excludeNewLeads {
-				continue
-			}
-			e := entry
-			res = routeResult{target: &e}
-		} else {
-			prog := &CampaignContactProgress{
-				CampaignID: campaignID, ContactID: contactID, SequenceID: *lastSeq,
-				SentAt: sentAt, OpenedAt: openedAt, ClickedAt: clickedAt, RepliedAt: repliedAt,
-				ReplyClass: replyClass, AILabel: aiLabel,
-			}
-			sa := time.Time{}
-			if sentAt != nil {
-				sa = *sentAt
-			}
-			res = routeNext(*lastSeq, prog, sa)
-
-			// Route-aware stop_on_reply for a contact who has replied:
-			//   - still on the cold trunk (lastSeq not in the reply flow): they may
-			//     only ENTER the reply flow via a positive-reply branch. Any cold
-			//     route, an undecided cold window, or a stop ends them here — no cold
-			//     sends and no deferring on a cold window.
-			//   - already inside the reply flow: keep the reply flow's own routing
-			//     (its waits are legitimate), but if it would route back out into the
-			//     cold sequence, stop instead.
-			if stopOnReply && hasReplied {
-				if !replyFlowSteps[*lastSeq] {
-					res = routeReplyOnly(*lastSeq, prog, sa)
-				} else if res.target != nil && !replyFlowSteps[*res.target] {
-					res = routeResult{stop: true}
-				}
-			}
+		if in.lastSeq == nil && excludeNewLeads {
+			continue
 		}
-
-		if res.wait != nil {
+		res := router.route(campaignID, contactID, in)
+		if res.WaitUntil != nil {
 			// Not decidable yet — remember the soonest window so the scheduler
 			// can re-check exactly then instead of guessing or completing.
-			noteDue(*res.wait)
+			noteDue(*res.WaitUntil)
 			continue
 		}
-		if res.stop || res.target == nil {
-			continue // reached the end / a STOP (incl. a replied contact stopped above)
-		}
-		// Loop guard: never re-send a step the contact already received.
-		already := false
-		for _, sid := range sentIDs {
-			if sid == *res.target {
-				already = true
-				break
-			}
-		}
-		if already {
-			continue
+		if res.Target == nil {
+			continue // reached the end / a STOP / a step already received
 		}
 		// When is this step due? Skip it (but remember when) if not yet: the
 		// contacts behind this one may be sendable right now.
-		if !isNew && sentAt != nil {
-			due := sentAt.Add(24 * time.Hour * time.Duration(steps[idxByID[*res.target]].waitAfter))
-			if last, ok := idxByID[*lastSeq]; ok && steps[last].waitMinutes > 0 {
-				due = due.Add(time.Duration(steps[last].waitMinutes) * time.Minute)
-			}
-			if due.After(dueBy) {
-				noteDue(due)
-				continue
-			}
+		if res.DueAt != nil && res.DueAt.After(router.dueBy) {
+			noteDue(*res.DueAt)
+			continue
 		}
-		return &ContactSequencePair{ContactID: contactID, SequenceID: *res.target, IsNewLead: isNew}, nil, nil
+		return &ContactSequencePair{ContactID: contactID, SequenceID: *res.Target, IsNewLead: res.IsNewLead}, nil, nil
 	}
 	if rerr := rows.Err(); rerr != nil {
 		return nil, nil, rerr
@@ -1203,6 +970,387 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 	// Nobody sendable now. Hand back the soonest moment somebody will be so the
 	// scheduler defers until then rather than completing.
 	return nil, nextDue, nil
+}
+
+// ContactRoute is where a contact's flow goes next inside one campaign.
+type ContactRoute struct {
+	// Target is the next step to send. Nil when the flow has ended for the
+	// contact, a step they already received is next (loop guard), or a
+	// condition window is still open (WaitUntil set).
+	Target    *uuid.UUID
+	IsNewLead bool
+	// DueAt is when the target's wait (the step's wait_after, plus a preceding
+	// wait node) elapses. Nil means due now.
+	DueAt *time.Time
+	// WaitUntil is when an undecided condition window closes.
+	WaitUntil *time.Time
+	// Excluded names the pre-send gate that keeps routing from ever offering
+	// the contact: "bounced", "failed", "suppressed", "undeliverable" or
+	// "not_a_lead". Empty when routing considers them.
+	Excluded string
+	// LastSentStep is the step the contact is on now (nil before any send).
+	LastSentStep *uuid.UUID
+}
+
+// RouteContact runs the campaign's routing for ONE contact and reports where
+// their flow goes next, including the gate that would exclude them. It reads
+// exactly what FindNextRoutedPair reads, so a preview never disagrees with
+// the send path.
+func (r *campaignProgressRepository) RouteContact(ctx context.Context, campaignID, contactID uuid.UUID) (*ContactRoute, error) {
+	router, err := r.loadRouter(ctx, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	query := `
+		SELECT
+		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''),
+		       COALESCE(ss.ids, '{}') AS sent_ids,
+		       EXISTS (
+		         SELECT 1 FROM campaign_contact_progress rp
+		         WHERE rp.campaign_id = $1 AND rp.contact_id = cl.contact_id AND rp.replied_at IS NOT NULL
+		       ) AS has_replied,
+		       EXISTS (
+		         SELECT 1 FROM campaign_contact_progress b
+		         WHERE b.contact_id = cl.contact_id AND b.bounced_at IS NOT NULL
+		       ) AS bounced,
+		       EXISTS (
+		         SELECT 1 FROM campaign_contact_progress f
+		         WHERE f.campaign_id = $1 AND f.contact_id = cl.contact_id
+		           AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
+		           AND f.send_attempts >= $2
+		       ) AS failed,
+		       EXISTS (
+		         SELECT 1 FROM suppressed_recipients sr
+		         JOIN campaigns camp ON camp.organization_id = sr.organization_id
+		         WHERE camp.id = $1
+		           AND LOWER(sr.email) = LOWER(c.email)
+		           AND (sr.expires_at IS NULL OR sr.expires_at > NOW())
+		       ) AS suppressed,
+		       ` + undeliverableClause("$1") + ` AS undeliverable
+		FROM campaign_leads cl
+		JOIN contacts c ON c.id = cl.contact_id
+		LEFT JOIN LATERAL (
+			SELECT sequence_id, sent_at, opened_at, clicked_at, replied_at, reply_class, ai_label
+			FROM campaign_contact_progress p
+			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
+			ORDER BY p.sent_at DESC LIMIT 1
+		) lp ON true
+		LEFT JOIN LATERAL (
+			SELECT array_agg(sequence_id) AS ids
+			FROM campaign_contact_progress p2
+			WHERE p2.campaign_id = $1 AND p2.contact_id = cl.contact_id
+			  AND (p2.sent_at IS NOT NULL OR p2.dispatched_at IS NOT NULL)
+		) ss ON true
+		WHERE cl.campaign_id = $1 AND cl.contact_id = $3
+	`
+	var in routeInput
+	var bounced, failed, suppressed, undeliverable bool
+	err = r.db.QueryRow(ctx, query, campaignID, config.CampaignSendMaxAttempts, contactID).Scan(
+		&in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.sentIDs, &in.hasReplied,
+		&bounced, &failed, &suppressed, &undeliverable,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &ContactRoute{Excluded: "not_a_lead"}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &ContactRoute{LastSentStep: in.lastSeq}
+	switch {
+	case bounced:
+		out.Excluded = "bounced"
+	case failed:
+		out.Excluded = "failed"
+	case suppressed:
+		out.Excluded = "suppressed"
+	case undeliverable:
+		out.Excluded = "undeliverable"
+	}
+	if router == nil {
+		return out, nil
+	}
+	res := router.route(campaignID, contactID, in)
+	out.Target, out.IsNewLead, out.DueAt, out.WaitUntil = res.Target, res.IsNewLead, res.DueAt, res.WaitUntil
+	return out, nil
+}
+
+// routeInput is a lead's routing facts as the finder query returns them.
+type routeInput struct {
+	lastSeq                                *uuid.UUID
+	sentAt, openedAt, clickedAt, repliedAt *time.Time
+	replyClass, aiLabel                    string
+	sentIDs                                []uuid.UUID
+	hasReplied                             bool
+}
+
+// campaignRouter is a campaign's flow graph loaded once per pass, with the
+// routing rules that decide where a contact goes out of their current step.
+type campaignRouter struct {
+	steps   []routeStep
+	idxByID map[uuid.UUID]int
+	entry   uuid.UUID
+	now     time.Time
+	// dueBy tolerates the same grace the scheduler's hard-floor check does: a
+	// task fires at (or a breath before) the slot it was scheduled for.
+	dueBy          time.Time
+	stopOnReply    bool
+	replyFlowSteps map[uuid.UUID]bool
+}
+
+type routeStep struct {
+	id          uuid.UUID
+	bc          models.BranchConditions
+	waitAfter   int
+	waitMinutes int // a "wait" node's own delay, gating the step after it
+}
+
+// routeResult is the outcome of routing a contact out of their current step:
+// send `target`, fully `stop`, or `wait` until a condition window elapses.
+type routeResult struct {
+	target *uuid.UUID
+	stop   bool
+	wait   *time.Time
+}
+
+// loadRouter reads the steps (position + branch tree + wait) once, ordered by
+// position, and precomputes the reply-flow step set for route-aware
+// stop_on_reply. Returns nil when the campaign has no steps.
+func (r *campaignProgressRepository) loadRouter(ctx context.Context, campaignID uuid.UUID) (*campaignRouter, error) {
+	srows, err := r.db.Query(ctx, `SELECT id, conditions, wait_after, kind, action FROM sequences WHERE campaign_id = $1 ORDER BY position ASC, created_at ASC`, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	cr := &campaignRouter{idxByID: map[uuid.UUID]int{}, replyFlowSteps: map[uuid.UUID]bool{}}
+	for srows.Next() {
+		var si routeStep
+		var raw, action []byte
+		var kind string
+		if serr := srows.Scan(&si.id, &raw, &si.waitAfter, &kind, &action); serr != nil {
+			srows.Close()
+			return nil, serr
+		}
+		if len(raw) > 0 {
+			_ = json.Unmarshal(raw, &si.bc)
+		}
+		if kind != "email" && len(action) > 0 {
+			var cfg models.ActionConfig
+			if json.Unmarshal(action, &cfg) == nil && cfg.Type == "wait" && cfg.WaitMinutes != nil && *cfg.WaitMinutes > 0 {
+				si.waitMinutes = *cfg.WaitMinutes
+			}
+		}
+		cr.idxByID[si.id] = len(cr.steps)
+		cr.steps = append(cr.steps, si)
+	}
+	srows.Close()
+	if serr := srows.Err(); serr != nil {
+		return nil, serr
+	}
+	if len(cr.steps) == 0 {
+		return nil, nil
+	}
+	cr.entry = cr.steps[0].id
+	cr.now = time.Now()
+	cr.dueBy = cr.now.Add(config.CampaignNotDueGraceSeconds * time.Second)
+
+	// Route-aware stop_on_reply. Rather than blanket-excluding every contact who
+	// has replied (which also kills the reply branch's OWN follow-up steps), a
+	// replied contact keeps moving ONLY while their next routed step is part of the
+	// REPLY FLOW: the subgraph downstream of a reply branch that is NOT also part
+	// of the cold sequence. The normal / fall-through cold sequence stops; the
+	// reply branch's path (its actions AND any follow-up emails) runs to
+	// completion. Compute the reply-flow step set once and load the flag.
+	if serr := r.db.QueryRow(ctx, `SELECT stop_on_reply FROM campaigns WHERE id = $1`, campaignID).Scan(&cr.stopOnReply); serr != nil {
+		return nil, serr
+	}
+	if cr.stopOnReply {
+		steps := cr.steps
+		idxByID := cr.idxByID
+		// bfs walks a directed reachability closure from `seeds`, following the
+		// targets selected by `follow`, and records every visited step into `into`.
+		bfs := func(seeds []uuid.UUID, into map[uuid.UUID]bool, follow func(b *models.Branch) bool) {
+			queue := append([]uuid.UUID(nil), seeds...)
+			for _, s := range seeds {
+				into[s] = true
+			}
+			for len(queue) > 0 {
+				cur := queue[0]
+				queue = queue[1:]
+				idx, ok := idxByID[cur]
+				if !ok {
+					continue
+				}
+				for j := range steps[idx].bc.Branches {
+					b := &steps[idx].bc.Branches[j]
+					if b.TargetSequenceID == nil || into[*b.TargetSequenceID] || !follow(b) {
+						continue
+					}
+					into[*b.TargetSequenceID] = true
+					queue = append(queue, *b.TargetSequenceID)
+				}
+			}
+		}
+
+		// 1. Cold trunk: every step a NON-replier reaches from the entry, i.e.
+		//    following every branch EXCEPT the ones that route on a positive reply.
+		//    A step that also sits here (a reply branch merged back into the cold
+		//    sequence) is NOT reply flow — a replier must stop when they reach it.
+		coldReachable := map[uuid.UUID]bool{}
+		bfs([]uuid.UUID{cr.entry}, coldReachable, func(b *models.Branch) bool {
+			return !branchHasPositiveReplyCondition(b)
+		})
+
+		// 2. Reply flow: everything reachable from a positive-reply branch target
+		//    (following ALL onward branches, so internal reply-flow branching is
+		//    kept), MINUS the cold trunk.
+		var seeds []uuid.UUID
+		for i := range steps {
+			for j := range steps[i].bc.Branches {
+				b := &steps[i].bc.Branches[j]
+				if b.TargetSequenceID != nil && branchHasPositiveReplyCondition(b) && !coldReachable[*b.TargetSequenceID] {
+					seeds = append(seeds, *b.TargetSequenceID)
+				}
+			}
+		}
+		bfs(seeds, cr.replyFlowSteps, func(b *models.Branch) bool {
+			return b.TargetSequenceID != nil && !coldReachable[*b.TargetSequenceID]
+		})
+	}
+	return cr, nil
+}
+
+// routeNext follows the first DECIDABLE branch out of fromID. A branch whose
+// window is still open leaves the contact waiting (so "if opened within 3d"
+// gets its 3 days instead of being judged the instant the step is sent).
+func (cr *campaignRouter) routeNext(fromID uuid.UUID, prog *CampaignContactProgress, sentAt time.Time) routeResult {
+	idx, ok := cr.idxByID[fromID]
+	if !ok {
+		return routeResult{stop: true}
+	}
+	bc := cr.steps[idx].bc
+	// Routing is purely the connections the user drew. A step with no
+	// outgoing connection, or whose connections don't match, ends the
+	// contact (STOP). There is NO implicit "advance to the next step by
+	// position" — steps are only linked when explicitly connected, and an
+	// unconditional connection (a branch with no conditions) is the "just go
+	// there after the wait" default.
+	if len(bc.Branches) == 0 {
+		return routeResult{stop: true}
+	}
+	for i := range bc.Branches {
+		b := &bc.Branches[i]
+		st, recheck := evaluateBranchState(b, prog, sentAt, cr.now)
+		if st == BranchNoMatch {
+			continue
+		}
+		if st == BranchUndecided {
+			rc := recheck
+			return routeResult{wait: &rc}
+		}
+		// Matched: a nil / deleted target ends the contact (STOP).
+		if b.TargetSequenceID == nil {
+			return routeResult{stop: true}
+		}
+		if _, live := cr.idxByID[*b.TargetSequenceID]; !live {
+			return routeResult{stop: true}
+		}
+		t := *b.TargetSequenceID
+		return routeResult{target: &t}
+	}
+	// Nothing matched -> the flow ends with STOP.
+	return routeResult{stop: true}
+}
+
+// routeReplyOnly is the routing used for a contact who HAS REPLIED but is still
+// on the cold trunk (stop_on_reply on). It considers ONLY positive-reply
+// branches that lead into the reply flow, giving them priority regardless of
+// declared order, and never waits on a cold window. The first such branch that
+// matches right now routes the contact into the reply flow; anything else means
+// "no reply handling here for this reply" -> STOP the cold sequence. This is
+// what lets a non-instant reply branch fire even when an engagement branch is
+// declared ahead of it, and stops a replier instead of deferring on a cold
+// "did not open within N days" window forever.
+func (cr *campaignRouter) routeReplyOnly(fromID uuid.UUID, prog *CampaignContactProgress, sentAt time.Time) routeResult {
+	idx, ok := cr.idxByID[fromID]
+	if !ok {
+		return routeResult{stop: true}
+	}
+	for i := range cr.steps[idx].bc.Branches {
+		b := &cr.steps[idx].bc.Branches[i]
+		if b.TargetSequenceID == nil || !branchHasPositiveReplyCondition(b) || !cr.replyFlowSteps[*b.TargetSequenceID] {
+			continue
+		}
+		if st, _ := evaluateBranchState(b, prog, sentAt, cr.now); st != BranchMatch {
+			continue
+		}
+		if _, live := cr.idxByID[*b.TargetSequenceID]; !live {
+			continue
+		}
+		t := *b.TargetSequenceID
+		return routeResult{target: &t}
+	}
+	return routeResult{stop: true}
+}
+
+// route decides one contact's next step from their routing facts: the entry
+// step for a new lead, otherwise the route out of their last-sent step, with
+// the loop guard and the step's wait applied.
+func (cr *campaignRouter) route(campaignID, contactID uuid.UUID, in routeInput) ContactRoute {
+	out := ContactRoute{LastSentStep: in.lastSeq, IsNewLead: in.lastSeq == nil}
+	var res routeResult
+	if out.IsNewLead {
+		e := cr.entry
+		res = routeResult{target: &e}
+	} else {
+		prog := &CampaignContactProgress{
+			CampaignID: campaignID, ContactID: contactID, SequenceID: *in.lastSeq,
+			SentAt: in.sentAt, OpenedAt: in.openedAt, ClickedAt: in.clickedAt, RepliedAt: in.repliedAt,
+			ReplyClass: in.replyClass, AILabel: in.aiLabel,
+		}
+		sa := time.Time{}
+		if in.sentAt != nil {
+			sa = *in.sentAt
+		}
+		res = cr.routeNext(*in.lastSeq, prog, sa)
+
+		// Route-aware stop_on_reply for a contact who has replied:
+		//   - still on the cold trunk (lastSeq not in the reply flow): they may
+		//     only ENTER the reply flow via a positive-reply branch. Any cold
+		//     route, an undecided cold window, or a stop ends them here — no cold
+		//     sends and no deferring on a cold window.
+		//   - already inside the reply flow: keep the reply flow's own routing
+		//     (its waits are legitimate), but if it would route back out into the
+		//     cold sequence, stop instead.
+		if cr.stopOnReply && in.hasReplied {
+			if !cr.replyFlowSteps[*in.lastSeq] {
+				res = cr.routeReplyOnly(*in.lastSeq, prog, sa)
+			} else if res.target != nil && !cr.replyFlowSteps[*res.target] {
+				res = routeResult{stop: true}
+			}
+		}
+	}
+
+	if res.wait != nil {
+		out.WaitUntil = res.wait
+		return out
+	}
+	if res.stop || res.target == nil {
+		return out // reached the end / a STOP (incl. a replied contact stopped above)
+	}
+	// Loop guard: never re-send a step the contact already received.
+	for _, sid := range in.sentIDs {
+		if sid == *res.target {
+			return out
+		}
+	}
+	out.Target = res.target
+	if !out.IsNewLead && in.sentAt != nil {
+		due := in.sentAt.Add(24 * time.Hour * time.Duration(cr.steps[cr.idxByID[*res.target]].waitAfter))
+		if last, ok := cr.idxByID[*in.lastSeq]; ok && cr.steps[last].waitMinutes > 0 {
+			due = due.Add(time.Duration(cr.steps[last].waitMinutes) * time.Minute)
+		}
+		out.DueAt = &due
+	}
+	return out
 }
 
 // branchHasPositiveReplyCondition reports whether a branch is a "reply branch":

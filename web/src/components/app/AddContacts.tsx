@@ -33,6 +33,9 @@ export interface AddContact {
     campaigns: string[];
     categories?: string[];
     custom_fields: Record<string, string>;
+    // First-touch source hint: "campaign" when added from a campaign's
+    // Leads tab, else "manual". The server decides every other origin.
+    source?: "manual" | "campaign";
 }
 
 interface SelectCampaigns {
@@ -153,7 +156,10 @@ export default function AddContacts() {
                     },
                     {} as Record<string, string>
                 ),
-                campaigns: manual.campaigns.map((c) => c.id)
+                campaigns: manual.campaigns.map((c) => c.id),
+                // Opened from a campaign's Leads tab (campaigns preset) means
+                // the contact came in through that campaign.
+                source: (c?.add?.campaigns.length ?? 0) > 0 ? ("campaign" as const) : ("manual" as const),
             }
             await toast.promise(
                 addContacts.mutateAsync([data]),
@@ -241,6 +247,7 @@ export default function AddContacts() {
                 phone: primary['phone'] ?? "",
                 campaigns: (c?.add && c?.add.campaigns.length > 0) ? c.add.campaigns : campaigns.map((c) => c.id),
                 custom_fields,
+                source: (c?.add?.campaigns.length ?? 0) > 0 ? ("campaign" as const) : ("manual" as const),
             }
         })
         return entries

@@ -59,6 +59,8 @@ const (
 	ActivityContactUpdated  ActivityType = "contact_updated"
 	ActivityCampaignAdded   ActivityType = "campaign_added"
 	ActivityCampaignRemoved ActivityType = "campaign_removed"
+	ActivityCategoryAdded   ActivityType = "category_added"
+	ActivityCategoryRemoved ActivityType = "category_removed"
 )
 
 type ContactActivity struct {
