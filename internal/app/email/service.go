@@ -32,8 +32,8 @@ type EmailService interface {
 	// SetWarmupLifecycle starts, pauses, resumes, or disables warmup for a
 	// mailbox. start/resume preserve ramp progress; disable turns warmup off.
 	SetWarmupLifecycle(ctx context.Context, userID, emailAccountID, action string) (*models.Email, *errx.Error)
-	// SetSendHold puts a mailbox in reserve (held out of campaign sending by
-	// its owner) or releases it back into rotation. Idempotent.
+	// SetSendHold holds a mailbox in reserve or releases it; a release lands
+	// wherever its warmup health says, so an unhealthy mailbox rests.
 	SetSendHold(ctx context.Context, orgID, emailAccountID string, hold bool) (*models.SendLifecycleState, *errx.Error)
 	// UpdateTrackingDomain sets or clears the custom open/click tracking
 	// domain and resolves it once, persisting the verdict.

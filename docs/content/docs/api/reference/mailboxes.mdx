@@ -385,7 +385,7 @@ The mailbox's cold-rotation state.
 
 `POST /emails/:id/release`
 
-Puts a held mailbox back into campaign sending. It lands in `active`; if its warmup health is still throttled or worse, the next rebalancer pass moves it to `resting` until it recovers. Bodyless and idempotent.
+Puts a held mailbox back into automatic management. It lands in `active`, or straight in `resting` when its warmup health is still throttled or worse, so a release never sends cold mail from a mailbox that should be recovering. Bodyless and idempotent.
 
 Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
 

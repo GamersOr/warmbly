@@ -1152,8 +1152,7 @@ func main() {
 		if aware, ok := emailService.(email.OrgRiskAware); ok {
 			aware.WireOrgRisk(orgRiskRepository)
 		}
-		// The owner's hold on campaign sending lives on the same lifecycle the
-		// rebalancer moves.
+		// The owner's hold shares the lifecycle the rebalancer moves.
 		if aware, ok := emailService.(email.LifecycleAware); ok {
 			aware.WireLifecycle(repository.NewSendLifecycleRepository(primaryDB))
 		}

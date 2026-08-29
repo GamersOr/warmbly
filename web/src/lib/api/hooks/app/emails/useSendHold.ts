@@ -1,8 +1,7 @@
 import sendHold from "@/lib/api/client/app/emails/sendHold";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-// Drives the drawer's "hold from campaigns" control. The lifecycle is read off
-// the account-status query, so that is what refreshes.
+// The lifecycle is read off the account-status query, so that is what refreshes.
 export default function useSendHold(id: string) {
     const queryClient = useQueryClient();
 

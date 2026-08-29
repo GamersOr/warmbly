@@ -117,8 +117,6 @@ function RampHoldNotice({ hold }: { hold: import("@/lib/api/models/app/analytics
 }
 
 // A mailbox that has quietly stopped receiving campaign sends looks broken.
-// The reserve state is the owner's own hold, so it explains itself without the
-// stored reason and points at the control that undoes it.
 function LifecycleNotice({ state }: { state: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState }) {
     const reserve = state.state === "reserve";
     const copy = reserve
@@ -142,14 +140,20 @@ function LifecycleNotice({ state }: { state: import("@/lib/api/models/app/analyt
     );
 }
 
-// The owner's switch for the reserve lifecycle state. Off means the rebalancer
-// decides (active, or resting while health is poor); on overrides it.
+// The owner's switch for the reserve lifecycle state.
 function SendHoldControl({ mailboxId, state }: { mailboxId: string; state?: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState }) {
     const hold = useSendHold(mailboxId);
     const held = state?.state === "reserve";
     const toggle = (v: boolean) =>
         hold.mutate(v, {
-            onSuccess: () => toast.success(v ? "Mailbox held out of campaigns" : "Mailbox back in campaign rotation"),
+            onSuccess: (data) =>
+                toast.success(
+                    v
+                        ? "Mailbox held out of campaigns"
+                        : data.state === "resting"
+                            ? "Hold released. The mailbox rests until its warmup health recovers"
+                            : "Mailbox back in campaign rotation",
+                ),
             onError: (e) => toast.error(buildError(e as unknown as AppError)),
         });
     return (
