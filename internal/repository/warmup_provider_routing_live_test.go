@@ -27,6 +27,7 @@ type providerRoutingFixture struct {
 	sender    uuid.UUID
 	atGoogle  uuid.UUID
 	atMSGraph uuid.UUID
+	atCustom  uuid.UUID
 }
 
 func newProviderRoutingFixture(t *testing.T) *providerRoutingFixture {
@@ -41,7 +42,7 @@ func newProviderRoutingFixture(t *testing.T) *providerRoutingFixture {
 
 	f := &providerRoutingFixture{
 		pool: pool, user: uuid.New(), org: uuid.New(),
-		sender: uuid.New(), atGoogle: uuid.New(), atMSGraph: uuid.New(),
+		sender: uuid.New(), atGoogle: uuid.New(), atMSGraph: uuid.New(), atCustom: uuid.New(),
 	}
 	exec := func(sql string, args ...any) {
 		t.Helper()
@@ -65,15 +66,16 @@ func newProviderRoutingFixture(t *testing.T) *providerRoutingFixture {
 		{f.sender, "smtp_imap", "test.local"},
 		{f.atGoogle, "gmail", "gmail.com"},
 		{f.atMSGraph, "smtp_imap", "outlook.com"},
+		{f.atCustom, "smtp_imap", "acme.test"},
 	} {
 		exec(`INSERT INTO email_accounts (id, user_id, organization_id, email, name, signature_plain,
 		          signature_html, provider, status, campaign_limit, min_wait_time, timezone)
 		      VALUES ($1, $2, $3, $4, 'Route', '', '', $5, 'active', 50, 600, 'UTC')`,
 			m.id, f.user, f.org, "route-"+m.id.String()[:8]+"@"+m.domain, m.provider)
 	}
-	// Only the two recipients join the pool; the sender does not, so the
-	// participants map must contain exactly them.
-	for _, id := range []uuid.UUID{f.atGoogle, f.atMSGraph} {
+	// Only the recipients join the pool; the sender does not, so it must never
+	// appear in the participants map.
+	for _, id := range []uuid.UUID{f.atGoogle, f.atMSGraph, f.atCustom} {
 		exec(`INSERT INTO warmup_pool_participants (pool_id, email_account_id, participant_role, health_state)
 		      VALUES ($1, $2, 'sender_receiver', 'healthy')`, premiumPoolID, id)
 	}
@@ -122,12 +124,19 @@ func (f *providerRoutingFixture) send(t *testing.T, recipient uuid.UUID, n int, 
 
 func (f *providerRoutingFixture) placement(t *testing.T, domain string, n int) {
 	t.Helper()
+	f.placementFrom(t, "smtp_imap", domain, n)
+}
+
+// placementFrom writes the row the way the consumer does: recipient_provider is
+// the connect method the mailbox uses, recipient_domain is who its mail is at.
+func (f *providerRoutingFixture) placementFrom(t *testing.T, connectMethod, domain string, n int) {
+	t.Helper()
 	for i := 0; i < n; i++ {
 		if _, err := f.pool.Exec(context.Background(),
 			`INSERT INTO warmup_spam_reports (id, reporter_account_id, reported_account_id, message_id,
-			     report_type, recipient_domain, created_at)
-			 VALUES (gen_random_uuid(), $1, $1, $2, 'spam_placement', $3, NOW())`,
-			f.sender, "m-"+uuid.New().String(), domain); err != nil {
+			     report_type, recipient_provider, recipient_domain, created_at)
+			 VALUES (gen_random_uuid(), $1, $1, $2, 'spam_placement', $3, $4, NOW())`,
+			f.sender, "m-"+uuid.New().String(), connectMethod, domain); err != nil {
 			t.Fatalf("insert placement: %v", err)
 		}
 	}
@@ -220,5 +229,72 @@ func TestLiveProviderRoutingIgnoresFailedSends(t *testing.T) {
 	}
 	if m.Rate() != 0.5 {
 		t.Errorf("rate = %v, want 0.5; counting the failures would have read 0.05", m.Rate())
+	}
+}
+
+// An unattributed placement (the recipient account could not be resolved when
+// it was recorded) has no domain, so it belongs to no provider. Charging it to
+// ProviderCustom would demote every custom-domain partner for a failure that
+// was never theirs, and the send side can never produce a blank domain to put
+// underneath it.
+func TestLiveProviderRoutingIgnoresUnattributedPlacement(t *testing.T) {
+	handle, _ := liveContactDB(t)
+	f := newProviderRoutingFixture(t)
+	repo := NewWarmupRepository(handle.Pool)
+
+	f.send(t, f.atCustom, 10, "completed")
+	f.placement(t, "", 5)
+
+	got, err := repo.SenderPlacementByProvider(context.Background(), f.sender, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("SenderPlacementByProvider: %v", err)
+	}
+	c := got["custom"]
+	if c.Sends != 10 {
+		t.Errorf("sends = %d, want the 10 that went to the custom domain", c.Sends)
+	}
+	if c.Placements != 0 || c.Rate() != 0 {
+		t.Errorf("custom = %+v (rate %v), want the domainless placements ignored", c, c.Rate())
+	}
+}
+
+// The admin overview has to name the same providers routing does. The stored
+// recipient_provider column is the connect method, which files a custom-domain
+// Microsoft 365 mailbox under smtp_imap: the bucket an operator most needs
+// split, and one routing never uses.
+func TestLivePoolPlacementsUseTheRoutingVocabulary(t *testing.T) {
+	handle, _ := liveContactDB(t)
+	f := newProviderRoutingFixture(t)
+	repo := NewWarmupRepository(handle.Pool)
+	ctx := context.Background()
+	since := time.Now().Add(-24 * time.Hour)
+
+	// The rollup is pool-wide, so measure what these rows added to it.
+	before, err := repo.PoolSpamPlacementsByProvider(ctx, since)
+	if err != nil {
+		t.Fatalf("PoolSpamPlacementsByProvider: %v", err)
+	}
+
+	f.placementFrom(t, "smtp_imap", "outlook.com", 3)
+	f.placementFrom(t, "gmail", "", 2)
+
+	after, err := repo.PoolSpamPlacementsByProvider(ctx, since)
+	if err != nil {
+		t.Fatalf("PoolSpamPlacementsByProvider: %v", err)
+	}
+	delta := func(k string) int { return after[k] - before[k] }
+
+	if got := delta("microsoft"); got != 3 {
+		t.Errorf("microsoft delta = %d, want 3: mail run by Microsoft over plain IMAP", got)
+	}
+	if got := delta("smtp_imap"); got != 0 {
+		t.Errorf("smtp_imap delta = %d, want 0: the connect method is not a provider", got)
+	}
+	// Domainless rows stay their own bucket rather than inflating custom.
+	if got := delta("unknown"); got != 2 {
+		t.Errorf("unknown delta = %d, want 2", got)
+	}
+	if got := delta("custom"); got != 0 {
+		t.Errorf("custom delta = %d, want 0", got)
 	}
 }
