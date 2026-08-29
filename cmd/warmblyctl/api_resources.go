@@ -87,6 +87,8 @@ var apiSpecs = []apiSpec{
 	{name: "mailbox warmup-resume", summary: "Resume warmup", method: "POST", path: "/emails/{id}/warmup/resume"},
 	{name: "mailbox warmup-stop", summary: "Stop warmup", method: "POST", path: "/emails/{id}/warmup/stop"},
 	{name: "mailbox warmup-status", summary: "The mailbox's warmup pool ban status", method: "GET", path: "/emails/{id}/warmup/ban-status"},
+	{name: "mailbox hold", summary: "Hold the mailbox out of campaign sending", method: "POST", path: "/emails/{id}/hold"},
+	{name: "mailbox release", summary: "Put a held mailbox back into campaign sending", method: "POST", path: "/emails/{id}/release"},
 
 	// Unified inbox.
 	{name: "inbox list", summary: "List inbox messages", method: "GET", path: "/unibox", query: []string{"limit", "cursor", "address", "direction", "from", "subject", "unseen", "awaiting_reply", "since", "until"}},

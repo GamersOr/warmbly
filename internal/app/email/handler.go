@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/app/lifecycle"
 	"github.com/warmbly/warmbly/internal/app/worker"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
@@ -104,6 +105,43 @@ func (s *emailService) SetWarmupLifecycle(ctx context.Context, userID, emailAcco
 	s.syncWarmupPoolMembership(ctx, account)
 	s.publishAccountEvent(ctx, pubsub.EventAccountSynced, account)
 	return account, nil
+}
+
+// SetSendHold: force is set because this is the owner's decision the rebalancer's guard protects.
+func (s *emailService) SetSendHold(ctx context.Context, orgID, emailAccountID string, hold bool) (*models.SendLifecycleState, *errx.Error) {
+	if s.lifecycleRepo == nil {
+		return nil, errx.New(errx.Conflict, "Holding a mailbox is not available on this install.")
+	}
+	account, xerr := s.emailRepository.Get(ctx, orgID, emailAccountID)
+	if xerr != nil {
+		return nil, xerr
+	}
+	next, reason := models.SendLifecycleReserve, "held back by its owner"
+	if !hold {
+		// A release lands where the rebalancer would put the mailbox now.
+		candidate, err := s.lifecycleRepo.GetLifecycleCandidate(ctx, account.ID)
+		if err != nil {
+			log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not read send lifecycle")
+			return nil, errx.InternalError()
+		}
+		d := lifecycle.Decide(models.SendLifecycleActive, nil, candidate.HealthState, time.Now())
+		next, reason = d.Next, "released by its owner"
+		if d.Reason != "" {
+			reason = "released by its owner; " + d.Reason
+		}
+	}
+	if _, err := s.lifecycleRepo.SetSendLifecycle(ctx, account.ID, next, reason, true); err != nil {
+		log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not set send hold")
+		return nil, errx.InternalError()
+	}
+	states, err := s.lifecycleRepo.GetSendLifecycles(ctx, []uuid.UUID{account.ID})
+	if err != nil {
+		log.Error().Err(err).Str("email_account_id", account.ID.String()).Msg("could not read send lifecycle")
+		return nil, errx.InternalError()
+	}
+	state := states[account.ID]
+	s.publishAccountEvent(ctx, pubsub.EventAccountSynced, account)
+	return &state, nil
 }
 
 // UpdateTrackingDomain sets or clears a mailbox's custom tracking domain and

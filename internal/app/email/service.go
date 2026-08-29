@@ -32,6 +32,9 @@ type EmailService interface {
 	// SetWarmupLifecycle starts, pauses, resumes, or disables warmup for a
 	// mailbox. start/resume preserve ramp progress; disable turns warmup off.
 	SetWarmupLifecycle(ctx context.Context, userID, emailAccountID, action string) (*models.Email, *errx.Error)
+	// SetSendHold holds a mailbox in reserve or releases it; a release lands
+	// wherever its warmup health says, so an unhealthy mailbox rests.
+	SetSendHold(ctx context.Context, orgID, emailAccountID string, hold bool) (*models.SendLifecycleState, *errx.Error)
 	// UpdateTrackingDomain sets or clears the custom open/click tracking
 	// domain and resolves it once, persisting the verdict.
 	UpdateTrackingDomain(ctx context.Context, orgID, emailAccountID, domain string) (*models.TrackingDomainStatus, *errx.Error)
@@ -111,6 +114,18 @@ type emailService struct {
 	// orgRiskRepo bars a restricted organization from the paid warmup pool.
 	// Optional/nil-safe.
 	orgRiskRepo repository.OrgRiskRepository
+	// lifecycleRepo backs the owner's hold; without it SetSendHold refuses.
+	lifecycleRepo repository.SendLifecycleRepository
+}
+
+// WireLifecycle attaches the cold-sending lifecycle.
+func (s *emailService) WireLifecycle(r repository.SendLifecycleRepository) {
+	s.lifecycleRepo = r
+}
+
+// LifecycleAware is the optional capability the caller uses to attach it.
+type LifecycleAware interface {
+	WireLifecycle(r repository.SendLifecycleRepository)
 }
 
 // WireOrgRisk attaches the organization risk posture.

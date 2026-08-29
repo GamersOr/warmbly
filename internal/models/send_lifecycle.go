@@ -10,8 +10,6 @@ import "time"
 type SendLifecycle string
 
 const (
-	// SendLifecycleWarming is building reputation and not yet in cold rotation.
-	SendLifecycleWarming SendLifecycle = "warming"
 	// SendLifecycleActive is in cold rotation. The default.
 	SendLifecycleActive SendLifecycle = "active"
 	// SendLifecycleResting was pulled out of cold rotation to recover on
@@ -30,8 +28,7 @@ func (l SendLifecycle) SendsCold() bool {
 }
 
 // AutoManaged reports whether the rebalancer may move this state. Reserve is
-// the owner's decision and is never overridden; warming is derived from the
-// mailbox's own warmup settings.
+// the owner's decision and is never overridden.
 func (l SendLifecycle) AutoManaged() bool {
 	return l == SendLifecycleActive || l == SendLifecycleResting || l == ""
 }
@@ -39,7 +36,7 @@ func (l SendLifecycle) AutoManaged() bool {
 // Valid reports whether l is a state the database will accept.
 func (l SendLifecycle) Valid() bool {
 	switch l {
-	case SendLifecycleWarming, SendLifecycleActive, SendLifecycleResting, SendLifecycleReserve:
+	case SendLifecycleActive, SendLifecycleResting, SendLifecycleReserve:
 		return true
 	}
 	return false

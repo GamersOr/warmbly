@@ -1152,6 +1152,10 @@ func main() {
 		if aware, ok := emailService.(email.OrgRiskAware); ok {
 			aware.WireOrgRisk(orgRiskRepository)
 		}
+		// The owner's hold shares the lifecycle the rebalancer moves.
+		if aware, ok := emailService.(email.LifecycleAware); ok {
+			aware.WireLifecycle(repository.NewSendLifecycleRepository(primaryDB))
+		}
 		analyticsRepository := repository.NewAnalyticsRepository(primaryDB)
 		emailAccountErrorRepository := repository.NewEmailAccountErrorRepository(primaryDB)
 		analyticsService = analytics.NewService(analyticsRepository, emailRepostory, campaignRepostory, emailAccountErrorRepository, warmupRepository)
