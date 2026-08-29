@@ -67,9 +67,11 @@ type ContactCampaignProgress struct {
 	//   bounced      — a send hard-bounced (terminal/negative)
 	//   failed       — the mailbox could not send a step after every retry (terminal/negative)
 	//   unsubscribed — the contact is unsubscribed/suppressed (terminal)
-	Status         string     `json:"status"`
-	Sent           int        `json:"sent"`
+	Status string `json:"status"`
+	Sent   int    `json:"sent"`
+	// Opened counts human opens only; automated fetches are in MachineOpened.
 	Opened         int        `json:"opened"`
+	MachineOpened  int        `json:"machine_opened"`
 	Clicked        int        `json:"clicked"`
 	Replied        int        `json:"replied"`
 	Bounced        int        `json:"bounced"`
@@ -110,6 +112,30 @@ func ValidLeadStatus(s string) bool {
 	}
 }
 
+// Lead engagement filter values for SearchContacts.Engagement. Each is a
+// predicate over the contact's progress rows in one campaign; the negative
+// forms only match leads that were sent at least one step, so a lead never
+// emailed is neither "opened" nor "not opened".
+const (
+	LeadEngagementOpened     = "opened"
+	LeadEngagementNotOpened  = "not_opened"
+	LeadEngagementClicked    = "clicked"
+	LeadEngagementNotClicked = "not_clicked"
+	LeadEngagementReplied    = "replied"
+	LeadEngagementNotReplied = "not_replied"
+	LeadEngagementBounced    = "bounced"
+)
+
+// ValidLeadEngagement reports whether s is one of the engagement filter values.
+func ValidLeadEngagement(s string) bool {
+	switch s {
+	case LeadEngagementOpened, LeadEngagementNotOpened, LeadEngagementClicked, LeadEngagementNotClicked, LeadEngagementReplied, LeadEngagementNotReplied, LeadEngagementBounced:
+		return true
+	default:
+		return false
+	}
+}
+
 type ContactsResult struct {
 	Data       []Contact  `json:"data"`
 	Pagination Pagination `json:"pagination"`
@@ -141,6 +167,13 @@ type CampaignLeadCounts struct {
 	Unsubscribed int `json:"unsubscribed"`
 	// Undeliverable: address verification refused it, so routing skips it.
 	Undeliverable int `json:"undeliverable"`
+	// Engagement totals, matching the `engagement` search filter: leads sent
+	// at least one step, and of those the ones with a human open, a click, or
+	// a reply on any step.
+	Contacted  int `json:"contacted"`
+	Opened     int `json:"opened"`
+	Clicked    int `json:"clicked"`
+	RepliedAny int `json:"replied_any"`
 }
 
 // ContactsCounts are org-wide contact facet totals for the browse sidebar.
@@ -409,6 +442,7 @@ type SearchContacts struct {
 	CustomFieldFilters []SearchContactsFilter `json:"custom_field_filters"` // Custom Field Filters
 	CampaignIDs        []string               `json:"campaign_ids"`         // Contacts must be in ALL these campaigns
 	LeadStatus         string                 `json:"lead_status"`          // Filter by derived lead status; requires exactly one campaign_id
+	Engagement         string                 `json:"engagement"`           // Filter by lead engagement (opened, not_opened, ...); ANDed with lead_status; requires exactly one campaign_id
 	CategoryIDs        []string               `json:"category_ids"`         // Contacts must have ALL these categories
 	MinCampaigns       *int                   `json:"min_campaigns"`        // Minimum number of associated campaigns
 	MaxCampaigns       *int                   `json:"max_campaigns"`        // Maximum number of associated campaigns

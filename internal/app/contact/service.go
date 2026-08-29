@@ -29,7 +29,7 @@ type ContactService interface {
 	// Export streams every contact matching the request into the given
 	// writer. The format / filename / content-type are returned so the
 	// handler can set headers correctly.
-	Export(ctx context.Context, userID string, req *models.ContactExportRequest, w io.Writer) (filename, contentType string, count int, err *errx.Error)
+	Export(ctx context.Context, orgID string, req *models.ContactExportRequest, w io.Writer) (filename, contentType string, count int, err *errx.Error)
 
 	// ImportPreview parses an uploaded CSV/XLSX file and reports back
 	// the columns + first N rows + suggested mapping — no DB writes.

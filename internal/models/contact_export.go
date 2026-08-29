@@ -65,6 +65,12 @@ const (
 	ContactExportFieldCampaigns  = "campaigns"
 	ContactExportFieldCreatedAt  = "created_at"
 	ContactExportFieldUpdatedAt  = "updated_at"
+	// Per-lead campaign engagement. Populated only when the export filters
+	// target exactly one campaign; blank otherwise.
+	ContactExportFieldLeadStatus  = "lead_status"
+	ContactExportFieldLeadOpened  = "lead_opened"
+	ContactExportFieldLeadClicked = "lead_clicked"
+	ContactExportFieldLeadReplied = "lead_replied"
 )
 
 // DefaultExportFields is what the UI lands on when the user just clicks
