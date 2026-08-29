@@ -23,6 +23,13 @@ func (s *tasksService) warnOnWeakContent(ctx context.Context, orgID, campaignID,
 	if s.advanced == nil || s.campaignLogRepo == nil {
 		return
 	}
+	// Score first: it is pure CPU, and a clean 100 cannot fall below any floor
+	// (they are clamped to 100), so the common case never touches the database.
+	res := warmlint.ScoreWithAttachments(subject, bodyHTML, bodyPlain, attachments)
+	if res.Score >= 100 {
+		return
+	}
+
 	// Campaign-effective, not org-only: a campaign that turned the check off or
 	// moved its floor must be honored here as it is at preflight.
 	settings, xerr := s.advanced.EffectiveSettings(ctx, orgID, campaignID)
@@ -30,11 +37,11 @@ func (s *tasksService) warnOnWeakContent(ctx context.Context, orgID, campaignID,
 		return
 	}
 	floor := settings.Preflight.MinContentScore
-	if floor <= 0 {
+	if floor <= 0 || floor > 100 {
+		// Out of range means a row written before the floor was clamped; fall
+		// back to the default rather than honoring a floor nothing can clear.
 		floor = 60
 	}
-
-	res := warmlint.ScoreWithAttachments(subject, bodyHTML, bodyPlain, attachments)
 	if res.Score >= floor {
 		return
 	}
@@ -62,7 +69,9 @@ func (s *tasksService) warnOnWeakContent(ctx context.Context, orgID, campaignID,
 		Message: fmt.Sprintf("Step %d's copy scores %d/100 for spam signals as sent (floor %d).%s",
 			step, res.Score, floor, detail),
 		Metadata: map[string]interface{}{
-			"level":       "warning",
+			// "warn" is the dashboard's amber tier; "warning" would fall
+			// through to the neutral info styling.
+			"level":       "warn",
 			"sequence_id": seq,
 			"score":       res.Score,
 			"floor":       floor,

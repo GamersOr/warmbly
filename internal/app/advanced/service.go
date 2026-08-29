@@ -165,7 +165,11 @@ type service struct {
 	dispatcher           EventDispatcher
 	// audienceRepo measures a campaign's list for the preflight report.
 	// Optional/nil-safe: without it the list check is simply absent.
-	audienceRepo     repository.CampaignAudienceRepository
+	audienceRepo repository.CampaignAudienceRepository
+	// attachmentRepo counts a campaign's attachments so preflight scores copy
+	// the way the send path does. Optional/nil-safe: without it the content
+	// check simply scores zero attachments.
+	attachmentRepo   repository.AttachmentRepository
 	notifier         Notifier
 	realtime         ReplyRealtimePublisher
 	automationRunner AutomationRunner
@@ -222,6 +226,7 @@ func (s *service) UpdateOrganizationSettings(ctx context.Context, organizationID
 	if settings == nil {
 		return errx.New(errx.BadRequest, "settings are required")
 	}
+	settings.Normalize()
 	if err := s.repo.UpsertOutreachSettings(ctx, organizationID, updatedBy, settings); err != nil {
 		return toErrx(err)
 	}
@@ -247,6 +252,7 @@ func (s *service) UpdateCampaignSettings(ctx context.Context, campaignID uuid.UU
 	if settings == nil {
 		return errx.New(errx.BadRequest, "settings are required")
 	}
+	settings.Normalize()
 	if err := s.repo.UpsertCampaignAdvancedSettings(ctx, campaignID, settings); err != nil {
 		return toErrx(err)
 	}
@@ -1760,11 +1766,43 @@ func (s *service) ProcessRetryableDeadLetters(ctx context.Context) (int, *errx.E
 	return retried, nil
 }
 
+// worstStepContentScore scores each email step's copy and returns the lowest
+// score, that step's number, its leading issue, and how many steps were scored.
+// Only email steps carry copy: a wait or action node has no subject or body and
+// would otherwise score as the campaign's worst content. Step numbers are the
+// step's position, the same number the per-send warning reports.
+func worstStepContentScore(seqs []models.Sequence, attachments int) (worst, worstStep int, issue string, scored int) {
+	worst = 101
+	for _, seq := range seqs {
+		if seq.Kind != "" && seq.Kind != "email" {
+			continue
+		}
+		scored++
+		r := warmlint.ScoreWithAttachments(seq.Subject, seq.BodyHTML, seq.BodyPlain, attachments)
+		if r.Score >= worst {
+			continue
+		}
+		worst, worstStep, issue = r.Score, seq.Position+1, ""
+		for _, is := range r.Issues {
+			if is.Severity == "high" {
+				issue = is.Message
+				break
+			}
+		}
+		if issue == "" && len(r.Issues) > 0 {
+			issue = r.Issues[0].Message
+		}
+	}
+	return worst, worstStep, issue, scored
+}
+
 // contentScoreCheck scores every step's copy and reports the worst. A step list
 // it could not read reports as FAILED, not passed: a check that did not run
 // must never look like one that succeeded.
 func (s *service) contentScoreCheck(ctx context.Context, campaignID uuid.UUID, floor int, recommendations *[]string) models.PreflightCheckResult {
-	if floor <= 0 {
+	if floor <= 0 || floor > 100 {
+		// Out of range means a row written before the floor was clamped; fall
+		// back to the default rather than honoring a floor nothing can clear.
 		floor = 60
 	}
 	seqs, err := s.campaignRepo.GetSequencesByCampaignID(ctx, campaignID)
@@ -1787,21 +1825,22 @@ func (s *service) contentScoreCheck(ctx context.Context, campaignID uuid.UUID, f
 		}
 	}
 
-	worst, worstStep, issue := 101, 0, ""
-	for i, seq := range seqs {
-		r := warmlint.Score(seq.Subject, seq.BodyHTML, seq.BodyPlain)
-		if r.Score >= worst {
-			continue
+	// Attachments are campaign-wide and the send path scores them, so preflight
+	// weighs them too rather than reporting a score the feed later contradicts.
+	attachments := 0
+	if s.attachmentRepo != nil {
+		if atts, aerr := s.attachmentRepo.ListByCampaign(ctx, campaignID); aerr == nil {
+			attachments = len(atts)
 		}
-		worst, worstStep, issue = r.Score, i+1, ""
-		for _, is := range r.Issues {
-			if is.Severity == "high" {
-				issue = is.Message
-				break
-			}
-		}
-		if issue == "" && len(r.Issues) > 0 {
-			issue = r.Issues[0].Message
+	}
+
+	worst, worstStep, issue, scored := worstStepContentScore(seqs, attachments)
+	if scored == 0 {
+		return models.PreflightCheckResult{
+			Key:      "content_score",
+			Passed:   true,
+			Severity: "info",
+			Message:  "No email steps to score yet.",
 		}
 	}
 
@@ -1862,3 +1901,18 @@ func (s *service) WireAudience(r repository.CampaignAudienceRepository) {
 type AudienceAware interface {
 	WireAudience(r repository.CampaignAudienceRepository)
 }
+
+// WireAttachments attaches the campaign attachment counter the content check
+// scores with, so preflight and the send path weigh attachments the same way.
+func (s *service) WireAttachments(r repository.AttachmentRepository) {
+	s.attachmentRepo = r
+}
+
+// AttachmentAware is the optional capability the caller uses to attach it.
+type AttachmentAware interface {
+	WireAttachments(r repository.AttachmentRepository)
+}
+
+// The wiring in main is a type assertion, so a receiver change would silently
+// stop attaching the repository rather than fail the build.
+var _ AttachmentAware = (*service)(nil)

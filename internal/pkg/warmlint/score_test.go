@@ -83,3 +83,50 @@ func TestScoreNeverGoesNegative(t *testing.T) {
 		t.Error("obviously spammy copy produced no issues")
 	}
 }
+
+func TestScoreCountsLinksInHTMLAnchors(t *testing.T) {
+	// A normal HTML email carries its URLs in href attributes. Stripping tags
+	// throws those away, so counting the text alone reported zero links and the
+	// cap never fired for the case it exists for.
+	body := strings.Repeat("A real sentence about the recipient's work. ", 10)
+	html := "<p>" + body + "</p><p>" +
+		strings.Repeat(`<a href="https://example.com/x">see this</a> `, 6) + "</p>"
+
+	res := Score("Quick question", html, "")
+	if !hasIssue(res, "too_many_links") {
+		t.Errorf("six anchors in an HTML body were not counted: %+v", res.Issues)
+	}
+
+	// The editor stores a plain-text body derived from the HTML, which also
+	// drops the hrefs. The score must not depend on which one is present.
+	res = Score("Quick question", html, body)
+	if !hasIssue(res, "too_many_links") {
+		t.Errorf("six anchors alongside a link-free plain body were not counted: %+v", res.Issues)
+	}
+}
+
+func TestScoreDoesNotDoubleCountSelfLinkingAnchors(t *testing.T) {
+	// A URL used as its own anchor text appears in both the href and the text.
+	// Counting both would flag three links as six.
+	body := strings.Repeat("A real sentence about the recipient's work. ", 10)
+	html := "<p>" + body + "</p><p>" +
+		`<a href="https://a.com/1">https://a.com/1</a> ` +
+		`<a href="https://b.com/2">https://b.com/2</a> ` +
+		`<a href="https://c.com/3">https://c.com/3</a>` + "</p>"
+	plain := body + " https://a.com/1 https://b.com/2 https://c.com/3"
+
+	res := Score("Quick question", html, plain)
+	if hasIssue(res, "too_many_links") {
+		t.Errorf("three self-linking anchors were counted as more: %+v", res.Issues)
+	}
+}
+
+func TestScoreStillCountsPlainTextURLs(t *testing.T) {
+	body := strings.Repeat("A real sentence about the recipient's work. ", 10)
+	plain := body + " https://a.com/1 https://b.com/2 https://c.com/3 https://d.com/4 https://e.com/5"
+
+	res := Score("Quick question", "", plain)
+	if !hasIssue(res, "too_many_links") {
+		t.Errorf("five bare URLs in a plain body were not counted: %+v", res.Issues)
+	}
+}
