@@ -3,6 +3,7 @@ mod aws;
 mod config;
 mod events;
 mod handlers;
+mod hits;
 #[cfg(feature = "kafka")]
 mod kafka;
 mod links;
@@ -10,7 +11,11 @@ mod nats;
 mod observability;
 mod producer;
 
-use axum::{routing::get, Router};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{get, post},
+    Router,
+};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower_http::{
@@ -21,7 +26,7 @@ use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
-use crate::handlers::{health, track_click, track_open, AppState};
+use crate::handlers::{health, track_click, track_open, track_page_hit, tracking_js, AppState};
 use crate::observability::report_error;
 use crate::producer::Producer;
 
@@ -96,6 +101,13 @@ async fn main() {
         .route("/health", get(health))
         .route("/t/o/:task_id", get(track_open))
         .route("/c/:link_id", get(track_click))
+        // Website tracking: the snippet and the page-view ingest it posts to.
+        // The body cap is the first thing a flood hits.
+        .route("/tracking.js", get(tracking_js))
+        .route(
+            "/p",
+            post(track_page_hit).layer(DefaultBodyLimit::max(hits::MAX_BODY_BYTES)),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

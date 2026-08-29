@@ -29,6 +29,7 @@ import {
     UserIcon,
     UsersIcon,
     WebhookIcon,
+    GlobeIcon,
 } from "lucide-react";
 import { UnsavedProvider, useUnsavedRegistry } from "@/hooks/context/unsaved";
 import { usePermission, type PermissionKey } from "@/hooks/usePermission";
@@ -68,6 +69,7 @@ const GROUPS: SectionGroup[] = [
             { path: "roles", label: "Roles & access", icon: ShieldCheckIcon, description: "Who can do what.", ownerOnly: true },
             { path: "workspace", label: "Workspace", icon: BriefcaseIcon, description: "Org-wide settings.", ownerOnly: true },
             { path: "sending", label: "Sending", icon: SendIcon, description: "When campaign mail reaches each recipient.", permission: "MANAGE_SETTINGS" },
+            { path: "tracking", label: "Website tracking", icon: GlobeIcon, description: "Page views on your site, in the contact timeline.", permission: "MANAGE_SETTINGS" },
             { path: "ai-skills", label: "AI skills", icon: SparklesIcon, description: "Playbooks your AI features follow.", permission: "MANAGE_SETTINGS" },
             { path: "billing", label: "Billing", icon: CreditCardIcon, description: "Plan, payment, invoices.", ownerOnly: true, billingOnly: true },
             { path: "referral", label: "Refer & earn", icon: GiftIcon, description: "Invite teams and earn account credit.", ownerOnly: true, billingOnly: true },

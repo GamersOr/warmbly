@@ -383,6 +383,7 @@ The Rust open and click service. It reads its own environment, so these have to 
 | `BACKEND_INTERNAL_URL` | Where tracking resolves opaque `/c/<id>` click tickets. **Required**: the service exits at boot without it | none |
 | `INTERNAL_API_TOKEN` | Bearer token for that lookup. **Required**: the service exits at boot on an empty value | none |
 | `TRACKING_RATE_LIMIT_PER_MIN` | Counted pixel and click requests per source per minute. Over budget, pixels are still served but not counted, and click redirects get `429` | `300` |
+| `TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN` | Website page views accepted per source per minute, on top of the shared budget above. Over budget, the snippet gets `429` | `60` |
 | `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs an image built with `CARGO_FEATURES=kafka` | `nats` |
 | `NATS_URL`, `NATS_SUBJECT_PREFIX` | JetStream address and subject prefix. The publish subject is `<prefix>.<topic>` | `nats://localhost:4222`, `warmbly` |
 | `KAFKA_TRACKING_TOPIC` | Event topic, read by the Rust publisher **and** the Go subscriber | `tracking-events` |

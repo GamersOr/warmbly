@@ -1,0 +1,56 @@
+package jobs
+
+import (
+	"context"
+	"time"
+
+	"github.com/getsentry/sentry-go"
+	"github.com/warmbly/warmbly/internal/repository"
+)
+
+// WebsiteTrackingRetentionJob prunes page views past each workspace's own
+// retention window. The window is the promise the workspace makes on its
+// tracking settings page, so the sweep is what keeps that promise.
+type WebsiteTrackingRetentionJob struct {
+	repo repository.WebsiteTrackingRepository
+}
+
+func NewWebsiteTrackingRetentionJob(repo repository.WebsiteTrackingRepository) *WebsiteTrackingRetentionJob {
+	return &WebsiteTrackingRetentionJob{repo: repo}
+}
+
+// Run executes one pruning pass over every workspace. A failure on one
+// workspace is reported and the pass continues with the next.
+func (j *WebsiteTrackingRetentionJob) Run(ctx context.Context) error {
+	if j.repo == nil {
+		return nil
+	}
+	cutoffs, err := j.repo.RetentionCutoffs(ctx, time.Now())
+	if err != nil {
+		sentry.CaptureException(err)
+		return err
+	}
+	var last error
+	for _, c := range cutoffs {
+		if _, err := j.repo.PruneBefore(ctx, c.OrganizationID, c.Before); err != nil {
+			sentry.CaptureException(err)
+			last = err
+		}
+	}
+	return last
+}
+
+// Start runs the job once on boot and then on the interval until ctx ends.
+func (j *WebsiteTrackingRetentionJob) Start(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	_ = j.Run(ctx)
+	for {
+		select {
+		case <-ticker.C:
+			_ = j.Run(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
+}

@@ -475,8 +475,8 @@ defmodule RealtimeWeb.OrgChannel do
           ] ->
         has.(:view_campaigns)
 
-      # Contact changes
-      String.contains?(event_type, "CONTACT") ->
+      # Contact changes, and website page views tied to a contact
+      String.contains?(event_type, "CONTACT") or String.contains?(event_type, "PAGE_HIT") ->
         has.(:view_contacts)
 
       # AI contact research progress: findings are about contacts.

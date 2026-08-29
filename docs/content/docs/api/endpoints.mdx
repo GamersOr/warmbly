@@ -295,6 +295,7 @@ These never accept an API key. They depend on a human-bound session: billing flo
 - `GET /me/danger-zone`, `POST /me/danger-zone/delete`, `DELETE /me/danger-zone/delete`
 - `GET /invitations`, `POST /invitations/accept`
 - All of `/organization/*` (create, switch, members, invitations, transfer ownership, avatar, danger zone)
+- `GET /website-tracking/settings`, `PATCH /website-tracking/settings`, `POST /website-tracking/settings/rotate-key` (the [website tracking](/guides/website-tracking/) snippet's consent mode, location precision, allowed hosts and retention; JWT permission `MANAGE_SETTINGS`. The rotate is bodyless and safe to repeat, each call issues a new key)
 - All of `/subscription/*` (checkout, portal, cancel, change-plan, preview-change, enterprise-inquiry, discounts, referrals, etc.)
 - All of `/admin/*`
 
@@ -371,6 +372,11 @@ External MCP servers whose tools the assistant can use (see [Connect MCP tools](
 - `POST /oauth/token`, `POST /oauth/revoke` (OAuth token endpoints, authenticated by the client's id and secret, or PKCE for public clients)
 - `POST /oauth/register` (OAuth dynamic client registration, RFC 7591; open and per-IP rate-limited)
 - `GET /.well-known/oauth-authorization-server`, `GET /.well-known/oauth-protected-resource` (OAuth discovery metadata)
+
+On the tracking service (the `TRACKING_DOMAIN` host, not the API), also public and rate-limited per source:
+
+- `GET /t/o/:task_id.png` (open pixel), `GET /c/:link_id` (click redirect)
+- `GET /tracking.js` (the website tracking snippet), `POST /p` (page-view ingest; JSON body up to 8 KB, `429` over budget, `204` otherwise. Nothing in the request can name a contact)
 
 ## Notes
 

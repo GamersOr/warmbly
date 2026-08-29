@@ -2,7 +2,7 @@
 //
 // Filtering pipeline (all client-side, applied to whatever pages are
 // already in the cache):
-//   - Type chips: All / Emails / Replies / Deliverability / Notes
+//   - Type chips: All / Emails / Replies / Deliverability / Notes / Website
 //   - Free-text query against subject, content, campaign, sequence,
 //     mailbox, reason, intent
 //   - Date range [from, to] (inclusive day boundaries)
@@ -23,6 +23,8 @@ import {
     CalendarClockIcon,
     CalendarPlusIcon,
     CalendarXIcon,
+    ChevronDownIcon,
+    GlobeIcon,
     Loader2Icon,
     MailIcon,
     MailOpenIcon,
@@ -40,7 +42,7 @@ import type { ContactTimelineEventType } from "@/lib/api/models/app/contacts/Con
 import useClickOutside from "@/hooks/useClickOutside";
 import { fmtAbsolute, fmtRelative } from "./format";
 
-type FilterId = "all" | "emails" | "replies" | "deliv" | "notes" | "meetings";
+type FilterId = "all" | "emails" | "replies" | "deliv" | "notes" | "meetings" | "website";
 
 const FILTERS: { id: FilterId; label: string }[] = [
     { id: "all", label: "All" },
@@ -49,6 +51,7 @@ const FILTERS: { id: FilterId; label: string }[] = [
     { id: "deliv", label: "Deliv." },
     { id: "notes", label: "Notes" },
     { id: "meetings", label: "Meetings" },
+    { id: "website", label: "Website" },
 ];
 
 const EMAIL_TYPES: ContactTimelineEventType[] = [
@@ -229,6 +232,9 @@ function applyFilters(
             case "meetings":
                 if (!MEETING_TYPES.includes(e.type)) return false;
                 break;
+            case "website":
+                if (e.type !== "page_hit") return false;
+                break;
             case "all":
                 break;
         }
@@ -242,6 +248,11 @@ function applyFilters(
                 e.email_account_name,
                 e.reason,
                 e.intent,
+                e.page_hit?.url,
+                e.page_hit?.title,
+                e.page_hit?.referrer_domain,
+                e.page_hit?.utm_source,
+                e.page_hit?.utm_campaign,
             ]
                 .filter(Boolean)
                 .join(" ")
@@ -497,6 +508,9 @@ function EventRow({
     highlight: string;
 }) {
     const { Icon, label } = visualFor(event.type);
+    if (event.type === "page_hit" && event.page_hit) {
+        return <PageHitRow event={event} highlight={highlight} />;
+    }
     return (
         <div className="px-3 py-2 border-b last:border-b-0 border-slate-100">
             <div className="flex items-start gap-2.5">
@@ -528,6 +542,132 @@ function EventRow({
             )}
         </div>
     );
+}
+
+// Page views keep the row to one line (title or path, where from, what
+// device) and open into the full detail on click, so a busy browsing session
+// does not swamp the rest of the timeline.
+function PageHitRow({
+    event,
+    highlight,
+}: {
+    event: ContactTimelineEvent;
+    highlight: string;
+}) {
+    const hit = event.page_hit!;
+    const [open, setOpen] = React.useState(false);
+    const device = [cap(hit.device_type), hit.os, hit.browser].filter(Boolean).join(" / ");
+    const location = [hit.city, hit.region, hit.country_code].filter(Boolean).join(", ");
+    const screen = hit.screen_width && hit.screen_height ? `${hit.screen_width} × ${hit.screen_height}` : "";
+    const details: [string, string][] = [
+        ["Page URL", hit.url],
+        ["Page title", hit.title],
+        ["Referrer", hit.referrer],
+        ["Device", cap(hit.device_type)],
+        ["Operating system", hit.os],
+        ["Browser", [hit.browser, hit.browser_version].filter(Boolean).join(" ")],
+        ["Device brand", hit.device_brand],
+        ["Language", hit.language],
+        ["Timezone", hit.timezone],
+        ["Screen resolution", screen],
+        ["Location", location],
+        ["UTM source", hit.utm_source],
+        ["UTM medium", hit.utm_medium],
+        ["UTM campaign", hit.utm_campaign],
+        ["UTM term", hit.utm_term],
+        ["UTM content", hit.utm_content],
+        ["Session", hit.session_key.slice(0, 8)],
+    ];
+    return (
+        <div className="border-b last:border-b-0 border-slate-100">
+            <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                aria-expanded={open}
+                className="w-full text-left px-3 py-2 hover:bg-slate-50/70 transition-colors"
+            >
+                <div className="flex items-start gap-2.5">
+                    <GlobeIcon className="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-1.5 min-w-0">
+                            <span className="text-[12px] font-medium text-slate-900 shrink-0">
+                                {hit.landing ? "Landed on" : "Page hit"}
+                            </span>
+                            <span className="text-[11.5px] text-slate-600 truncate">
+                                · <Highlight text={hit.title || hit.path} q={highlight} />
+                            </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5 flex gap-1.5 flex-wrap">
+                            <span className="font-mono truncate max-w-[260px]">
+                                <Highlight text={hit.path} q={highlight} />
+                            </span>
+                            {hit.referrer_domain && (
+                                <>
+                                    <span className="text-slate-300">·</span>
+                                    <span>
+                                        from <Highlight text={hit.referrer_domain} q={highlight} />
+                                    </span>
+                                </>
+                            )}
+                            {device && (
+                                <>
+                                    <span className="text-slate-300">·</span>
+                                    <span>{device}</span>
+                                </>
+                            )}
+                            {hit.utm_source && (
+                                <>
+                                    <span className="text-slate-300">·</span>
+                                    <span>
+                                        utm <Highlight text={hit.utm_source} q={highlight} />
+                                    </span>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                    <span
+                        className="text-[10.5px] text-slate-400 tabular-nums shrink-0 mt-0.5"
+                        title={fmtAbsolute(event.at)}
+                    >
+                        {fmtRelative(event.at)}
+                    </span>
+                    <ChevronDownIcon
+                        className={`w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+                    />
+                </div>
+            </button>
+            {open && (
+                <dl className="mx-3 mb-2.5 ml-9 grid grid-cols-[minmax(110px,auto)_1fr] gap-x-3 gap-y-1 text-[11px]">
+                    {details
+                        .filter(([, v]) => !!v)
+                        .map(([k, v]) => (
+                            <React.Fragment key={k}>
+                                <dt className="text-slate-500">{k}</dt>
+                                <dd className="text-slate-800 break-all">
+                                    {k === "Page URL" || k === "Referrer" ? (
+                                        <a
+                                            href={v}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-sky-600 hover:text-sky-700"
+                                        >
+                                            {v}
+                                        </a>
+                                    ) : (
+                                        v
+                                    )}
+                                </dd>
+                            </React.Fragment>
+                        ))}
+                </dl>
+            )}
+        </div>
+    );
+}
+
+function cap(s: string): string {
+    if (!s || s === "unknown") return "";
+    return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function EventMeta({
@@ -680,6 +820,8 @@ function visualFor(type: ContactTimelineEventType): {
             return { Icon: CalendarClockIcon, label: "Meeting rescheduled" };
         case "meeting_canceled":
             return { Icon: CalendarXIcon, label: "Meeting canceled" };
+        case "page_hit":
+            return { Icon: GlobeIcon, label: "Page hit" };
         default:
             return { Icon: MailIcon, label: type };
     }

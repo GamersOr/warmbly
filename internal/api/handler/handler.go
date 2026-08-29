@@ -59,6 +59,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
 	"github.com/warmbly/warmbly/internal/app/webhook"
+	"github.com/warmbly/warmbly/internal/app/websitetracking"
 	"github.com/warmbly/warmbly/internal/app/worker"
 	"github.com/warmbly/warmbly/internal/app/worker_orchestrator"
 	"github.com/warmbly/warmbly/internal/pkg/generation"
@@ -159,6 +160,9 @@ type Handler struct {
 
 	// Advanced outreach controls
 	AdvancedService advanced.Service
+
+	// Website tracking snippet: settings and the page-view ingest path.
+	WebsiteTrackingService websitetracking.Service
 
 	// Pre-send email verification (control-plane SMTP RCPT probe / pluggable
 	// paid backend). Drops hard-bouncing addresses before a worker sends.

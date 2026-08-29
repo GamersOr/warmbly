@@ -250,6 +250,10 @@ const (
 	TimelineMeetingBooked      ContactTimelineEventType = "meeting_booked"
 	TimelineMeetingRescheduled ContactTimelineEventType = "meeting_rescheduled"
 	TimelineMeetingCanceled    ContactTimelineEventType = "meeting_canceled"
+
+	// A page view reported by the website tracking snippet, tied to the
+	// contact through an email-link ticket. Detail rides in PageHit.
+	TimelinePageHit ContactTimelineEventType = "page_hit"
 )
 
 // ContactTimelineEvent is one entry in the merged activity feed. The
@@ -289,6 +293,9 @@ type ContactTimelineEvent struct {
 
 	// Author (notes).
 	UserID *uuid.UUID `json:"user_id,omitempty"`
+
+	// Website page view (page_hit): URL, referrer, device, UTM, location.
+	PageHit *WebsitePageHit `json:"page_hit,omitempty"`
 }
 
 type ContactTimelineResult struct {

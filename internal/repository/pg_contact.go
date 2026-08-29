@@ -2419,6 +2419,7 @@ func (r *contactRepository) ListSentEmails(ctx context.Context, userID, contactI
 //   - deliverability_events           → bounce / complaint
 //   - suppressed_recipients           → suppression added
 //   - contact_notes                   → CRM notes
+//   - website_page_hits               → page views from the tracking snippet
 //
 // We pull up to (limit) candidates from each source ordered by time
 // DESC, then merge-sort in Go. This avoids a 5-way UNION with
@@ -2717,6 +2718,59 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		mrows.Close()
+
+		// 7. Website page views from any browser tied to the contact through
+		//    an email-link ticket. The detail block carries everything the
+		//    expandable row shows.
+		hitQuery := `
+			SELECT h.id, h.visitor_id, h.session_key, h.occurred_at,
+			       h.url, h.path, h.title, h.referrer, h.referrer_domain, h.landing,
+			       h.utm_source, h.utm_medium, h.utm_campaign, h.utm_term, h.utm_content,
+			       h.device_type, h.os, h.browser, h.browser_version, h.device_brand,
+			       h.language, h.timezone, h.screen_width, h.screen_height,
+			       h.country_code, h.region, h.city
+			FROM website_page_hits h
+			WHERE h.organization_id = $1
+			  AND h.visitor_id IN (SELECT id FROM website_visitors WHERE contact_id = $2)
+			  AND h.occurred_at < $3
+			ORDER BY h.occurred_at DESC
+			LIMIT $4
+		`
+		hrows, err := r.DB.Query(ctx, hitQuery, *orgID, contactID, bound, limit)
+		if err != nil {
+			db.CaptureError(err, hitQuery, nil, "ListTimeline page hits")
+			return nil, errx.InternalError()
+		}
+		for hrows.Next() {
+			var h models.WebsitePageHit
+			if err := hrows.Scan(
+				&h.ID, &h.VisitorID, &h.SessionKey, &h.OccurredAt,
+				&h.URL, &h.Path, &h.Title, &h.Referrer, &h.ReferrerDomain, &h.Landing,
+				&h.UTMSource, &h.UTMMedium, &h.UTMCampaign, &h.UTMTerm, &h.UTMContent,
+				&h.DeviceType, &h.OS, &h.Browser, &h.BrowserVersion, &h.DeviceBrand,
+				&h.Language, &h.Timezone, &h.ScreenWidth, &h.ScreenHeight,
+				&h.CountryCode, &h.Region, &h.City,
+			); err != nil {
+				hrows.Close()
+				db.CaptureError(err, "", nil, "ListTimeline page hits scan")
+				return nil, errx.InternalError()
+			}
+			hit := h
+			ev := models.ContactTimelineEvent{
+				Type:    models.TimelinePageHit,
+				At:      h.OccurredAt,
+				PageHit: &hit,
+			}
+			if h.Title != "" {
+				title := h.Title
+				ev.Subject = &title
+			} else {
+				path := h.Path
+				ev.Subject = &path
+			}
+			events = append(events, ev)
+		}
+		hrows.Close()
 	}
 
 	// Merge sort: newest first.

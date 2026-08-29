@@ -55,6 +55,9 @@ pub struct Config {
     pub internal_api_token: String,
     /// Per-source request budget for both tracking endpoints (default 300/min).
     pub rate_limit_per_min: u32,
+    /// Page-view ingest budget per source per minute. Lower than the pixel
+    /// budget: a person does not view a page a second, a script does.
+    pub pagehit_rate_limit_per_min: u32,
 }
 
 impl Config {
@@ -167,6 +170,15 @@ impl Config {
             .unwrap_or(300);
         info!("Per-source rate limit: {}/min", rate_limit_per_min);
 
+        let pagehit_rate_limit_per_min: u32 = env::var("TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        info!(
+            "Per-source page-hit rate limit: {}/min",
+            pagehit_rate_limit_per_min
+        );
+
         Ok(Self {
             env: env_name,
             host,
@@ -184,6 +196,7 @@ impl Config {
             backend_internal_url,
             internal_api_token,
             rate_limit_per_min,
+            pagehit_rate_limit_per_min,
         })
     }
 
@@ -258,6 +271,7 @@ impl Config {
             backend_internal_url,
             internal_api_token,
             rate_limit_per_min: 300,
+            pagehit_rate_limit_per_min: 60,
         })
     }
 

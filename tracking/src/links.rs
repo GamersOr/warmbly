@@ -22,12 +22,17 @@ use tracing::warn;
 pub struct ResolvedLink {
     pub destination: String,
     pub task_id: String,
+    /// The workspace runs website tracking and registered the destination's
+    /// host, so the redirect may append the ticket for the snippet.
+    pub identify: bool,
 }
 
 #[derive(Deserialize)]
 struct LinkResponse {
     destination: String,
     task_id: String,
+    #[serde(default)]
+    identify: bool,
 }
 
 pub enum Resolution {
@@ -127,6 +132,7 @@ impl LinkResolver {
                     let link = ResolvedLink {
                         destination: body.destination,
                         task_id: body.task_id,
+                        identify: body.identify,
                     };
                     self.found.insert(link_id.to_string(), link.clone()).await;
                     Resolution::Found(link)
