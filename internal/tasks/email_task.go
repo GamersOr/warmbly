@@ -739,9 +739,6 @@ func (s *tasksService) resolveWarmupPoolType(ctx context.Context, account *Email
 	if account == nil {
 		return "premium"
 	}
-	if account.WarmupPoolType != "" {
-		return account.WarmupPoolType
-	}
 	// No organization means no entitlement to check, so the mailbox gets the
 	// lower-trust pool rather than defaulting into the paid one.
 	if account.OrganizationID == nil {
@@ -749,9 +746,14 @@ func (s *tasksService) resolveWarmupPoolType(ctx context.Context, account *Email
 	}
 	// A restricted organization leaves the paid pool whatever it pays: the
 	// shared reputation paying customers depend on is not for spending on a
-	// risky tenant.
+	// risky tenant. Checked before the stored tier, which is always set
+	// (schema default 'free', worker assignment writes it) and so would
+	// otherwise short-circuit this gate (issue #242).
 	if s.orgSuspendedOrRestricted(ctx, *account.OrganizationID) {
 		return "free"
+	}
+	if account.WarmupPoolType != "" {
+		return account.WarmupPoolType
 	}
 	if s.featureGate != nil {
 		isPaid, xerr := s.featureGate.IsPaidOrganization(ctx, *account.OrganizationID)

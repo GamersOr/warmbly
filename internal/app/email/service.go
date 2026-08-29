@@ -108,7 +108,24 @@ type emailService struct {
 	// (email_account.connected, email_account.removed) are dispatched to
 	// subscribed customer webhooks.
 	webhookService webhook.Service
+	// orgRiskRepo bars a restricted organization from the paid warmup pool.
+	// Optional/nil-safe.
+	orgRiskRepo repository.OrgRiskRepository
 }
+
+// WireOrgRisk attaches the organization risk posture.
+func (s *emailService) WireOrgRisk(r repository.OrgRiskRepository) {
+	s.orgRiskRepo = r
+}
+
+// OrgRiskAware is the optional capability the caller uses to attach org risk.
+type OrgRiskAware interface {
+	WireOrgRisk(r repository.OrgRiskRepository)
+}
+
+// The backend attaches the posture through a type assertion, so a silently
+// unsatisfied interface would leave restricted workspaces in the paid pool.
+var _ OrgRiskAware = (*emailService)(nil)
 
 // SyncBudgetSource is the operator-editable sync fair-use section, satisfied
 // by instancesettings.Service. Injected post-construction; when unset the
