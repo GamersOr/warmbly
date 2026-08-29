@@ -112,22 +112,57 @@ func (c *GenerationClient) SubmitBatch(ctx context.Context, requests []BatchRequ
 	return batch.ID, file.ID, nil
 }
 
-// GetBatch returns the current status, the output file ID (present when at
-// least one request succeeded), the error file ID (present when at least one
-// failed), and the request counts for a batch. A batch whose requests all
-// failed still completes, with output empty and every refusal in the error
-// file, so callers must read that one to learn why.
-func (c *GenerationClient) GetBatch(ctx context.Context, batchID string) (status, outputFileID, errorFileID string, counts BatchCounts, err error) {
+// BatchState is the provider's view of one batch. Grouped rather than returned
+// as a widening list of strings, because the two failure surfaces are different
+// and a caller has to tell them apart.
+type BatchState struct {
+	Status string
+	// OutputFileID is present when at least one request succeeded, ErrorFileID
+	// when at least one failed. A batch whose requests ALL failed still
+	// completes, with output empty and every refusal in the error file.
+	OutputFileID string
+	ErrorFileID  string
+	Counts       BatchCounts
+	// FailureReason is the batch-level error, reported when the batch itself
+	// never ran: a rejected input file, a quota refusal. It is not a per-request
+	// refusal, and it arrives with no error file to read it out of, so it is the
+	// only place that says why.
+	FailureReason string
+}
+
+// GetBatch returns the provider's current view of a batch.
+func (c *GenerationClient) GetBatch(ctx context.Context, batchID string) (BatchState, error) {
 	batch, err := c.client.Batches.Get(ctx, batchID)
 	if err != nil {
-		return "", "", "", BatchCounts{}, err
+		return BatchState{}, err
 	}
-	counts = BatchCounts{
-		Completed: int(batch.RequestCounts.Completed),
-		Failed:    int(batch.RequestCounts.Failed),
-		Total:     int(batch.RequestCounts.Total),
+	return BatchState{
+		Status:       string(batch.Status),
+		OutputFileID: batch.OutputFileID,
+		ErrorFileID:  batch.ErrorFileID,
+		Counts: BatchCounts{
+			Completed: int(batch.RequestCounts.Completed),
+			Failed:    int(batch.RequestCounts.Failed),
+			Total:     int(batch.RequestCounts.Total),
+		},
+		FailureReason: batchFailureReason(batch.Errors.Data),
+	}, nil
+}
+
+// batchFailureReason renders the batch-level errors as one line, naming how many
+// more there are rather than pasting all of them into a job row.
+func batchFailureReason(errs []openai.BatchError) string {
+	for _, e := range errs {
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
+		}
+		if len(errs) > 1 {
+			return fmt.Sprintf("%s (+%d more)", msg, len(errs)-1)
+		}
+		return msg
 	}
-	return string(batch.Status), batch.OutputFileID, batch.ErrorFileID, counts, nil
+	return ""
 }
 
 // CancelBatch requests cancellation of an in-flight batch.

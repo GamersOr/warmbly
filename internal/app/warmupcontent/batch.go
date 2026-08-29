@@ -168,29 +168,35 @@ func (s *service) PollBatches(ctx context.Context) error {
 
 // pollBatchJob reconciles a single batch job.
 func (s *service) pollBatchJob(ctx context.Context, job *models.WarmupGenerationJob) error {
-	status, outputFileID, errorFileID, counts, err := s.gen.GetBatch(ctx, job.BatchID)
+	state, err := s.gen.GetBatch(ctx, job.BatchID)
 	if err != nil {
 		return err
 	}
-	job.BatchStatus = status
+	job.BatchStatus = state.Status
 
-	switch status {
+	switch state.Status {
 	case "completed":
-		job.BatchOutputFileID = outputFileID
+		job.BatchOutputFileID = state.OutputFileID
 		// A batch whose requests all failed completes with no output file; the
 		// refusals are in the error file, which has the same JSONL shape. Read
 		// it instead of failing on the empty id, or the reason is never seen.
-		resultsFileID := outputFileID
+		resultsFileID := state.OutputFileID
 		if resultsFileID == "" {
-			resultsFileID = errorFileID
+			resultsFileID = state.ErrorFileID
 		}
-		return s.ingestBatch(ctx, job, resultsFileID, counts)
+		return s.ingestBatch(ctx, job, resultsFileID, state.Counts)
 	case "failed", "expired", "cancelled":
 		now := time.Now()
 		job.Status = "failed"
 		job.FinishedAt = &now
 		if job.Error == "" {
-			job.Error = fmt.Sprintf("batch %s", status)
+			// A batch that failed as a whole has no error file, so the provider's
+			// own message is the only account of why. Recording just the status
+			// leaves the operator with "batch failed" and nothing to act on.
+			job.Error = fmt.Sprintf("batch %s", state.Status)
+			if state.FailureReason != "" {
+				job.Error += ": " + state.FailureReason
+			}
 		}
 		return s.repo.UpdateGenerationJob(ctx, job)
 	default:
