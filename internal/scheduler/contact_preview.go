@@ -11,9 +11,7 @@ import (
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
-// ContactSendConstraint names the hard constraint holding a contact's next
-// step back. The caller turns it into copy; the scheduler only knows which
-// gate applied.
+// ContactSendConstraint names the gate holding a step back; the caller words it.
 type ContactSendConstraint string
 
 const (
@@ -30,31 +28,23 @@ const (
 	ConstraintCampaignEnded    ContactSendConstraint = "campaign_ended"
 )
 
-// ContactSendPreview is a read-only answer to "what happens next for this
-// contact in this campaign". Route says which step; State, ScheduledAt and
-// NotBefore say when, through the same constraints the send path applies.
+// ContactSendPreview is a read-only "what happens next" for one contact in
+// one campaign; ScheduledAt is set only when the step is due now.
 type ContactSendPreview struct {
-	Route *repository.ContactRoute
-	State models.ContactNextActionState
-	// ScheduledAt is set only when the step is due now: the slot the scheduler
-	// would give it this tick.
+	Route       *repository.ContactRoute
+	State       models.ContactNextActionState
 	ScheduledAt *time.Time
-	// NotBefore is the earliest the hard constraints allow the step.
-	NotBefore  *time.Time
-	Constraint ContactSendConstraint
+	NotBefore   *time.Time
+	Constraint  ContactSendConstraint
 }
 
-// ContactSendPreviewer is the capability the contact drawer reads; the
-// scheduler service satisfies it.
+// ContactSendPreviewer is satisfied by the scheduler service.
 type ContactSendPreviewer interface {
 	PreviewContactSend(ctx context.Context, campaignID, contactID uuid.UUID) (*ContactSendPreview, error)
 }
 
-// PreviewContactSend derives the contact's next step and its timing without
-// writing anything: it routes the contact the way FindNextRoutedPair does and
-// places the send the way CalculateNextCampaignTime does. A campaign is one
-// self-perpetuating task, so this is the only honest source of "scheduled
-// for"; nothing per contact is stored.
+// PreviewContactSend routes and places one contact through the send path's
+// own rules without writing anything.
 func (s *schedulerService) PreviewContactSend(ctx context.Context, campaignID, contactID uuid.UUID) (*ContactSendPreview, error) {
 	campaign, err := s.campaignRepo.GetByID(ctx, campaignID)
 	if err != nil {
@@ -81,6 +71,8 @@ func (s *schedulerService) PreviewContactSend(ctx context.Context, campaignID, c
 		pv.Constraint = ConstraintCampaignInactive
 		return pv, nil
 	}
+
+	projectRampLevel(campaign, time.Now())
 
 	accounts, meta, err := s.campaignSenders(ctx, campaign)
 	if err != nil {
@@ -146,4 +138,19 @@ func (s *schedulerService) deferralConstraint(ctx context.Context, campaign *mod
 		}
 	}
 	return ConstraintCapacity
+}
+
+// projectRampLevel applies today's ramp advance in memory, mirroring
+// campaignRepo.AdvanceRampLevel, so a preview on a new UTC day budgets with
+// the level the next real pass will persist instead of yesterday's.
+func projectRampLevel(c *models.Campaign, now time.Time) {
+	if !c.RampEnabled {
+		return
+	}
+	today := now.UTC().Truncate(24 * time.Hour)
+	if c.RampLevelDate != nil && !c.RampLevelDate.UTC().Truncate(24*time.Hour).Before(today) {
+		return
+	}
+	c.RampLevel = min(c.RampCeiling, max(c.RampLevel, c.RampStart)+c.RampIncrement)
+	c.RampLevelDate = &today
 }

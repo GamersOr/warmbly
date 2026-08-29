@@ -13,14 +13,10 @@ import (
 	"github.com/warmbly/warmbly/internal/scheduler"
 )
 
-// SetNextSendPreviewer wires the scheduler's read-only preview. Optional: with
-// no previewer the campaign state still lists steps and status, just without
-// a next action.
+// SetNextSendPreviewer is optional; without it the panel has no next action.
 func (s *contactService) SetNextSendPreviewer(p scheduler.ContactSendPreviewer) { s.previewer = p }
 
-// CampaignStates is the per-campaign panel of the contact drawer: the flow,
-// this contact's progress, the lead status, and a scheduler-backed next
-// action.
+// CampaignStates returns the contact's campaigns with a scheduler-backed next action.
 func (s *contactService) CampaignStates(ctx context.Context, orgID, contactID uuid.UUID) ([]models.ContactCampaignState, *errx.Error) {
 	states, xerr := s.contactRepository.ListCampaignStates(ctx, orgID, contactID)
 	if xerr != nil {

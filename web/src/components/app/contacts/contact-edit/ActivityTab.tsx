@@ -1011,16 +1011,17 @@ function detailsFor(e: ContactTimelineEvent): [string, React.ReactNode][] {
         add("Scheduled for", e.scheduled_for ? fmtAbsolute(e.scheduled_for) : null);
         add("Calendar", providerLabel(e.source));
         add("State", e.meeting_state);
-        if (e.join_url && e.type !== "meeting_canceled") {
+        const joinUrl = safeHttpUrl(e.join_url);
+        if (joinUrl && e.type !== "meeting_canceled") {
             add(
                 "Join",
                 <a
-                    href={e.join_url}
+                    href={joinUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-sky-600 hover:text-sky-700 font-medium"
                 >
-                    {e.join_url}
+                    {joinUrl}
                 </a>,
             );
         }
@@ -1050,6 +1051,7 @@ function EventMeta({
               })
             : null;
         const provider = providerLabel(event.source);
+        const joinUrl = safeHttpUrl(event.join_url);
         return (
             <div className="text-[11px] text-slate-500 mt-0.5 flex gap-1.5 flex-wrap items-center">
                 {when && <span>for {when}</span>}
@@ -1061,11 +1063,11 @@ function EventMeta({
                         <span className="text-slate-700">{event.reason}</span>
                     </>
                 )}
-                {event.type !== "meeting_canceled" && event.join_url && (
+                {event.type !== "meeting_canceled" && joinUrl && (
                     <>
                         <span className="text-slate-300">·</span>
                         <a
-                            href={event.join_url}
+                            href={joinUrl}
                             target="_blank"
                             rel="noopener noreferrer"
                             onClick={(e) => e.stopPropagation()}
@@ -1179,6 +1181,18 @@ function Highlight({ text, q }: { text: string; q: string }) {
             {text.slice(idx + ql.length)}
         </>
     );
+}
+
+// Meeting join links come from a scheduling provider's webhook and are stored
+// verbatim, so only http(s) may become an href; anything else is not linked.
+function safeHttpUrl(raw?: string | null): string | null {
+    if (!raw) return null;
+    try {
+        const u = new URL(raw);
+        return u.protocol === "https:" || u.protocol === "http:" ? u.href : null;
+    } catch {
+        return null;
+    }
 }
 
 function providerLabel(source?: string | null): string | null {
