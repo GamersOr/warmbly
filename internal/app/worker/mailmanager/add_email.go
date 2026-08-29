@@ -2,10 +2,14 @@ package mailmanager
 
 import (
 	"context"
+	"errors"
 
 	"github.com/warmbly/warmbly/internal/app/worker/wmail"
 	"github.com/warmbly/warmbly/internal/models"
 )
+
+// errBrokerUnavailable: a managed mailbox needs the backend's token broker.
+var errBrokerUnavailable = errors.New("cloud-managed mailbox needs ENCRYPTED_KEYS_BACKEND_URL and ENCRYPTED_KEYS_WORKER_TOKEN for brokered tokens")
 
 func (m *MailManager) AddWMail(
 	ctx context.Context,
@@ -17,6 +21,12 @@ func (m *MailManager) AddWMail(
 	// Cfg is avro-excluded from the payload, so rebuild it from the worker's
 	// local oauth config for token refresh (no-op for smtp_imap).
 	data.Cfg = m.cfgFor(data.Type)
+	if data.Brokered {
+		if m.tokenBroker == nil {
+			return errBrokerUnavailable
+		}
+		data.TokenSource = m.tokenBroker.Source(data.ID)
+	}
 
 	newMail, err := wmail.NewWMail(
 		data,

@@ -5,7 +5,7 @@ description: "Warm the mailboxes on your own Warmbly instance in the hosted warm
 
 A self-hosted Warmbly instance warms mailboxes only against the other mailboxes on that same instance, which for most installs is a handful. Linking the instance to Warmbly Cloud lets those mailboxes warm in the hosted pool instead: thousands of real, monitored mailboxes exchanging natural-looking mail, with replies and inbox engagement handled for you.
 
-Only warmup moves to the cloud. Campaigns, contacts, the unibox, tracking and every stored message stay on your server exactly as before.
+Only warmup moves to the cloud. Campaigns, contacts, the unibox, tracking and every stored message stay on your server exactly as before. Linked instances also get Google and Microsoft sign-in through Warmbly's own OAuth apps, so there is no client to register: see [Google and Microsoft mailboxes](#google-and-microsoft-mailboxes-sign-in-through-warmbly-cloud).
 
 <Callout type="info" title="Pricing">
   A free Warmbly Cloud workspace holds up to 10 mailboxes, connected directly or through a linked instance, and warms them at no cost. Unlimited mailboxes cost $15 a month per workspace. Nothing else about self-hosting changes.
@@ -20,7 +20,7 @@ Your instance keeps a single link to a Warmbly Cloud workspace. When you enroll 
 - your instance stops its own warmup for that mailbox and keeps sending campaigns from it as usual
 - health, daily volume and 7 day totals show up in your instance's settings as the cloud reports them
 
-Unenrolling a mailbox, or disconnecting the instance, deletes the credential on the cloud immediately.
+Unenrolling an SMTP/IMAP mailbox, or disconnecting the instance, deletes its credential on the cloud immediately. A mailbox that was signed in through Warmbly Cloud stays in the cloud workspace when you remove it from the instance; disconnecting the instance removes its mirrors of such mailboxes, since they cannot send without the link.
 
 ## Linking your instance
 
@@ -32,11 +32,25 @@ The link is offered in three places on a self-hosted instance: as the last step 
 
 The whole flow takes about a minute. A code expires after 15 minutes if nobody approves it; start again from the instance.
 
-## Which mailboxes can be enrolled
+## Google and Microsoft mailboxes: sign in through Warmbly Cloud
 
-Mailboxes connected with **SMTP/IMAP** (including Google Workspace and Microsoft 365 through an app password) can be enrolled.
+On a linked instance, **Add account > Gmail / Google Workspace** and **Outlook / Microsoft 365** no longer need an OAuth client of your own. The sign-in window opens on Warmbly's verified Google and Microsoft apps, and when you approve:
 
-Mailboxes connected through **Sign in with Google** or **Sign in with Microsoft** cannot be enrolled yet. Their refresh grant is bound to the OAuth app that issued it, which on a self-hosted instance is your own, so the cloud could never refresh the token. Reconnect such a mailbox with SMTP/IMAP to enroll it.
+- the mailbox is created in your Warmbly Cloud workspace, where its sign-in lives, and starts warming in the pool right away
+- your instance gets a mirror of the mailbox with no credential on it. Campaigns, replies and the unibox work from your server as before; to send and sync, the instance asks the cloud for a short-lived access token (about an hour, cached) using its link token
+- the refresh grant never leaves the cloud. Removing the mailbox from either side, unlinking the instance, or the cloud blocking the mailbox stops the instance sending from it within the hour
+
+These mailboxes show the blue **Cloud** badge with "Signed in through Warmbly Cloud". The `BOX_GOOGLE_*` and `BOX_OUTLOOK_*` variables are still honoured when set, but an instance without them can now connect Google and Microsoft mailboxes as long as it is linked.
+
+### Mailboxes connected on the cloud
+
+A Google or Microsoft mailbox you connect directly on app.warmbly.com shows up in your instance's **Add account** dialog under **In your Warmbly Cloud workspace**. Press **Connect** to add it to the instance the same way: the cloud keeps the sign-in, the instance sends with brokered tokens. A mailbox can be linked to one instance at a time.
+
+### Which existing mailboxes can be enrolled
+
+Mailboxes connected with **SMTP/IMAP** (including Google Workspace and Microsoft 365 through an app password) can be enrolled as they are: the instance sends the credential to the cloud and keeps its own copy.
+
+A Google or Microsoft mailbox that was signed in with your instance's own OAuth app cannot be enrolled, because that grant can only be refreshed by the app that issued it. Remove it and add it again through Warmbly Cloud to warm it there.
 
 ## What your instance shows
 
@@ -67,6 +81,8 @@ Upgrade from the link card on your instance, or from **Settings > Billing** on W
 
 Enrolled mailboxes are ordinary members of the hosted pool and are held to the same rules: verification tokens on every warmup message, spam placement and complaint tracking, and automatic quarantine or blocking when a mailbox starts hurting partners. A mailbox that gets quarantined on the cloud shows that state on your instance, stops being offered to partners, and re-enters on the same probation terms as any hosted mailbox.
 
+For mailboxes signed in through Warmbly Cloud the enforcement reaches sending too. Every access token the instance draws is checked on the cloud: a mailbox the cloud has **blocked**, one that is no longer active there, one that was removed from the workspace, or an instance whose link was revoked gets no token, and the instance stops sending and syncing from that mailbox as soon as its cached token expires.
+
 ## Unlinking
 
 On your instance, **Settings > Warmbly Cloud > Disconnect** removes every enrolled mailbox from the pool, deletes their credentials on the cloud and lets local warmup take over. On Warmbly Cloud, **Settings > Linked instances** lists the instances linked to a workspace and can unlink any of them from the other side.
@@ -75,6 +91,7 @@ On your instance, **Settings > Warmbly Cloud > Disconnect** removes every enroll
 
 - Traffic is outbound only: the instance calls `WARMBLY_CLOUD_URL` (default `https://api.warmbly.com`) over HTTPS. Nothing needs to reach the instance from the internet
 - The instance token is stored sealed with `CREDENTIALS_ENCRYPTION_KEY`. Rotating that key invalidates the stored token; reconnect afterwards
+- Brokered access tokens reach the worker through the backend's internal API (`/api/v1/internal/cloud-link/token/:id`), so workers keep needing only `ENCRYPTED_KEYS_BACKEND_URL` and `ENCRYPTED_KEYS_WORKER_TOKEN`. A worker that cannot reach the backend keeps sending from such mailboxes until its cached token expires, about an hour
 - The link and the enrollment list are properties of the instance, not of a workspace, so they are not part of a [workspace export](/guides/workspace-export-import/). Reconnect after moving a workspace to a new instance
 - `INSTANCE_NAME` sets the name shown on the approval page; the hostname is used when unset
 

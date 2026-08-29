@@ -40,9 +40,14 @@ export default function MailboxTable() {
 
     const flip = (row: CloudLinkMailboxRow) => {
         if (row.enrolled) {
-            confirm.show(`Stop warming ${row.email} in the Warmbly pool? The cloud deletes its credential right away.`, async () => {
-                await run(row.id, () => unenroll.mutateAsync(row.id), `${row.email} removed from the pool`);
-            });
+            confirm.show(
+                row.managed
+                    ? `Remove ${row.email} from this instance? It stays in your Warmbly Cloud workspace, where its sign-in lives.`
+                    : `Stop warming ${row.email} in the Warmbly pool? The cloud deletes its credential right away.`,
+                async () => {
+                    await run(row.id, () => unenroll.mutateAsync(row.id), row.managed ? `${row.email} removed from this instance` : `${row.email} removed from the pool`);
+                },
+            );
             return;
         }
         void run(row.id, () => enroll.mutateAsync(row.id), `${row.email} is now warming in the pool`);
@@ -75,7 +80,7 @@ export default function MailboxTable() {
                 <tbody className="divide-y divide-slate-200/70">
                     <AnimatePresence initial={false}>
                         {list.map((row) => {
-                            const supported = providerSupported(row.provider);
+                            const supported = providerSupported(row.provider) || row.managed;
                             const cloud = row.cloud;
                             const paused = !!cloud?.warmup?.paused;
                             return (
@@ -85,7 +90,8 @@ export default function MailboxTable() {
                                             <p className="text-slate-900 truncate">{row.email}</p>
                                             <p className="text-[11px] text-slate-400 truncate">
                                                 {providerLabel(row.provider)}
-                                                {!supported && " · connect with SMTP/IMAP to enroll"}
+                                                {row.managed && " · signed in through Warmbly Cloud"}
+                                                {!supported && " · signed in with this instance's own OAuth app; add it again through Warmbly Cloud to warm it"}
                                                 {row.enrolled && !cloud && " · waiting for the cloud"}
                                                 {cloud?.errors && cloud.errors.length > 0 && (
                                                     <span className="inline-flex items-center gap-1 text-amber-700 ml-1">

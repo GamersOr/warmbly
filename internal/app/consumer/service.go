@@ -3,6 +3,8 @@ package jobs
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/app/advanced"
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
@@ -16,6 +18,12 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 )
+
+// CloudLinkVerifier is the self-hosted pool link as the consumer sees it.
+type CloudLinkVerifier interface {
+	IsEnrolled(ctx context.Context, accountID uuid.UUID) bool
+	VerifyWarmupToken(ctx context.Context, accountID uuid.UUID, token string) (bool, error)
+}
 
 type JobsService struct {
 	// Bus delivers the jobs.worker-events stream (Kafka or NATS).
@@ -32,7 +40,9 @@ type JobsService struct {
 	EmailAccountErrorRepository repository.EmailAccountErrorRepository
 	WarmupRepo                  repository.WarmupRepository
 	// PoolLinkRepo marks warmup-only mailboxes of linked instances; nil when unused.
-	PoolLinkRepo         repository.PoolLinkRepository
+	PoolLinkRepo repository.PoolLinkRepository
+	// CloudLink (self-hosted) verifies cloud warmup mail in mailboxes the cloud warms; nil when unused.
+	CloudLink            CloudLinkVerifier
 	WarmupContentRepo    repository.WarmupContentRepository
 	WarmupEngagementRepo repository.WarmupEngagementRepository
 	WarmupService        warmupapp.Service

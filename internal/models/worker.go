@@ -231,8 +231,12 @@ type AddWorkerEmail struct {
 	// Sync is the fair-use budget and resume state. Nil only from a publisher
 	// older than the sync policy; the worker then applies compiled defaults.
 	Sync *AddWorkerEmailSyncData `json:"sync" avro:"sync"`
+	// Brokered: no credential travels; the worker fetches access tokens from the backend.
+	Brokered bool `json:"brokered" avro:"brokered"`
 
 	Cfg oauth2.Config `json:"-" avro:"-"`
+	// TokenSource is set by the worker for brokered mailboxes.
+	TokenSource oauth2.TokenSource `json:"-" avro:"-"`
 }
 
 // SavesSentCopy reports whether the worker should APPEND a copy of each sent

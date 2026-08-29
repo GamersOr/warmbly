@@ -109,6 +109,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Mailboxes managed by Warmbly Cloud send with access tokens the backend
+	// brokers; the refresh grant never reaches the worker.
+	tokenBroker, err := repository.NewHTTPBrokeredTokenClient(internalBaseURL, internalToken)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Blob storage (S3 by default, filesystem when BLOB_PROVIDER=filesystem).
 	s3Client, err := storage.NewFromEnv(ctx, awscfg, "main")
@@ -172,6 +178,7 @@ func main() {
 		EmailMessageMapRepository: emailMessageMapRepo,
 		SyncContextRepository:     syncContextRepo,
 		OauthInbox:                &oauthInbox,
+		TokenBroker:               tokenBroker,
 	}
 
 	if err := workerService.Init(); err != nil {

@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+    adoptCloudMailbox,
     disconnectCloudLink,
     enrollCloudLinkMailbox,
+    listCloudWorkspaceMailboxes,
     getCloudLinkStatus,
     listCloudLinkMailboxes,
     pollCloudLinkConnect,
@@ -82,6 +84,21 @@ export function useCloudLinkMailboxLifecycle() {
     return useMutation({
         mutationFn: ({ id, action }: { id: string; action: "pause" | "resume" }) => setCloudLinkMailboxLifecycle(id, action),
         onSuccess: () => void qc.invalidateQueries({ queryKey: CLOUD_LINK_KEY }),
+    });
+}
+
+export function useCloudWorkspaceMailboxes(enabled = true) {
+    return useQuery({ queryKey: [...CLOUD_LINK_KEY, "workspace-mailboxes"], queryFn: listCloudWorkspaceMailboxes, enabled, staleTime: 10_000 });
+}
+
+export function useAdoptCloudMailbox() {
+    const qc = useQueryClient();
+    return useMutation({
+        mutationFn: (id: string) => adoptCloudMailbox(id),
+        onSuccess: () => {
+            void qc.invalidateQueries({ queryKey: CLOUD_LINK_KEY });
+            void qc.invalidateQueries({ queryKey: ["emails"] });
+        },
     });
 }
 

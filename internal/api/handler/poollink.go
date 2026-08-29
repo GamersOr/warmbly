@@ -301,3 +301,118 @@ func (h *Handler) PoolLinkUnenroll(c *gin.Context) {
 	}
 	c.Status(http.StatusNoContent)
 }
+
+// Cloud-managed mailboxes for a linked instance.
+
+func (h *Handler) PoolLinkOAuthStart(c *gin.Context) {
+	inst := middleware.GetPoolLinkInstance(c)
+	if inst == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	var req models.PoolLinkOAuthStartRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		return
+	}
+	res, xerr := h.PoolLinkService.StartOAuth(c.Request.Context(), inst, req)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusCreated, res)
+}
+
+func (h *Handler) PoolLinkOAuthFinish(c *gin.Context) {
+	inst := middleware.GetPoolLinkInstance(c)
+	if inst == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	var req models.PoolLinkOAuthFinishRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		return
+	}
+	state, xerr := h.PoolLinkService.FinishOAuth(c.Request.Context(), inst, req.Session)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusCreated, state)
+}
+
+func (h *Handler) PoolLinkAccessToken(c *gin.Context) {
+	inst := middleware.GetPoolLinkInstance(c)
+	if inst == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	remoteID, ok := poolLinkRemoteID(c)
+	if !ok {
+		return
+	}
+	tok, xerr := h.PoolLinkService.AccessToken(c.Request.Context(), inst, remoteID)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, tok)
+}
+
+func (h *Handler) PoolLinkWorkspaceMailboxes(c *gin.Context) {
+	inst := middleware.GetPoolLinkInstance(c)
+	if inst == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	list, xerr := h.PoolLinkService.ListWorkspaceMailboxes(c.Request.Context(), inst)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, list)
+}
+
+func (h *Handler) PoolLinkAdopt(c *gin.Context) {
+	inst := middleware.GetPoolLinkInstance(c)
+	if inst == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	var req models.PoolLinkAdoptRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		return
+	}
+	state, xerr := h.PoolLinkService.Adopt(c.Request.Context(), inst, req)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusCreated, state)
+}
+
+func (h *Handler) PoolLinkVerifyWarmupToken(c *gin.Context) {
+	inst := middleware.GetPoolLinkInstance(c)
+	if inst == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	remoteID, ok := poolLinkRemoteID(c)
+	if !ok {
+		return
+	}
+	token, err := uuid.Parse(c.Param("token"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"valid": false})
+		return
+	}
+	valid, xerr := h.PoolLinkService.VerifyWarmupToken(c.Request.Context(), inst, remoteID, token)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"valid": valid})
+}

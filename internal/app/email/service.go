@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
+	"golang.org/x/oauth2"
 	"time"
 
 	"github.com/google/uuid"
@@ -81,6 +82,13 @@ type EmailService interface {
 	WireMailboxes(repo repository.MailboxRepository)
 	WireSyncBudget(src SyncBudgetSource)
 	WirePoolLink(repo repository.PoolLinkRepository)
+	// WireCloudLink marks managed mailboxes, which ship to the worker without a credential.
+	WireCloudLink(repo repository.CloudLinkRepository)
+	// Brokered OAuth (cloud side): consent on this deployment's OAuth app for a linked instance.
+	OAuthAuthorizeURL(provider models.InboxProvider, state string) (string, *errx.Error)
+	OAuthConnectWithCode(ctx context.Context, userID string, orgID *uuid.UUID, provider models.InboxProvider, code string) (*models.Email, *errx.Error)
+	// OAuthAccessToken is a live access token for an OAuth mailbox, refreshed when near expiry.
+	OAuthAccessToken(ctx context.Context, accountID uuid.UUID) (*oauth2.Token, *errx.Error)
 	// LoadAccountOntoWorker assigns a worker if needed and ships the mailbox
 	// to it (idempotent; the reconciler calls it too).
 	LoadAccountOntoWorker(ctx context.Context, accountID uuid.UUID) error
@@ -113,6 +121,8 @@ type emailService struct {
 	syncBudget         SyncBudgetSource
 	// poolLink marks linked warmup-only mailboxes, which sync with no history.
 	poolLink repository.PoolLinkRepository
+	// cloudLink marks managed mailboxes whose credential the cloud holds.
+	cloudLink repository.CloudLinkRepository
 	// webhookService is optional. When non-nil, account lifecycle events
 	// (email_account.connected, email_account.removed) are dispatched to
 	// subscribed customer webhooks.
@@ -174,6 +184,10 @@ func (s *emailService) WireSyncBudget(src SyncBudgetSource) {
 
 // WirePoolLink attaches the pool-link repository so linked mailboxes get the
 // warmup-only sync policy.
+func (s *emailService) WireCloudLink(repo repository.CloudLinkRepository) {
+	s.cloudLink = repo
+}
+
 func (s *emailService) WirePoolLink(repo repository.PoolLinkRepository) {
 	s.poolLink = repo
 }

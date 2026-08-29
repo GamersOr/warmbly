@@ -129,7 +129,7 @@ export default function CloudLinkCard({
                 </span>
                 <div className="text-[13px] text-slate-600 leading-relaxed">
                     <p className="text-slate-900 font-medium">Warmbly warms your mailboxes for you.</p>
-                    <p className="mt-1">Free for 10 mailboxes. Your data stays on this server; only warmup runs in the cloud.</p>
+                    <p className="mt-1">Free for 10 mailboxes. Google and Microsoft sign-in without OAuth setup. Your data stays on this server; only warmup runs in the cloud.</p>
                     {start.isPending && (
                         <p className="mt-2 inline-flex items-center gap-1.5 text-slate-400">
                             <Loader2Icon className="w-3 h-3 animate-spin" /> Getting a code
@@ -153,7 +153,8 @@ export default function CloudLinkCard({
                     </div>
                     <ul className="space-y-2 text-[12.5px] text-slate-600">
                         <Bullet icon={FlameIcon}>Free for up to 10 mailboxes. Unlimited mailboxes for $15 a month.</Bullet>
-                        <Bullet icon={LockIcon}>Only the mailbox credential travels, encrypted, for warmup. Campaigns, contacts and inbox never leave here.</Bullet>
+                        <Bullet icon={CloudIcon}>Sign in Google and Microsoft mailboxes through Warmbly's own apps: no OAuth client setup on this server.</Bullet>
+                        <Bullet icon={LockIcon}>Only mailbox sign-ins live on the cloud, encrypted, for warmup and sending. Campaigns, contacts and inbox never leave here.</Bullet>
                         <Bullet icon={ShieldCheckIcon}>You can remove a mailbox or disconnect at any time; the cloud forgets it immediately.</Bullet>
                     </ul>
                     <button

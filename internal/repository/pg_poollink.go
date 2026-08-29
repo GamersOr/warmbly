@@ -38,6 +38,10 @@ type PoolLinkRepository interface {
 	ListMailboxes(ctx context.Context, instanceID uuid.UUID) ([]models.PoolLinkMailbox, error)
 	CountMailboxesForOrganization(ctx context.Context, orgID uuid.UUID) (int, error)
 	DeleteMailbox(ctx context.Context, instanceID, remoteID uuid.UUID) error
+	// TouchMailboxToken records when a managed mailbox last drew an access token.
+	TouchMailboxToken(ctx context.Context, instanceID, remoteID uuid.UUID) error
+	// ListAdoptableMailboxes: the workspace's active OAuth mailboxes no instance holds yet.
+	ListAdoptableMailboxes(ctx context.Context, orgID uuid.UUID) ([]models.PoolLinkWorkspaceMailbox, error)
 }
 
 type poolLinkRepository struct {
@@ -249,11 +253,11 @@ func (r *poolLinkRepository) HasActiveInstance(ctx context.Context, orgID uuid.U
 
 func (r *poolLinkRepository) EnrollMailbox(ctx context.Context, m *models.PoolLinkMailbox) error {
 	query := `
-		INSERT INTO pool_link_mailboxes (instance_id, remote_id, email_account_id)
-		VALUES ($1, $2, $3)
+		INSERT INTO pool_link_mailboxes (instance_id, remote_id, email_account_id, managed)
+		VALUES ($1, $2, $3, $4)
 		RETURNING enrolled_at
 	`
-	if err := r.db.QueryRow(ctx, query, m.InstanceID, m.RemoteID, m.EmailAccountID).Scan(&m.EnrolledAt); err != nil {
+	if err := r.db.QueryRow(ctx, query, m.InstanceID, m.RemoteID, m.EmailAccountID, m.Managed).Scan(&m.EnrolledAt); err != nil {
 		db.CaptureError(err, query, nil, "queryrow")
 		return err
 	}
@@ -262,7 +266,7 @@ func (r *poolLinkRepository) EnrollMailbox(ctx context.Context, m *models.PoolLi
 
 func scanPoolLinkMailbox(row pgx.Row) (*models.PoolLinkMailbox, error) {
 	var m models.PoolLinkMailbox
-	if err := row.Scan(&m.InstanceID, &m.RemoteID, &m.EmailAccountID, &m.EnrolledAt); err != nil {
+	if err := row.Scan(&m.InstanceID, &m.RemoteID, &m.EmailAccountID, &m.EnrolledAt, &m.Managed, &m.LastTokenAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -272,7 +276,7 @@ func scanPoolLinkMailbox(row pgx.Row) (*models.PoolLinkMailbox, error) {
 }
 
 func (r *poolLinkRepository) GetMailboxByRemote(ctx context.Context, instanceID, remoteID uuid.UUID) (*models.PoolLinkMailbox, error) {
-	query := `SELECT instance_id, remote_id, email_account_id, enrolled_at FROM pool_link_mailboxes WHERE instance_id = $1 AND remote_id = $2`
+	query := `SELECT instance_id, remote_id, email_account_id, enrolled_at, managed, last_token_at FROM pool_link_mailboxes WHERE instance_id = $1 AND remote_id = $2`
 	m, err := scanPoolLinkMailbox(r.db.QueryRow(ctx, query, instanceID, remoteID))
 	if err != nil {
 		db.CaptureError(err, query, nil, "queryrow")
@@ -282,7 +286,7 @@ func (r *poolLinkRepository) GetMailboxByRemote(ctx context.Context, instanceID,
 }
 
 func (r *poolLinkRepository) GetMailboxByAccount(ctx context.Context, accountID uuid.UUID) (*models.PoolLinkMailbox, error) {
-	query := `SELECT instance_id, remote_id, email_account_id, enrolled_at FROM pool_link_mailboxes WHERE email_account_id = $1`
+	query := `SELECT instance_id, remote_id, email_account_id, enrolled_at, managed, last_token_at FROM pool_link_mailboxes WHERE email_account_id = $1`
 	m, err := scanPoolLinkMailbox(r.db.QueryRow(ctx, query, accountID))
 	if err != nil {
 		db.CaptureError(err, query, []any{accountID}, "queryrow")
@@ -292,7 +296,7 @@ func (r *poolLinkRepository) GetMailboxByAccount(ctx context.Context, accountID 
 }
 
 func (r *poolLinkRepository) ListMailboxes(ctx context.Context, instanceID uuid.UUID) ([]models.PoolLinkMailbox, error) {
-	query := `SELECT instance_id, remote_id, email_account_id, enrolled_at FROM pool_link_mailboxes WHERE instance_id = $1 ORDER BY enrolled_at`
+	query := `SELECT instance_id, remote_id, email_account_id, enrolled_at, managed, last_token_at FROM pool_link_mailboxes WHERE instance_id = $1 ORDER BY enrolled_at`
 	rows, err := r.db.Query(ctx, query, instanceID)
 	if err != nil {
 		db.CaptureError(err, query, []any{instanceID}, "query")
@@ -302,7 +306,7 @@ func (r *poolLinkRepository) ListMailboxes(ctx context.Context, instanceID uuid.
 	out := []models.PoolLinkMailbox{}
 	for rows.Next() {
 		var m models.PoolLinkMailbox
-		if err := rows.Scan(&m.InstanceID, &m.RemoteID, &m.EmailAccountID, &m.EnrolledAt); err != nil {
+		if err := rows.Scan(&m.InstanceID, &m.RemoteID, &m.EmailAccountID, &m.EnrolledAt, &m.Managed, &m.LastTokenAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -331,4 +335,36 @@ func (r *poolLinkRepository) DeleteMailbox(ctx context.Context, instanceID, remo
 		return err
 	}
 	return nil
+}
+
+func (r *poolLinkRepository) TouchMailboxToken(ctx context.Context, instanceID, remoteID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE pool_link_mailboxes SET last_token_at = NOW() WHERE instance_id = $1 AND remote_id = $2`, instanceID, remoteID)
+	return err
+}
+
+func (r *poolLinkRepository) ListAdoptableMailboxes(ctx context.Context, orgID uuid.UUID) ([]models.PoolLinkWorkspaceMailbox, error) {
+	query := `
+		SELECT a.id, a.email, a.name, a.provider, a.status
+		FROM email_accounts a
+		WHERE a.organization_id = $1
+		  AND a.status = 'active'
+		  AND a.provider IN ('gmail', 'outlook')
+		  AND NOT EXISTS (SELECT 1 FROM pool_link_mailboxes m WHERE m.email_account_id = a.id)
+		ORDER BY a.created_at
+	`
+	rows, err := r.db.Query(ctx, query, orgID)
+	if err != nil {
+		db.CaptureError(err, query, []any{orgID}, "query")
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.PoolLinkWorkspaceMailbox{}
+	for rows.Next() {
+		var m models.PoolLinkWorkspaceMailbox
+		if err := rows.Scan(&m.ID, &m.Email, &m.Name, &m.Provider, &m.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }

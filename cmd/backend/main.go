@@ -1180,7 +1180,12 @@ func main() {
 		if g, ok := featureGateService.(interface{ WirePoolLink(feature.PoolLinkReader) }); ok {
 			g.WirePoolLink(poolLinkService)
 		}
-		cloudLinkService = cloudlink.NewService(repository.NewCloudLinkRepository(primaryDB.Pool, credEncrypter), emailRepostory)
+		if w, ok := poolLinkService.(poollink.CacheWirer); ok {
+			w.WireCache(cache)
+		}
+		cloudLinkRepository := repository.NewCloudLinkRepository(primaryDB.Pool, credEncrypter)
+		emailService.WireCloudLink(cloudLinkRepository)
+		cloudLinkService = cloudlink.NewService(cloudLinkRepository, emailRepostory, emailService)
 
 		rateLimitRepository := repository.NewRateLimitRepository(primaryDB)
 		rateLimitService = ratelimit.NewService(cache, rateLimitRepository)

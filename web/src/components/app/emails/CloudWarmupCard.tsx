@@ -53,7 +53,7 @@ export default function CloudWarmupCard({ mailboxId, email, provider }: { mailbo
             <div className="px-5 py-3 flex items-center gap-2.5 text-[12px] text-slate-600">
                 <CloudIcon className="w-3.5 h-3.5 text-sky-600 shrink-0" />
                 <span className="min-w-0 flex-1">
-                    {supported ? "Not in the Warmbly pool. Enrolling stops local warmup and lets the cloud warm it." : "Google and Microsoft sign-in mailboxes cannot be warmed by the cloud yet; reconnect with SMTP/IMAP to enroll."}
+                    {supported ? "Not in the Warmbly pool. Enrolling stops local warmup and lets the cloud warm it." : "This mailbox was signed in with this instance's own OAuth app, which the cloud cannot refresh. Remove it and add it again through Warmbly Cloud to warm it there."}
                 </span>
                 {supported && (
                     <button
@@ -80,7 +80,9 @@ export default function CloudWarmupCard({ mailboxId, email, provider }: { mailbo
                         <CloudIcon className="w-4 h-4" />
                     </span>
                     <div className="min-w-0 flex-1">
-                        <div className="text-[12.5px] font-medium text-slate-900">{paused ? "Paused in Warmbly Cloud" : "Warmed by Warmbly Cloud"}</div>
+                        <div className="text-[12.5px] font-medium text-slate-900">
+                            {paused ? "Paused in Warmbly Cloud" : row.managed ? "Signed in through Warmbly Cloud" : "Warmed by Warmbly Cloud"}
+                        </div>
                         <div className="text-[11px] text-slate-500 truncate">
                             {cloud
                                 ? `${cloud.sent_today} of ${cloud.warmup?.target_volume ?? cloud.settings.base} today · ${cloud.sent_7d} in 7 days${cloud.spam_placed_7d ? ` · ${cloud.spam_placed_7d} landed in spam` : ""}${health ? ` · ${health}` : ""}`
@@ -103,9 +105,14 @@ export default function CloudWarmupCard({ mailboxId, email, provider }: { mailbo
                             type="button"
                             disabled={busy}
                             onClick={() =>
-                                confirm.show(`Stop warming ${email} in the Warmbly pool? The cloud deletes its credential right away and local warmup takes over.`, async () => {
-                                    await run(() => unenroll.mutateAsync(mailboxId), `${email} removed from the pool`);
-                                })
+                                confirm.show(
+                                    row.managed
+                                        ? `Remove ${email} from this instance? It stays in your Warmbly Cloud workspace, where its sign-in lives.`
+                                        : `Stop warming ${email} in the Warmbly pool? The cloud deletes its credential right away and local warmup takes over.`,
+                                    async () => {
+                                        await run(() => unenroll.mutateAsync(mailboxId), row.managed ? `${email} removed from this instance` : `${email} removed from the pool`);
+                                    },
+                                )
                             }
                             className="h-7 px-2.5 rounded-md text-[12px] font-medium text-slate-600 hover:text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-60"
                         >

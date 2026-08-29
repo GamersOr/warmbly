@@ -273,6 +273,22 @@ func (s *emailService) buildAddWorkerEmail(ctx context.Context, acc *models.Emai
 		SaveToSent: &saveToSent,
 	}
 
+	// A managed mailbox has no local credential; the worker draws brokered tokens.
+	if s.cloudLink != nil {
+		if m, err := s.cloudLink.GetByAccount(ctx, acc.ID); err == nil && m != nil && m.Managed {
+			out.Brokered = true
+			switch provider {
+			case models.InboxProviderGoogle:
+				out.Google = &models.AddWorkerEmailGoogleData{LastHistoryID: s.lastHistoryFor(ctx, userID, acc.ID, acc.LastID)}
+			case models.InboxProviderOutlook:
+				out.Graph = &models.AddWorkerEmailGraphData{DeltaLinks: s.deltaLinksFor(ctx, userID, acc.ID)}
+			default:
+				return nil, nil
+			}
+			return out, nil
+		}
+	}
+
 	switch provider {
 	case models.InboxProviderGoogle:
 		creds, cerr := s.emailRepository.GetOAuthCredentials(ctx, acc.ID)

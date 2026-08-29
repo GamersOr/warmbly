@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/warmbly/warmbly/internal/app/poollink"
 	"github.com/warmbly/warmbly/internal/config"
 )
 
@@ -92,17 +93,25 @@ func callbackTargetOrigin() string {
 }
 
 func (h *Handler) EmailOAuthCallbackGmail(c *gin.Context) {
-	renderOAuthCallback(c, "gmail")
+	h.renderOAuthCallback(c, "gmail")
 }
 
 func (h *Handler) EmailOAuthCallbackOutlook(c *gin.Context) {
-	renderOAuthCallback(c, "outlook")
+	h.renderOAuthCallback(c, "outlook")
 }
 
-func renderOAuthCallback(c *gin.Context, provider string) {
+func (h *Handler) renderOAuthCallback(c *gin.Context, provider string) {
 	code := c.Query("code")
 	state := c.Query("state")
 	providerErr := c.Query("error")
+
+	// A brokered consent has no opener on our origin; it completes here and redirects to the instance.
+	if h.PoolLinkService != nil && strings.HasPrefix(state, poollink.BrokerStatePrefix) {
+		if to := h.PoolLinkService.CompleteOAuthCallback(c.Request.Context(), provider, code, state, providerErr); to != "" {
+			c.Redirect(http.StatusFound, to)
+			return
+		}
+	}
 
 	data := callbackData{
 		Provider:  provider,

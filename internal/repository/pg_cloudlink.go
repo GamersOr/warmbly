@@ -20,7 +20,7 @@ type CloudLinkRepository interface {
 	Delete(ctx context.Context) error
 	SetSyncResult(ctx context.Context, at time.Time, lastError string) error
 
-	Enroll(ctx context.Context, accountID, remoteID uuid.UUID) (*models.CloudLinkMailbox, error)
+	Enroll(ctx context.Context, accountID, remoteID uuid.UUID, managed bool) (*models.CloudLinkMailbox, error)
 	Unenroll(ctx context.Context, accountID uuid.UUID) error
 	UnenrollAll(ctx context.Context) error
 	GetByAccount(ctx context.Context, accountID uuid.UUID) (*models.CloudLinkMailbox, error)
@@ -101,15 +101,15 @@ func (r *cloudLinkRepository) SetSyncResult(ctx context.Context, at time.Time, l
 	return err
 }
 
-func (r *cloudLinkRepository) Enroll(ctx context.Context, accountID, remoteID uuid.UUID) (*models.CloudLinkMailbox, error) {
+func (r *cloudLinkRepository) Enroll(ctx context.Context, accountID, remoteID uuid.UUID, managed bool) (*models.CloudLinkMailbox, error) {
 	query := `
-		INSERT INTO cloud_link_mailboxes (email_account_id, remote_id)
-		VALUES ($1, $2)
-		ON CONFLICT (email_account_id) DO UPDATE SET remote_id = EXCLUDED.remote_id
-		RETURNING email_account_id, remote_id, enrolled_at
+		INSERT INTO cloud_link_mailboxes (email_account_id, remote_id, managed)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (email_account_id) DO UPDATE SET remote_id = EXCLUDED.remote_id, managed = EXCLUDED.managed
+		RETURNING email_account_id, remote_id, enrolled_at, managed
 	`
 	var m models.CloudLinkMailbox
-	if err := r.db.QueryRow(ctx, query, accountID, remoteID).Scan(&m.EmailAccountID, &m.RemoteID, &m.EnrolledAt); err != nil {
+	if err := r.db.QueryRow(ctx, query, accountID, remoteID, managed).Scan(&m.EmailAccountID, &m.RemoteID, &m.EnrolledAt, &m.Managed); err != nil {
 		db.CaptureError(err, query, nil, "queryrow")
 		return nil, err
 	}
@@ -130,9 +130,9 @@ func (r *cloudLinkRepository) UnenrollAll(ctx context.Context) error {
 }
 
 func (r *cloudLinkRepository) GetByAccount(ctx context.Context, accountID uuid.UUID) (*models.CloudLinkMailbox, error) {
-	query := `SELECT email_account_id, remote_id, enrolled_at FROM cloud_link_mailboxes WHERE email_account_id = $1`
+	query := `SELECT email_account_id, remote_id, enrolled_at, managed FROM cloud_link_mailboxes WHERE email_account_id = $1`
 	var m models.CloudLinkMailbox
-	if err := r.db.QueryRow(ctx, query, accountID).Scan(&m.EmailAccountID, &m.RemoteID, &m.EnrolledAt); err != nil {
+	if err := r.db.QueryRow(ctx, query, accountID).Scan(&m.EmailAccountID, &m.RemoteID, &m.EnrolledAt, &m.Managed); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -143,7 +143,7 @@ func (r *cloudLinkRepository) GetByAccount(ctx context.Context, accountID uuid.U
 }
 
 func (r *cloudLinkRepository) List(ctx context.Context) ([]models.CloudLinkMailbox, error) {
-	query := `SELECT email_account_id, remote_id, enrolled_at FROM cloud_link_mailboxes ORDER BY enrolled_at`
+	query := `SELECT email_account_id, remote_id, enrolled_at, managed FROM cloud_link_mailboxes ORDER BY enrolled_at`
 	rows, err := r.db.Query(ctx, query)
 	if err != nil {
 		db.CaptureError(err, query, nil, "query")
@@ -153,7 +153,7 @@ func (r *cloudLinkRepository) List(ctx context.Context) ([]models.CloudLinkMailb
 	out := []models.CloudLinkMailbox{}
 	for rows.Next() {
 		var m models.CloudLinkMailbox
-		if err := rows.Scan(&m.EmailAccountID, &m.RemoteID, &m.EnrolledAt); err != nil {
+		if err := rows.Scan(&m.EmailAccountID, &m.RemoteID, &m.EnrolledAt, &m.Managed); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

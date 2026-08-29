@@ -136,6 +136,9 @@ func Run(
 		// something the mailbox sent?" (tasks, message map, unibox threads).
 		internal.GET("/sync/own-conversation", h.InternalSyncOwnConversation)
 
+		// Brokered credential for a mailbox managed by Warmbly Cloud.
+		internal.GET("/cloud-link/token/:id", h.InternalCloudLinkToken)
+
 		// Worker bootstrap config + heartbeat. Workers POST their identity
 		// on boot (worker_id + bind_ip + tag) and pull their runtime config
 		// instead of carrying it all in the install-time env file.
@@ -1123,6 +1126,13 @@ func Run(
 				poolLinkInstance.GET("/mailboxes/:remoteId", h.PoolLinkGetMailbox)
 				poolLinkInstance.PATCH("/mailboxes/:remoteId", h.PoolLinkPatchMailbox)
 				poolLinkInstance.DELETE("/mailboxes/:remoteId", h.PoolLinkUnenroll)
+				// Cloud-managed mailboxes: consent on this deployment's OAuth app, brokered tokens.
+				poolLinkInstance.POST("/oauth/start", h.PoolLinkOAuthStart)
+				poolLinkInstance.POST("/oauth/finish", h.PoolLinkOAuthFinish)
+				poolLinkInstance.GET("/mailboxes/:remoteId/token", h.PoolLinkAccessToken)
+				poolLinkInstance.GET("/mailboxes/:remoteId/warmup-tokens/:token", h.PoolLinkVerifyWarmupToken)
+				poolLinkInstance.GET("/workspace-mailboxes", h.PoolLinkWorkspaceMailboxes)
+				poolLinkInstance.POST("/mailboxes/adopt", h.PoolLinkAdopt)
 			}
 
 			// Self-hosted side: Settings > Warmbly Cloud.
@@ -1140,6 +1150,10 @@ func Run(
 				cloudLink.DELETE("/mailboxes/:id/enroll", m.RequirePermission(models.PermManageEmails), h.CloudLinkUnenroll)
 				cloudLink.POST("/mailboxes/:id/pause", m.RequirePermission(models.PermManageEmails), h.CloudLinkPause)
 				cloudLink.POST("/mailboxes/:id/resume", m.RequirePermission(models.PermManageEmails), h.CloudLinkResume)
+				cloudLink.POST("/oauth/start", m.RequirePermission(models.PermManageEmails), h.CloudLinkOAuthStart)
+				cloudLink.POST("/oauth/finish", m.RequirePermission(models.PermManageEmails), h.CloudLinkOAuthFinish)
+				cloudLink.GET("/workspace-mailboxes", h.CloudLinkWorkspaceMailboxes)
+				cloudLink.POST("/workspace-mailboxes/:id/adopt", m.RequirePermission(models.PermManageEmails), h.CloudLinkAdopt)
 			}
 
 			subscriptions := jwtOnly.Group("/subscription")
