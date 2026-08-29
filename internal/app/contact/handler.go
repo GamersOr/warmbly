@@ -85,19 +85,27 @@ func (s *contactService) Search(ctx context.Context, orgID, cursor, category, li
 		return nil, err
 	}
 
-	// The lead_status filter is a single-campaign Leads-view feature: an invalid
-	// value or the wrong campaign cardinality is a client contract error (400),
-	// not a silently-ignored no-op.
-	if filters.LeadStatus != "" {
-		if !models.ValidLeadStatus(filters.LeadStatus) {
-			return nil, errx.New(errx.BadRequest, "invalid lead_status")
-		}
-		if len(filters.CampaignIDs) != 1 {
-			return nil, errx.New(errx.BadRequest, "lead_status requires exactly one campaign_id")
-		}
+	if err := validateLeadFilters(filters); err != nil {
+		return nil, err
 	}
 
 	return s.contactRepository.Search(ctx, orgID, categoryId, cursorId, filters, limitN)
+}
+
+// validateLeadFilters gates the single-campaign Leads-view filters: an unknown
+// value or the wrong campaign cardinality is a client contract error (400 with
+// a stable code), not a silently-ignored no-op.
+func validateLeadFilters(filters models.SearchContacts) *errx.Error {
+	if filters.LeadStatus != "" && !models.ValidLeadStatus(filters.LeadStatus) {
+		return errx.NewWithIdentifier(errx.BadRequest, "invalid_lead_status", "invalid lead_status")
+	}
+	if filters.Engagement != "" && !models.ValidLeadEngagement(filters.Engagement) {
+		return errx.NewWithIdentifier(errx.BadRequest, "invalid_engagement", "invalid engagement")
+	}
+	if (filters.LeadStatus != "" || filters.Engagement != "") && len(filters.CampaignIDs) != 1 {
+		return errx.NewWithIdentifier(errx.BadRequest, "lead_filter_requires_campaign", "lead_status and engagement require exactly one campaign_id")
+	}
+	return nil
 }
 
 func (s *contactService) SearchCounts(ctx context.Context, orgID string) (*models.ContactsCounts, *errx.Error) {

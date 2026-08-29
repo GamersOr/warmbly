@@ -561,6 +561,7 @@ func Run(
 				contacts.GET("/:id", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetContact)
 				contacts.GET("/:id/emails", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactEmails)
 				contacts.GET("/:id/timeline", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactTimeline)
+				contacts.GET("/:id/campaigns", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactCampaignStates)
 
 				// AI contact research (dedicated AI_RESEARCH scope; JWT callers by
 				// the matching contact permission). Batch queues and drains in the

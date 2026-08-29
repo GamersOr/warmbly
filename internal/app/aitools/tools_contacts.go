@@ -175,6 +175,7 @@ func (d Deps) addContact(ctx context.Context, inv Invocation, args json.RawMessa
 		Phone:        in.Phone,
 		Categories:   in.Categories,
 		CustomFields: in.CustomFields,
+		Source:       models.ContactSourceAIAssistant,
 	}})
 	if xerr != nil {
 		return "", fromErrx(xerr)

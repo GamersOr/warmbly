@@ -36,62 +36,10 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		}
 	}
 
-	// STEP 2: Resolve the campaign's sending mailboxes. Explicit strategy uses
-	// the campaign_senders pool (carrying per-sender rotation metadata); tags
-	// strategy keeps the existing tag-based resolution. An empty explicit pool
-	// falls back to tags so a misconfigured campaign still sends.
-	type senderMeta struct {
-		weight           int
-		rotationPosition int
-		lastSentAt       *time.Time
-		hasMeta          bool
-	}
-	accounts := []models.Email{}
-	senderMetaByID := map[uuid.UUID]senderMeta{}
-	seen := map[uuid.UUID]bool{}
-	// UNION of the explicit campaign_senders pool and the tag-resolved mailboxes
-	// (one dropdown picks both — they're no longer mutually exclusive). When the
-	// campaign selects NEITHER tags nor explicit accounts, it sends from ALL of
-	// the active mailboxes in the campaign's tenant ("all").
-	//
-	// Tenancy is the campaign's organization, never its owner: a user who belongs
-	// to two organizations must not have organization A's campaign pick up an
-	// organization B mailbox and burn B's reputation, caps and warmup state. A
-	// campaign with no organization resolves to no mailboxes, the same way the
-	// campaign task halts it rather than sending unchecked.
-	scope := repository.NewAccountScope(campaign.OrganizationID)
-	senders, serr := s.emailRepo.GetByCampaignSenders(ctx, scope, campaignID)
-	if serr != nil {
-		return time.Time{}, nil, uuid.Nil, serr
-	}
-	for _, snd := range senders {
-		accounts = append(accounts, snd.Account)
-		seen[snd.Account.ID] = true
-		senderMetaByID[snd.Account.ID] = senderMeta{
-			weight:           snd.Weight,
-			rotationPosition: snd.RotationPosition,
-			lastSentAt:       snd.LastSentAt,
-			hasMeta:          true,
-		}
-	}
-	if len(campaign.EmailTags) > 0 {
-		tagAccounts, terr := s.emailRepo.GetByTags(ctx, scope, campaign.EmailTags)
-		if terr != nil {
-			return time.Time{}, nil, uuid.Nil, terr
-		}
-		for _, ta := range tagAccounts {
-			if !seen[ta.ID] {
-				accounts = append(accounts, ta)
-				seen[ta.ID] = true
-			}
-		}
-	}
-	if len(senders) == 0 && len(campaign.EmailTags) == 0 {
-		allAccts, aerr := s.emailRepo.GetAllActiveInScope(ctx, scope)
-		if aerr != nil {
-			return time.Time{}, nil, uuid.Nil, aerr
-		}
-		accounts = allAccts
+	// STEP 2: Resolve the campaign's sending mailboxes.
+	accounts, senderMetaByID, err := s.campaignSenders(ctx, campaign)
+	if err != nil {
+		return time.Time{}, nil, uuid.Nil, err
 	}
 
 	if len(accounts) == 0 {
@@ -172,6 +120,85 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// no branches. A step is sent only if the flow reaches it; STOP/end and
 	// already-sent loops drop the contact in the finder. Conditions are evaluated
 	// at schedule time (a known, accepted race vs. last-moment engagement).
+	return s.placeCampaignSend(ctx, campaign, accounts, senderMetaByID, nextPair, false)
+}
+
+// senderMeta is a mailbox's campaign_senders rotation metadata.
+type senderMeta struct {
+	weight           int
+	rotationPosition int
+	lastSentAt       *time.Time
+	hasMeta          bool
+}
+
+// campaignSenders resolves the campaign's sending mailboxes. Explicit strategy
+// uses the campaign_senders pool (carrying per-sender rotation metadata); tags
+// strategy keeps the existing tag-based resolution. An empty explicit pool
+// falls back to tags so a misconfigured campaign still sends.
+func (s *schedulerService) campaignSenders(ctx context.Context, campaign *models.Campaign) ([]models.Email, map[uuid.UUID]senderMeta, error) {
+	campaignID := campaign.ID
+	accounts := []models.Email{}
+	senderMetaByID := map[uuid.UUID]senderMeta{}
+	seen := map[uuid.UUID]bool{}
+	// UNION of the explicit campaign_senders pool and the tag-resolved mailboxes
+	// (one dropdown picks both — they're no longer mutually exclusive). When the
+	// campaign selects NEITHER tags nor explicit accounts, it sends from ALL of
+	// the active mailboxes in the campaign's tenant ("all").
+	//
+	// Tenancy is the campaign's organization, never its owner: a user who belongs
+	// to two organizations must not have organization A's campaign pick up an
+	// organization B mailbox and burn B's reputation, caps and warmup state. A
+	// campaign with no organization resolves to no mailboxes, the same way the
+	// campaign task halts it rather than sending unchecked.
+	scope := repository.NewAccountScope(campaign.OrganizationID)
+	senders, serr := s.emailRepo.GetByCampaignSenders(ctx, scope, campaignID)
+	if serr != nil {
+		return nil, nil, serr
+	}
+	for _, snd := range senders {
+		accounts = append(accounts, snd.Account)
+		seen[snd.Account.ID] = true
+		senderMetaByID[snd.Account.ID] = senderMeta{
+			weight:           snd.Weight,
+			rotationPosition: snd.RotationPosition,
+			lastSentAt:       snd.LastSentAt,
+			hasMeta:          true,
+		}
+	}
+	if len(campaign.EmailTags) > 0 {
+		tagAccounts, terr := s.emailRepo.GetByTags(ctx, scope, campaign.EmailTags)
+		if terr != nil {
+			return nil, nil, terr
+		}
+		for _, ta := range tagAccounts {
+			if !seen[ta.ID] {
+				accounts = append(accounts, ta)
+				seen[ta.ID] = true
+			}
+		}
+	}
+	if len(senders) == 0 && len(campaign.EmailTags) == 0 {
+		allAccts, aerr := s.emailRepo.GetAllActiveInScope(ctx, scope)
+		if aerr != nil {
+			return nil, nil, aerr
+		}
+		accounts = allAccts
+	}
+	return accounts, senderMetaByID, nil
+}
+
+// placeCampaignSend runs every hard constraint and pacing rule on one
+// (contact, step) pair against the campaign's mailbox pool and returns the
+// slot, exactly as the send path uses it. preview makes it read-only (no
+// decision logs, no cached writes) so the contact drawer can ask "when would
+// this step go" through the same rules the scheduler applies.
+func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *models.Campaign, accounts []models.Email, senderMetaByID map[uuid.UUID]senderMeta, nextPair *repository.ContactSequencePair, preview bool) (time.Time, *repository.ContactSequencePair, uuid.UUID, error) {
+	campaignID := campaign.ID
+	logDecision := func(eventType, message string, metadata map[string]interface{}) {
+		if !preview {
+			s.logCampaignDecision(ctx, campaignID, eventType, message, metadata)
+		}
+	}
 
 	// STEP 3.5: Resolve the recipient ESP/provider for ESP matching. Cheap:
 	// prefer the cached contact.esp_provider, else derive from the domain
@@ -195,7 +222,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 		} else {
 			recipientProvider = providerForEmailDomain(recipientContact.Email)
 			// Opportunistically cache the derived provider (best-effort).
-			if recipientProvider != "" {
+			if recipientProvider != "" && !preview {
 				_ = s.contactRepo.SetContactESP(ctx, recipientContact.ID, recipientProvider)
 			}
 		}
@@ -259,7 +286,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// manual send gate.
 	riskState := s.orgRiskState(ctx, campaign.OrganizationID)
 	if riskState.BlocksSending() {
-		s.logCampaignDecision(ctx, campaignID, "org_suspended",
+		logDecision("org_suspended",
 			"Sending is paused for this workspace while it is under review", nil)
 		return s.deferToNextDay(campaign), nil, accounts[0].ID, ErrCampaignDeferred
 	}
@@ -479,7 +506,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// every few minutes for a condition the mailbox badge, the Advisor card and
 	// the notification already cover.
 	if len(candidates) == 0 && authGated == len(accounts) {
-		s.logCampaignDecision(ctx, campaignID, "domain_auth_gated",
+		logDecision("domain_auth_gated",
 			"No mailbox can send: every sending domain fails SPF/DMARC authentication",
 			map[string]interface{}{"gated_mailboxes": authGated, "pool_size": len(accounts)})
 		return time.Time{}, nil, uuid.Nil, ErrDomainAuthFailing
@@ -488,7 +515,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// Every mailbox is out of cold rotation. Say so rather than letting the
 	// campaign look stalled for no visible reason; they return on their own.
 	if len(candidates) == 0 && lifecycleGated == len(accounts) {
-		s.logCampaignDecision(ctx, campaignID, "mailboxes_resting",
+		logDecision("mailboxes_resting",
 			"No mailbox is in cold rotation: all are resting or held in reserve",
 			map[string]interface{}{"resting_mailboxes": lifecycleGated, "pool_size": len(accounts)})
 		return s.deferToNextDay(campaign), nil, accounts[0].ID, ErrCampaignDeferred
@@ -511,7 +538,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 			if len(matching) == 0 {
 				// No matching mailbox under budget today: defer to the next slot
 				// rather than complete or send cross-provider.
-				s.logCampaignDecision(ctx, campaignID, "provider_match_deferred",
+				logDecision("provider_match_deferred",
 					"No same-provider mailbox available; deferring to next slot",
 					map[string]interface{}{"recipient_provider": recipientProvider})
 				// Deferral, not a send: nil pair + sentinel so the caller reschedules
@@ -570,7 +597,7 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 			// ESP-strict with no matching mailbox at all: defer rather than
 			// complete or send cross-provider.
 			if campaign.ESPMatchMode == "strict" && recipientProvider != "" {
-				s.logCampaignDecision(ctx, campaignID, "provider_match_deferred",
+				logDecision("provider_match_deferred",
 					"No same-provider mailbox available tomorrow; deferring",
 					map[string]interface{}{"recipient_provider": recipientProvider})
 				// Deferral, not a send (see above).

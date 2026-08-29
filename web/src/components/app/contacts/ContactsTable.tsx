@@ -22,7 +22,9 @@ import {
     DownloadIcon,
     Loader2Icon,
     MailIcon,
+    MailOpenIcon,
     MoreHorizontalIcon,
+    MousePointerClickIcon,
     PhoneIcon,
     PlusIcon,
     RefreshCcwIcon,
@@ -54,7 +56,7 @@ import ContactFilters from "./ContactFilters";
 import ContactEdit from "./ContactEdit";
 import type { ContactSlideTab } from "./contact-edit/tabs";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
-import type { ContactCampaignProgress, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
+import type { ContactCampaignProgress, LeadEngagement, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
 import type { CampaignLeadCounts } from "@/lib/api/models/app/contacts/SearchContactsResult";
 import ContactsEditBulk from "./ContactsEditBulk";
 import { NewContactDialog } from "./NewContactDialog";
@@ -246,6 +248,15 @@ export default function ContactsTable({
     }
 
     const embedded = !!current_campaign;
+    // Leads-view scope chips write straight into the search request, so the
+    // rows, the total and pagination all come from the server for that scope.
+    const leadFilterActive = !!searchProps.lead_status || !!searchProps.engagement;
+    const setLeadStatus = (v: LeadStatus | undefined) =>
+        setSearchProps((s) => ({ ...s, lead_status: s.lead_status === v ? undefined : v }));
+    const setEngagement = (v: LeadEngagement | undefined) =>
+        setSearchProps((s) => ({ ...s, engagement: s.engagement === v ? undefined : v }));
+    const clearLeadFilters = () =>
+        setSearchProps((s) => ({ ...s, lead_status: undefined, engagement: undefined }));
     const tableNode = (
         <ContactsTableBody
             embedded={embedded}
@@ -271,21 +282,29 @@ export default function ContactsTable({
             emptyTitle={
                 subFilter !== "all"
                     ? `No ${subFilter} contacts`
-                    : current_campaign
-                        ? "No contacts in this campaign"
-                        : "No contacts yet"
+                    : leadFilterActive
+                        ? "No leads match"
+                        : current_campaign
+                            ? "No contacts in this campaign"
+                            : "No contacts yet"
             }
             emptyBody={
                 subFilter !== "all"
                     ? "Switch to All to see the full list."
-                    : current_campaign
-                        ? "Pick people from your contacts, import a file, or add one by hand."
-                        : "Add or upload contacts to get started."
+                    : leadFilterActive
+                        ? "Clear the status or engagement filter to see every lead."
+                        : current_campaign
+                            ? "Pick people from your contacts, import a file, or add one by hand."
+                            : "Add or upload contacts to get started."
             }
             emptyCta={
                 subFilter !== "all" ? (
                     <TopbarAction variant="ghost" onClick={() => setSubFilter("all")}>
                         Show all
+                    </TopbarAction>
+                ) : leadFilterActive ? (
+                    <TopbarAction variant="ghost" onClick={clearLeadFilters}>
+                        Show all leads
                     </TopbarAction>
                 ) : current_campaign ? (
                     <div className="flex items-center justify-center gap-1.5">
@@ -368,6 +387,10 @@ export default function ContactsTable({
                     total={total}
                     hasMore={!!contactsData.hasNextPage}
                     serverCounts={contactsData.data?.pages[0]?.lead_counts}
+                    leadStatus={searchProps.lead_status}
+                    engagement={searchProps.engagement}
+                    onLeadStatus={setLeadStatus}
+                    onEngagement={setEngagement}
                 />
                 {tableNode}
                 <SelectionBar
@@ -751,6 +774,13 @@ function ContactsTableBody({
                         <Th className="hidden md:table-cell">Company</Th>
                         <Th className="hidden lg:table-cell">Phone</Th>
                         <Th className="w-auto md:w-32">{embedded ? "Progress" : "Status"}</Th>
+                        {embedded && (
+                            <>
+                                <Th className="w-16 hidden md:table-cell">Opened</Th>
+                                <Th className="w-16 hidden md:table-cell">Clicked</Th>
+                                <Th className="w-16 hidden md:table-cell">Replied</Th>
+                            </>
+                        )}
                         {embedded ? (
                             <Th className="w-28 hidden md:table-cell">Current step</Th>
                         ) : (
@@ -863,6 +893,29 @@ function ContactsTableBody({
                                         <StatusPill subscribed={c.subscribed} />
                                     )}
                                 </td>
+                                {embedded && (
+                                    <>
+                                        <EngagementCell
+                                            n={lead?.opened ?? 0}
+                                            sent={(lead?.sent ?? 0) > 0}
+                                            Icon={MailOpenIcon}
+                                            label="opened"
+                                            auto={(lead?.machine_opened ?? 0) > 0}
+                                        />
+                                        <EngagementCell
+                                            n={lead?.clicked ?? 0}
+                                            sent={(lead?.sent ?? 0) > 0}
+                                            Icon={MousePointerClickIcon}
+                                            label="clicked"
+                                        />
+                                        <EngagementCell
+                                            n={lead?.replied ?? 0}
+                                            sent={(lead?.sent ?? 0) > 0}
+                                            Icon={CornerUpLeftIcon}
+                                            label="replied"
+                                        />
+                                    </>
+                                )}
                                 {embedded ? (
                                     <td className="px-3 hidden md:table-cell">
                                         {lead?.current_step ? (
@@ -978,6 +1031,49 @@ function StatusPill({ subscribed }: { subscribed: boolean }) {
     );
 }
 
+// One engagement column of the Leads view. A count of steps engaged, a dash
+// for a lead that was sent but never did, and blank for a lead never emailed.
+// A machine-only open (Apple MPP prefetch) reads "auto" so it is not mistaken
+// for a person.
+function EngagementCell({
+    n,
+    sent,
+    Icon,
+    label,
+    auto = false,
+}: {
+    n: number;
+    sent: boolean;
+    Icon: typeof MailOpenIcon;
+    label: string;
+    auto?: boolean;
+}) {
+    return (
+        <td className="px-3 hidden md:table-cell">
+            {n > 0 ? (
+                <span
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 tabular-nums"
+                    title={`${label} ${n} ${n === 1 ? "email" : "emails"}`}
+                >
+                    <Icon className="w-3 h-3 shrink-0" />
+                    {n}
+                </span>
+            ) : auto ? (
+                <span
+                    className="text-[10.5px] text-slate-400"
+                    title="Opened by a mail client automatically, not by a person"
+                >
+                    auto
+                </span>
+            ) : sent ? (
+                <span className="text-slate-300 text-[11px]" aria-label={`not ${label}`}>
+                    —
+                </span>
+            ) : null}
+        </td>
+    );
+}
+
 // Per-lead processing state inside a campaign (campaign Leads view only).
 // `active` renders the animated dot-grid loader (the same "processing" motif
 // used across the app); every other state is a distinct lucide icon.
@@ -1035,11 +1131,19 @@ function LeadProgressStrip({
     total,
     hasMore,
     serverCounts,
+    leadStatus,
+    engagement,
+    onLeadStatus,
+    onEngagement,
 }: {
     contacts: { campaign_lead?: ContactCampaignProgress | null }[];
     total: number;
     hasMore: boolean;
     serverCounts?: CampaignLeadCounts;
+    leadStatus?: LeadStatus;
+    engagement?: LeadEngagement;
+    onLeadStatus: (s: LeadStatus) => void;
+    onEngagement: (e: LeadEngagement) => void;
 }) {
     const counts = React.useMemo(() => {
         if (serverCounts) {
@@ -1069,9 +1173,31 @@ function LeadProgressStrip({
     }, [contacts, serverCounts]);
 
     const loaded = contacts.length;
-    if (loaded === 0) return null;
+    // Stay mounted while a chip filter is active, or an empty scope would
+    // take the only control that clears it off the screen.
+    if (loaded === 0 && !leadStatus && !engagement && !(serverCounts && serverCounts.total > 0)) return null;
     // The bar's segments are shares of whatever the counts cover.
     const barTotal = serverCounts ? Math.max(serverCounts.total, 1) : loaded;
+    const status = (key: LeadStatus) => ({
+        active: leadStatus === key,
+        onClick: () => onLeadStatus(key),
+    });
+    const engaged = (key: LeadEngagement) => ({
+        active: engagement === key,
+        onClick: () => onEngagement(key),
+    });
+    // Engagement totals only exist server-side; the fallback row count would
+    // lie past one page, so the chips carry no number until they arrive.
+    const eng = serverCounts
+        ? {
+              opened: serverCounts.opened,
+              notOpened: Math.max(serverCounts.contacted - serverCounts.opened, 0),
+              clicked: serverCounts.clicked,
+              notClicked: Math.max(serverCounts.contacted - serverCounts.clicked, 0),
+              replied: serverCounts.replied_any,
+              notReplied: Math.max(serverCounts.contacted - serverCounts.replied_any, 0),
+          }
+        : undefined;
 
     const segs: { key: LeadStatus; color: string }[] = [
         { key: "active", color: "bg-sky-500" },
@@ -1099,17 +1225,26 @@ function LeadProgressStrip({
                     )}
                 </div>
             </div>
-            <div className="flex items-center gap-3 text-[11px] flex-wrap">
-                <StripChip dot="bg-sky-500" label="Processing" n={counts.active} loader={counts.active > 0} />
-                <StripChip dot="bg-indigo-500" label="Done" n={counts.completed} />
-                <StripChip dot="bg-emerald-500" label="Replied" n={counts.replied} />
-                <StripChip dot="bg-slate-300" label="Queued" n={counts.pending} />
-                <StripChip dot="bg-rose-400" label="Bounced" n={counts.bounced} />
-                {counts.failed > 0 && <StripChip dot="bg-rose-500" label="Failed" n={counts.failed} />}
-                {counts.undeliverable > 0 && (
-                    <StripChip dot="bg-amber-500" label="Undeliverable" n={counts.undeliverable} />
+            <div className="flex items-center gap-2 text-[11px] flex-wrap">
+                <StripChip dot="bg-sky-500" label="Processing" n={counts.active} loader={counts.active > 0} {...status("active")} />
+                <StripChip dot="bg-indigo-500" label="Done" n={counts.completed} {...status("completed")} />
+                <StripChip dot="bg-emerald-500" label="Replied" n={counts.replied} {...status("replied")} />
+                <StripChip dot="bg-slate-300" label="Queued" n={counts.pending} {...status("pending")} />
+                <StripChip dot="bg-rose-400" label="Bounced" n={counts.bounced} {...status("bounced")} />
+                {(counts.failed > 0 || leadStatus === "failed") && (
+                    <StripChip dot="bg-rose-500" label="Failed" n={counts.failed} {...status("failed")} />
                 )}
-                <StripChip dot="bg-slate-300" label="Unsub" n={counts.unsubscribed} />
+                {(counts.undeliverable > 0 || leadStatus === "undeliverable") && (
+                    <StripChip dot="bg-amber-500" label="Undeliverable" n={counts.undeliverable} {...status("undeliverable")} />
+                )}
+                <StripChip dot="bg-slate-300" label="Unsub" n={counts.unsubscribed} {...status("unsubscribed")} />
+                <span className="h-4 w-px bg-slate-200 mx-0.5" aria-hidden />
+                <StripChip Icon={MailOpenIcon} label="Opened" n={eng?.opened} {...engaged("opened")} />
+                <StripChip Icon={MailOpenIcon} label="Not opened" n={eng?.notOpened} {...engaged("not_opened")} />
+                <StripChip Icon={MousePointerClickIcon} label="Clicked" n={eng?.clicked} {...engaged("clicked")} />
+                <StripChip Icon={MousePointerClickIcon} label="Not clicked" n={eng?.notClicked} {...engaged("not_clicked")} />
+                <StripChip Icon={CornerUpLeftIcon} label="Replied" n={eng?.replied} {...engaged("replied")} />
+                <StripChip Icon={CornerUpLeftIcon} label="Not replied" n={eng?.notReplied} {...engaged("not_replied")} />
             </div>
             <div className="ml-auto flex items-center gap-2 text-[10.5px] text-slate-400 tabular-nums">
                 {counts.active > 0 && (
@@ -1129,27 +1264,49 @@ function LeadProgressStrip({
     );
 }
 
+// A scope chip: click toggles that scope as the server filter. Status chips
+// carry a colour dot, engagement chips a lucide icon; `n` is omitted while the
+// server total is not known yet.
 function StripChip({
     dot,
+    Icon,
     label,
     n,
     loader = false,
+    active = false,
+    onClick,
 }: {
-    dot: string;
+    dot?: string;
+    Icon?: typeof MailOpenIcon;
     label: string;
-    n: number;
+    n?: number;
     loader?: boolean;
+    active?: boolean;
+    onClick: () => void;
 }) {
     return (
-        <span className="inline-flex items-center gap-1.5">
+        <button
+            type="button"
+            aria-pressed={active}
+            onClick={onClick}
+            className={`inline-flex items-center gap-1.5 h-6 px-1.5 -mx-0.5 rounded-md border transition-colors ${
+                active
+                    ? "border-sky-200 bg-sky-50 text-sky-700"
+                    : "border-transparent hover:bg-slate-100 text-slate-500"
+            }`}
+        >
             {loader ? (
                 <span className="campaign-grid text-sky-600" aria-hidden />
+            ) : Icon ? (
+                <Icon className={`w-3 h-3 ${active ? "text-sky-600" : "text-slate-400"}`} />
             ) : (
                 <span className={`size-1.5 rounded-full ${dot}`} />
             )}
-            <span className="text-slate-500">{label}</span>
-            <span className="font-mono tabular-nums text-slate-900">{n}</span>
-        </span>
+            <span className={active ? "text-sky-700" : "text-slate-500"}>{label}</span>
+            {n !== undefined && (
+                <span className={`font-mono tabular-nums ${active ? "text-sky-800" : "text-slate-900"}`}>{n}</span>
+            )}
+        </button>
     );
 }
 

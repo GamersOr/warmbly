@@ -11,6 +11,14 @@ export type ContactTimelineEventType =
     | "meeting_booked"
     | "meeting_rescheduled"
     | "meeting_canceled"
+    // Lifecycle (from contact_activities). contact_created carries the
+    // first-touch source, which is how "imported" and "created via API"
+    // are told apart.
+    | "contact_created"
+    | "campaign_added"
+    | "campaign_removed"
+    | "category_added"
+    | "category_removed"
     | "page_hit";
 
 // A page view from the website tracking snippet (page_hit).
@@ -70,6 +78,11 @@ export default interface ContactTimelineEvent {
     scheduled_for?: string | null;
     join_url?: string | null;
     meeting_state?: string | null;
+
+    // Lifecycle events.
+    category_id?: string | null;
+    category_title?: string | null;
+    source_detail?: string | null;
 
     user_id?: string | null;
 

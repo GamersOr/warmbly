@@ -8,4 +8,8 @@ export default interface AddContact {
     categories?: string[];
 
     custom_fields: Record<string, string>;
+
+    // First-touch source hint. The dashboard may say "manual" or "campaign"
+    // (added from a campaign's Leads tab); the server decides everything else.
+    source?: "manual" | "campaign";
 }

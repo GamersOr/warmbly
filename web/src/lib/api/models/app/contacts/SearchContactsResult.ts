@@ -33,6 +33,12 @@ export interface CampaignLeadCounts {
     unsubscribed: number;
     // Leads the campaign will never send to: address verification refused them.
     undeliverable: number;
+    // Engagement totals matching the `engagement` filter: leads sent at least
+    // one step, and of those the ones with a human open, click, or reply.
+    contacted: number;
+    opened: number;
+    clicked: number;
+    replied_any: number;
 }
 
 export default interface SearchContactsResult {

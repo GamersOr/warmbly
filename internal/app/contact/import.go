@@ -169,6 +169,11 @@ func (s *contactService) ImportCommit(
 	if perr != nil {
 		return nil, errx.ErrUuid
 	}
+	// A plain file import unless the caller (the Google Sheets sync) says
+	// otherwise; the file name is the detail a user recognises.
+	if opts.Source == "" {
+		opts.Source, opts.SourceDetail = models.ContactSourceImport, filename
+	}
 
 	dedup := opts.Dedup
 	switch dedup {
@@ -428,6 +433,9 @@ func (s *contactService) ImportCommit(
 			end = len(toInsert)
 		}
 		chunk := toInsert[start:end]
+		for i := range chunk {
+			chunk[i].Source, chunk[i].SourceDetail = opts.Source, opts.SourceDetail
+		}
 		inserted, xerr := s.Add(ctx, userID, orgID, chunk)
 		if xerr != nil {
 			// Per-row reasons are easier to act on than a "batch

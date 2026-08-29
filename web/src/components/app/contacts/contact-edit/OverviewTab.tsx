@@ -19,6 +19,7 @@ import {
 import type ContactDetail from "@/lib/api/models/app/contacts/ContactDetail";
 import type Contact from "@/lib/api/models/app/contacts/Contact";
 import { fmtAbsolute, fmtRelative } from "./format";
+import { sourceLabel } from "./ActivityTab";
 
 export default function OverviewTab({
     contact,
@@ -177,6 +178,25 @@ export default function OverviewTab({
                     />
                 </div>
             </Section>
+
+            {detail && (
+                <Section title="Source">
+                    <div className="rounded-md border border-slate-200 bg-white overflow-hidden">
+                        <ProfileRow
+                            label="Came from"
+                            value={
+                                detail.source_detail
+                                    ? `${sourceLabel(detail.source)} · ${detail.source_detail}`
+                                    : sourceLabel(detail.source)
+                            }
+                        />
+                        <ProfileRow
+                            label="First seen"
+                            value={fmtAbsolute(detail.first_seen_at)}
+                        />
+                    </div>
+                </Section>
+            )}
 
             {Object.keys(contact.custom_fields || {}).length > 0 && (
                 <Section title="Custom fields">
