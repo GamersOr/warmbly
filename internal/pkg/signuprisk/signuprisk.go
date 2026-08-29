@@ -17,10 +17,39 @@ type Result struct {
 	Score int
 	// Reasons are the findings, for the evidence record and admin review.
 	Reasons []string
+	// Findings are the same reasons with their own weight and class, so a
+	// caller can file them separately rather than fusing one aggregate score
+	// under one class.
+	Findings []Finding
 	// Disposable is called out separately because it is the single strongest
 	// predictor: a throwaway address correlates with abuse far more tightly
 	// than any of the softer signals here.
 	Disposable bool
+}
+
+// Finding is one weighted reason. Substantive marks a finding about the account
+// itself; the rest describe how the signup looked, which ordinary customers
+// also do.
+type Finding struct {
+	Reason      string
+	Weight      int
+	Substantive bool
+}
+
+// Substantive totals the findings that are about the account itself.
+func (r Result) Substantive() []Finding { return r.pick(true) }
+
+// Circumstantial totals the findings that only describe how the signup looked.
+func (r Result) Circumstantial() []Finding { return r.pick(false) }
+
+func (r Result) pick(substantive bool) []Finding {
+	out := make([]Finding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		if f.Substantive == substantive {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Weights. Deliberately small individually: this feeds a fused org score where
@@ -68,31 +97,32 @@ func IsDisposable(email string) bool {
 // Score assesses one signup.
 func Score(email, ipaddr string) Result {
 	res := Result{Reasons: []string{}}
+	add := func(reason string, weight int, substantive bool) {
+		res.Findings = append(res.Findings, Finding{Reason: reason, Weight: weight, Substantive: substantive})
+		res.Reasons = append(res.Reasons, reason)
+		res.Score += weight
+	}
 
 	domain := domainOf(email)
 	switch {
 	case domain == "":
-		res.Score += weightNoTLD
-		res.Reasons = append(res.Reasons, "signup address has no domain")
+		add("signup address has no domain", weightNoTLD, false)
 	case disposableDomains[domain]:
+		// The only finding here about the account rather than its appearance.
 		res.Disposable = true
-		res.Score += weightDisposable
-		res.Reasons = append(res.Reasons, "signup used a disposable email domain")
+		add("signup used a disposable email domain", weightDisposable, true)
 	case !strings.Contains(domain, "."):
-		res.Score += weightNoTLD
-		res.Reasons = append(res.Reasons, "signup domain has no public suffix")
+		add("signup domain has no public suffix", weightNoTLD, false)
 	}
 
 	// A plus-address at a free provider is how one person opens many accounts.
 	// Weak on its own: plenty of people tag their real mail this way.
 	if local := localOf(email); strings.Contains(local, "+") && freeProviders[domain] {
-		res.Score += weightPlusAddress
-		res.Reasons = append(res.Reasons, "signup used a tagged address at a free provider")
+		add("signup used a tagged address at a free provider", weightPlusAddress, false)
 	}
 
 	if strings.TrimSpace(ipaddr) == "" {
-		res.Score += weightMissingIP
-		res.Reasons = append(res.Reasons, "signup arrived with no source address")
+		add("signup arrived with no source address", weightMissingIP, false)
 	}
 
 	if res.Score > 100 {
