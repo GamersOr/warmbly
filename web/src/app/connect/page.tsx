@@ -218,7 +218,7 @@ function CodeStep({ code, setCode, loading, error, onRetry }: { code: string; se
             </div>
 
             <div className="mt-8 flex justify-center">
-                <InputOTP maxLength={CODE_LENGTH} value={code} onChange={(v) => setCode(clean(v))} pattern={REGEXP_ONLY_DIGITS_AND_CHARS} autoFocus containerClassName="gap-1.5 sm:gap-2" disabled={loading}>
+                <InputOTP maxLength={CODE_LENGTH} value={code} onChange={(v) => setCode(clean(v))} pattern={REGEXP_ONLY_DIGITS_AND_CHARS} pasteTransformer={clean} autoFocus containerClassName="gap-1.5 sm:gap-2" disabled={loading}>
                     <InputOTPGroup className="gap-1.5 sm:gap-2">
                         {[0, 1, 2, 3].map((i) => (
                             <Slot key={i} index={i} />
