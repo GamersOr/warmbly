@@ -1265,7 +1265,7 @@ func (r *campaignRepository) GetSequenceByID(ctx context.Context, sequenceID uui
 // GetSequencesByCampaignID retrieves all sequences for a campaign ordered by position
 func (r *campaignRepository) GetSequencesByCampaignID(ctx context.Context, campaignID uuid.UUID) ([]models.Sequence, error) {
 	query := `
-		SELECT id, name, subject, body_plain, body_html, body_sync, body_code, wait_after, position, updated_at, created_at
+		SELECT id, name, subject, body_plain, body_html, body_sync, body_code, wait_after, position, kind, updated_at, created_at
 		FROM sequences
 		WHERE campaign_id = $1
 		ORDER BY position ASC, created_at ASC
@@ -1283,7 +1283,7 @@ func (r *campaignRepository) GetSequencesByCampaignID(ctx context.Context, campa
 		var seq models.Sequence
 		err := rows.Scan(
 			&seq.ID, &seq.Name, &seq.Subject, &seq.BodyPlain, &seq.BodyHTML,
-			&seq.BodySync, &seq.BodyCode, &seq.WaitAfter, &seq.Position, &seq.UpdatedAt, &seq.CreatedAt,
+			&seq.BodySync, &seq.BodyCode, &seq.WaitAfter, &seq.Position, &seq.Kind, &seq.UpdatedAt, &seq.CreatedAt,
 		)
 		if err != nil {
 			db.CaptureError(err, "", nil, "scan")

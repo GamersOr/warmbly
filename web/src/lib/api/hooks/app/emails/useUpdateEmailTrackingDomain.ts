@@ -1,7 +1,7 @@
 import updateEmailTrackingDomain from "@/lib/api/client/app/emails/updateEmailTrackingDomain";
-import type GetEmails from "@/lib/api/models/app/emails/GetEmails";
 import type Inbox from "@/lib/api/models/app/emails/Inbox";
-import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import patchEmailLists from "./patchEmailLists";
 
 export default function useUpdateEmailTrackingDomain(id: string) {
     const queryClient = useQueryClient();
@@ -9,26 +9,18 @@ export default function useUpdateEmailTrackingDomain(id: string) {
     return useMutation({
         mutationFn: (tracking_domain: string) => updateEmailTrackingDomain(id, tracking_domain),
         onSuccess: (data) => {
-            const allLists = queryClient.getQueriesData<InfiniteData<GetEmails>>({
-                queryKey: ["emails", "list"],
-            });
-
-            for (const [key, oldData] of allLists) {
-                if (!oldData) continue;
-
-                queryClient.setQueryData(key, {
-                    ...oldData,
-                    pages: oldData.pages.map((page) => ({
-                        ...page,
-                        data: page.data.map((c) => c.id === id ? {
-                            ...c,
-                            tracking_domain: data.tracking_domain,
-                            tracking_domain_verified: data.tracking_domain_verified,
-                            tracking_domain_verified_at: data.tracking_domain_verified_at,
-                        } : c),
-                    })),
-                });
-            }
+            patchEmailLists(queryClient, (rows) =>
+                rows.map((c) =>
+                    c.id === id
+                        ? {
+                              ...c,
+                              tracking_domain: data.tracking_domain,
+                              tracking_domain_verified: data.tracking_domain_verified,
+                              tracking_domain_verified_at: data.tracking_domain_verified_at,
+                          }
+                        : c,
+                ),
+            );
 
             // The card reads its target and diagnostic from this query.
             queryClient.setQueryData(["emails", id, "tracking-domain"], data);

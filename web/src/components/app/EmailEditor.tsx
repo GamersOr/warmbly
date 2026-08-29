@@ -7,7 +7,7 @@ import {
     RiText,
     RiCodeView,
 } from "@remixicon/react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { TextInput } from "@/components/ui/field";
 import {
@@ -53,6 +53,11 @@ export default function EmailEditor({
 }: EmailEditorProps) {
     const editorRef = useRef<HTMLDivElement>(null);
     const [activeTab, setActiveTab] = useState<"html" | "plain">("html");
+    // Only rewrite innerHTML when the prop diverges from the DOM; rewriting it every render resets the caret.
+    useEffect(() => {
+        const el = editorRef.current;
+        if (el && el.innerHTML !== htmlText) el.innerHTML = htmlText;
+    }, [htmlText, activeTab, code]);
     const [urlPopover, setUrlPopover] = useState<"link" | "image" | null>(null);
     const [url, setUrl] = useState("");
     // The contentEditable selection is lost as soon as the popover's text
@@ -263,9 +268,9 @@ export default function EmailEditor({
                     ref={editorRef}
                     id={id}
                     contentEditable
+                    suppressContentEditableWarning
                     onInput={(e) => commitHtml(e.currentTarget.innerHTML)}
                     className="min-h-[120px] px-3 py-2.5 text-[13px] text-slate-800 outline-none prose prose-sm max-w-none"
-                    dangerouslySetInnerHTML={{ __html: htmlText }}
                 />
             )}
         </div>

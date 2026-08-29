@@ -216,8 +216,8 @@ func (s *emailService) resolveTrackingDomain(ctx context.Context, domain string)
 
 // CheckDomainAuth runs a live SPF/DKIM/DMARC lookup for a mailbox's sending
 // domain and reports it without writing anything.
-func (s *emailService) CheckDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
-	_, res, xerr := s.resolveDomainAuth(ctx, userID, emailAccountID)
+func (s *emailService) CheckDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
+	_, res, xerr := s.resolveDomainAuth(ctx, orgID, emailAccountID)
 	return res, xerr
 }
 
@@ -229,8 +229,8 @@ func (s *emailService) CheckDomainAuth(ctx context.Context, userID, emailAccount
 // their DNS would keep being blocked until the background sweep next reached
 // their domain, which can be a day away, and "I fixed it and nothing happened"
 // is how a correct gate still becomes a support incident.
-func (s *emailService) RefreshDomainAuth(ctx context.Context, userID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
-	domain, res, xerr := s.resolveDomainAuth(ctx, userID, emailAccountID)
+func (s *emailService) RefreshDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error) {
+	domain, res, xerr := s.resolveDomainAuth(ctx, orgID, emailAccountID)
 	if xerr != nil {
 		return nil, xerr
 	}
@@ -247,11 +247,10 @@ func (s *emailService) RefreshDomainAuth(ctx context.Context, userID, emailAccou
 	return res, nil
 }
 
-// resolveDomainAuth loads the caller's mailbox and runs the DNS lookup for its
-// sending domain, returning the domain alongside the result so the persisting
-// caller does not re-derive it.
-func (s *emailService) resolveDomainAuth(ctx context.Context, userID, emailAccountID string) (string, *dnsauth.Result, *errx.Error) {
-	account, xerr := s.emailRepository.Get(ctx, userID, emailAccountID)
+// resolveDomainAuth loads the organization's mailbox (Get is org-scoped, never user-scoped)
+// and runs the DNS lookup, returning the domain so the persisting caller does not re-derive it.
+func (s *emailService) resolveDomainAuth(ctx context.Context, orgID, emailAccountID string) (string, *dnsauth.Result, *errx.Error) {
+	account, xerr := s.emailRepository.Get(ctx, orgID, emailAccountID)
 	if xerr != nil {
 		return "", nil, xerr
 	}
@@ -359,17 +358,35 @@ func (s *emailService) canUseWarmupPool(ctx context.Context, account *models.Ema
 	return err == nil && canWarmup
 }
 
+// orgSuspendedOrRestricted reports whether the workspace's posture bars the
+// paid warmup pool. Fails open.
+func (s *emailService) orgSuspendedOrRestricted(ctx context.Context, orgID uuid.UUID) bool {
+	if s.orgRiskRepo == nil {
+		return false
+	}
+	states, err := s.orgRiskRepo.GetOrgRiskStates(ctx, []uuid.UUID{orgID})
+	if err != nil {
+		return false
+	}
+	return states[orgID].ForcesFreeWarmupPool()
+}
+
 func (s *emailService) resolveWarmupPoolType(ctx context.Context, account *models.Email) string {
 	if account == nil {
 		return "premium"
-	}
-	if account.WarmupPoolType != "" {
-		return account.WarmupPoolType
 	}
 	// No organization means no entitlement to check, so the mailbox gets the
 	// lower-trust pool rather than defaulting into the paid one.
 	if account.OrganizationID == nil {
 		return "free"
+	}
+	// A restricted organization leaves the paid pool whatever it pays. Checked
+	// before the stored tier, which is never empty and would short-circuit it.
+	if s.orgSuspendedOrRestricted(ctx, *account.OrganizationID) {
+		return "free"
+	}
+	if account.WarmupPoolType != "" {
+		return account.WarmupPoolType
 	}
 	if s.featureGate != nil {
 		isPaid, err := s.featureGate.IsPaidOrganization(ctx, *account.OrganizationID)

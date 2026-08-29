@@ -13,7 +13,8 @@ import (
 var (
 	stackedPunct = regexp.MustCompile(`[!?]{2,}`)
 	wordToken    = regexp.MustCompile(`[a-z0-9%]+`)
-	linkPattern  = regexp.MustCompile(`https?://`)
+	linkPattern  = regexp.MustCompile(`https?://[^\s"'<>)\]]*`)
+	hrefPattern  = regexp.MustCompile(`(?i)href\s*=\s*["']?\s*(https?://[^\s"'<>]*)`)
 	htmlTag      = regexp.MustCompile(`(?i)<[a-z!/][^>]*>`)
 	imgTag       = regexp.MustCompile(`(?i)<img\b[^>]*>`)
 )
@@ -99,7 +100,7 @@ func Score(subject, bodyHTML, bodyPlain string) ScoreResult {
 	if subj == "" {
 		deduct(20, "high", "empty_subject", "Subject is empty.")
 	} else if isAllCaps(subj) {
-		deduct(15, "high", "all_caps_subject", "Subject is all caps — a strong spam signal.")
+		deduct(15, "high", "all_caps_subject", "Subject is all caps, a strong spam signal.")
 	}
 	if stackedPunct.MatchString(combined) {
 		deduct(10, "warn", "stacked_punctuation", "Stacked punctuation (e.g. !!! or ?!) reads as promotional.")
@@ -115,12 +116,12 @@ func Score(subject, bodyHTML, bodyPlain string) ScoreResult {
 		}
 		deduct(d, severity, "spam_trigger_terms", fmt.Sprintf("%d spam-trigger term(s) found in subject/body.", n))
 	}
-	if links := len(linkPattern.FindAllString(combined, -1)); links > 3 {
+	if links := countLinks(combined, bodyHTML); links > 3 {
 		d := (links - 3) * 5
 		if d > 20 {
 			d = 20
 		}
-		deduct(d, "warn", "too_many_links", fmt.Sprintf("%d links — keep cold-email link count low.", links))
+		deduct(d, "warn", "too_many_links", fmt.Sprintf("%d links. Keep the link count low in cold email.", links))
 	}
 	if strings.TrimSpace(body) == "" {
 		deduct(25, "high", "empty_body", "Body has no text content (image-only or empty body hurts deliverability).")
@@ -134,13 +135,13 @@ func Score(subject, bodyHTML, bodyPlain string) ScoreResult {
 		switch {
 		case len(strings.TrimSpace(body)) < 200 && images >= 1:
 			deduct(20, "high", "image_heavy",
-				"Almost all of this email is images — filters cannot read it and treat that as evasion.")
+				"Almost all of this email is images. Filters cannot read it and treat that as evasion.")
 		case images > 3:
 			d := (images - 3) * 5
 			if d > 15 {
 				d = 15
 			}
-			deduct(d, "warn", "many_images", fmt.Sprintf("%d images — cold email from a person rarely has many.", images))
+			deduct(d, "warn", "many_images", fmt.Sprintf("%d images. Cold email from a person rarely has many.", images))
 		}
 	}
 
@@ -164,7 +165,7 @@ func ScoreWithAttachments(subject, bodyHTML, bodyPlain string, attachments int) 
 		res.Issues = append(res.Issues, Issue{
 			Severity: "warn",
 			Code:     "has_attachments",
-			Message:  fmt.Sprintf("%d attachment(s) on a cold email — link to the file instead.", attachments),
+			Message:  fmt.Sprintf("%d attachment(s) on a cold email. Link to the file instead.", attachments),
 		})
 	}
 	return res
@@ -185,6 +186,31 @@ func isAllCaps(s string) bool {
 		}
 	}
 	return letters >= 4
+}
+
+// countLinks counts every anchor plus any bare URL in the text that is not
+// already an anchor's destination. Stripping tags throws hrefs away, so the text
+// alone reports zero links for an HTML email; matching destinations keeps a URL
+// used as its own anchor text from counting twice.
+func countLinks(text, bodyHTML string) int {
+	destinations := map[string]struct{}{}
+	n := 0
+	for _, m := range hrefPattern.FindAllStringSubmatch(bodyHTML, -1) {
+		destinations[trimURL(m[1])] = struct{}{}
+		n++
+	}
+	for _, u := range linkPattern.FindAllString(text, -1) {
+		if _, seen := destinations[trimURL(u)]; !seen {
+			n++
+		}
+	}
+	return n
+}
+
+// trimURL drops the sentence punctuation a URL picks up in prose, so the same
+// link matches whether it was written inline or as an anchor's destination.
+func trimURL(u string) string {
+	return strings.TrimRight(u, ".,;:!?)]}\"'")
 }
 
 func countTriggerTerms(text string) int {
