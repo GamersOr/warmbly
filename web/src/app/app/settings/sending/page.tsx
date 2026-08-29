@@ -222,12 +222,12 @@ function SendingSettings() {
                                 description="Copy scoring below this out of 100 is flagged. Higher is stricter."
                             >
                                 <NumberInput
-                                    min={0}
+                                    min={1}
                                     max={100}
                                     value={draft.preflight?.min_content_score ?? 60}
                                     onChange={(n) =>
                                         patchPreflight({
-                                            min_content_score: Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 60,
+                                            min_content_score: Number.isFinite(n) ? Math.min(100, Math.max(1, n)) : 60,
                                         })
                                     }
                                     className="w-20"

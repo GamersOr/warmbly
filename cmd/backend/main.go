@@ -1148,6 +1148,10 @@ func main() {
 		if instanceSettings != nil {
 			emailService.WireSyncBudget(instanceSettings)
 		}
+		// A restricted organization's mailboxes join the free pool on connect.
+		if aware, ok := emailService.(email.OrgRiskAware); ok {
+			aware.WireOrgRisk(orgRiskRepository)
+		}
 		analyticsRepository := repository.NewAnalyticsRepository(primaryDB)
 		emailAccountErrorRepository := repository.NewEmailAccountErrorRepository(primaryDB)
 		analyticsService = analytics.NewService(analyticsRepository, emailRepostory, campaignRepostory, emailAccountErrorRepository, warmupRepository)
@@ -1288,6 +1292,11 @@ func main() {
 		// the dialog cannot say one thing and the launch another.
 		if aware, ok := advancedService.(advanced.AudienceAware); ok {
 			aware.WireAudience(campaignAudienceRepository)
+		}
+		// Preflight's content check weighs attachments the way the send path
+		// does, so the launch dialog and the campaign feed agree on the score.
+		if aware, ok := advancedService.(advanced.AttachmentAware); ok {
+			aware.WireAttachments(attachmentRepoForHandler)
 		}
 
 		// Shared AI tool registry: every tool calls a service-layer function as
