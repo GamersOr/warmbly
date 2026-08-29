@@ -331,14 +331,17 @@ export default function AddressesPage() {
                 />
                 <CloudPoolBanner onConnect={() => setCloudDialog(true)} mailboxCount={stats.total} />
                 {!emailsData.isLoading && <CloudPathsPanel mailboxCount={stats.total} onAdd={() => p?.setAddEmail(true)} />}
-                <WarmupCoverageNotice
-                    warmupCount={warmupActive}
-                    totalCount={stats.total}
-                    canWarmup={canWarmup}
-                    onAdd={() => p?.setAddEmail(true)}
-                    onConnectCloud={cloud.selfHosted && !cloud.connected ? () => setCloudDialog(true) : undefined}
-                    cloudConnected={cloud.connected}
-                />
+                {/* Hosted, the pool is thousands of mailboxes: the pool-size advice is self-host only. */}
+                {cloud.selfHosted && (
+                    <WarmupCoverageNotice
+                        warmupCount={warmupActive}
+                        totalCount={stats.total}
+                        canWarmup={canWarmup}
+                        onAdd={() => p?.setAddEmail(true)}
+                        onConnectCloud={!cloud.connected ? () => setCloudDialog(true) : undefined}
+                        cloudConnected={cloud.connected}
+                    />
+                )}
                 <CloudConnectDialog open={cloudDialog} onClose={() => setCloudDialog(false)} />
                 {emailsData.isLoading ? (
                     <div className="divide-y divide-slate-200/60">
