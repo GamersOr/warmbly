@@ -553,22 +553,36 @@ func (s *service) mergeOrganization(ctx context.Context, tx pgx.Tx, orgID uuid.U
 }
 
 // orgMergeExcluded are the organization columns an archive may never set.
-var orgMergeExcluded = map[string]bool{
-	"id":                     true,
-	"owner_user_id":          true,
-	"slug":                   true,
-	"created_at":             true,
-	"deletion_scheduled_at":  true,
-	"deletion_scheduled_for": true,
-	// Risk posture is one platform's verdict about a tenant on its own
-	// infrastructure, reached from evidence the destination never saw. Letting
-	// an archive carry it would import a suspension nobody here decided, and
-	// letting it carry "trusted" would let an archive clear one.
-	"risk_state":        true,
-	"risk_score":        true,
-	"risk_reason":       true,
-	"risk_signals":      true,
-	"risk_evaluated_at": true,
+var orgMergeExcluded = func() map[string]bool {
+	out := map[string]bool{
+		"id":                     true,
+		"owner_user_id":          true,
+		"slug":                   true,
+		"created_at":             true,
+		"deletion_scheduled_at":  true,
+		"deletion_scheduled_for": true,
+	}
+	for name := range OrgRiskColumns {
+		out[name] = true
+	}
+	return out
+}()
+
+// OrgRiskColumns are the risk verdict an instance reached about a tenant. They
+// never travel in either direction. Importing one would apply a suspension
+// nobody here decided (or let an archive clear one), and exporting one would
+// hand the customer the detector evidence and the reviewer's note, which the
+// customer-facing endpoint deliberately withholds.
+var OrgRiskColumns = map[string]bool{
+	"risk_state":           true,
+	"risk_score":           true,
+	"risk_reason":          true,
+	"risk_signals":         true,
+	"risk_evaluated_at":    true,
+	"risk_override":        true,
+	"risk_override_reason": true,
+	"risk_override_by":     true,
+	"risk_override_at":     true,
 }
 
 // buildUserMap resolves archive members to destination accounts by email.

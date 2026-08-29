@@ -250,6 +250,31 @@ warmblyctl user revoke-admin --email someone@example.com
 There is no way to grant platform admin from inside the product without already holding the bit. One admin account is one lost password away from needing shell access. The `single_platform_admin` check on [Instance health](/development/instance-health/#single_platform_admin) says so on purpose.
 </Callout>
 
+## Workspace abuse posture
+
+A ban stops one person signing in. A posture governs one workspace's sending, and it is set by detectors rather than by hand. The bands and what each one costs a customer are on [deliverability](/guides/deliverability/#workspace-sending-posture); this is the operator side.
+
+Open **Organizations**, filter by **Abuse posture** to find the workspaces a detector has acted on, and open one. The **Abuse posture** panel is the only place the evidence is readable: the customer endpoint returns the band and a sentence, deliberately not the findings, because handing someone the exact detector weights that flagged them is a map for evading the next check.
+
+The panel shows every finding on file with its weight, what it says, and when it ages out. From it you can:
+
+| Action | What it does | Permission |
+|---|---|---|
+| Retract a finding | Removes one detector's finding and lowers the score for good | `manage_organizations` |
+| Set posture | Pins the band to your decision. Detectors keep scoring the evidence, but the posture stays where you put it | `manage_organizations` |
+| Lift override | Removes the pin and hands the posture back to the score, re-derived from the findings still on file | `manage_organizations` |
+
+Reading the panel needs only `view_organizations`.
+
+Two rules are worth knowing before you use it:
+
+- **The pin outranks the score in both directions.** Pinning `trusted` keeps a workspace sending even while heavy evidence stands against it, and pinning `suspended` keeps it stopped even after every detector retracts. That is the point: a decision a human made is not undone by the next detector write.
+- **A pin does not expire.** Lifting it is a deliberate act. If you clear a workspace by pinning `trusted` and the underlying findings were genuinely wrong, retract those findings too, then lift the pin. Otherwise the posture snaps back the moment anyone lifts it.
+
+The reason you type is shown to the workspace in its dashboard banner, so write it for them. Internal notes belong in the audit trail, which records who changed a posture, from what to what, and why.
+
+Findings that fire once and have nothing that would ever re-check them, such as a signup's origin score or a run of anomalous sign-ins, carry a 30-day expiry and are swept out automatically, so a workspace recovers on its own without anyone touching it. Findings a detector keeps re-checking carry no expiry, because that detector withdraws them itself: import quality is a running assessment across everything the workspace has imported, and the recipient-outcome pass is re-derived from the last 30 days of sends. The panel's **Ages out** column says which kind each finding is.
+
 ## Recovering access
 
 Every command below runs inside the backend, because that is where the correct environment already lives: `PRIMARY_DB`, `REDIS` and the encryption keys. Authorization is container or host access, which is the right trust model when the identity system is the thing that is broken. `warmblyctl` has no HTTP surface.

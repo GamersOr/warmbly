@@ -9,6 +9,8 @@ import type {
     AdminOrgSearch,
     AdminOrgsResult,
     OrganizationLimitOverrides,
+    OrgRisk,
+    SetOrgRiskOverrideRequest,
     UpdateOrgOverridesRequest,
 } from "@/lib/api/models/admin";
 
@@ -63,5 +65,51 @@ export function updateOrganizationOverrides(
         url: `/admin/organizations/${id}/overrides`,
         authorization: true,
         data: body,
+    });
+}
+
+/** The posture with its evidence. The customer endpoint withholds the signal
+ *  blob, so this is the only place the reason a workspace was flagged is
+ *  readable. */
+export function getOrganizationRisk(id: string): Promise<OrgRisk> {
+    return Request({
+        method: "GET",
+        url: `/admin/organizations/${id}/risk`,
+        authorization: true,
+    });
+}
+
+/** Pin the posture. The pin outranks the score and survives every later
+ *  detector write, until it is lifted. */
+export function setOrganizationRiskOverride(
+    id: string,
+    body: SetOrgRiskOverrideRequest,
+): Promise<OrgRisk> {
+    return Request({
+        method: "PUT",
+        url: `/admin/organizations/${id}/risk`,
+        authorization: true,
+        data: body,
+    });
+}
+
+/** Lift the pin and hand the posture back to the evidence. */
+export function clearOrganizationRiskOverride(id: string): Promise<OrgRisk> {
+    return Request({
+        method: "DELETE",
+        url: `/admin/organizations/${id}/risk`,
+        authorization: true,
+    });
+}
+
+/** Retract one detector's finding, which lowers the score for good. */
+export function clearOrganizationRiskSignal(
+    id: string,
+    key: string,
+): Promise<OrgRisk> {
+    return Request({
+        method: "DELETE",
+        url: `/admin/organizations/${id}/risk/signals/${encodeURIComponent(key)}`,
+        authorization: true,
     });
 }

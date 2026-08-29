@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/warmbly/warmbly/internal/app/orgrisk"
 	"github.com/warmbly/warmbly/internal/app/user"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -88,5 +89,60 @@ func TestCreateAccountRecordsACleanSignupToo(t *testing.T) {
 	}
 	if repo.gotNorm != "ada@acme.com" {
 		t.Errorf("normalized = %q", repo.gotNorm)
+	}
+}
+
+// capturingRisk records what the signup filed on the workspace.
+type capturingRisk struct {
+	orgrisk.Service
+	got []orgrisk.Signal
+}
+
+func (c *capturingRisk) RecordSignal(_ context.Context, _ uuid.UUID, sig orgrisk.Signal) (*models.OrgRisk, *errx.Error) {
+	c.got = append(c.got, sig)
+	return &models.OrgRisk{}, nil
+}
+
+// Only the throwaway domain is evidence about the account. The softer findings
+// describe how a signup looked, and shape must not restrict a workspace, so the
+// two are filed separately instead of fused into one classed score.
+func TestSignupRiskFilesEachClassSeparately(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		email string
+		ip    string
+		want  map[string]orgrisk.Signal
+	}{
+		{"an ordinary signup files nothing", "ada@acme.com", "203.0.113.5", map[string]orgrisk.Signal{}},
+		{"soft findings only", "ada.lovelace+signup@gmail.com", "", map[string]orgrisk.Signal{
+			"signup": {Weight: 10, Class: orgrisk.ClassCircumstantial},
+		}},
+		{"a throwaway domain with a soft finding beside it", "grow@mailinator.com", "", map[string]orgrisk.Signal{
+			"signup_disposable": {Weight: 35, Class: orgrisk.ClassSubstantive},
+			"signup":            {Weight: 5, Class: orgrisk.ClassCircumstantial},
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			risk := &capturingRisk{}
+			svc := &authService{orgRisk: risk}
+			svc.recordSignupRisk(context.Background(), uuid.New(), tt.email, SignupOrigin{IP: tt.ip})
+
+			if len(risk.got) != len(tt.want) {
+				t.Fatalf("filed %d signals, want %d: %+v", len(risk.got), len(tt.want), risk.got)
+			}
+			for _, got := range risk.got {
+				want, ok := tt.want[got.Key]
+				if !ok {
+					t.Errorf("unexpected signal %q", got.Key)
+					continue
+				}
+				if got.Weight != want.Weight || got.Class != want.Class {
+					t.Errorf("%s = %d/%q, want %d/%q", got.Key, got.Weight, got.Class, want.Weight, want.Class)
+				}
+				if got.Detail == "" {
+					t.Errorf("%s carries no reason for review", got.Key)
+				}
+			}
+		})
 	}
 }

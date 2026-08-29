@@ -739,7 +739,8 @@ const adminOrgListColumns = `
 	(SELECT COUNT(*) FROM organization_members om WHERE om.organization_id = o.id) AS member_count,
 	(SELECT COUNT(*) FROM email_accounts ea WHERE ea.organization_id = o.id) AS email_account_count,
 	(SELECT COUNT(*) FROM campaigns c WHERE c.organization_id = o.id) AS campaign_count,
-	(SELECT COUNT(*) FROM campaigns c WHERE c.organization_id = o.id AND c.status = 'active') AS active_campaigns`
+	(SELECT COUNT(*) FROM campaigns c WHERE c.organization_id = o.id AND c.status = 'active') AS active_campaigns,
+	o.risk_state`
 
 // SearchOrganizationsForAdmin lists orgs for the admin panel with cursor
 // pagination. The cursor is the last seen org id; rows are returned in
@@ -793,6 +794,13 @@ func (r *organizationRepository) SearchOrganizationsForAdmin(ctx context.Context
 	}
 	if search.HasOverrides {
 		where += ` AND EXISTS (SELECT 1 FROM organization_limit_overrides olo WHERE olo.organization_id = o.id)`
+	}
+	if models.OrgRiskState(search.RiskState).Valid() {
+		where += ` AND o.risk_state = $` + itoa(argNum)
+		args = append(args, search.RiskState)
+		argNum++
+	} else if search.RiskFlagged {
+		where += ` AND o.risk_state <> 'trusted'`
 	}
 
 	// Local helpers, same style as the rest of this builder.
@@ -918,6 +926,7 @@ func (r *organizationRepository) SearchOrganizationsForAdmin(ctx context.Context
 			&item.OwnerEmail, &item.OwnerFirstName, &item.OwnerLastName, &item.OwnerBannedAt,
 			&item.CreatedAt, &item.DeletionScheduledFor,
 			&item.MemberCount, &item.EmailAccountCount, &item.CampaignCount, &item.ActiveCampaigns,
+			&item.RiskState,
 			&planName, &planPublic, &isEnterprise,
 		); err != nil {
 			return nil, err
@@ -969,6 +978,7 @@ func (r *organizationRepository) GetOrganizationAdminDetail(ctx context.Context,
 		&detail.OwnerEmail, &detail.OwnerFirstName, &detail.OwnerLastName, &detail.OwnerBannedAt,
 		&detail.CreatedAt, &detail.DeletionScheduledFor,
 		&detail.MemberCount, &detail.EmailAccountCount, &detail.CampaignCount, &detail.ActiveCampaigns,
+		&detail.RiskState,
 		&detail.UpdatedAt, &detail.DeletionScheduledAt,
 		&detail.PlanName, &detail.SubscriptionStatus, &isEnterprise, &detail.CurrentPeriodEnd, &detail.TrialEnd,
 	)
