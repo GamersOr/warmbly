@@ -144,11 +144,11 @@ A mailbox now has a cold-rotation state, separate from its health:
 
 A mailbox rests when its warmup health reaches `throttled` or worse, and returns on its own once it is healthy again **and** has held steady for three days. One good hour does not put it back at full cold volume.
 
-Resting only makes sense while warmup is running, because warmup traffic is what it recovers on. If warmup stops on a resting mailbox (you switch it off, or the workspace loses warmup when a trial ends or a plan changes), there is no health signal to wait for, so the mailbox returns on its own three days after its last rest stamp rather than staying out indefinitely.
+Resting only makes sense while the mailbox is in a warmup pool, because pool health is the signal it recovers on. If a resting mailbox leaves its pool (the workspace loses warmup when a trial ends or a plan changes), there is no health signal to wait for, so the mailbox returns on its own three days after its last rest stamp rather than staying out indefinitely. Pausing warmup on the mailbox does not remove it from the pool, so its health keeps being tracked and the normal three healthy days still apply.
 
 ### Putting a resting mailbox back yourself
 
-You do not have to wait. A resting mailbox's notice in the drawer has a **Put back into campaigns** button. It lands in `active` unless warmup is running and still reports the mailbox as `throttled` or worse, in which case it stays resting and the drawer says so: a mailbox that warmup can see is struggling should not send cold mail. To override that, turn warmup off for the mailbox first, or hold it in `reserve` and release it.
+You do not have to wait. A resting mailbox's notice in the drawer has a **Put back into campaigns** button. It lands in `active` unless its warmup health is still `throttled` or worse, in which case it stays resting and the drawer says so: a mailbox that warmup can see is struggling should not send cold mail, and there is no override for that short of the health recovering.
 
 API keys get the same exit through `POST /emails/:id/release`, which works on a resting mailbox as well as a held one.
 

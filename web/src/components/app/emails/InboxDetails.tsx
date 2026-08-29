@@ -117,24 +117,23 @@ function RampHoldNotice({ hold }: { hold: import("@/lib/api/models/app/analytics
 }
 
 // A mailbox that has quietly stopped receiving campaign sends looks broken.
-// A resting one can be put back by hand: with warmup off there is nothing to
-// recover on, and with warmup on the owner may still decide the wait is over.
+// hasHealthSignal is warmup_health presence: the pool row the rebalancer reads, not the warmup setting.
 function LifecycleNotice({
     mailboxId,
     state,
-    warmupRunning,
+    hasHealthSignal,
 }: {
     mailboxId: string;
     state: import("@/lib/api/models/app/analytics/AccountStatus").SendLifecycleState;
-    warmupRunning: boolean;
+    hasHealthSignal: boolean;
 }) {
     const hold = useSendHold(mailboxId);
     const reserve = state.state === "reserve";
     const copy = reserve
         ? "You are holding this mailbox out of campaigns. Warmup keeps running. Turn the hold off below to put it back into rotation."
-        : warmupRunning
-            ? "This mailbox is resting: it keeps its warmup traffic to rebuild reputation, but campaigns are not sending from it. It returns on its own once it has recovered and held steady for three days."
-            : "This mailbox is resting, but warmup is not running on it, so there is nothing to recover on. It returns on its own after three days of rest, or now if you put it back.";
+        : hasHealthSignal
+            ? "This mailbox is resting: campaigns are not sending from it while its warmup health recovers. It returns on its own once that health is back and has held steady for three days."
+            : "This mailbox is resting, but it is in no warmup pool, so there is no health signal to recover on. It returns on its own after three days of rest, or now if you put it back.";
     const resume = () =>
         hold.mutate(false, {
             onSuccess: (data) =>
@@ -572,7 +571,7 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
             </div>
 
             {ws?.ramp_hold && <RampHoldNotice hold={ws.ramp_hold} />}
-            {status?.send_lifecycle && <LifecycleNotice mailboxId={mailbox.id} state={status.send_lifecycle} warmupRunning={!!ws} />}
+            {status?.send_lifecycle && <LifecycleNotice mailboxId={mailbox.id} state={status.send_lifecycle} hasHealthSignal={!!status.warmup_health} />}
             {status?.cold_ramp && <ColdRampNotice ramp={status.cold_ramp} />}
             {status && <SendHoldControl mailboxId={mailbox.id} state={status.send_lifecycle} />}
 
