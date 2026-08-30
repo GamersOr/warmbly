@@ -1,0 +1,25 @@
+[Unit]
+Description=Warmbly worker (send and sync executor)
+Documentation=https://docs.warmbly.com/development/bare-metal/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warmbly
+Group=warmbly
+# The worker has its own env file: it never sees the database URL or AUTH_SECRET.
+EnvironmentFile=/etc/warmbly/worker.env
+WorkingDirectory=/opt/warmbly
+ExecStart=/opt/warmbly/bin/worker
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/warmbly
+
+[Install]
+WantedBy=multi-user.target
