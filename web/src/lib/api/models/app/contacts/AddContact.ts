@@ -7,6 +7,10 @@ export default interface AddContact {
     campaigns: string[];
     categories?: string[];
 
+    // A verdict you already hold for the address, in Warmbly's vocabulary or
+    // any known provider's (ZeroBounce, MillionVerifier, NeverBounce, ...).
+    verification_status?: string;
+    verification_provider?: string;
     custom_fields: Record<string, string>;
 
     // First-touch source hint. The dashboard may say "manual" or "campaign"

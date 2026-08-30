@@ -16,6 +16,17 @@ export interface ContactsCounts {
     in_campaign: number;
     not_contacted: number;
     categories: ContactCategoryCount[];
+    verification?: ContactVerificationCounts;
+}
+
+// Org contacts by verification verdict. pending is the subset of unknown
+// nobody has checked yet.
+export interface ContactVerificationCounts {
+    valid: number;
+    risky: number;
+    invalid: number;
+    unknown: number;
+    pending: number;
 }
 
 // Per-status lead totals for one campaign's Leads view. Returned on the first

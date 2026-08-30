@@ -18,6 +18,7 @@ import {
     useOutreachSettings,
     useUpdateOutreachSettings,
 } from "@/lib/api/hooks/app/outreach/useOutreachSettings";
+import VerificationSettings from "@/components/app/contacts/VerificationSettings";
 import {
     DEFAULT_PREFERRED_HOURS,
     describeHours,
@@ -107,6 +108,7 @@ function SendingSettings() {
             description="When campaign mail goes out, measured in your recipient's day."
             actions={<SaveStatus status={autosave.status} onRetry={autosave.retry} />}
         >
+            <VerificationSettings />
             <Section
                 eyebrow="Send-time optimization"
                 description="Hold each campaign email until it lands inside the hours you pick, in the recipient's own timezone. It only ever delays a send, never brings one forward, and it still obeys the campaign schedule and each mailbox's working hours."

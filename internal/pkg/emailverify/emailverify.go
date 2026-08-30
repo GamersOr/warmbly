@@ -43,6 +43,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/warmbly/warmbly/internal/pkg/signuprisk"
 )
 
 // Status is the verification outcome for a single address. It is a small closed
@@ -65,15 +67,45 @@ const (
 	StatusUnknown Status = "unknown"
 )
 
+// SubStatus refines a Status with the reason class a paid provider or the
+// in-house checks can name. Empty when nothing more specific is known.
+type SubStatus string
+
+const (
+	SubStatusNone        SubStatus = ""
+	SubStatusCatchAll    SubStatus = "catch_all"
+	SubStatusDisposable  SubStatus = "disposable"
+	SubStatusRole        SubStatus = "role"
+	SubStatusSpamTrap    SubStatus = "spamtrap"
+	SubStatusMailboxFull SubStatus = "mailbox_full"
+	SubStatusNoMX        SubStatus = "no_mx"
+	SubStatusSyntax      SubStatus = "syntax"
+	// SubStatusUndisclosed marks a provider (Microsoft, Yahoo) that answers
+	// every RCPT the same way, so an SMTP probe cannot judge the mailbox.
+	SubStatusUndisclosed SubStatus = "undisclosed"
+)
+
+// Provider names for Result.Provider and contacts.verification_provider.
+const (
+	ProviderBuiltin         = "builtin"
+	ProviderMillionVerifier = "millionverifier"
+)
+
 // Result is the outcome of verifying one address. It round-trips into the
 // contacts table (verification_status / verification_reason / is_catch_all /
-// verification_checked_at).
+// verification_checked_at / verification_sub_status / verification_provider).
 type Result struct {
 	Email      string    `json:"email"`
 	Status     Status    `json:"status"`
+	SubStatus  SubStatus `json:"sub_status,omitempty"`
 	Reason     string    `json:"reason"`
 	IsCatchAll bool      `json:"is_catch_all"`
 	HasMX      bool      `json:"has_mx"`
+	// Provider is who produced the verdict: ProviderBuiltin, a paid backend,
+	// or the vocabulary an imported result was recognised as.
+	Provider string `json:"provider,omitempty"`
+	// Confidence is the scored certainty of Status once evidence is applied.
+	Confidence int       `json:"confidence,omitempty"`
 	CheckedAt  time.Time `json:"checked_at"`
 }
 
@@ -125,6 +157,9 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// ProbeReady reports whether the configured HELO host lets the SMTP probe run.
+func (v *SMTPVerifier) ProbeReady() bool { return isFQDN(v.cfg.HeloHost) }
+
 // SMTPVerifier is the in-house Verifier: syntax -> MX -> SMTP RCPT probe ->
 // catch-all detection. It opens exactly one connection to the lowest-preference
 // MX and probes both the real address and a random localpart on the same
@@ -135,6 +170,9 @@ type SMTPVerifier struct {
 	// smtpPort is always "25" in production (MX hosts listen nowhere else);
 	// it exists so tests can point probe() at a local server.
 	smtpPort string
+	// domains remembers per-domain facts (no MX, catch-all, undisclosing
+	// provider) so a 50k list at 2k domains costs 2k probes, not 50k.
+	domains *domainCache
 }
 
 // New constructs the in-house SMTP verifier. The resolver mirrors dnsauth's
@@ -144,6 +182,7 @@ func New(cfg Config) *SMTPVerifier {
 		cfg:      cfg.withDefaults(),
 		resolver: &net.Resolver{},
 		smtpPort: "25",
+		domains:  newDomainCache(domainCacheTTL),
 	}
 }
 
@@ -152,12 +191,13 @@ func New(cfg Config) *SMTPVerifier {
 // code path.
 func (v *SMTPVerifier) Verify(ctx context.Context, email string) Result {
 	now := time.Now().UTC()
-	res := Result{Email: email, CheckedAt: now, Status: StatusUnknown}
+	res := Result{Email: email, CheckedAt: now, Status: StatusUnknown, Provider: ProviderBuiltin}
 
 	// 1. Syntax (RFC 5322-ish via net/mail). A parse failure is a hard invalid.
 	addr, err := mail.ParseAddress(email)
 	if err != nil {
 		res.Status = StatusInvalid
+		res.SubStatus = SubStatusSyntax
 		res.Reason = "invalid syntax"
 		return res
 	}
@@ -166,14 +206,49 @@ func (v *SMTPVerifier) Verify(ctx context.Context, email string) Result {
 	at := strings.LastIndex(normalized, "@")
 	if at <= 0 || at == len(normalized)-1 {
 		res.Status = StatusInvalid
+		res.SubStatus = SubStatusSyntax
 		res.Reason = "invalid syntax"
 		return res
 	}
 	localpart := normalized[:at]
 	domain := normalized[at+1:]
 
-	// 2. MX lookup. No MX (and no usable fallback) is a hard invalid: nowhere to
-	// deliver. A lookup *error* (timeout/SERVFAIL) is unknown, not invalid.
+	// Address-level facts that need no network. A disposable domain is never
+	// worth a send; a role address is deliverable but flagged, so the campaign's
+	// risky toggle decides.
+	if signuprisk.IsDisposable(normalized) {
+		res.Status = StatusInvalid
+		res.SubStatus = SubStatusDisposable
+		res.Reason = "disposable email domain"
+		return res
+	}
+	role := isRoleLocalpart(localpart)
+
+	// 2. Domain facts, cached: no MX and catch-all are properties of the
+	// domain, and providers that never disclose mailboxes are known by MX.
+	if cached, ok := v.domains.get(domain); ok {
+		switch cached.kind {
+		case domainNoMX:
+			res.Status = StatusInvalid
+			res.SubStatus = SubStatusNoMX
+			res.Reason = "no MX records"
+			return res
+		case domainCatchAll:
+			res.HasMX = true
+			res.IsCatchAll = true
+			res.Status = StatusRisky
+			res.SubStatus = SubStatusCatchAll
+			res.Reason = "catch-all domain; acceptance is not conclusive"
+			return res
+		case domainUndisclosed:
+			res.HasMX = true
+			res.Status = StatusUnknown
+			res.SubStatus = SubStatusUndisclosed
+			res.Reason = cached.reason
+			return res
+		}
+	}
+
 	hosts, mxErr := v.lookupMXHosts(ctx, domain)
 	if mxErr != nil {
 		res.Status = StatusUnknown
@@ -181,11 +256,25 @@ func (v *SMTPVerifier) Verify(ctx context.Context, email string) Result {
 		return res
 	}
 	if len(hosts) == 0 {
+		v.domains.put(domain, domainFact{kind: domainNoMX})
 		res.Status = StatusInvalid
+		res.SubStatus = SubStatusNoMX
 		res.Reason = "no MX records"
 		return res
 	}
 	res.HasMX = true
+
+	// Providers that accept every RCPT and bounce later (Microsoft 365,
+	// Yahoo) make a probe meaningless: say so instead of spending a
+	// connection and calling the result "valid".
+	if fp := fingerprintMX(hosts); fp.undisclosed {
+		reason := fp.name + " does not disclose mailboxes to an SMTP probe"
+		v.domains.put(domain, domainFact{kind: domainUndisclosed, reason: reason})
+		res.Status = StatusUnknown
+		res.SubStatus = SubStatusUndisclosed
+		res.Reason = reason
+		return res
+	}
 
 	// 3. SMTP RCPT probe against the lowest-preference (highest priority) MX.
 	// Refused outright without a real HELO identity: a probe that announces a
@@ -196,15 +285,23 @@ func (v *SMTPVerifier) Verify(ctx context.Context, email string) Result {
 		res.Reason = "smtp probe skipped: set EMAIL_VERIFY_HELO_HOST to a public fully-qualified hostname for this instance"
 		return res
 	}
-	probe := v.probe(ctx, hosts[0], localpart, domain)
+	probe := v.probeHosts(ctx, hosts, localpart, domain)
 	switch probe.outcome {
 	case probeAccepted:
 		// 4. Catch-all check already folded into probe(): if the random control
 		// localpart was also accepted, the 250 on the real address is meaningless.
 		if probe.catchAll {
+			v.domains.put(domain, domainFact{kind: domainCatchAll})
 			res.IsCatchAll = true
 			res.Status = StatusRisky
+			res.SubStatus = SubStatusCatchAll
 			res.Reason = "catch-all domain; acceptance is not conclusive"
+			return res
+		}
+		if role {
+			res.Status = StatusRisky
+			res.SubStatus = SubStatusRole
+			res.Reason = "role address (shared inbox); recipient accepted"
 			return res
 		}
 		res.Status = StatusValid
@@ -219,6 +316,27 @@ func (v *SMTPVerifier) Verify(ctx context.Context, email string) Result {
 		res.Reason = probe.reason
 		return res
 	}
+}
+
+// probeHosts tries the MX hosts in preference order until one answers the
+// session. A dial or handshake failure on the primary is common (it is the
+// busiest host) and says nothing about the mailbox; only a host that talked
+// to us gets to decide.
+func (v *SMTPVerifier) probeHosts(ctx context.Context, hosts []string, localpart, domain string) probeResult {
+	var last probeResult
+	for i, host := range hosts {
+		if i >= maxMXAttempts {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return probeResult{outcome: probeUnknown, reason: "cancelled: " + err.Error()}
+		}
+		last = v.probe(ctx, host, localpart, domain)
+		if last.outcome != probeUnknown || !last.sessionFailed {
+			return last
+		}
+	}
+	return last
 }
 
 // lookupMXHosts returns MX hosts ordered by ascending preference (most-preferred
@@ -276,6 +394,9 @@ type probeResult struct {
 	outcome  probeOutcome
 	catchAll bool
 	reason   string
+	// sessionFailed is set when the host never judged the address (dial or
+	// handshake failure), so the next MX is worth trying.
+	sessionFailed bool
 }
 
 // probe opens one SMTP session to host:25, greets it, sets the envelope sender,
@@ -293,7 +414,7 @@ func (v *SMTPVerifier) probe(ctx context.Context, host, localpart, domain string
 	if err != nil {
 		// Most commonly: outbound :25 blocked by the cloud provider, or the MX is
 		// firewalled/tarpitting. Either way we cannot conclude invalid.
-		return probeResult{outcome: probeUnknown, reason: "smtp dial failed (port 25 may be blocked): " + err.Error()}
+		return probeResult{outcome: probeUnknown, sessionFailed: true, reason: "smtp dial failed (port 25 may be blocked): " + err.Error()}
 	}
 	// Bound the whole session.
 	deadline := time.Now().Add(v.cfg.CommandTimeout * 4)
@@ -305,7 +426,7 @@ func (v *SMTPVerifier) probe(ctx context.Context, host, localpart, domain string
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		_ = conn.Close()
-		return probeResult{outcome: probeUnknown, reason: "smtp handshake failed: " + err.Error()}
+		return probeResult{outcome: probeUnknown, sessionFailed: true, reason: "smtp handshake failed: " + err.Error()}
 	}
 	defer func() { _ = client.Close() }()
 

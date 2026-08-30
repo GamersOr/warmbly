@@ -31,6 +31,7 @@ Every field is optional; an empty body matches all contacts in the organization.
 | `lead_status` | string | No | Filter to one derived lead status: `pending`, `active`, `completed`, `replied`, `bounced`, `failed`, `undeliverable`, or `unsubscribed`. Requires exactly one `campaign_ids` entry, otherwise the request is rejected with `lead_filter_requires_campaign`; an unknown value is rejected with `invalid_lead_status`. |
 | `engagement` | string | No | Filter by engagement inside that campaign: `opened`, `not_opened`, `clicked`, `not_clicked`, `replied`, `not_replied`, or `bounced`. `opened` means a human open (machine opens never count); the `not_*` values match only leads sent at least one step. Combines with `lead_status` as AND. Requires exactly one `campaign_ids` entry (`lead_filter_requires_campaign`); an unknown value is rejected with `invalid_engagement`. |
 | `category_ids` | string[] | No | Contact must have ALL of these categories. |
+| `verification_status` | string | No | Filter by verification verdict: `valid`, `risky`, `invalid`, or `unknown`. |
 | `min_campaigns` | integer | No | Minimum number of associated campaigns. |
 | `max_campaigns` | integer | No | Maximum number of associated campaigns. |
 | `subscribed` | boolean | No | Filter by subscription status. |
@@ -71,7 +72,11 @@ Returns a `data` array of contacts plus a `pagination` envelope.
       "campaigns": [{ "id": "c1...", "name": "Q3 Outbound" }],
       "categories": [{ "id": "6f1c...", "title": "VIP", "color": "#0ea5e9" }],
       "verification_status": "valid",
-      "verification_reason": "",
+      "verification_reason": "recipient accepted",
+      "verification_sub_status": "",
+      "verification_source": "probe",
+      "verification_provider": "builtin",
+      "verification_checked_at": "2026-06-10T11:58:00Z",
       "is_catch_all": false,
       "esp_provider": "gmail",
       "updated_at": "2026-06-10T12:00:00Z",
@@ -85,6 +90,8 @@ Returns a `data` array of contacts plus a `pagination` envelope.
   }
 }
 ```
+
+Every contact carries its address verification: `verification_status` (`valid`, `risky`, `invalid`, or `unknown`), `verification_sub_status` (`catch_all`, `disposable`, `role`, `spamtrap`, `mailbox_full`, `no_mx`, `syntax`, `undisclosed`, or empty), `verification_source` (`probe` for the built-in check, `provider` for a connected verification service, `imported` for a verdict that came with the contact, `manual` for one a member set, empty when never checked), `verification_provider` (who produced it), `verification_reason`, `verification_checked_at`, and `verification_confidence` (0 to 100, scored from the check plus what real mail to the address showed; see [what real mail teaches the check](/guides/deliverability/#what-real-mail-teaches-the-check)). Campaigns never send to `invalid`, and send to `risky` only when their `risky_emails` setting is on.
 
 When the search filters by exactly one campaign, each contact additionally carries a `campaign_lead` object with its processing state inside that campaign (`status`, `sent`, `opened`, `machine_opened`, `clicked`, `replied`, `bounced`, `current_step`, `last_activity_at`, and `failure_reason` when failed). `opened` counts steps opened by a person; steps fetched automatically by a mail client (Apple Mail Privacy Protection and similar) are in `machine_opened` instead, matching the machine opens the analytics summary reports. The `status` derivation, highest priority first, is `unsubscribed` (not subscribed), then `bounced`, `replied`, `failed` (a step could not be sent after every retry; `failure_reason` carries the sending worker's reason), `completed` (every email step sent, no reply), `active` (some steps sent, more to send), `undeliverable` (pre-send verification refused the address, so the campaign skips the lead and never sends to it), and `pending` (queued, nothing sent). A step counts as sent only once the sending worker has delivered it to the mailbox provider; a send the worker could not complete is retried on the campaign's next pass and never shows as sent. The `lead_status` filter narrows to one of these buckets.
 
@@ -145,6 +152,8 @@ A JSON array of contact objects (at least one, up to the per-request maximum; an
 | `categories` | string[] | No | Category IDs to assign. |
 | `custom_fields` | object | No | String key/value custom fields. Keys may use letters, numbers, underscores, spaces, and dashes. |
 | `subscribed` | boolean | No | Marketing-consent flag. Omit it to let a new contact default to subscribed and an existing one keep whatever it already had. |
+| `verification_status` | string | No | A verdict you already hold for the address, in Warmbly's vocabulary (`valid`, `risky`, `invalid`, `unknown`) or any known service's (`ok`, `catch-all`, `do_not_mail`, `deliverable`, `ok_for_all`, ...). Stored as an imported verdict that the background check leaves alone. A value no known service writes is rejected with `unknown_verification_status`. |
+| `verification_provider` | string | No | The vocabulary `verification_status` is written in: `zerobounce`, `millionverifier`, `neverbounce`, `bouncer`, `kickbox`, `emailable`, `debounce`, `clearout`, `emaillistverify`, or `warmbly`. Omit it to have the value recognised by itself. An unknown name is rejected with `unknown_verification_provider`. |
 
 An address you already have is matched (lowercased) and enriched rather than duplicated: fields you send replace what is stored, fields you omit or send empty are left alone, and `custom_fields` is merged key by key. Use `PATCH /contacts/:id` to clear a value.
 
@@ -351,7 +360,7 @@ Send `multipart/form-data` with a `file` field and an `options` field containing
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `mapping` | array | Yes | Column mappings: `{ "index", "target", "custom_key" }`. `target` is `ignore`, `email`, `first_name`, `last_name`, `company`, `phone`, `subscribed`, `categories`, or `custom` with the name in `custom_key`. `custom:<key>` is still accepted as the older spelling. Exactly one column must map to `email`. |
+| `mapping` | array | Yes | Column mappings: `{ "index", "target", "custom_key", "verification_provider" }`. `target` is `ignore`, `email`, `first_name`, `last_name`, `company`, `phone`, `subscribed`, `categories`, `verification_status`, or `custom` with the name in `custom_key`. `custom:<key>` is still accepted as the older spelling. Exactly one column must map to `email`. A `verification_status` column is read in the vocabulary named by `verification_provider` (see [Create contacts](#create-contacts)), or recognised value by value when it is omitted; a cell nobody recognises leaves that contact unverified rather than failing the row. The preview suggests this target itself when a column's header or values look like another service's results. |
 | `dedup` | string | Yes | `skip`, `update`, or `create_duplicate` for rows whose email matches an existing contact. |
 | `has_header` | boolean | Yes | Whether the first row is a header. |
 | `category_ids` | string[] | No | Categories to assign to imported contacts. |
@@ -402,6 +411,48 @@ Imports are capped at 50,000 rows. `errors` carries at most the first 1,000 entr
 
 A custom-field name may use letters, numbers, underscores, spaces, and dashes (`Company Mobile`, `first-name`, `plan_tier`). Anything else is a `400` on the whole request, raised before any row is written, along with a mapping that names no `email` column or a `custom` column with no `custom_key`. Per-row `errors` are reserved for problems with the data itself.
 
+## Verification overview
+
+`GET /contacts/verification`
+
+Reports which verifier checks this workspace's addresses and the contacts by verdict. **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`.
+
+### Response
+
+```json
+{
+  "provider": "millionverifier",
+  "connection_id": "9a1b...",
+  "credits": 48210,
+  "builtin_ready": true,
+  "counts": { "valid": 11240, "risky": 380, "invalid": 512, "unknown": 1890, "pending": 120 }
+}
+```
+
+`provider` is `builtin` or `millionverifier`. `credits` is the connected service's remaining balance; `provider_error` is set instead when the service is connected but unusable (a rejected key, no credits), in which case the built-in check is in use. `builtin_ready` says whether the built-in mailbox probe can run on this instance. `pending` is the share of `unknown` nobody has checked yet.
+
+## Verify or override contacts
+
+`POST /contacts/verification`
+
+Queues a fresh check of the listed contacts, or records a manual verdict on them. **Scope** `BULK_CONTACTS` · **Org permission** `manage_contacts`.
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `action` | string | Yes | `verify` queues a re-check (each contact updates as its verdict lands); `mark_deliverable` records `valid`; `mark_undeliverable` records `invalid`. Manual verdicts are never re-checked automatically. Anything else is rejected with `invalid_action`. |
+| `contacts` | string[] | No | Contact ids, up to the bulk maximum per request. |
+| `campaign_id` | string | No | Instead of, or as well as, `contacts`: every lead of this campaign that verification refused. |
+
+At least one contact must be selected (`no_contacts`). Marking leads deliverable resumes any campaign of the workspace that was paused for verification.
+
+### Response
+
+```json
+{ "affected": 512, "action": "verify", "queued": true }
+```
+
 ## Look up a contact by email
 
 `GET /contacts/lookup`
@@ -439,7 +490,7 @@ Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
 
 `GET /contacts/:id`
 
-Returns the hydrated contact 360 payload: the contact plus an engagement summary and, when present, suppression state. Engagement and suppression counts are org-scoped; they are returned only when an organization is selected.
+Returns the hydrated contact 360 payload: the contact plus an engagement summary, when present suppression state, and a `verification` object explaining the verdict: `status`, `confidence`, `reasons` (sentences, strongest first), `decisive` (true when real mail rather than a check decided the status), and `evidence`, the observations it was scored from, newest first, each `{ "kind", "detail", "observed_at" }` with `kind` one of `delivered`, `opened`, `clicked`, `replied`, `auto_replied`, `bounced_recipient`, `bounced_other`. Engagement and suppression counts are org-scoped; they are returned only when an organization is selected.
 
 Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
 

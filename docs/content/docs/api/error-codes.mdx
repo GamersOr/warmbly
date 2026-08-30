@@ -78,6 +78,12 @@ Returned when the request cannot be processed due to invalid syntax.
 | `invalid_lead_status` | `POST /contacts/search` or `POST /contacts/export` was given a `lead_status` that is not one of the documented values |
 | `invalid_engagement` | `POST /contacts/search` or `POST /contacts/export` was given an `engagement` that is not one of the documented values |
 | `lead_filter_requires_campaign` | `lead_status` or `engagement` was set without exactly one `campaign_ids` entry; both filters describe a contact inside one campaign |
+| `unknown_verification_status` | A contact's `verification_status` is not a value any known verification service writes |
+| `unknown_verification_provider` | A contact's `verification_provider` names a vocabulary the platform cannot read |
+| `invalid_action` | `POST /contacts/verification` was given an `action` other than `verify`, `mark_deliverable` or `mark_undeliverable` |
+| `no_contacts` | `POST /contacts/verification` selected no contacts: neither `contacts` nor a `campaign_id` with refused leads |
+| `list_bounce_risk` | `POST /campaigns/:id/start` refused the launch on the list's projected bounce rate. Clean or verify the list, or repeat the request with `acknowledge_list_risk: true` |
+| `leads_undeliverable` | `POST /campaigns/:id/start` found nothing to send because address verification refused every remaining lead; the campaign is parked at `paused_undeliverable` until they are re-verified or marked deliverable |
 | `no_organization` | The request needs a workspace and the caller has none selected. Every entitlement, limit and suppression rule is scoped to a workspace, so a write that would run unscoped is refused rather than run without those checks. API keys always carry their workspace; a dashboard session picks one at sign-in, so this normally means the session predates the workspace being chosen. Select a workspace and retry |
 
 ### 401 Unauthorized

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/warmbly/warmbly/internal/pkg/emailverify"
 	"strings"
 	"time"
 
@@ -194,6 +195,13 @@ func (s *JobsService) failCampaignSend(ctx context.Context, task *repository.Tas
 		}
 		s.logCampaignSendFailure(ctx, campaignID, ct, recipient, reason, code, 0, false, true, false)
 		return nil
+	}
+
+	// A server that rejected the RECIPIENT at send time is a bounce in all but
+	// delivery route; a rejection of the sender, the session or the content
+	// says nothing about the address.
+	if s.Evidence != nil && ct.ContactID != nil && ct.SequenceID != nil && emailverify.NamesRecipient(reason) {
+		s.Evidence.RecordEvidence(ctx, *ct.ContactID, "bounced_recipient", "send:"+ct.SequenceID.String(), reason)
 	}
 
 	attempts, exhausted, rolledBack := 0, false, false

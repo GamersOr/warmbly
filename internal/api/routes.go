@@ -550,6 +550,10 @@ func Run(
 				contacts.POST("", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.AddContacts)
 				contacts.DELETE("", m.RequireAccess(models.PermManageContacts, models.APIPermBulkContacts), h.DeleteContactBulk)
 				contacts.PATCH("", m.RequireAccess(models.PermManageContacts, models.APIPermBulkContacts), h.UpdateContactBulk)
+				// Address verification: who checks this workspace's contacts,
+				// and the member actions (re-verify, mark deliverable).
+				contacts.GET("/verification", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetContactVerification)
+				contacts.POST("/verification", m.RequireAccess(models.PermManageContacts, models.APIPermBulkContacts), h.RequestContactVerification)
 				// Import + export power-tools. Read-only export gates on
 				// ReadContacts; the import endpoints write and so use the
 				// stricter Write/Bulk scopes that the rest of the contact
