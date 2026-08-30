@@ -103,8 +103,10 @@ type Result struct {
 	HasMX      bool      `json:"has_mx"`
 	// Provider is who produced the verdict: ProviderBuiltin, a paid backend,
 	// or the vocabulary an imported result was recognised as.
-	Provider  string    `json:"provider,omitempty"`
-	CheckedAt time.Time `json:"checked_at"`
+	Provider string `json:"provider,omitempty"`
+	// Confidence is the scored certainty of Status once evidence is applied.
+	Confidence int       `json:"confidence,omitempty"`
+	CheckedAt  time.Time `json:"checked_at"`
 }
 
 // Verifier is the single contract the rest of the platform depends on. The

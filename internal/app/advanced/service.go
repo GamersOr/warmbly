@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/warmbly/warmbly/internal/pkg/emailverify"
 	"hash/fnv"
 	"math/rand"
 	"net/mail"
@@ -168,9 +169,11 @@ type service struct {
 	audienceRepo repository.CampaignAudienceRepository
 	// attachmentRepo lets preflight weigh attachments as the send path does.
 	// Optional/nil-safe: without it the content check scores none.
-	attachmentRepo   repository.AttachmentRepository
-	notifier         Notifier
-	realtime         ReplyRealtimePublisher
+	attachmentRepo repository.AttachmentRepository
+	notifier       Notifier
+	realtime       ReplyRealtimePublisher
+	// evidence teaches verification what replies and bounces showed.
+	evidence         EvidenceRecorder
 	automationRunner AutomationRunner
 	inboxAgent       InboxAgent
 }
@@ -919,6 +922,15 @@ func (s *service) ProcessIncomingReply(ctx context.Context, emailAccountID uuid.
 		// stop_on_reply and silently halt the sequence, and (b) match the plain
 		// "replied" branch. Both stop_on_reply and the "replied" condition key off
 		// replied_at IS NOT NULL, so gating the stamp here fixes both at once.
+		// Any reply, human or automatic, proves the mailbox is live; only a
+		// human one counts as engagement.
+		if s.evidence != nil {
+			kind := "replied"
+			if replyclassify.IsAutomated(replyResult.Class) {
+				kind = "auto_replied"
+			}
+			s.evidence.RecordEvidence(ctx, ctID, kind, msg.ID.String(), "")
+		}
 		if !replyclassify.IsAutomated(replyResult.Class) {
 			_ = s.campaignProgressRepo.RecordEmailReplied(ctx, cID, ctID, sID)
 			_ = s.repo.MarkVariantEvent(ctx, cID, ctID, string(models.DeliverabilityEventReply))
@@ -1154,6 +1166,15 @@ func (s *service) IngestDeliverabilityEvent(ctx context.Context, organizationID 
 			switch eventType {
 			case models.DeliverabilityEventBounce:
 				_ = s.campaignProgressRepo.RecordEmailBounced(ctx, *req.CampaignID, *req.ContactID, *campaignTask.SequenceID)
+				// Only a bounce that names the recipient is evidence against
+				// the address; a full mailbox or a policy block is not.
+				if s.evidence != nil {
+					kind := "bounced_other"
+					if emailverify.NamesRecipient(req.Reason) {
+						kind = "bounced_recipient"
+					}
+					s.evidence.RecordEvidence(ctx, *req.ContactID, kind, req.IdempotencyKey, req.Reason)
+				}
 			case models.DeliverabilityEventComplaint:
 				_ = s.campaignProgressRepo.RecordEmailComplained(ctx, *req.CampaignID, *req.ContactID, *campaignTask.SequenceID)
 			}
@@ -1899,6 +1920,18 @@ func (s *service) listQualityCheck(ctx context.Context, orgID, campaignID uuid.U
 }
 
 // WireAudience attaches the launch-time list measurement.
+// EvidenceRecorder mirrors emailverify.EvidenceRecorder without importing it.
+type EvidenceRecorder interface {
+	RecordEvidence(ctx context.Context, contactID uuid.UUID, kind, ref, detail string)
+}
+
+// EvidenceAware lets main hand the service the verification evidence ledger.
+type EvidenceAware interface {
+	WireEvidence(e EvidenceRecorder)
+}
+
+func (s *service) WireEvidence(e EvidenceRecorder) { s.evidence = e }
+
 func (s *service) WireAudience(r repository.CampaignAudienceRepository) {
 	s.audienceRepo = r
 }

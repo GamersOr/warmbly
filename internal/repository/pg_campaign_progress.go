@@ -1368,8 +1368,10 @@ func branchHasPositiveReplyCondition(b *models.Branch) bool {
 	return false
 }
 
-// CountUndeliverableLeads counts the leads FindNextRoutedPair excludes, using
-// the same predicate it filters on.
+// CountUndeliverableLeads counts the leads FindNextRoutedPair excludes for
+// verification, using the same predicate it filters on. Leads that are done
+// anyway (replied, bounced, or sent every email step) are not counted: their
+// verdict changes nothing, and counting them would park a finished campaign.
 func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context, campaignID uuid.UUID) (int, error) {
 	var n int
 	err := r.db.QueryRow(ctx, `
@@ -1377,6 +1379,17 @@ func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context
 		FROM campaign_leads cl
 		JOIN contacts c ON c.id = cl.contact_id
 		WHERE cl.campaign_id = $1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM campaign_contact_progress d
+		    WHERE d.campaign_id = $1 AND d.contact_id = cl.contact_id
+		      AND (d.replied_at IS NOT NULL OR d.bounced_at IS NOT NULL)
+		  )
+		  AND (
+		    SELECT COUNT(*) FROM campaign_contact_progress s
+		    WHERE s.campaign_id = $1 AND s.contact_id = cl.contact_id AND s.sent_at IS NOT NULL
+		  ) < (
+		    SELECT COUNT(*) FROM sequences q WHERE q.campaign_id = $1 AND q.kind = 'email'
+		  )
 		  AND `+undeliverableClause("$1"), campaignID).Scan(&n)
 	if err != nil {
 		return 0, err

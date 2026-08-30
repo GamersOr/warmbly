@@ -165,6 +165,12 @@ const (
 	// VerificationUnknownRecheckDays is the shorter shelf life of an
 	// inconclusive verdict (greylisted, timeout, undisclosing provider).
 	VerificationUnknownRecheckDays = 30
+	// VerificationEvidenceFreshDays is how long real mail to an address (a
+	// delivery, an open, a reply) excuses it from being re-checked.
+	VerificationEvidenceFreshDays = 180
+	// VerificationDeliveryWindowHours is how long after a send with no
+	// bounce the delivery counts as evidence the mailbox exists.
+	VerificationDeliveryWindowHours = 72
 	// VerificationBatchSize is how many contacts one scheduler pass checks.
 	VerificationBatchSize = 200
 	// VerificationIntervalSeconds is how often the scheduler passes. A pass

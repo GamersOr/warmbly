@@ -45,6 +45,10 @@ type Contact struct {
 	VerificationSource    string `json:"verification_source"`
 	VerificationProvider  string `json:"verification_provider"`
 	VerificationSubStatus string `json:"verification_sub_status"`
+	// VerificationConfidence is how sure the platform is of the status, 0 to
+	// 100, scored from the last check plus what real mail to the address
+	// showed (deliveries, opens, replies, bounces).
+	VerificationConfidence int `json:"verification_confidence"`
 
 	// Recipient ESP/provider, derived in the control plane from the recipient
 	// domain (never an MX dial on the send hot path). '' | 'gmail' | 'outlook'
@@ -204,6 +208,23 @@ type ContactVerificationCounts struct {
 	Pending int `json:"pending"`
 }
 
+// ContactVerificationDetail is the "why" behind a contact's verdict.
+type ContactVerificationDetail struct {
+	Status     string   `json:"status"`
+	Confidence int      `json:"confidence"`
+	Reasons    []string `json:"reasons"`
+	// Decisive is true when real mail, not a check, decided the status.
+	Decisive bool                          `json:"decisive"`
+	Evidence []ContactVerificationEvidence `json:"evidence"`
+}
+
+// ContactVerificationEvidence is one observed fact about the mailbox.
+type ContactVerificationEvidence struct {
+	Kind       string    `json:"kind"`
+	Detail     string    `json:"detail,omitempty"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
 // Verification provenance values for contacts.verification_source.
 const (
 	VerificationSourceNone     = ""
@@ -307,6 +328,9 @@ type ContactDetail struct {
 	Contact
 	Engagement  ContactEngagement   `json:"engagement"`
 	Suppression *ContactSuppression `json:"suppression,omitempty"`
+	// Verification explains the verdict: the reasons behind it and the
+	// observations it was scored from.
+	Verification *ContactVerificationDetail `json:"verification,omitempty"`
 
 	// First-touch attribution. Source never changes after creation.
 	Source       ContactSource `json:"source"`

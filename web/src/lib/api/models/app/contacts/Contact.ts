@@ -79,6 +79,9 @@ export default interface Contact {
     verification_source?: VerificationSource;
     verification_provider?: string;
     verification_checked_at?: string | null;
+    // How sure the platform is of the status, 0 to 100, scored from the last
+    // check plus what real mail to the address showed.
+    verification_confidence?: number;
     is_catch_all?: boolean;
 
     // Present only in the campaign Leads view (single-campaign search). Drives

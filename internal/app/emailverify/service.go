@@ -70,6 +70,12 @@ type Service interface {
 	// pass that changed its contacts, e.g. to resume a campaign that was
 	// parked waiting for verification.
 	SetVerdictHook(fn func(ctx context.Context, orgID uuid.UUID))
+
+	// SetEvidence attaches the evidence ledger, so a check never overrides
+	// what real mail has shown.
+	SetEvidence(e *Evidence)
+	// Explain builds the contact's verification detail for the drawer.
+	Explain(ctx context.Context, contactID uuid.UUID) *models.ContactVerificationDetail
 }
 
 type service struct {
@@ -84,7 +90,12 @@ type service struct {
 	wake chan struct{}
 	hook func(ctx context.Context, orgID uuid.UUID)
 
-	breaker *breaker
+	evidence *Evidence
+
+	// breakers are per organization: one tenant's list must not decide
+	// whether another tenant's rejections are trusted.
+	breakersMu sync.Mutex
+	breakers   map[uuid.UUID]*breaker
 
 	creditsMu sync.Mutex
 	credits   map[string]creditsEntry
@@ -119,7 +130,7 @@ func NewService(repo repository.ContactRepository, opts Options) Service {
 		builtinReady: opts.BuiltinReady,
 		providers:    opts.Providers,
 		wake:         make(chan struct{}, 1),
-		breaker:      newBreaker(config.VerificationBreakerWindow, config.VerificationBreakerInvalidPct, time.Duration(config.VerificationBreakerCooldownMinutes)*time.Minute),
+		breakers:     map[uuid.UUID]*breaker{},
 		credits:      map[string]creditsEntry{},
 	}
 	if k := strings.TrimSpace(opts.PlatformMillionVerifierKey); k != "" {
@@ -138,6 +149,23 @@ func (s *service) Kick() {
 func (s *service) Wake() <-chan struct{} { return s.wake }
 
 func (s *service) SetVerdictHook(fn func(ctx context.Context, orgID uuid.UUID)) { s.hook = fn }
+
+func (s *service) SetEvidence(e *Evidence) { s.evidence = e }
+
+func (s *service) Explain(ctx context.Context, contactID uuid.UUID) *models.ContactVerificationDetail {
+	return s.evidence.Explain(ctx, contactID)
+}
+
+func (s *service) breakerFor(orgID uuid.UUID) *breaker {
+	s.breakersMu.Lock()
+	defer s.breakersMu.Unlock()
+	b, ok := s.breakers[orgID]
+	if !ok {
+		b = newBreaker(config.VerificationBreakerWindow, config.VerificationBreakerInvalidPct, time.Duration(config.VerificationBreakerCooldownMinutes)*time.Minute)
+		s.breakers[orgID] = b
+	}
+	return b
+}
 
 // providerFor resolves the org's paid provider: its own connection first,
 // then the operator's instance-wide key.
@@ -164,11 +192,11 @@ func (s *service) VerifyAddress(ctx context.Context, orgID uuid.UUID, email stri
 		}
 		s.noteProviderError(ctx, p, err)
 	}
-	return s.verifyBuiltin(ctx, email)
+	return s.verifyBuiltin(ctx, orgID, email)
 }
 
-// verifyBuiltin runs the in-house verifier under the self-check breaker.
-func (s *service) verifyBuiltin(ctx context.Context, email string) emailverify.Result {
+// verifyBuiltin runs the in-house verifier under the org's self-check breaker.
+func (s *service) verifyBuiltin(ctx context.Context, orgID uuid.UUID, email string) emailverify.Result {
 	res := s.builtin.Verify(ctx, email)
 	// Syntax, no-MX and disposable verdicts do not come from a probe, so they
 	// neither feed nor fall under the breaker.
@@ -176,7 +204,7 @@ func (s *service) verifyBuiltin(ctx context.Context, email string) emailverify.R
 	if !probeVerdict {
 		return res
 	}
-	if s.breaker.observe(res.Status == emailverify.StatusInvalid) && res.Status == emailverify.StatusInvalid {
+	if s.breakerFor(orgID).observe(res.Status == emailverify.StatusInvalid) && res.Status == emailverify.StatusInvalid {
 		res.Status = emailverify.StatusUnknown
 		res.Reason = "probe rejection not trusted: the in-house check is rejecting an unusual share of addresses and is cooling down (" + res.Reason + ")"
 	}
@@ -263,7 +291,7 @@ func (s *service) VerifyPending(ctx context.Context, limit int) (int, *errx.Erro
 // verifyOrgBatch checks one org's candidates with its verifier, in parallel
 // up to the verifier's concurrency, and persists every verdict.
 func (s *service) verifyOrgBatch(ctx context.Context, orgID uuid.UUID, cands []repository.VerificationCandidate) int {
-	verify := s.verifyBuiltin
+	verify := func(ctx context.Context, email string) emailverify.Result { return s.verifyBuiltin(ctx, orgID, email) }
 	workers := config.VerificationProbeConcurrency
 	if p := s.providerFor(ctx, orgID); p != nil {
 		if _, err := s.providerUsable(ctx, p); err != nil {
@@ -275,7 +303,7 @@ func (s *service) verifyOrgBatch(ctx context.Context, orgID uuid.UUID, cands []r
 				if err != nil {
 					s.noteProviderError(ctx, p, err)
 					// Fall back for this address so the pass still makes progress.
-					return s.verifyBuiltin(ctx, email)
+					return s.verifyBuiltin(ctx, orgID, email)
 				}
 				return res
 			}
@@ -297,7 +325,8 @@ func (s *service) verifyOrgBatch(ctx context.Context, orgID uuid.UUID, cands []r
 		go func(c repository.VerificationCandidate) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			res := verify(ctx, c.Email)
+			// What real mail showed outranks what the check says.
+			res := s.evidence.Apply(ctx, c.ID, verify(ctx, c.Email))
 			if xerr := s.repo.UpdateContactVerification(ctx, c.ID, res); xerr != nil {
 				// Skip this one; a transient DB error shouldn't abort the whole pass.
 				return

@@ -733,6 +733,7 @@ function ContactsTableBody({
         verification_source?: VerificationSource;
         verification_provider?: string;
         verification_checked_at?: string | null;
+        verification_confidence?: number;
         created_at: Date;
     }[];
     selected: string[];

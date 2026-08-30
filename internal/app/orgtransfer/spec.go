@@ -254,6 +254,12 @@ var Tables = []Table{
 		Scope: `contact_id IN ` + orgContacts,
 	},
 	{
+		// What real mail showed about each address; the verdict on the
+		// contact row is scored from it, so it travels with the contacts.
+		Name: "contact_verification_evidence", Group: models.OrgDataGroupContacts,
+		Scope: `contact_id IN ` + orgContacts,
+	},
+	{
 		Name: "contact_notes", Group: models.OrgDataGroupContacts,
 		Scope: scopeOrg,
 	},

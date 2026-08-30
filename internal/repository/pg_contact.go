@@ -509,7 +509,7 @@ func (r *contactRepository) GetByID(ctx context.Context, contactID uuid.UUID) (*
 			c.id, c.first_name, c.last_name, c.email, c.company, c.phone,
 			c.custom_fields, c.subscribed, c.updated_at, c.created_at,
 			c.verification_status, c.verification_reason, c.is_catch_all, c.verification_checked_at,
-			c.verification_source, c.verification_provider, c.verification_sub_status,
+			c.verification_source, c.verification_provider, c.verification_sub_status, c.verification_confidence,
 			c.esp_provider, c.esp_resolved_at
 		FROM contacts c
 		WHERE c.id = $1
@@ -521,7 +521,7 @@ func (r *contactRepository) GetByID(ctx context.Context, contactID uuid.UUID) (*
 		&contact.Company, &contact.Phone, &contact.CustomFields, &contact.Subscribed,
 		&contact.UpdatedAt, &contact.CreatedAt,
 		&contact.VerificationStatus, &contact.VerificationReason, &contact.IsCatchAll, &contact.VerificationCheckedAt,
-		&contact.VerificationSource, &contact.VerificationProvider, &contact.VerificationSubStatus,
+		&contact.VerificationSource, &contact.VerificationProvider, &contact.VerificationSubStatus, &contact.VerificationConfidence,
 		&contact.ESPProvider, &contact.ESPResolvedAt,
 	)
 	if err != nil {
@@ -580,10 +580,11 @@ func (r *contactRepository) UpdateContactVerification(ctx context.Context, conta
 		    verification_source = $6,
 		    verification_provider = $7,
 		    verification_sub_status = $8,
+		    verification_confidence = $9,
 		    updated_at = NOW()
 		WHERE id = $1
 	`
-	params := []any{contactID, status, res.Reason, res.IsCatchAll, checkedAt, source, provider, string(res.SubStatus)}
+	params := []any{contactID, status, res.Reason, res.IsCatchAll, checkedAt, source, provider, string(res.SubStatus), res.Confidence}
 	cmd, err := r.DB.Exec(ctx, query, params...)
 	if err != nil {
 		db.CaptureError(err, query, params, "exec")
@@ -620,6 +621,8 @@ func (r *contactRepository) ListVerificationCandidates(ctx context.Context, limi
 		FROM contacts c
 		WHERE c.organization_id IS NOT NULL
 		  AND c.verification_source <> 'manual'
+		  -- Real mail seen recently excuses the address from a check.
+		  AND (c.verification_evidence_at IS NULL OR c.verification_evidence_at < NOW() - make_interval(days => $4))
 		  AND (
 		    c.verification_checked_at IS NULL
 		    OR (c.verification_status = 'unknown' AND c.verification_checked_at < NOW() - make_interval(days => $2))
@@ -628,7 +631,7 @@ func (r *contactRepository) ListVerificationCandidates(ctx context.Context, limi
 		ORDER BY c.verification_checked_at ASC NULLS FIRST, c.created_at ASC
 		LIMIT $1
 	`
-	params := []any{limit, config.VerificationUnknownRecheckDays, config.VerificationRecheckDays}
+	params := []any{limit, config.VerificationUnknownRecheckDays, config.VerificationRecheckDays, config.VerificationEvidenceFreshDays}
 	rows, err := r.DB.Query(ctx, query, params...)
 	if err != nil {
 		db.CaptureError(err, query, params, "query")
@@ -1177,7 +1180,7 @@ func (r *contactRepository) Search(
 			c.id, c.first_name, c.last_name, c.email, c.company, c.phone,
 			c.custom_fields, c.subscribed, c.updated_at, c.created_at,
 			c.verification_status, c.verification_reason, c.is_catch_all, c.verification_checked_at,
-			c.verification_source, c.verification_provider, c.verification_sub_status,
+			c.verification_source, c.verification_provider, c.verification_sub_status, c.verification_confidence,
 			COALESCE(cl.campaign_count,0) AS campaign_count,
 			COALESCE(
 				(
@@ -1259,7 +1262,7 @@ func (r *contactRepository) Search(
 			&c.Company, &c.Phone, &c.CustomFields, &c.Subscribed,
 			&c.UpdatedAt, &c.CreatedAt,
 			&c.VerificationStatus, &c.VerificationReason, &c.IsCatchAll, &c.VerificationCheckedAt,
-			&c.VerificationSource, &c.VerificationProvider, &c.VerificationSubStatus,
+			&c.VerificationSource, &c.VerificationProvider, &c.VerificationSubStatus, &c.VerificationConfidence,
 			&campaignCount, &campaignsJSON, &categoriesJSON, &leadProgressJSON,
 		); err != nil {
 			db.CaptureError(err, "", nil, "scan")

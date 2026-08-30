@@ -32,10 +32,10 @@ const SOURCE_LABEL: Record<string, string> = {
     manual: "marked by a teammate",
 };
 
-export function verificationTitle(c: Pick<Contact, "verification_status" | "verification_sub_status" | "verification_source" | "verification_provider">): string {
+export function verificationTitle(c: Pick<Contact, "verification_status" | "verification_sub_status" | "verification_source" | "verification_provider" | "verification_confidence">): string {
     const status = c.verification_status ?? "unknown";
     const meta = META[status] ?? META.unknown;
-    const parts: string[] = [meta.label];
+    const parts: string[] = [c.verification_confidence ? `${meta.label} (${c.verification_confidence}% sure)` : meta.label];
     if (c.verification_sub_status && SUB_LABEL[c.verification_sub_status]) parts.push(SUB_LABEL[c.verification_sub_status]);
     if (c.verification_source && SOURCE_LABEL[c.verification_source]) {
         const src = c.verification_source === "imported" && c.verification_provider && c.verification_provider !== "imported"
@@ -50,7 +50,7 @@ export default function VerificationBadge({
     contact,
     className,
 }: {
-    contact: Pick<Contact, "verification_status" | "verification_sub_status" | "verification_source" | "verification_provider" | "verification_checked_at">;
+    contact: Pick<Contact, "verification_status" | "verification_sub_status" | "verification_source" | "verification_provider" | "verification_checked_at" | "verification_confidence">;
     className?: string;
 }) {
     const status = contact.verification_status ?? "unknown";
