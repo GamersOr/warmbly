@@ -358,3 +358,14 @@ type CreateSequenceInput struct {
 	BodyCode  *bool  `json:"body_code,omitempty"`
 	WaitAfter *int   `json:"wait_after,omitempty"`
 }
+
+// StartCampaignOptions qualifies a start request.
+type StartCampaignOptions struct {
+	// AcknowledgeListRisk launches past the bounce-risk gate: the member has
+	// read the projection and takes the risk (the list may have been verified
+	// elsewhere).
+	AcknowledgeListRisk bool `json:"acknowledge_list_risk"`
+	// Automatic marks a start the platform initiated (a resume after
+	// verification), which skips the member-facing cooldown.
+	Automatic bool `json:"-"`
+}

@@ -29,6 +29,7 @@ import {
     PlusIcon,
     RefreshCcwIcon,
     Settings2Icon,
+    ShieldCheckIcon,
     SheetIcon,
     SparklesIcon,
     TrashIcon,
@@ -41,6 +42,8 @@ import { useConfirm } from "@/hooks/context/confirm";
 import useSearchContacts from "@/lib/api/hooks/app/contacts/useSearchContacts";
 import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import useDeleteContacts from "@/lib/api/hooks/app/contacts/useDeleteContacts";
+import { useRequestContactVerification } from "@/lib/api/hooks/app/contacts/useContactVerification";
+import VerificationBadge from "./VerificationBadge";
 import { useBatchResearch } from "@/lib/api/hooks/app/contacts/useContactResearch";
 import useIntegrationConnections from "@/lib/api/hooks/app/integrations/useIntegrationConnections";
 import { usePushContacts } from "@/lib/api/hooks/app/integrations/usePushContacts";
@@ -56,7 +59,7 @@ import ContactFilters from "./ContactFilters";
 import ContactEdit from "./ContactEdit";
 import type { ContactSlideTab } from "./contact-edit/tabs";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
-import type { ContactCampaignProgress, LeadEngagement, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
+import type { ContactCampaignProgress, LeadEngagement, LeadStatus, VerificationSource, VerificationStatus } from "@/lib/api/models/app/contacts/Contact";
 import type { CampaignLeadCounts } from "@/lib/api/models/app/contacts/SearchContactsResult";
 import ContactsEditBulk from "./ContactsEditBulk";
 import { NewContactDialog } from "./NewContactDialog";
@@ -247,6 +250,36 @@ export default function ContactsTable({
         );
     }
 
+    // Bulk verification actions. A re-check is queued and each row's mark
+    // updates live as its verdict lands; marking deliverable is immediate.
+    const verification = useRequestContactVerification();
+    function bulkVerify() {
+        if (selected.length === 0) return;
+        const ids = selected;
+        confirm?.show(
+            `Re-verify ${ids.length} ${ids.length === 1 ? "address" : "addresses"}? Verdicts land in the background${
+                ids.length > 50 ? " over the next few minutes" : ""
+            }.`,
+            async () => {
+                const res = await verification.mutateAsync({ contacts: ids, action: "verify" });
+                toast.success(`Re-checking ${res.affected} ${res.affected === 1 ? "address" : "addresses"}`);
+                setSelected([]);
+            },
+        );
+    }
+    function bulkMarkDeliverable() {
+        if (selected.length === 0) return;
+        const ids = selected;
+        confirm?.show(
+            `Mark ${ids.length} ${ids.length === 1 ? "address" : "addresses"} deliverable? Campaigns will send to them even if verification refused them. Use this for a list you verified elsewhere.`,
+            async () => {
+                const res = await verification.mutateAsync({ contacts: ids, action: "mark_deliverable" });
+                toast.success(`${res.affected} marked deliverable`);
+                setSelected([]);
+            },
+        );
+    }
+
     const embedded = !!current_campaign;
     // Leads-view scope chips write straight into the search request, so the
     // rows, the total and pagination all come from the server for that scope.
@@ -402,6 +435,9 @@ export default function ContactsTable({
                     onBulkEdit={() => setBulkEdit(true)}
                     onResearch={bulkResearch}
                     researching={batchResearch.isPending}
+                    onVerify={bulkVerify}
+                    onMarkDeliverable={bulkMarkDeliverable}
+                    verifying={verification.isPending}
                     onDelete={() =>
                         confirm?.show(
                             `Are you sure you want to delete ${selected.length} contacts?`,
@@ -613,6 +649,9 @@ export default function ContactsTable({
                 onBulkEdit={() => setBulkEdit(true)}
                 onResearch={bulkResearch}
                 researching={batchResearch.isPending}
+                onVerify={bulkVerify}
+                onMarkDeliverable={bulkMarkDeliverable}
+                verifying={verification.isPending}
                 onDelete={() =>
                     confirm?.show(
                         `Are you sure you want to delete ${selected.length} contacts?`,
@@ -689,6 +728,11 @@ function ContactsTableBody({
         campaigns: { id: string }[];
         categories?: { id: string; title: string; color: string }[];
         campaign_lead?: ContactCampaignProgress | null;
+        verification_status?: VerificationStatus;
+        verification_sub_status?: string;
+        verification_source?: VerificationSource;
+        verification_provider?: string;
+        verification_checked_at?: string | null;
         created_at: Date;
     }[];
     selected: string[];
@@ -862,6 +906,7 @@ function ContactsTableBody({
                                             <div className="text-[10.5px] text-slate-400 truncate font-mono leading-tight flex items-center gap-1">
                                                 <MailIcon className="w-2.5 h-2.5 shrink-0" />
                                                 <span className="truncate">{c.email}</span>
+                                                <VerificationBadge contact={c} />
                                             </div>
                                         </div>
                                     </div>
@@ -1319,6 +1364,9 @@ function SelectionBar({
     onBulkEdit,
     onResearch,
     researching,
+    onVerify,
+    onMarkDeliverable,
+    verifying,
     onDelete,
     onClear,
 }: {
@@ -1330,6 +1378,9 @@ function SelectionBar({
     onBulkEdit: () => void;
     onResearch: () => void;
     researching: boolean;
+    onVerify: () => void;
+    onMarkDeliverable: () => void;
+    verifying: boolean;
     onDelete: () => void;
     onClear: () => void;
 }) {
@@ -1391,6 +1442,23 @@ function SelectionBar({
                 {researching ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <SparklesIcon className="w-3 h-3" />}
                 <span className="hidden sm:inline">Research</span>
             </button>
+            <PopoverMenu side="top" align="center">
+                <PopoverMenuTrigger asChild>
+                    <button
+                        type="button"
+                        disabled={verifying}
+                        className="h-7 px-2.5 rounded text-[12px] text-slate-700 hover:text-emerald-700 hover:bg-emerald-50 font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                    >
+                        {verifying ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <ShieldCheckIcon className="w-3 h-3" />}
+                        <span className="hidden sm:inline">Verify</span>
+                    </button>
+                </PopoverMenuTrigger>
+                <PopoverMenuContent>
+                    <PopoverMenuLabel>Address verification</PopoverMenuLabel>
+                    <PopoverMenuItem onSelect={onVerify}>Re-verify {count}</PopoverMenuItem>
+                    <PopoverMenuItem onSelect={onMarkDeliverable}>Mark deliverable</PopoverMenuItem>
+                </PopoverMenuContent>
+            </PopoverMenu>
             <button
                 type="button"
                 onClick={onDelete}

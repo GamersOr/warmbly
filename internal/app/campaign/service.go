@@ -33,7 +33,11 @@ type CampaignService interface {
 	Duplicate(ctx context.Context, orgID, userID uuid.UUID, campaignID, name string) (*models.Campaign, *errx.Error)
 
 	// Start/Stop
-	StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string) *errx.Error
+	StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string, opts models.StartCampaignOptions) *errx.Error
+	// ResumeVerificationPaused restarts the org's campaigns parked at
+	// paused_undeliverable. Called after verification verdicts change; a
+	// campaign that still has nothing to send parks itself again.
+	ResumeVerificationPaused(ctx context.Context, orgID uuid.UUID)
 	StopCampaign(ctx context.Context, orgID uuid.UUID, campaignID string) *errx.Error
 
 	// Logs
@@ -71,6 +75,9 @@ type campaignService struct {
 	// audienceRepo measures the campaign's list at launch. Optional/nil-safe:
 	// without it no launch is ever refused on list quality.
 	audienceRepo repository.CampaignAudienceRepository
+	// campaignProgressRepo counts the leads verification refused, so a start
+	// with nothing left to send can say why. Optional/nil-safe.
+	campaignProgressRepo repository.CampaignProgressRepository
 }
 
 // WireAudience attaches the launch-time list gate.
@@ -88,6 +95,15 @@ type AudienceAware interface {
 // delete leaves attachment objects behind and duplicate skips attachments.
 type AttachmentAware interface {
 	WireAttachments(repo repository.AttachmentRepository, store storage.Store)
+}
+
+// ProgressAware lets main hand the campaign service the progress repository.
+type ProgressAware interface {
+	WireProgress(r repository.CampaignProgressRepository)
+}
+
+func (s *campaignService) WireProgress(r repository.CampaignProgressRepository) {
+	s.campaignProgressRepo = r
 }
 
 func (s *campaignService) WireAttachments(repo repository.AttachmentRepository, store storage.Store) {

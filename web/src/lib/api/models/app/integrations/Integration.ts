@@ -13,7 +13,9 @@ export type IntegrationProvider =
     | "slack"
     | "discord"
     | "calendly"
-    | "cal_com";
+    | "cal_com"
+    | "google_sheets"
+    | "millionverifier";
 
 export type IntegrationAuthMethod = "oauth" | "api_key" | "webhook";
 
@@ -32,7 +34,8 @@ export type IntegrationCategory =
     | "automation"
     | "notifications"
     | "meetings"
-    | "data";
+    | "data"
+    | "verification";
 
 export interface IntegrationCatalogEntry {
     provider: IntegrationProvider;
@@ -281,6 +284,7 @@ export const CATEGORY_LABELS: Record<IntegrationCategory, string> = {
     notifications: "Notifications",
     meetings: "Meetings",
     data: "Data",
+    verification: "Verification",
 };
 
 export const CATEGORY_ORDER: IntegrationCategory[] = [
@@ -289,6 +293,7 @@ export const CATEGORY_ORDER: IntegrationCategory[] = [
     "automation",
     "meetings",
     "data",
+    "verification",
 ];
 
 // Reply-intent classifier buckets, used to filter reply automations
@@ -356,6 +361,8 @@ export const PROVIDER_LABELS: Record<IntegrationProvider, string> = {
     discord: "Discord",
     calendly: "Calendly",
     cal_com: "Cal.com",
+    google_sheets: "Google Sheets",
+    millionverifier: "MillionVerifier",
 };
 
 // A connection is bookable when it's a connected scheduling provider with a

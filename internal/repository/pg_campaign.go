@@ -68,6 +68,8 @@ type CampaignRepository interface {
 	// reply routing a contact onto a live branch). The reconciler re-checks each.
 	ListStaleParkedCampaigns(ctx context.Context, staleAfter time.Duration, limit int) ([]ParkedCampaignTask, error)
 	CountActiveForOrganization(ctx context.Context, orgID uuid.UUID) (int, error)
+	// ListIDsByStatus lists the org's campaigns parked at one status.
+	ListIDsByStatus(ctx context.Context, orgID uuid.UUID, status string) ([]uuid.UUID, error)
 	AccountHasActiveCampaign(ctx context.Context, accountID uuid.UUID) (bool, error)
 	// CountActiveCampaignsForAccount returns how many active campaigns send
 	// from the given mailbox (matched through the campaign's email tags OR an
@@ -833,12 +835,13 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 	}
 	if data.Status != nil {
 		// Valid statuses: draft, active, paused, completed, paused_trial_expired,
-		// paused_no_accounts, paused_guardrail
+		// paused_no_accounts, paused_guardrail, paused_undeliverable
 		status := *data.Status
 		validStatuses := map[string]bool{
 			"draft": true, "active": true, "paused": true,
 			"completed": true, "paused_trial_expired": true,
 			"paused_no_accounts": true, "paused_guardrail": true,
+			"paused_undeliverable": true,
 		}
 		if !validStatuses[status] {
 			return nil, errx.ErrInvalid
@@ -1331,10 +1334,13 @@ func (r *campaignRepository) GetSequencesRoutingByCampaignID(ctx context.Context
 // validCampaignTransitions defines which status transitions are allowed.
 // Key is the current status, values are the statuses it can transition to.
 var validCampaignTransitions = map[string]map[string]bool{
-	"draft":                {"active": true},
-	"active":               {"paused": true, "completed": true, "paused_no_accounts": true, "paused_trial_expired": true, "paused_guardrail": true},
-	"paused":               {"active": true, "draft": true},
-	"paused_no_accounts":   {"active": true, "paused": true},
+	"draft":              {"active": true},
+	"active":             {"paused": true, "completed": true, "paused_no_accounts": true, "paused_trial_expired": true, "paused_guardrail": true, "paused_undeliverable": true},
+	"paused":             {"active": true, "draft": true},
+	"paused_no_accounts": {"active": true, "paused": true},
+	// Parked because verification refused every remaining lead; resumes once
+	// they are re-verified or marked deliverable.
+	"paused_undeliverable": {"active": true, "paused": true},
 	"paused_trial_expired": {"active": true, "paused": true},
 	// An auto-pause is resumable, but only deliberately: the owner has to
 	// restart the campaign (or park it) after looking at why it tripped.
@@ -1561,6 +1567,24 @@ func (r *campaignRepository) CountActiveForOrganization(ctx context.Context, org
 	var count int
 	err := r.DB.QueryRow(ctx, query, orgID).Scan(&count)
 	return count, err
+}
+
+// ListIDsByStatus lists the org's campaigns parked at one status.
+func (r *campaignRepository) ListIDsByStatus(ctx context.Context, orgID uuid.UUID, status string) ([]uuid.UUID, error) {
+	rows, err := r.DB.Query(ctx, `SELECT id FROM campaigns WHERE organization_id = $1 AND status = $2`, orgID, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // AccountHasActiveCampaign reports whether the mailbox backs at least one active

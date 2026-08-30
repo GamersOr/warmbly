@@ -536,7 +536,7 @@ func (d Deps) setCampaignStatus(ctx context.Context, inv Invocation, args json.R
 	}
 	switch in.Action {
 	case "start":
-		if xerr := d.Campaigns.StartCampaign(ctx, inv.OrgID, in.CampaignID); xerr != nil {
+		if xerr := d.Campaigns.StartCampaign(ctx, inv.OrgID, in.CampaignID, models.StartCampaignOptions{}); xerr != nil {
 			return "", fromErrx(xerr)
 		}
 		d.logAudit(ctx, inv, models.AuditActionStart, models.AuditEntityCampaign, &cid, nil)

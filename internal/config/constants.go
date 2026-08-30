@@ -158,6 +158,32 @@ const (
 	UniboxLimitMax     = 100
 	UniboxLimitDefault = 50
 
+	// VerificationRecheckDays is how long a verification verdict is trusted
+	// before the address is checked again. Mailboxes get created and closed;
+	// a verdict from last quarter is a guess.
+	VerificationRecheckDays = 90
+	// VerificationUnknownRecheckDays is the shorter shelf life of an
+	// inconclusive verdict (greylisted, timeout, undisclosing provider).
+	VerificationUnknownRecheckDays = 30
+	// VerificationBatchSize is how many contacts one scheduler pass checks.
+	VerificationBatchSize = 200
+	// VerificationIntervalSeconds is how often the scheduler passes. A pass
+	// that finds a full batch runs again immediately, so a large import drains
+	// at the verifier's speed rather than one batch per interval.
+	VerificationIntervalSeconds = 60
+	// VerificationProbeConcurrency bounds parallel in-house SMTP probes.
+	VerificationProbeConcurrency = 4
+	// VerificationProviderConcurrency bounds parallel paid-provider lookups.
+	VerificationProviderConcurrency = 8
+	// VerificationBreakerWindow and VerificationBreakerInvalidPct are the
+	// in-house probe's self-check: when this share of the last window of
+	// probe verdicts is "invalid", the probe itself is suspect (issue #200,
+	// #264) and its invalid verdicts are filed as unknown for
+	// VerificationBreakerCooldownMinutes.
+	VerificationBreakerWindow          = 200
+	VerificationBreakerInvalidPct      = 40.0
+	VerificationBreakerCooldownMinutes = 60
+
 	// WarmupVerifyHeader is the custom header carrying the warmup
 	// verification token on outbound warmup mail. The name is intentionally
 	// generic (not "X-Warmbly-*") so anti-spam vendors cannot trivially

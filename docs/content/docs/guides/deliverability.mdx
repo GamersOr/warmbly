@@ -98,7 +98,7 @@ If a campaign has already been paused because every one of its mailboxes was gat
 
 **One-click unsubscribe** (RFC 8058) puts a native Unsubscribe control in the recipient's mail client. It drives complaint rate down, because someone who can opt out cleanly rarely hits "mark as spam" instead, and Google's bulk-sender guidance effectively requires it at volume. Unsubscribes are suppressed automatically.
 
-**Pre-send verification** checks an address before sending and skips undeliverable ones, keeping bad addresses from becoming the hard bounces that drive the `5%` and `10%` thresholds above. A skipped lead shows as **Undeliverable** in the campaign's Leads view rather than sitting at Queued, and the campaign's activity log says how many it skipped when it finishes, so a campaign is never quietly held up by addresses it will not send to. Verification only records an address as invalid when the recipient's server rejects the address itself. A server that rejects the check for its own reasons (a policy block, a rate limit, or a greeting it does not accept) leaves the address unverified, and unverified addresses are still sent to. Self-hosted instances should set `EMAIL_VERIFY_HELO_HOST`, described in the [configuration reference](/development/configuration/#pre-send-verification).
+**Pre-send verification** checks every address before a campaign sends to it and skips the undeliverable ones, keeping bad addresses from becoming the hard bounces that drive the `5%` and `10%` thresholds above. There is nothing to run: new contacts are checked in the background within a minute of being added, each contact carries its verdict (a small mark next to the email), and Settings > Sending shows the whole workspace at a glance. See [address verification](#address-verification) below for how verdicts are produced and what to do when one is wrong.
 
 **Suppression** is the safety net: a suppressed recipient is never emailed again by any campaign. Warmbly suppresses automatically on a bounce, a spam complaint, or an unsubscribe, because once someone has bounced or complained the safest response is to stop, not to keep collecting negative signals.
 
@@ -113,6 +113,24 @@ Complaint reports are read from IMAP and Gmail mailboxes. Microsoft Graph return
 </Callout>
 
 **Domain authentication refusals** are separated from ordinary failures. When a receiving server refuses a message because your sending domain failed its checks (Microsoft's `5.7.515`, Gmail's `5.7.26`), that is not a bad recipient and not an outage: every send from that domain fails the same way until its DNS is fixed. Warmbly says so in the campaign's activity feed rather than blaming the address, does not suppress the recipient, and brings that domain's authentication check forward so the [domain authentication](/guides/deliverability/#domain-authentication) state reflects it.
+
+## Address verification
+
+Every address gets one of four verdicts. **Deliverable** and **unverified** are always sent to. **Undeliverable** is never sent to. **Risky** (a catch-all domain, a shared inbox such as `info@`) is sent to only when the campaign's **send to risky addresses** setting allows it.
+
+Verdicts come from one of three places, and the source is shown on the contact:
+
+- **The built-in check**, included on every plan: syntax, the domain's mail server, known disposable domains, and a mailbox probe against the recipient's server. It only records an address as undeliverable when that server rejects the address itself; a server that rejects the check for its own reasons (a policy block, a rate limit, a greeting it does not accept) leaves the address unverified. Microsoft 365 and Yahoo answer every probe the same way, so their addresses stay unverified rather than being called deliverable. The check also watches itself: when it starts rejecting an unusual share of addresses, its rejections are filed as unverified for an hour instead of being trusted, because a real list is never mostly dead. Self-hosted instances should set `EMAIL_VERIFY_HELO_HOST`, described in the [configuration reference](/development/configuration/#pre-send-verification).
+- **MillionVerifier**, pay as you go: connect it once under Integrations with your own API key, and every check from then on uses your MillionVerifier credits (one per address) instead of the built-in probe. Its verdicts cover the catch-all and Microsoft cases the probe cannot. When the balance runs out or the key stops working, the connection is marked and the built-in check takes over until it is fixed. Nothing else changes.
+- **Results you already have.** A list verified with another service (ZeroBounce, MillionVerifier, NeverBounce, Bouncer, Kickbox, Emailable, DeBounce, Clearout, EmailListVerify, or a Warmbly export) can bring its status column along. The import recognises the column from its header or its values, maps it to **Verification status**, and reads each service's own words (`catch-all`, `do_not_mail`, `ok_for_all`, and so on). Those verdicts are kept as they are; the built-in check leaves them alone. The same field is accepted when [creating contacts through the API](/api/reference/contacts/#create-contacts).
+
+Verdicts age: an address is checked again after 90 days (30 for an inconclusive verdict), because mailboxes get created and closed. A verdict a teammate set by hand never expires.
+
+### When verification is wrong
+
+Select the contacts and choose **Verify** in the selection bar: **Re-verify** queues a fresh check, and each row's mark updates as its verdict lands; **Mark deliverable** overrides the verdict for a list you know is good. Both are also available on a campaign's Leads tab.
+
+A campaign never quietly finishes because of verification. When every remaining lead has been refused, the campaign shows **needs verification** and pauses, with two buttons on it: **Re-verify leads** checks them again and resumes sending automatically as soon as any pass, and **Send anyway** marks them deliverable and resumes at once. The [launch check](/guides/campaigns/#adding-leads) likewise offers **Launch anyway** when a list is refused for its projected bounce rate, for a list verified elsewhere.
 
 ## Workspace sending posture
 

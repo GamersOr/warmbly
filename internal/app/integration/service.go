@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
+	"github.com/warmbly/warmbly/internal/pkg/emailverify"
 	"strings"
 	"time"
 
@@ -161,6 +163,11 @@ type Service interface {
 	// configured default channel. No-op (nil) when no Slack is connected.
 	NotifySlack(ctx context.Context, orgID uuid.UUID, title, body string) error
 
+	// VerificationProviderFor and ReportVerificationProviderError implement
+	// emailverify.ProviderSource: the org's paid verification backend, if any.
+	VerificationProviderFor(ctx context.Context, orgID uuid.UUID) (*emailverifyapp.Provider, error)
+	ReportVerificationProviderError(ctx context.Context, connectionID uuid.UUID, err error)
+
 	// Repo exposes the underlying repository for the inbound webhook handlers.
 	Repo() repository.IntegrationRepository
 }
@@ -263,6 +270,16 @@ func (s *service) Connect(ctx context.Context, orgID, userID uuid.UUID, provider
 	}
 
 	displayFields := buildDisplayFields(provider, config)
+
+	// A verification key is checked before it is stored: a mistyped key would
+	// otherwise quietly leave every contact on the built-in check.
+	if provider == models.IntegrationMillionVerifier {
+		credits, err := checkMillionVerifierKey(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		displayFields["credits"] = credits
+	}
 
 	var inboundSecret string
 	var err error
@@ -1327,8 +1344,87 @@ func buildDisplayFields(provider models.IntegrationProvider, config map[string]a
 		pick("server")
 	case models.IntegrationZapier, models.IntegrationMake, models.IntegrationN8N:
 		// Outbound-via-Warmbly-API providers: minimal display fields.
+	case models.IntegrationMillionVerifier:
+		// Credits are filled in at connect time from the provider.
 	}
 	return df
+}
+
+// checkMillionVerifierKey validates a pasted key against the provider and
+// returns the account's credit balance.
+func checkMillionVerifierKey(ctx context.Context, config map[string]any) (int, error) {
+	key, _ := config["api_key"].(string)
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return 0, errors.New("paste your MillionVerifier API key")
+	}
+	credits, err := emailverify.NewMillionVerifier(key, "").Credits(ctx)
+	switch {
+	case errors.Is(err, emailverify.ErrMillionVerifierKey):
+		return 0, errors.New("MillionVerifier rejected this API key")
+	case errors.Is(err, emailverify.ErrMillionVerifierCredits):
+		// A valid key with an empty balance still connects; the built-in
+		// check covers until it is topped up.
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("could not reach MillionVerifier: %w", err)
+	}
+	return credits, nil
+}
+
+// VerificationProviderFor returns the org's connected MillionVerifier client,
+// or nil when none is connected. A disconnected or reauth-required connection
+// does not count.
+func (s *service) VerificationProviderFor(ctx context.Context, orgID uuid.UUID) (*emailverifyapp.Provider, error) {
+	conns, err := s.repo.ListConnections(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range conns {
+		if c.Provider != models.IntegrationMillionVerifier {
+			continue
+		}
+		if c.Status != models.IntegrationStatusConnected && c.Status != models.IntegrationStatusDegraded {
+			continue
+		}
+		sec, err := s.repo.GetConnectionSecrets(ctx, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err := s.openConfig(ctx, sec)
+		if err != nil {
+			return nil, err
+		}
+		key, _ := cfg["api_key"].(string)
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		id := c.ID
+		return &emailverifyapp.Provider{
+			Name:         emailverify.ProviderMillionVerifier,
+			ConnectionID: &id,
+			Client:       emailverify.NewMillionVerifier(key, ""),
+		}, nil
+	}
+	return nil, nil
+}
+
+// ReportVerificationProviderError records why the provider stopped being
+// usable on the connection card.
+func (s *service) ReportVerificationProviderError(ctx context.Context, connectionID uuid.UUID, err error) {
+	if err == nil {
+		return
+	}
+	status, health := models.IntegrationStatusDegraded, models.IntegrationHealthDegraded
+	detail := err.Error()
+	switch {
+	case errors.Is(err, emailverify.ErrMillionVerifierKey):
+		status, health = models.IntegrationStatusReauthRequired, models.IntegrationHealthDown
+		detail = "MillionVerifier rejected the API key; reconnect with a current key"
+	case errors.Is(err, emailverify.ErrMillionVerifierCredits):
+		detail = "MillionVerifier account is out of credits; the built-in check is used until it is topped up"
+	}
+	_ = s.repo.SetConnectionStatus(ctx, connectionID, status, health, detail)
 }
 
 // slackChannelFor resolves the channel to post org notifications to. The

@@ -42,6 +42,11 @@ const (
 	ContactImportTargetPhone      ContactImportColumnTarget = "phone"
 	ContactImportTargetSubscribed ContactImportColumnTarget = "subscribed"
 	ContactImportTargetCategories ContactImportColumnTarget = "categories"
+	// ContactImportTargetVerificationStatus reads a verdict column written by
+	// Warmbly or another verification service (ZeroBounce, MillionVerifier,
+	// NeverBounce, ...). Values are recognised by vocabulary; a value nobody
+	// knows leaves the contact unverified rather than failing the row.
+	ContactImportTargetVerificationStatus ContactImportColumnTarget = "verification_status"
 	// ContactImportTargetCustom routes the column into Contact.CustomFields
 	// under ContactImportColumnMapping.CustomKey. "custom:<key>" is accepted
 	// as an equivalent legacy spelling.
@@ -55,6 +60,11 @@ const (
 type ContactImportColumnMapping struct {
 	Index  int                       `json:"index"`
 	Target ContactImportColumnTarget `json:"target"`
+
+	// VerificationProvider names the vocabulary of a verification_status
+	// column when the header or its values made it clear (e.g. "zerobounce").
+	// Optional; without it each value is recognised by itself.
+	VerificationProvider string `json:"verification_provider,omitempty"`
 
 	// CustomKey is only used when Target == "custom:<anything>". It
 	// is split out so the client can render a nicer label without

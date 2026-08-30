@@ -43,7 +43,7 @@ The result step also reports what the addresses themselves look like: how many w
 - **The import still happens.** These are your records, so nothing is refused here. A list bad enough to matter is stopped when you try to launch a campaign with it, which is where the damage would actually occur. See [the launch check](/guides/campaigns/).
 - **Lists under 20 rows are not judged**, since a share of a handful of rows means nothing.
 
-This is not address verification. It reads the addresses; verification asks the receiving server whether they exist, and runs separately in the background.
+This is not address verification. It reads the addresses; verification asks the receiving server whether they exist, and runs separately in the background, within a minute of the import. A file that already carries verification results from another service (a `status` or `ZeroBounce Status` column, say) is recognised during mapping and offered as **Verification status**; those verdicts are kept and the background check skips them. See [address verification](/guides/deliverability/#address-verification).
 
 ## Custom fields
 

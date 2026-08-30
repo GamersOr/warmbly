@@ -38,6 +38,13 @@ type Contact struct {
 	VerificationReason    string     `json:"verification_reason"`
 	IsCatchAll            bool       `json:"is_catch_all"`
 	VerificationCheckedAt *time.Time `json:"verification_checked_at,omitempty"`
+	// VerificationSource says who produced the verdict (see the
+	// VerificationSource* constants); VerificationProvider names the backend or
+	// the external vocabulary; VerificationSubStatus refines the status
+	// (catch_all, disposable, role, ...).
+	VerificationSource    string `json:"verification_source"`
+	VerificationProvider  string `json:"verification_provider"`
+	VerificationSubStatus string `json:"verification_sub_status"`
 
 	// Recipient ESP/provider, derived in the control plane from the recipient
 	// domain (never an MX dial on the send hot path). '' | 'gmail' | 'outlook'
@@ -178,12 +185,86 @@ type CampaignLeadCounts struct {
 
 // ContactsCounts are org-wide contact facet totals for the browse sidebar.
 type ContactsCounts struct {
-	Total        int                    `json:"total"`
-	Subscribed   int                    `json:"subscribed"`
-	Unsubscribed int                    `json:"unsubscribed"`
-	InCampaign   int                    `json:"in_campaign"`
-	NotContacted int                    `json:"not_contacted"`
-	Categories   []ContactCategoryCount `json:"categories"`
+	Total        int                       `json:"total"`
+	Subscribed   int                       `json:"subscribed"`
+	Unsubscribed int                       `json:"unsubscribed"`
+	InCampaign   int                       `json:"in_campaign"`
+	NotContacted int                       `json:"not_contacted"`
+	Categories   []ContactCategoryCount    `json:"categories"`
+	Verification ContactVerificationCounts `json:"verification"`
+}
+
+// ContactVerificationCounts is the org's contacts by verification status.
+// Pending is the subset of Unknown nobody has checked yet.
+type ContactVerificationCounts struct {
+	Valid   int `json:"valid"`
+	Risky   int `json:"risky"`
+	Invalid int `json:"invalid"`
+	Unknown int `json:"unknown"`
+	Pending int `json:"pending"`
+}
+
+// Verification provenance values for contacts.verification_source.
+const (
+	VerificationSourceNone     = ""
+	VerificationSourceProbe    = "probe"
+	VerificationSourceProvider = "provider"
+	VerificationSourceImported = "imported"
+	VerificationSourceManual   = "manual"
+)
+
+// ContactVerificationWrite is a verdict to store on a contact, already
+// normalised into Warmbly's vocabulary.
+type ContactVerificationWrite struct {
+	Status    string
+	SubStatus string
+	Reason    string
+	Provider  string
+	Source    string
+}
+
+// Actions for POST /contacts/verification.
+const (
+	ContactVerificationActionVerify            = "verify"
+	ContactVerificationActionMarkDeliverable   = "mark_deliverable"
+	ContactVerificationActionMarkUndeliverable = "mark_undeliverable"
+)
+
+// ContactVerificationRequest is the body of POST /contacts/verification.
+type ContactVerificationRequest struct {
+	Contacts []string `json:"contacts"`
+	// CampaignID selects every lead of one campaign that verification refused
+	// (the "re-verify skipped leads" action), instead of listing ids.
+	CampaignID string `json:"campaign_id,omitempty"`
+	Action     string `json:"action"`
+}
+
+// ContactVerificationResponse reports how many contacts the action touched.
+type ContactVerificationResponse struct {
+	Affected int    `json:"affected"`
+	Action   string `json:"action"`
+	// Queued is true for the verify action: the check runs in the background
+	// and each contact updates live as its verdict lands.
+	Queued bool `json:"queued"`
+}
+
+// VerificationOverview is what Settings shows about address verification.
+type VerificationOverview struct {
+	// Provider is who checks this workspace's addresses: "builtin" or
+	// "millionverifier".
+	Provider string `json:"provider"`
+	// ConnectionID is the integration connection behind a paid provider.
+	ConnectionID *string `json:"connection_id,omitempty"`
+	// Credits is the paid provider's remaining balance when it could be read.
+	Credits *int `json:"credits,omitempty"`
+	// ProviderError is set when the paid provider is connected but unusable
+	// (bad key, no credits), in which case the built-in check is in use.
+	ProviderError string `json:"provider_error,omitempty"`
+	// BuiltinReady says whether the in-house probe can reach mail servers from
+	// this instance (a HELO host is configured). Off, it still checks syntax,
+	// MX, and disposable domains.
+	BuiltinReady bool                      `json:"builtin_ready"`
+	Counts       ContactVerificationCounts `json:"counts"`
 }
 
 // ContactCategoryCount is the number of org contacts carrying one category.
@@ -383,6 +464,19 @@ type AddContact struct {
 
 	CustomFields map[string]string `json:"custom_fields"`
 
+	// VerificationStatus is a verdict the caller already holds for this
+	// address, in Warmbly's vocabulary or any provider's the platform knows
+	// (ZeroBounce, MillionVerifier, NeverBounce, ...). VerificationProvider
+	// optionally names that vocabulary; without it the value is recognised by
+	// itself. An unrecognised value is a 400. Stored as an imported verdict,
+	// which the background check leaves alone until it ages out.
+	VerificationStatus   string `json:"verification_status,omitempty"`
+	VerificationProvider string `json:"verification_provider,omitempty"`
+
+	// Verification is the normalised verdict derived from VerificationStatus.
+	// Filled by the repository, never read from the request.
+	Verification *ContactVerificationWrite `json:"-"`
+
 	// Subscribed is the marketing-consent flag to store. nil means "don't
 	// decide": a new contact defaults to subscribed, an existing one keeps
 	// whatever it already had. Set explicitly by the importer when the file
@@ -454,6 +548,7 @@ type SearchContacts struct {
 	MinCampaigns       *int                   `json:"min_campaigns"`        // Minimum number of associated campaigns
 	MaxCampaigns       *int                   `json:"max_campaigns"`        // Maximum number of associated campaigns
 	Subscribed         *bool                  `json:"subscribed"`           // Filter by subscription status
+	VerificationStatus string                 `json:"verification_status"`  // Filter by verification verdict: valid | risky | invalid | unknown
 	CreatedAfter       *time.Time             `json:"created_after"`        // Contacts created after this date
 	CreatedBefore      *time.Time             `json:"created_before"`       // Contacts created before this date
 	UpdatedAfter       *time.Time             `json:"updated_after"`        // Contacts updated after this date

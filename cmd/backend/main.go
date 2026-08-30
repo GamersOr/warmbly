@@ -1269,6 +1269,10 @@ func main() {
 		if aware, ok := campaignService.(campaign.AudienceAware); ok {
 			aware.WireAudience(campaignAudienceRepository)
 		}
+		// A start with nothing left to send says whether verification is why.
+		if aware, ok := campaignService.(campaign.ProgressAware); ok {
+			aware.WireProgress(campaignProgressRepository)
+		}
 		// Delete drops attachment objects and duplicate copies them, so the
 		// campaign service needs the store the attachment handler writes to.
 		if aware, ok := campaignService.(campaign.AttachmentAware); ok {
@@ -1646,9 +1650,29 @@ func main() {
 			HeloHost: emailVerifyHeloHost(),               // e.g. verify.warmbly.com
 			MailFrom: os.Getenv("EMAIL_VERIFY_MAIL_FROM"), // e.g. verify@warmbly.com
 		})
-		emailVerifyService = emailverifyapp.NewService(contactRepostory, emailVerifier)
-		emailVerificationJob := jobs.NewEmailVerificationJob(emailVerifyService, 100)
-		emailVerificationScheduler := jobs.NewEmailVerificationScheduler(emailVerificationJob, 15*time.Minute)
+		// A workspace that connected MillionVerifier is checked through its own
+		// credits; EMAIL_VERIFY_MILLIONVERIFIER_API_KEY is the operator's key
+		// for every workspace without one. Verdict changes resume campaigns
+		// parked because verification refused their leads.
+		emailVerifyService = emailverifyapp.NewService(contactRepostory, emailverifyapp.Options{
+			Builtin:                    emailVerifier,
+			BuiltinReady:               emailVerifier.ProbeReady(),
+			Providers:                  integrationServiceForHandler,
+			PlatformMillionVerifierKey: os.Getenv("EMAIL_VERIFY_MILLIONVERIFIER_API_KEY"),
+		})
+		emailVerifyService.SetVerdictHook(func(ctx context.Context, orgID uuid.UUID) {
+			if campaignService != nil {
+				campaignService.ResumeVerificationPaused(ctx, orgID)
+			}
+			// Verdicts land outside any request, so the audit spine is fed by
+			// hand: every member's contact and campaign views refresh live.
+			if streamingPublisher != nil {
+				streamingPublisher.PublishAuditCreated(ctx, orgID, uuid.Nil, "verify", string(models.AuditEntityContact), nil)
+				streamingPublisher.PublishAuditCreated(ctx, orgID, uuid.Nil, "verify", string(models.AuditEntityCampaign), nil)
+			}
+		})
+		emailVerificationJob := jobs.NewEmailVerificationJob(emailVerifyService, config.VerificationBatchSize)
+		emailVerificationScheduler := jobs.NewEmailVerificationScheduler(emailVerificationJob, time.Duration(config.VerificationIntervalSeconds)*time.Second)
 		go emailVerificationScheduler.Start(ctx)
 
 		// Seed inbox-placement testing: send a tokenized copy of a template

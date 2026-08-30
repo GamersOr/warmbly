@@ -1,6 +1,6 @@
 import type { SearchContactsSortBy } from "./search-contacts.types";
 import type SearchContactsFilter from "./SearchContactsFilter";
-import type { LeadEngagement, LeadStatus } from "./Contact";
+import type { LeadEngagement, LeadStatus, VerificationStatus } from "./Contact";
 
 export default interface SearchContacts {
     query: string;
@@ -14,6 +14,7 @@ export default interface SearchContacts {
     min_campaigns?: number;
     max_campaigns?: number;
     subscribed?: boolean;
+    verification_status?: VerificationStatus;
     created_after?: Date;
     created_before?: Date;
     updated_after?: Date;

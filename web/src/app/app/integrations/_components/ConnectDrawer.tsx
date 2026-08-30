@@ -56,6 +56,15 @@ interface FieldDef {
 
 // Credential fields for non-OAuth providers only. OAuth providers never paste.
 const FIELDS_BY_PROVIDER: Record<string, FieldDef[]> = {
+    millionverifier: [
+        {
+            key: "api_key",
+            label: "MillionVerifier API key",
+            type: "password",
+            required: true,
+            helper: "API → API key in your MillionVerifier account. The key is checked before it is saved; one credit is spent per address verified.",
+        },
+    ],
     close: [
         { key: "workspace", label: "Organization", placeholder: "Acme" },
         {

@@ -272,7 +272,14 @@ func (h *Handler) StartCampaign(c *gin.Context) {
 
 	id := c.Param("id")
 
-	if xerr := h.CampaignService.StartCampaign(c.Request.Context(), *orgID, id); xerr != nil {
+	// Optional body: {"acknowledge_list_risk": true} launches past the
+	// bounce-risk gate once the member has read the projection.
+	var opts models.StartCampaignOptions
+	if c.Request.ContentLength != 0 {
+		_ = c.ShouldBindJSON(&opts)
+	}
+
+	if xerr := h.CampaignService.StartCampaign(c.Request.Context(), *orgID, id, opts); xerr != nil {
 		errx.JSON(c, xerr)
 		return
 	}

@@ -13,7 +13,7 @@ import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import type SearchContactsFilter from "@/lib/api/models/app/contacts/SearchContactsFilter";
 import type { SearchContactsFilterType, SearchContactsSortBy } from "@/lib/api/models/app/contacts/search-contacts.types";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
-import type { LeadEngagement, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
+import type { LeadEngagement, LeadStatus, VerificationStatus } from "@/lib/api/models/app/contacts/Contact";
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -292,6 +292,18 @@ export default function ContactFilters({
                                 </>
                             )}
 
+                            <Section label="Address verification" />
+                            <div className="px-4 py-3">
+                                <ChoiceRow
+                                    value={draft.verification_status}
+                                    onChange={(v) => setDraft((s) => ({ ...s, verification_status: v }))}
+                                    options={VERIFICATION_OPTIONS}
+                                />
+                                <p className="text-[10.5px] text-slate-400 mt-1.5 leading-tight">
+                                    Undeliverable addresses are never sent to. Risky ones (catch-all domains, shared inboxes) send only when the campaign allows it.
+                                </p>
+                            </div>
+
                             <Section label="Subscription" />
                             <div className="px-4 py-3">
                                 <Toggle3
@@ -457,6 +469,14 @@ const LEAD_STATUS_OPTIONS: { id: LeadStatus | undefined; label: string }[] = [
     { id: "failed", label: "Failed" },
     { id: "undeliverable", label: "Undeliverable" },
     { id: "unsubscribed", label: "Unsubscribed" },
+];
+
+const VERIFICATION_OPTIONS: { id: VerificationStatus | undefined; label: string }[] = [
+    { id: undefined, label: "Any" },
+    { id: "valid", label: "Deliverable" },
+    { id: "risky", label: "Risky" },
+    { id: "invalid", label: "Undeliverable" },
+    { id: "unknown", label: "Unverified" },
 ];
 
 const ENGAGEMENT_OPTIONS: { id: LeadEngagement | undefined; label: string }[] = [
@@ -629,6 +649,7 @@ function countActiveFilters(f: SearchContacts, hasCampaignContext: boolean): num
     if (f.query) n++;
     n += f.filters.length;
     if (f.subscribed !== undefined) n++;
+    if (f.verification_status) n++;
     if (f.lead_status) n++;
     if (f.engagement) n++;
     if (f.min_campaigns !== undefined) n++;
