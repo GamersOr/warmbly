@@ -78,6 +78,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/releases"
 	"github.com/warmbly/warmbly/internal/app/replyclassify"
 	"github.com/warmbly/warmbly/internal/app/research"
+	"github.com/warmbly/warmbly/internal/app/segment"
 	"github.com/warmbly/warmbly/internal/app/sequence"
 	"github.com/warmbly/warmbly/internal/app/settings"
 	"github.com/warmbly/warmbly/internal/app/skills"
@@ -162,6 +163,7 @@ func main() {
 	var rateLimitService ratelimit.RateLimitService
 	var sequenceService sequence.SequenceService
 	var contactService contact.ContactService
+	var segmentService segment.Service
 	var websiteTrackingService websitetracking.Service
 	var socketService socket.SocketService
 	var uniboxService unibox.UniboxService
@@ -1191,6 +1193,8 @@ func main() {
 		rateLimitService = ratelimit.NewService(cache, rateLimitRepository)
 		sequenceService = sequence.NewService(sequenceRepostory)
 		contactService = contact.NewService(contactRepostory, subscriptionRepository, planRepository, streamingPublisher)
+		segmentRepository := repository.NewSegmentRepository(primaryDB)
+		segmentService = segment.NewService(segmentRepository, contactRepostory)
 		// A visibly bad import is filed on the workspace's posture. On its own
 		// it can only reach `watch`, which changes nothing.
 		if aware, ok := contactService.(contact.OrgRiskAware); ok && orgRiskService != nil {
@@ -1278,6 +1282,9 @@ func main() {
 		// parked send chain, or the lead sits queued until the chain's next
 		// tick. Wired here because contactService is built before the scheduler
 		// and Cloud Tasks client exist.
+		if segmentService != nil {
+			segmentService.SetCampaignWaker(campaignService)
+		}
 		if contactService != nil {
 			contactService.SetCampaignWaker(campaignService)
 			// The contact drawer's "next action" is a read-only pass through
@@ -1480,6 +1487,14 @@ func main() {
 			trackedLinkRepository,
 			integrationServiceForHandler, // AutomationRunner for campaign run_automation steps
 		)
+		// Sequence action nodes that pin a contact into or out of a segment,
+		// both on the scheduled path (tasks) and the instant reply path (advanced).
+		if aware, ok := tasksService.(tasks.SegmentAware); ok {
+			aware.WireSegments(segmentRepository)
+		}
+		if aware, ok := advancedService.(advanced.SegmentAware); ok {
+			aware.WireSegments(segmentRepository)
+		}
 		// A restricted organization warms in the free pool, whatever it pays.
 		if aware, ok := tasksService.(tasks.OrgRiskAware); ok {
 			aware.WireOrgRisk(orgRiskRepository)
@@ -1791,6 +1806,7 @@ func main() {
 		AnalyticsService: analyticsService,
 		RateLimitService: rateLimitService,
 		ContactService:   contactService,
+		SegmentService:   segmentService,
 		SequenceService:  sequenceService,
 		UniboxService:    uniboxService,
 
