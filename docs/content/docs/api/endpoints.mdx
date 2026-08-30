@@ -82,6 +82,7 @@ All paths below are relative to the versioned base URL `https://api.warmbly.com/
 | GET | `/contacts/:id/emails` | `READ_CONTACTS` |
 | GET | `/contacts/:id/timeline` | `READ_CONTACTS` |
 | GET | `/contacts/:id/campaigns` | `READ_CONTACTS` |
+| GET | `/contacts/:id/segments` | `READ_CONTACTS` |
 | POST | `/contacts/export` | `READ_CONTACTS` |
 | POST | `/contacts/import/preview` | `WRITE_CONTACTS` |
 | POST | `/contacts/import/commit` | `BULK_CONTACTS` |
@@ -100,6 +101,24 @@ All paths below are relative to the versioned base URL `https://api.warmbly.com/
 The import pair is two steps over the same file: preview parses it and suggests a column mapping, commit applies the mapping you chose. Commit takes the stricter `BULK_CONTACTS` scope because one call writes up to 50,000 rows. A mapping problem, an unusable custom-field name or no `email` column, is a `400` on the whole request; see [contacts](/api/reference/contacts/).
 
 AI contact research charges credits (2 per run, billable even when it finds nothing) and only saves cited findings. See the [AI contact research](/guides/ai-contact-research/) guide. The batch endpoint accepts up to 500 contact ids and drains in the background.
+
+### Segments
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/segments` | `READ_CONTACTS` |
+| GET | `/segments/fields` | `READ_CONTACTS` |
+| POST | `/segments/preview` | `READ_CONTACTS` |
+| POST | `/segments` | `WRITE_CONTACTS` |
+| GET | `/segments/:id` | `READ_CONTACTS` |
+| PATCH | `/segments/:id` | `WRITE_CONTACTS` |
+| DELETE | `/segments/:id` | `WRITE_CONTACTS` |
+| POST | `/segments/:id/members` | `WRITE_CONTACTS` |
+| POST | `/segments/:id/members/lookup` | `READ_CONTACTS` |
+| GET | `/segments/:id/overrides` | `READ_CONTACTS` |
+| POST | `/segments/:id/add-to-campaign` | `WRITE_CAMPAIGNS` |
+
+Segments are saved contact audiences: a condition list plus per-contact manual overrides, evaluated live. Contact scopes cover them because a segment is a view over contacts; enrolling one into a campaign writes leads, so that call takes the campaign write scope. `POST /contacts/search` and `POST /contacts/export` accept `segment_ids` to scope any contact query to a segment. See [contacts](/api/reference/contacts/#segments) for the condition format.
 
 ### Lead sync
 
