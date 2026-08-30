@@ -76,6 +76,7 @@ const (
 	AuditEntityFolder             AuditEntityType = "folder"
 	AuditEntityTag                AuditEntityType = "tag"
 	AuditEntityCategory           AuditEntityType = "category"
+	AuditEntitySegment            AuditEntityType = "segment"
 	AuditEntitySubscription       AuditEntityType = "subscription"
 	AuditEntitySettings           AuditEntityType = "settings"
 
