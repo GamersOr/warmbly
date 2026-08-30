@@ -291,6 +291,10 @@ func main() {
 		nil, // tasksClient: the consumer does not schedule Cloud Tasks
 		warmupService,
 	)
+	// Instant reply actions can pin a contact into or out of a segment.
+	if aware, ok := advancedService.(advanced.SegmentAware); ok {
+		aware.WireSegments(repository.NewSegmentRepository(primaryDB))
+	}
 	advancedService.WireDispatcher(webhookService)
 	// Reply/open/click instant action chains run in THIS process (inbox ingest +
 	// tracking consumer), so a "run_automation" node on an instant branch must be

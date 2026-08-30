@@ -156,6 +156,7 @@ type service struct {
 	emailRepo            repository.EmailRepository
 	taskRepo             repository.TaskRepository
 	contactRepo          repository.ContactRepository
+	segmentRepo          repository.SegmentRepository
 	campaignProgressRepo repository.CampaignProgressRepository
 	crmRepo              repository.CRMRepository
 	categoryRepo         repository.GroupRepository

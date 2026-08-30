@@ -51,13 +51,17 @@ type Sequence struct {
 // ActionConfig is the persisted config for a non-email (action/wait) node. Type
 // is the switch the task executes on; the remaining fields are type-scoped.
 type ActionConfig struct {
-	Type string `json:"type"` // wait | add_tag | remove_tag | label_email | unsubscribe | notify | create_task | create_deal | move_deal_stage | run_automation | fire_event | switch | ai_step | end
+	Type string `json:"type"` // wait | add_tag | remove_tag | add_to_segment | remove_from_segment | label_email | unsubscribe | notify | create_task | create_deal | move_deal_stage | run_automation | fire_event | switch | ai_step | end
 
 	// wait
 	WaitMinutes *int `json:"wait_minutes,omitempty"`
 
 	// add_tag / remove_tag — a contact category id (product "tags" == categories)
 	CategoryID *uuid.UUID `json:"category_id,omitempty"`
+
+	// add_to_segment / remove_from_segment — pins the contact into or out of a
+	// segment as a manual override.
+	SegmentID *uuid.UUID `json:"segment_id,omitempty"`
 
 	// label_email — apply unibox conversation labels to the contact's most recent
 	// thread. Labels are the same registry as contact tags (categories), but in

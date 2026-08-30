@@ -129,6 +129,7 @@ type tasksService struct {
 	emailRepo            repository.EmailRepository
 	campaignRepo         repository.CampaignRepository
 	contactRepo          repository.ContactRepository
+	segmentRepo          repository.SegmentRepository
 	campaignLogRepo      repository.CampaignLogRepository
 	// orgRiskRepo bars a restricted organization from the paid warmup pool.
 	// Optional/nil-safe.
@@ -269,4 +270,15 @@ func (s *tasksService) WireOrgRisk(r repository.OrgRiskRepository) {
 // OrgRiskAware is the optional capability the caller uses to attach org risk.
 type OrgRiskAware interface {
 	WireOrgRisk(r repository.OrgRiskRepository)
+}
+
+// WireSegments attaches the segment repository the add_to_segment and
+// remove_from_segment action nodes write through.
+func (s *tasksService) WireSegments(r repository.SegmentRepository) {
+	s.segmentRepo = r
+}
+
+// SegmentAware is the optional capability the caller uses to attach segments.
+type SegmentAware interface {
+	WireSegments(r repository.SegmentRepository)
 }

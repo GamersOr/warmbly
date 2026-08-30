@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
 // EventDispatcher fans a platform event out to customer webhooks and, via the
@@ -22,6 +23,15 @@ type EventDispatcher interface {
 // way (rather than via the constructor) so the dispatcher — which itself may
 // depend on services constructed later — can be supplied once the graph is
 // fully wired. No-op if never called: emit() guards on a nil dispatcher.
+// WireSegments attaches the segment repository the instant add_to_segment /
+// remove_from_segment actions write through.
+func (s *service) WireSegments(r repository.SegmentRepository) { s.segmentRepo = r }
+
+// SegmentAware is the optional capability the caller uses to attach segments.
+type SegmentAware interface {
+	WireSegments(r repository.SegmentRepository)
+}
+
 func (s *service) WireDispatcher(d EventDispatcher) {
 	s.dispatcher = d
 }
