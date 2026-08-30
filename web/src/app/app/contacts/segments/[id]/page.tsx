@@ -56,7 +56,7 @@ function SegmentDetail() {
     if (segment.isError || !segment.data) {
         return (
             <div className="p-5">
-                <Link to="/app/segments" className="text-[12px] text-slate-500 hover:text-slate-900 inline-flex items-center gap-1">
+                <Link to="/app/contacts/segments" className="text-[12px] text-slate-500 hover:text-slate-900 inline-flex items-center gap-1">
                     <ArrowLeftIcon className="w-3 h-3" /> Segments
                 </Link>
                 <EmptyBlock title="Segment not found" body="It may have been deleted by a teammate." />
@@ -70,7 +70,7 @@ function SegmentDetail() {
             try {
                 await remove.mutateAsync(s.id);
                 toast.success("Segment deleted");
-                navigate("/app/segments");
+                navigate("/app/contacts/segments");
             } catch (err) {
                 toast.error(buildError(err as AppError));
             }
@@ -80,7 +80,7 @@ function SegmentDetail() {
     return (
         <div className="flex flex-col min-h-full">
             <div className="px-5 pt-3 pb-3 border-b border-slate-200 bg-white">
-                <Link to="/app/segments" className="text-[11px] text-slate-500 hover:text-slate-900 inline-flex items-center gap-1">
+                <Link to="/app/contacts/segments" className="text-[11px] text-slate-500 hover:text-slate-900 inline-flex items-center gap-1">
                     <ArrowLeftIcon className="w-3 h-3" /> Segments
                 </Link>
                 <div className="mt-1.5 flex flex-wrap items-start gap-3">

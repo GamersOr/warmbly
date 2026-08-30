@@ -23,6 +23,7 @@ import {
     CheckIcon,
     Loader2Icon,
     PlusIcon,
+    LayersIcon,
     RotateCcwIcon,
     SearchIcon,
     Trash2Icon,
@@ -50,6 +51,9 @@ interface Props {
     setFilters: React.Dispatch<React.SetStateAction<SearchContacts>>;
     activeCampaign?: MiniCampaign;
     loading?: boolean;
+    // Offered when at least one filter is set: hands the draft over to be
+    // saved as a segment.
+    onSaveAsSegment?: (draft: SearchContacts) => void;
 }
 
 const SORT_OPTIONS: { id: SearchContactsSortBy; label: string }[] = [
@@ -75,6 +79,7 @@ export default function ContactFilters({
     setFilters,
     activeCampaign,
     loading,
+    onSaveAsSegment,
 }: Props) {
     const [draft, setDraft] = React.useState<SearchContacts>(filters);
 
@@ -373,6 +378,16 @@ export default function ContactFilters({
                                 <RotateCcwIcon className="w-3 h-3" />
                                 Reset
                             </button>
+                            {onSaveAsSegment && activeCount > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => onSaveAsSegment(draft)}
+                                    className="h-7 px-2.5 rounded-md text-[12px] text-sky-700 hover:text-sky-800 hover:bg-sky-50 inline-flex items-center gap-1.5 transition-colors"
+                                >
+                                    <LayersIcon className="w-3 h-3" />
+                                    Save as segment
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 onClick={() => setActive(false)}

@@ -5,9 +5,11 @@ description: Save reusable audiences built from contact fields, categories, camp
 
 A segment is a saved audience: a set of conditions over your contacts plus any contacts you pin in or out by hand. A segment says which contacts belong together; a campaign says what happens to them. Membership is evaluated live, so a contact that starts matching (a new category, a reply, a bounce) is in the segment the next time anyone looks, with no rebuild step.
 
-Segments live under **Segments** in the sidebar and need the same permissions as contacts: **View contacts** to browse, **Manage contacts** to create, edit or delete.
+Segments live under **Contacts > Segments**, next to **All contacts** and **Categories**, and need the same permissions as contacts: **View contacts** to browse, **Manage contacts** to create, edit or delete.
 
 ## Building a segment
+
+The quickest start is from the contact list: set any filters, then press **Save as segment** in the filter panel and the editor opens with those filters as conditions (free-text search and a campaign's lead status do not carry over; add a condition for them instead). Or start from scratch with **New segment** on the Segments tab.
 
 Give the segment a name and a color, then add conditions. Each condition is a field, an operator and a value. Pick whether a contact must match **all** conditions or **any** of them. The drawer shows a live count of matching contacts as you edit, so you can see the effect of every change before saving.
 
@@ -46,7 +48,7 @@ Sequences can pin as well: the **Add to segment** and **Remove from segment** ac
 
 - **Browse**: a segment page lists its current members with the same table, filters, detail drawer and bulk actions as the contacts page.
 - **Add to campaign**: enrols every current member as a lead of the campaign you pick, from the segment page or with **From segment** on a campaign's Leads tab. Contacts already in that campaign are skipped, and a running campaign wakes up to schedule the new leads. This is a snapshot: contacts who join the segment later are not added until you run it again.
-- **Filter**: the contacts page filters have a **Segments** picker, and the same scope carries into an export.
+- **Filter**: the contact list filters have a **Segments** picker, and the same scope carries into an export.
 - **Duplicate**: the segment menu copies a definition to start a variation from.
 - **Search and export**: the contact search and export accept `segment_ids`, so anything that takes a contact filter can be scoped to a segment.
 

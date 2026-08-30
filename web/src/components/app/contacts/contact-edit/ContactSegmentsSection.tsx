@@ -50,7 +50,7 @@ export function ContactSegmentsSection({ contactId }: { contactId: string }) {
                 ) : list.length === 0 ? (
                     <div className="px-3 py-2.5 text-[11.5px] text-slate-400">
                         No segments yet.{" "}
-                        <Link to="/app/segments" className="text-sky-700 hover:underline">
+                        <Link to="/app/contacts/segments" className="text-sky-700 hover:underline">
                             Create one
                         </Link>
                         .
@@ -63,7 +63,7 @@ export function ContactSegmentsSection({ contactId }: { contactId: string }) {
                                 <li key={s.id} className="px-3 h-9 flex items-center gap-2">
                                     <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: s.color }} />
                                     <Link
-                                        to={`/app/segments/${s.id}`}
+                                        to={`/app/contacts/segments/${s.id}`}
                                         className={cn("text-[12px] truncate hover:underline", s.member ? "text-slate-900" : "text-slate-400")}
                                     >
                                         {s.name}

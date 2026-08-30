@@ -42,13 +42,19 @@ interface Draft {
     conditions: SegmentCondition[];
 }
 
-function draftFrom(segment?: Segment | null): Draft {
+// Starting conditions for a new segment, e.g. saved from the filter panel.
+export interface SegmentPreset {
+    conditions: SegmentCondition[];
+}
+
+function draftFrom(segment?: Segment | null, preset?: SegmentPreset | null): Draft {
+    const conditions = segment?.conditions ?? preset?.conditions ?? [];
     return {
         name: segment?.name ?? "",
         description: segment?.description ?? "",
         color: segment?.color ?? COLORS[0],
         match: segment?.match ?? "all",
-        conditions: segment?.conditions?.map((c) => ({ ...c, values: c.values ? [...c.values] : undefined })) ?? [],
+        conditions: conditions.map((c) => ({ ...c, values: c.values ? [...c.values] : undefined })),
     };
 }
 
@@ -69,12 +75,15 @@ export default function SegmentEditor({
     open,
     onClose,
     segment,
+    preset,
     onSaved,
 }: {
     open: boolean;
     onClose: () => void;
     // Edit this segment; omit to create a new one.
     segment?: Segment | null;
+    // Pre-filled conditions for a new segment; ignored when editing.
+    preset?: SegmentPreset | null;
     onSaved?: (segment: Segment) => void;
 }) {
     const confirm = useConfirm();
@@ -82,15 +91,15 @@ export default function SegmentEditor({
     const create = useCreateSegment();
     const update = useUpdateSegment();
 
-    const [draft, setDraft] = React.useState<Draft>(() => draftFrom(segment));
-    const [initial, setInitial] = React.useState<Draft>(() => draftFrom(segment));
+    const [draft, setDraft] = React.useState<Draft>(() => draftFrom(segment, preset));
+    const [initial, setInitial] = React.useState<Draft>(() => draftFrom(segment, preset));
     React.useEffect(() => {
         if (open) {
-            const d = draftFrom(segment);
+            const d = draftFrom(segment, preset);
             setDraft(d);
             setInitial(d);
         }
-    }, [open, segment]);
+    }, [open, segment, preset]);
     const dirty = !sameDraft(draft, initial);
 
     // Live count, debounced so typing a value does not fire a query per key.

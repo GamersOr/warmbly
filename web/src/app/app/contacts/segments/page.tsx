@@ -54,7 +54,7 @@ function SegmentsList() {
                 conditions: s.conditions,
             });
             toast.success(`Duplicated as ${copy.name}`);
-            navigate(`/app/segments/${copy.id}`);
+            navigate(`/app/contacts/segments/${copy.id}`);
         } catch (err) {
             toast.error(buildError(err as AppError));
         }
@@ -158,9 +158,9 @@ function SegmentsList() {
                                 key={s.id}
                                 role="link"
                                 tabIndex={0}
-                                onClick={() => navigate(`/app/segments/${s.id}`)}
+                                onClick={() => navigate(`/app/contacts/segments/${s.id}`)}
                                 onKeyDown={(e) => {
-                                    if (e.key === "Enter") navigate(`/app/segments/${s.id}`);
+                                    if (e.key === "Enter") navigate(`/app/contacts/segments/${s.id}`);
                                 }}
                                 className="group h-11 px-5 flex items-center gap-3 border-b border-slate-200/60 transition-colors hover:bg-slate-50/80 cursor-pointer"
                             >
@@ -198,7 +198,7 @@ function SegmentsList() {
                                         </button>
                                     </PopoverMenuTrigger>
                                     <PopoverMenuContent minWidth={180}>
-                                        <PopoverMenuItem onSelect={() => navigate(`/app/segments/${s.id}`)}>View contacts</PopoverMenuItem>
+                                        <PopoverMenuItem onSelect={() => navigate(`/app/contacts/segments/${s.id}`)}>View contacts</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={guarded(() => openEdit(s))}>Edit conditions</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={campaignGuarded(() => setCampaignFor(s))}>Add to campaign</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={guarded(() => duplicate(s))}>Duplicate</PopoverMenuItem>
@@ -217,7 +217,7 @@ function SegmentsList() {
                 onClose={() => setEditorOpen(false)}
                 segment={editing}
                 onSaved={(saved) => {
-                    if (!editing) navigate(`/app/segments/${saved.id}`);
+                    if (!editing) navigate(`/app/contacts/segments/${saved.id}`);
                 }}
             />
             {campaignFor && (

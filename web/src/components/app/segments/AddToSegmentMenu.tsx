@@ -47,7 +47,7 @@ export default function AddToSegmentMenu({ contacts, onDone }: { contacts: strin
             <PopoverMenuContent minWidth={200}>
                 <PopoverMenuLabel>Add {contacts.length} to segment</PopoverMenuLabel>
                 {list.length === 0 && (
-                    <div className="px-2.5 py-2 text-[11.5px] text-slate-400">No segments yet. Create one from the Segments page.</div>
+                    <div className="px-2.5 py-2 text-[11.5px] text-slate-400">No segments yet. Create one under Contacts &gt; Segments.</div>
                 )}
                 {list.map((s) => (
                     <PopoverMenuItem key={s.id} onSelect={() => add(s.id, s.name)}>

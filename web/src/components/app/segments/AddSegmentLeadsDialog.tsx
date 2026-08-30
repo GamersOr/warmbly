@@ -128,7 +128,7 @@ export default function AddSegmentLeadsDialog({
                             ) : list.length === 0 ? (
                                 <div className="px-5 py-10 text-center">
                                     <p className="text-[12.5px] text-slate-900 font-medium">{query ? "No segments match" : "No segments yet"}</p>
-                                    <p className="text-[11.5px] text-slate-400 mt-0.5">Build one from the Segments page first.</p>
+                                    <p className="text-[11.5px] text-slate-400 mt-0.5">Build one under Contacts &gt; Segments first.</p>
                                 </div>
                             ) : (
                                 <ul className="divide-y divide-slate-100">

@@ -11,6 +11,7 @@
 //     section header so it nests cleanly under the campaign view.
 
 import React from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
     AlertTriangleIcon,
     BanIcon,
@@ -67,6 +68,9 @@ import ExportDialog from "./ExportDialog";
 import ImportWizard from "./ImportWizard";
 import AddFromContactsDialog from "./AddFromContactsDialog";
 import AddToSegmentMenu from "@/components/app/segments/AddToSegmentMenu";
+import SegmentEditor from "@/components/app/segments/SegmentEditor";
+import { filtersToSegment } from "@/components/app/segments/filtersToSegment";
+import type { SegmentCondition } from "@/lib/api/models/app/segments/Segment";
 import AddSegmentLeadsDialog from "@/components/app/segments/AddSegmentLeadsDialog";
 import { useSetSegmentMembers } from "@/lib/api/hooks/app/segments";
 import useAiMetered from "@/hooks/useAiMetered";
@@ -127,15 +131,31 @@ export default function ContactsTable({
     const [syncOpen, setSyncOpen] = React.useState<boolean>(false);
     const [fromContactsOpen, setFromContactsOpen] = React.useState<boolean>(false);
     const [fromSegmentOpen, setFromSegmentOpen] = React.useState<boolean>(false);
+    // A filter saved as a segment: the panel's draft becomes the editor's preset.
+    const [segmentPreset, setSegmentPreset] = React.useState<{ conditions: SegmentCondition[] } | null>(null);
+    const navigate = useNavigate();
+    // ?category=<id> pre-filters the list (the Categories tab links here).
+    const [params] = useSearchParams();
 
-    const [searchProps, setSearchProps] = React.useState<SearchContacts>({
-        query: "",
-        filters: [],
-        campaign_ids: current_campaign ? [current_campaign.id] : [],
-        segment_ids: segment ? [segment.id] : undefined,
-        sort_by: "created_at",
-        reverse: false,
+    const [searchProps, setSearchProps] = React.useState<SearchContacts>(() => {
+        const category = params.get("category");
+        return {
+            query: "",
+            filters: [],
+            campaign_ids: current_campaign ? [current_campaign.id] : [],
+            segment_ids: segment ? [segment.id] : undefined,
+            category_ids: category && !segment && !current_campaign ? [category] : undefined,
+            sort_by: "created_at",
+            reverse: false,
+        };
     });
+
+    function saveAsSegment(draft: SearchContacts) {
+        const { conditions, dropped } = filtersToSegment(draft, current_campaign?.id);
+        setFiltersOpen(false);
+        if (dropped.length > 0) toast(`Not carried over: ${dropped.join(", ")}. Add a condition for it in the editor.`);
+        setSegmentPreset({ conditions });
+    }
     const contactsData = useSearchContacts({ options: searchProps });
 
     // Inside a segment, "remove" pins the contact out as a manual exclude so
@@ -455,6 +475,7 @@ export default function ContactsTable({
                     setFilters={setSearchProps}
                     activeCampaign={current_campaign}
                     loading={contactsData.isLoading}
+                    onSaveAsSegment={saveAsSegment}
                 />
                 <ContactEdit
                     contacts={contacts ?? []}
@@ -689,6 +710,13 @@ export default function ContactsTable({
                 setFilters={setSearchProps}
                 activeCampaign={current_campaign}
                 loading={contactsData.isLoading}
+                onSaveAsSegment={saveAsSegment}
+            />
+            <SegmentEditor
+                open={segmentPreset !== null}
+                onClose={() => setSegmentPreset(null)}
+                preset={segmentPreset}
+                onSaved={(saved) => navigate(`/app/contacts/segments/${saved.id}`)}
             />
             <ContactEdit contacts={contacts ?? []} active={edit} setActive={setEdit} initialTab={editTab} />
             <ContactsEditBulk active={bulkEdit} setActive={setBulkEdit} selected={selected} />
