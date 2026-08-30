@@ -5,6 +5,7 @@ const labelMap: Record<string, string> = {
   app: 'Dashboard',
   emails: 'Accounts',
   contacts: 'Contacts',
+  segments: 'Segments',
   campaigns: 'Campaigns',
   unibox: 'Inbox',
   analytics: 'Analytics',
