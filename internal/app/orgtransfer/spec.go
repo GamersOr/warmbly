@@ -258,6 +258,15 @@ var Tables = []Table{
 		Scope: scopeOrg,
 	},
 	{
+		Name: "segments", Group: models.OrgDataGroupContacts,
+		Scope: scopeOrg,
+		Note:  "Conditions travel as written; ones naming a campaign or category still match once that group arrives.",
+	},
+	{
+		Name: "segment_members", Group: models.OrgDataGroupContacts,
+		Scope: `segment_id IN (SELECT id FROM segments WHERE organization_id = $1)`,
+	},
+	{
 		Name: "contact_activities", Group: models.OrgDataGroupContacts,
 		Scope: scopeOrg,
 	},
