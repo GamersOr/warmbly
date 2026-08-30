@@ -5,6 +5,7 @@
   "pages": [
     "---Self-hosting---",
     "deployment-guide",
+    "bare-metal",
     "first-run",
     "accounts-and-access",
     "warmblyctl",
