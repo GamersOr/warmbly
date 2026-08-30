@@ -11,6 +11,8 @@ export default interface SearchContacts {
     lead_status?: LeadStatus;
     engagement?: LeadEngagement;
     category_ids?: string[];
+    // Contact must be a member of ALL of these segments.
+    segment_ids?: string[];
     min_campaigns?: number;
     max_campaigns?: number;
     subscribed?: boolean;
