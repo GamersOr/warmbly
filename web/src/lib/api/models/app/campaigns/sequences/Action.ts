@@ -5,6 +5,8 @@
 export type SequenceActionType =
     | "add_tag"
     | "remove_tag"
+    | "add_to_segment"
+    | "remove_from_segment"
     | "label_email"
     | "unsubscribe"
     | "create_task"
@@ -26,6 +28,9 @@ export interface SequenceAction {
     type: SequenceActionType;
     // add_tag / remove_tag — a contact category id
     category_id?: string | null;
+    // add_to_segment / remove_from_segment — pins the contact into or out of
+    // a segment as a manual override
+    segment_id?: string | null;
     // label_email — unibox conversation labels (same category registry as tags)
     // applied to the thread the contact replied on. Reply-branch only; a no-op
     // when the contact has not replied.

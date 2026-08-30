@@ -37,6 +37,7 @@ import {
     SparklesIcon,
     SplitIcon,
     TagIcon,
+    LayersIcon,
     TagsIcon,
     Trash2Icon,
     UnlinkIcon,
@@ -95,6 +96,7 @@ import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 import StepEmailArms from "./StepEmailArms";
 import CategoryPicker from "@/components/app/contacts/CategoryPicker";
+import { SegmentMultiPicker } from "@/components/app/segments/SegmentPickers";
 import type { ActionKV, AITagRef, SequenceAction, SequenceActionType } from "@/lib/api/models/app/campaigns/sequences/Action";
 import { useAutomations } from "@/lib/api/hooks/app/automations/useAutomations";
 import { triggerLabel } from "@/lib/api/models/app/automations/meta";
@@ -441,6 +443,8 @@ function StopNode() {
 const ACTION_META: Record<string, { label: string; Icon: typeof ClockIcon; tint: string }> = {
     add_tag: { label: "Add tag", Icon: TagIcon, tint: "text-emerald-600" },
     remove_tag: { label: "Remove tag", Icon: TagIcon, tint: "text-amber-600" },
+    add_to_segment: { label: "Add to segment", Icon: LayersIcon, tint: "text-emerald-600" },
+    remove_from_segment: { label: "Remove from segment", Icon: LayersIcon, tint: "text-amber-600" },
     label_email: { label: "Label email", Icon: TagsIcon, tint: "text-fuchsia-600" },
     create_task: { label: "Create task", Icon: CheckSquareIcon, tint: "text-violet-600" },
     create_deal: { label: "Create deal", Icon: HandshakeIcon, tint: "text-emerald-600" },
@@ -460,6 +464,10 @@ function actionSummary(a?: SequenceAction | null): string {
             return a.category_id ? "Add a tag" : "Pick a tag…";
         case "remove_tag":
             return a.category_id ? "Remove a tag" : "Pick a tag…";
+        case "add_to_segment":
+            return a.segment_id ? "Pin into a segment" : "Pick a segment…";
+        case "remove_from_segment":
+            return a.segment_id ? "Pin out of a segment" : "Pick a segment…";
         case "label_email":
             return a.label_ids && a.label_ids.length ? "Label the conversation" : "Pick a label…";
         case "create_deal":
@@ -2443,6 +2451,8 @@ function ConnectionEditor({
 const ADD_ACTION_OPTIONS: { type: SequenceActionType; label: string }[] = [
     { type: "add_tag", label: "Add tag" },
     { type: "remove_tag", label: "Remove tag" },
+    { type: "add_to_segment", label: "Add to segment" },
+    { type: "remove_from_segment", label: "Remove from segment" },
     { type: "label_email", label: "Label email" },
     { type: "create_task", label: "Create task" },
     { type: "create_deal", label: "Create deal" },
@@ -2888,6 +2898,23 @@ function ActionConfigFields({
                         placeholder="Pick a tag…"
                     />
                     <p className="mt-1.5 text-[11px] text-slate-400">Tags are your contact categories.</p>
+                </div>
+            )}
+
+            {(action.type === "add_to_segment" || action.type === "remove_from_segment") && (
+                <div>
+                    <Label>{action.type === "add_to_segment" ? "Segment to add to" : "Segment to remove from"}</Label>
+                    <SegmentMultiPicker
+                        value={action.segment_id ? [action.segment_id] : []}
+                        onChange={(ids) =>
+                            setAction((a) => ({ ...a, segment_id: ids.length ? ids[ids.length - 1] : null }))
+                        }
+                    />
+                    <p className="mt-1.5 text-[11px] text-slate-400">
+                        {action.type === "add_to_segment"
+                            ? "The contact stays in the segment whatever its conditions say."
+                            : "The contact stays out of the segment even while its conditions match."}
+                    </p>
                 </div>
             )}
 
