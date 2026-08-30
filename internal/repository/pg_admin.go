@@ -1606,7 +1606,7 @@ func (r *adminRepository) StopCampaign(ctx context.Context, campaignID uuid.UUID
 		UPDATE campaigns
 		SET status = 'paused', last_status_change_at = NOW(), updated_at = NOW()
 		WHERE id = $1
-		  AND status IN ('active', 'paused', 'paused_no_accounts', 'paused_trial_expired', 'paused_guardrail')
+		  AND status IN ('active', 'paused', 'paused_no_accounts', 'paused_trial_expired', 'paused_guardrail', 'paused_undeliverable')
 	`, campaignID)
 	if err != nil {
 		return false, err

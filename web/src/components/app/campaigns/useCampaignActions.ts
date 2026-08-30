@@ -19,7 +19,7 @@ export interface CampaignLike {
 }
 
 // Statuses from which a start is accepted by the backend.
-const STARTABLE = new Set(["draft", "paused", "paused_no_accounts", "paused_guardrail", "completed"]);
+const STARTABLE = new Set(["draft", "paused", "paused_no_accounts", "paused_guardrail", "paused_undeliverable", "completed"]);
 
 export function canStartCampaign(status: string | null | undefined): boolean {
     return STARTABLE.has(status ?? "draft");

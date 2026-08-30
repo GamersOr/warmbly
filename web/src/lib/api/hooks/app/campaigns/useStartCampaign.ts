@@ -1,11 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import startCampaign from "@/lib/api/client/app/campaigns/startCampaign";
+import startCampaign, { type StartCampaignOptions } from "@/lib/api/client/app/campaigns/startCampaign";
 
 export default function useStartCampaign() {
     const queryClient = useQueryClient();
 
     return useMutation({
-        mutationFn: (id: string) => startCampaign(id),
+        mutationFn: (arg: string | { id: string; options?: StartCampaignOptions }) =>
+            typeof arg === "string" ? startCampaign(arg) : startCampaign(arg.id, arg.options),
         onSuccess: () => {
             queryClient.invalidateQueries({
                 queryKey: ["campaigns"],

@@ -79,6 +79,7 @@ const STATUS_LABEL: Record<string, string> = {
     paused_no_accounts: "no accounts",
     paused_trial_expired: "trial expired",
     paused_guardrail: "auto-paused",
+    paused_undeliverable: "needs verification",
     completed: "finished",
     draft: "draft",
 };
@@ -93,6 +94,7 @@ const STATUS_TONE: Record<string, string> = {
     paused_no_accounts: "text-amber-600",
     paused_trial_expired: "text-amber-600",
     paused_guardrail: "text-rose-600",
+    paused_undeliverable: "text-amber-600",
     draft: "text-slate-500",
 };
 
@@ -116,6 +118,9 @@ function CampaignStatusMark({ status }: { status: string }) {
     } else if (status === "paused_guardrail") {
         Icon = AlertTriangleIcon;
         title = "Paused automatically — a deliverability guardrail was breached";
+    } else if (status === "paused_undeliverable") {
+        Icon = AlertTriangleIcon;
+        title = "Paused — address verification refused the remaining leads";
     } else if (status === "paused_no_accounts" || status === "paused_trial_expired") {
         Icon = AlertTriangleIcon;
         title = status === "paused_no_accounts" ? "Paused — no sending accounts" : "Paused — trial expired";
@@ -603,7 +608,7 @@ export default function CampaignsPage() {
             <LaunchCampaignDialog
                 campaign={launchTarget}
                 onClose={() => setLaunchTarget(null)}
-                onConfirm={(id) => startCampaign.mutateAsync(id)}
+                onConfirm={(id, options) => startCampaign.mutateAsync({ id, options })}
             />
         </Page>
     );

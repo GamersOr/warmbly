@@ -168,7 +168,14 @@ func (s *contactService) Delete(ctx context.Context, userID string, orgID uuid.U
 }
 
 func (s *contactService) GetDetail(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID) (*models.ContactDetail, *errx.Error) {
-	return s.contactRepository.GetDetail(ctx, userID, orgID, contactID)
+	detail, xerr := s.contactRepository.GetDetail(ctx, userID, orgID, contactID)
+	if xerr != nil || detail == nil {
+		return detail, xerr
+	}
+	if s.explainer != nil {
+		detail.Verification = s.explainer.Explain(ctx, contactID)
+	}
+	return detail, nil
 }
 
 func (s *contactService) GetByEmail(ctx context.Context, orgID *uuid.UUID, email string) (*models.Contact, *errx.Error) {

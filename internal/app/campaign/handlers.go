@@ -364,7 +364,7 @@ func truncateUTF8(s string, n int) string {
 	return s[:n]
 }
 
-func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string) *errx.Error {
+func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string, opts models.StartCampaignOptions) *errx.Error {
 	cID, parseErr := uuid.Parse(campaignID)
 	if parseErr != nil {
 		return errx.ErrUuid
@@ -392,14 +392,14 @@ func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, ca
 	// one just re-completes in enqueueCampaignWakeup with a clear message.
 	startable := map[string]bool{
 		"draft": true, "paused": true, "paused_no_accounts": true,
-		"paused_guardrail": true, "completed": true,
+		"paused_guardrail": true, "paused_undeliverable": true, "completed": true,
 	}
 	if !startable[campaign.Status] {
 		return errx.New(errx.BadRequest, "campaign must be in draft, paused, or completed status to start")
 	}
 
-	// Check cooldown
-	if campaign.LastStatusChangeAt != nil {
+	// Check cooldown. An automatic resume is not a member flapping a button.
+	if campaign.LastStatusChangeAt != nil && !opts.Automatic {
 		elapsed := time.Since(*campaign.LastStatusChangeAt)
 		if elapsed.Seconds() < campaignCooldownSeconds {
 			return errx.New(errx.BadRequest, "please wait before changing campaign status")
@@ -451,7 +451,10 @@ func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, ca
 	// Refuse a launch whose list is known to be largely undeliverable. Only
 	// KNOWN-invalid addresses count: a list nobody has verified is not evidence
 	// of a bad list, and blocking on that would refuse nearly every launch.
-	if s.audienceRepo != nil {
+	// The owner can acknowledge the risk and launch anyway (the list may have
+	// been verified elsewhere), and a campaign parked by verification has
+	// already been told, so its resume is not gated again.
+	if s.audienceRepo != nil && !opts.AcknowledgeListRisk && campaign.Status != "paused_undeliverable" {
 		audience, aerr := s.audienceRepo.GetCampaignAudience(ctx, orgID, cID)
 		switch {
 		case aerr != nil:
@@ -462,7 +465,7 @@ func (s *campaignService) StartCampaign(ctx context.Context, orgID uuid.UUID, ca
 				Msg("could not measure the campaign's list; launching without the check")
 		default:
 			if verdict := listgate.Project(audience); verdict.Block {
-				return errx.New(errx.BadRequest, verdict.Summary+" "+verdict.Remediation)
+				return errx.NewWithIdentifier(errx.BadRequest, "list_bounce_risk", verdict.Summary+" "+verdict.Remediation)
 			}
 		}
 	}
@@ -602,6 +605,13 @@ func (s *campaignService) enqueueCampaignWakeup(ctx context.Context, campaignID 
 			_ = s.campaignRepository.UpdateStatusWithLock(ctx, campaignID, "paused_no_accounts")
 			return errx.New(errx.BadRequest, "no active email accounts found for campaign's email tags")
 		case errors.Is(err, scheduler.ErrCampaignCompleted):
+			if s.campaignProgressRepo != nil {
+				if n, cerr := s.campaignProgressRepo.CountUndeliverableLeads(ctx, campaignID); cerr == nil && n > 0 {
+					_ = s.campaignRepository.UpdateStatusWithLock(ctx, campaignID, "paused_undeliverable")
+					return errx.NewWithIdentifier(errx.BadRequest, "leads_undeliverable",
+						fmt.Sprintf("%d remaining lead(s) were refused by address verification; re-verify them or mark them deliverable to continue", n))
+				}
+			}
 			_ = s.campaignRepository.UpdateStatusWithLock(ctx, campaignID, "completed")
 			return errx.New(errx.BadRequest, "campaign has no remaining contacts to send")
 		case errors.Is(err, scheduler.ErrCampaignEnded):
@@ -648,6 +658,21 @@ func (s *campaignService) enqueueCampaignWakeup(ctx context.Context, campaignID 
 	}
 
 	return nil
+}
+
+// ResumeVerificationPaused restarts every campaign of the org parked because
+// verification refused its leads. Best effort: a campaign that still has
+// nothing to send parks itself again inside StartCampaign.
+func (s *campaignService) ResumeVerificationPaused(ctx context.Context, orgID uuid.UUID) {
+	ids, err := s.campaignRepository.ListIDsByStatus(ctx, orgID, "paused_undeliverable")
+	if err != nil || len(ids) == 0 {
+		return
+	}
+	for _, id := range ids {
+		if xerr := s.StartCampaign(ctx, orgID, id.String(), models.StartCampaignOptions{Automatic: true}); xerr != nil {
+			log.Info().Str("campaign_id", id.String()).Str("reason", xerr.Message).Msg("campaign stays parked after verification")
+		}
+	}
 }
 
 func (s *campaignService) StopCampaign(ctx context.Context, orgID uuid.UUID, campaignID string) *errx.Error {

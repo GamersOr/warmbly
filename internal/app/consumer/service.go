@@ -83,6 +83,8 @@ type JobsService struct {
 	CampaignProgressRepo repository.CampaignProgressRepository
 	CampaignLogRepo      repository.CampaignLogRepository
 	ContactRepo          repository.ContactRepository
+	// Evidence teaches verification what send results showed.
+	Evidence advanced.EvidenceRecorder
 
 	eventHandlers map[models.JobEventType]func(ctx context.Context, body any) error
 }

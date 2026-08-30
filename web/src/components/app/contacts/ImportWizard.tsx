@@ -28,6 +28,7 @@ import {
     DownloadIcon,
     FileSpreadsheetIcon,
     Loader2Icon,
+    ShieldCheckIcon,
     UploadCloudIcon,
     XIcon,
 } from "lucide-react";
@@ -57,6 +58,7 @@ import {
     CUSTOM_KEY_RULES,
     DEDUP_OPTIONS,
     STANDARD_TARGETS,
+    VERIFICATION_VOCABULARY_LABELS,
     describeError,
     isCustomTarget,
     isValidCustomKey,
@@ -545,6 +547,22 @@ export function MapStep({
                                             header={col}
                                             onChange={(next) => updateMapping(idx, next)}
                                         />
+                                        <AnimatePresence initial={false}>
+                                            {m.target === "verification_status" && (
+                                                <motion.p
+                                                    key="vocab"
+                                                    initial={{ opacity: 0, y: -4 }}
+                                                    animate={{ opacity: 1, y: 0 }}
+                                                    exit={{ opacity: 0, y: -4 }}
+                                                    className="mt-1 text-[10.5px] text-emerald-700 inline-flex items-center gap-1"
+                                                >
+                                                    <ShieldCheckIcon className="w-3 h-3" />
+                                                    {m.verification_provider && VERIFICATION_VOCABULARY_LABELS[m.verification_provider]
+                                                        ? `${VERIFICATION_VOCABULARY_LABELS[m.verification_provider]} results recognised`
+                                                        : "Verification results recognised; these leads skip the built-in check"}
+                                                </motion.p>
+                                            )}
+                                        </AnimatePresence>
                                     </td>
                                 </tr>
                             );

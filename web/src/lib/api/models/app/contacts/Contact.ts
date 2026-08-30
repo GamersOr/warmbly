@@ -49,6 +49,15 @@ export interface ContactCampaignProgress {
     failure_reason?: string;
 }
 
+// VerificationStatus mirrors emailverify.Status: the pre-send verdict on the
+// address. "invalid" is never sent to; "risky" (catch-all, role) only when the
+// campaign allows it; "unknown" and "valid" always send.
+export type VerificationStatus = "valid" | "risky" | "invalid" | "unknown";
+
+// VerificationSource says who produced the verdict: the in-house probe, a
+// connected provider, a status column imported with the list, or a member.
+export type VerificationSource = "" | "probe" | "provider" | "imported" | "manual";
+
 export default interface Contact {
     id: string;
 
@@ -63,6 +72,17 @@ export default interface Contact {
     subscribed: boolean;
     campaigns: MiniCampaign[];
     categories: MiniCategory[];
+
+    verification_status?: VerificationStatus;
+    verification_reason?: string;
+    verification_sub_status?: string;
+    verification_source?: VerificationSource;
+    verification_provider?: string;
+    verification_checked_at?: string | null;
+    // How sure the platform is of the status, 0 to 100, scored from the last
+    // check plus what real mail to the address showed.
+    verification_confidence?: number;
+    is_catch_all?: boolean;
 
     // Present only in the campaign Leads view (single-campaign search). Drives
     // the per-lead processing-state column.

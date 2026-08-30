@@ -20,7 +20,23 @@ export const STANDARD_TARGETS: { id: string; label: string }[] = [
     { id: "phone", label: "Phone" },
     { id: "subscribed", label: "Subscribed" },
     { id: "categories", label: "Categories" },
+    { id: "verification_status", label: "Verification status" },
 ];
+
+// Vocabularies the verification_status target can read, for the mapping
+// row's "recognised as" badge. Mirrors emailverify.KnownVocabulary.
+export const VERIFICATION_VOCABULARY_LABELS: Record<string, string> = {
+    zerobounce: "ZeroBounce",
+    millionverifier: "MillionVerifier",
+    neverbounce: "NeverBounce",
+    bouncer: "Bouncer",
+    kickbox: "Kickbox",
+    emailable: "Emailable",
+    debounce: "DeBounce",
+    clearout: "Clearout",
+    emaillistverify: "EmailListVerify",
+    builtin: "Warmbly",
+};
 
 export const DEDUP_OPTIONS: { id: ImportDedupStrategy; label: string; hint: string }[] = [
     { id: "skip", label: "Skip existing", hint: "If a contact with this email exists, leave it alone." },

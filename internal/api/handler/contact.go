@@ -51,6 +51,10 @@ func (h *Handler) AddContacts(c *gin.Context) {
 
 	// Audit log - bulk import
 	h.auditOrg(c, models.AuditActionImport, models.AuditEntityContact, nil, nil, map[string]string{"count": fmt.Sprintf("%d", len(data))})
+	// New addresses are checked right away rather than on the next tick.
+	if h.EmailVerifyService != nil {
+		h.EmailVerifyService.Kick()
+	}
 
 	c.JSON(http.StatusOK, resp)
 }

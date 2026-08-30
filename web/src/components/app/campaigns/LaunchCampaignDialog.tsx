@@ -88,10 +88,13 @@ export default function LaunchCampaignDialog({
 }: {
     campaign: Campaign | null;
     onClose: () => void;
-    onConfirm: (id: string) => Promise<unknown>;
+    onConfirm: (id: string, options?: { acknowledge_list_risk?: boolean }) => Promise<unknown>;
 }) {
     const [phase, setPhase] = React.useState<Phase>("idle");
     const [error, setError] = React.useState<string | null>(null);
+    // The backend refused the launch on projected bounce rate. The member can
+    // take the risk explicitly (a list verified elsewhere), once they read why.
+    const [riskBlocked, setRiskBlocked] = React.useState(false);
     const timer = React.useRef<number | null>(null);
 
     // The list passes a campaign whose `sequences` is null (the list endpoint
@@ -111,6 +114,7 @@ export default function LaunchCampaignDialog({
         if (campaign) {
             setPhase("idle");
             setError(null);
+            setRiskBlocked(false);
         }
     }, [campaign]);
 
@@ -130,16 +134,18 @@ export default function LaunchCampaignDialog({
         return () => document.removeEventListener("keydown", onKey);
     }, [campaign, phase, onClose]);
 
-    async function launch() {
+    async function launch(acknowledge = false) {
         if (!campaign || phase === "launching") return;
         setError(null);
         setPhase("launching");
         try {
-            await onConfirm(campaign.id);
+            await onConfirm(campaign.id, acknowledge ? { acknowledge_list_risk: true } : undefined);
             setPhase("done");
             timer.current = window.setTimeout(onClose, 1200);
         } catch (e) {
-            setError(buildError(e as unknown as AppError));
+            const err = e as unknown as AppError;
+            setError(buildError(err));
+            setRiskBlocked(err?.code === "list_bounce_risk");
             setPhase("idle");
         }
     }
@@ -322,9 +328,21 @@ export default function LaunchCampaignDialog({
                                         >
                                             Cancel
                                         </button>
+                                        {riskBlocked && (
+                                            <motion.button
+                                                initial={{ opacity: 0, x: 8 }}
+                                                animate={{ opacity: 1, x: 0 }}
+                                                type="button"
+                                                onClick={() => launch(true)}
+                                                disabled={phase === "launching"}
+                                                className="h-8 px-3 rounded-md border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-[12.5px] font-medium transition-colors disabled:opacity-50"
+                                            >
+                                                Launch anyway
+                                            </motion.button>
+                                        )}
                                         <button
                                             type="button"
-                                            onClick={launch}
+                                            onClick={() => launch()}
                                             disabled={phase === "launching"}
                                             className="h-8 px-3.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12.5px] font-medium inline-flex items-center gap-2 transition-colors disabled:opacity-80"
                                         >

@@ -9,12 +9,12 @@ import (
 	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
 )
 
-// EmailVerificationJob verifies a capped batch of not-yet-checked contacts each
-// run, so the platform can drop hard-bouncing addresses before any worker sends
-// to them. It is a thin wrapper around emailverify.Service.VerifyPending; the
-// per-tick cap bounds how much outbound SMTP-probe work one pass does.
+// EmailVerificationJob verifies a batch of contacts due for a check each run,
+// so the platform can drop hard-bouncing addresses before any worker sends
+// to them. A run that fills its batch is repeated until the backlog is below
+// one batch, so a large import drains at the verifier's speed.
 //
-// Control-plane only: the underlying verifier dials remote MX hosts on :25 and
+// Control-plane only: the in-house verifier dials remote MX hosts on :25 and
 // must run from the backend/consumer, never a worker (sending) IP.
 type EmailVerificationJob struct {
 	svc       emailverifyapp.Service
@@ -22,7 +22,7 @@ type EmailVerificationJob struct {
 }
 
 // NewEmailVerificationJob creates the job. batchSize caps how many contacts are
-// verified per tick (defaults to 100 when non-positive).
+// verified per pass (defaults to 100 when non-positive).
 func NewEmailVerificationJob(svc emailverifyapp.Service, batchSize int) *EmailVerificationJob {
 	if batchSize <= 0 {
 		batchSize = 100
@@ -30,20 +30,26 @@ func NewEmailVerificationJob(svc emailverifyapp.Service, batchSize int) *EmailVe
 	return &EmailVerificationJob{svc: svc, batchSize: batchSize}
 }
 
-// Run performs one capped verification pass. Safe to call frequently — it
-// no-ops when there are no unverified contacts.
+// Run drains the backlog in batches. Safe to call frequently; it no-ops when
+// nothing is due.
 func (j *EmailVerificationJob) Run(ctx context.Context) error {
 	if j.svc == nil {
 		return nil
 	}
-	if _, err := j.svc.VerifyPending(ctx, j.batchSize); err != nil {
-		sentry.CaptureException(err)
-		return err
+	for {
+		n, err := j.svc.VerifyPending(ctx, j.batchSize)
+		if err != nil {
+			sentry.CaptureException(err)
+			return err
+		}
+		if n < j.batchSize || ctx.Err() != nil {
+			return nil
+		}
 	}
-	return nil
 }
 
-// EmailVerificationScheduler runs the job on a fixed interval.
+// EmailVerificationScheduler runs the job on a fixed interval and whenever
+// the service is kicked (a re-verify request, an import).
 type EmailVerificationScheduler struct {
 	job      *EmailVerificationJob
 	interval time.Duration
@@ -64,16 +70,21 @@ func (s *EmailVerificationScheduler) Start(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
+	var wake <-chan struct{}
+	if s.job != nil && s.job.svc != nil {
+		wake = s.job.svc.Wake()
+	}
 	for {
 		select {
 		case <-ticker.C:
-			if err := s.job.Run(ctx); err != nil {
-				sentry.CaptureException(err)
-			}
+		case <-wake:
 		case <-s.stopCh:
 			return
 		case <-ctx.Done():
 			return
+		}
+		if err := s.job.Run(ctx); err != nil {
+			sentry.CaptureException(err)
 		}
 	}
 }
