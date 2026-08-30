@@ -332,7 +332,10 @@ export function useRealtimeEvents() {
           markSelfMutation(entityType, entityId)
         }
         const spine: Record<string, QueryKey[]> = {
-          contact: [['contacts']],
+          // Segment membership is computed from contact data, so a contact
+          // change moves segment counts too.
+          contact: [['contacts'], ['segments']],
+          segment: [['segments'], ['contacts', 'list']],
           campaign: [['campaigns'], ['analytics']],
           step: [['campaigns']],
           // ['emails'] rather than ['emails', 'list']: it prefix-matches the
@@ -398,6 +401,7 @@ export function useRealtimeEvents() {
         const keys = spine[entityType]
         if (keys) invalidate(keys)
         if (entityId && entityType === 'contact') invalidate([['contacts', entityId]])
+        if (entityId && entityType === 'segment') invalidate([['segments', entityId]])
         if (entityId && entityType === 'campaign') invalidate([['campaigns', entityId]])
         if (entityId && entityType === 'automation') invalidate([['automations', entityId]])
         return

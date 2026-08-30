@@ -965,6 +965,18 @@ func (s *tasksService) executeActionNode(ctx context.Context, campaign *models.C
 			return xerr
 		}
 		return nil
+	case "add_to_segment", "remove_from_segment":
+		if cfg.SegmentID == nil || campaign.OrganizationID == nil || s.segmentRepo == nil {
+			return nil
+		}
+		mode := models.SegmentMemberInclude
+		if cfg.Type == "remove_from_segment" {
+			mode = models.SegmentMemberExclude
+		}
+		if _, xerr := s.segmentRepo.SetMembers(ctx, *campaign.OrganizationID, *cfg.SegmentID, []uuid.UUID{contact.ID}, mode); xerr != nil {
+			return xerr
+		}
+		return nil
 	case "label_email":
 		// Apply unibox labels to the contact's most recent conversation. A no-op
 		// when the contact has no thread yet (returns "" thread, nil error).

@@ -99,6 +99,7 @@ function hasActiveFilters(f: SearchContacts): boolean {
         f.filters.length > 0 ||
         (f.campaign_ids?.length ?? 0) > 0 ||
         (f.category_ids?.length ?? 0) > 0 ||
+        (f.segment_ids?.length ?? 0) > 0 ||
         f.subscribed !== undefined ||
         !!f.lead_status ||
         !!f.engagement ||

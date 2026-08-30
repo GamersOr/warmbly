@@ -269,6 +269,17 @@ func (s *service) executeInstantActionNode(ctx context.Context, campaign *models
 		}); xerr != nil {
 			s.logActionErr(campaign, contact, cfg.Type, eventKind, xerr)
 		}
+	case "add_to_segment", "remove_from_segment":
+		if cfg.SegmentID == nil || campaign.OrganizationID == nil || s.segmentRepo == nil {
+			return
+		}
+		mode := models.SegmentMemberInclude
+		if cfg.Type == "remove_from_segment" {
+			mode = models.SegmentMemberExclude
+		}
+		if _, xerr := s.segmentRepo.SetMembers(ctx, *campaign.OrganizationID, *cfg.SegmentID, []uuid.UUID{contact.ID}, mode); xerr != nil {
+			s.logActionErr(campaign, contact, cfg.Type, eventKind, xerr)
+		}
 	case "label_email":
 		// Label the conversation the contact just replied on. The most recent
 		// thread for the contact in the campaign owner's unibox is that reply.

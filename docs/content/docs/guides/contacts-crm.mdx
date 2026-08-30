@@ -65,13 +65,21 @@ Both forms work everywhere, including inside `{{if}}` conditions and helper func
 
 See [Personalization & expressions](/guides/expressions/) for the full templating language.
 
+## Filtering the list
+
+A filter bar sits above the contact list. **Category**, **Segment**, **Status** and **Campaign** are always there; open one, tick values, and the list updates immediately with the matching count next to the bar. **Add filter** adds a custom-field condition (field, contains/is/starts with/ends with, value), a date-added or last-updated range, a number-of-campaigns range, the address verification verdict and, on a campaign's Leads tab, lead status and engagement. Each active filter is a pill you can reopen to change or remove with its cross; **Clear** drops them all, and **Save as segment** turns the current set into a [segment](/guides/segments/). Free-text search and sort stay in the toolbar.
+
 ## Categories
 
 Colored labels that group and filter contacts (`Warm lead`, `Conference 2026`, `Enterprise`), behaving like tags. The same picker appears in bulk edit, a contact's Details tab, the new-contact dialog, the filters, and the import and sync wizards.
 
 It supports type-ahead search, and typing an unmatched name offers **Create** to add and select it in one step. Each category keeps its color everywhere its chip appears.
 
-Categories also drive automation: a sequence can run **Add tag** or **Remove tag** as a contact moves through a flow, so a label can be applied automatically on a positive reply.
+**Contacts > Categories** lists every category with a live contact count. From there you can create one, rename it, change its color, delete it (contacts are kept; the label is removed from them and from inbox threads), or click a row to open the contact list filtered to it.
+
+Categories also drive automation: a sequence can run **Add tag** or **Remove tag** as a contact moves through a flow, so a label can be applied automatically on a positive reply. **Add to segment** and **Remove from segment** do the same for [segments](/guides/segments/).
+
+To turn labels and activity into a reusable audience, build a [segment](/guides/segments/): a saved set of conditions over contacts (categories, fields, campaign activity, engagement) that you can browse and add to a campaign in one step.
 
 ## Where a contact came from
 
@@ -121,6 +129,7 @@ This is the safe default response to a bad signal: stop sending rather than keep
 ## Where to go next
 
 <Cards>
+  <Card title="Segments" href="/guides/segments/" />
   <Card title="Personalization & expressions" href="/guides/expressions/" />
   <Card title="Deliverability" href="/guides/deliverability/" />
   <Card title="Automations" href="/guides/automations/" />

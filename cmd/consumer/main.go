@@ -292,6 +292,10 @@ func main() {
 		nil, // tasksClient: the consumer does not schedule Cloud Tasks
 		warmupService,
 	)
+	// Instant reply actions can pin a contact into or out of a segment.
+	if aware, ok := advancedService.(advanced.SegmentAware); ok {
+		aware.WireSegments(repository.NewSegmentRepository(primaryDB))
+	}
 	advancedService.WireDispatcher(webhookService)
 	// Replies, bounces, opens and clicks teach verification what real mail
 	// showed about each address.

@@ -44,6 +44,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/referral"
 	"github.com/warmbly/warmbly/internal/app/releases"
 	"github.com/warmbly/warmbly/internal/app/research"
+	"github.com/warmbly/warmbly/internal/app/segment"
 	"github.com/warmbly/warmbly/internal/app/sequence"
 	"github.com/warmbly/warmbly/internal/app/skills"
 	"github.com/warmbly/warmbly/internal/app/socket"
@@ -99,6 +100,7 @@ type Handler struct {
 	EmailService     email.EmailService
 	CampaignService  campaign.CampaignService
 	ContactService   contact.ContactService
+	SegmentService   segment.Service
 	SequenceService  sequence.SequenceService
 	UniboxService    unibox.UniboxService
 

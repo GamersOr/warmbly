@@ -1,0 +1,243 @@
+package repository
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/models"
+)
+
+// Issue #266: segments compile to SQL over the real schema. These prove each
+// field family, the manual overrides and nested segments against Postgres.
+// The shared fixture already holds one contact (Pied Piper), so org-wide
+// counts are one higher than the three contacts seeded here.
+//
+//	WARMBLY_TEST_DB=postgres://warmbly:warmbly@localhost:15432/warmbly_dev?sslmode=disable \
+//	  go test ./internal/repository/ -run LiveSegment -v
+
+type segmentFixture struct {
+	*sharedOrgFixture
+	category uuid.UUID
+	alice    uuid.UUID // Acme, VP, in campaign, opened, categorised
+	bob      uuid.UUID // Globex, custom title Engineer, unsubscribed
+	carol    uuid.UUID // Acme, no activity
+}
+
+func newSegmentFixture(t *testing.T) (*segmentFixture, SegmentRepository) {
+	t.Helper()
+	handle, pool := liveContactDB(t)
+	base := newSharedOrgFixture(t, pool)
+	f := &segmentFixture{sharedOrgFixture: base, category: uuid.New(), alice: uuid.New(), bob: uuid.New(), carol: uuid.New()}
+	ctx := context.Background()
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("fixture %q: %v", sql[:min(60, len(sql))], err)
+		}
+	}
+	tag := uuid.New().String()[:6]
+	contact := func(id uuid.UUID, first, company string, custom string, subscribed bool) {
+		exec(`INSERT INTO contacts (id, user_id, organization_id, email, first_name, last_name, company, phone, custom_fields, subscribed)
+		      VALUES ($1, $2, $3, $4, $5, 'Seg', $6, '', $7::jsonb, $8)`,
+			id, f.owner, f.org, first+"-"+tag+"@"+company+".test", first, company, custom, subscribed)
+	}
+	contact(f.alice, "alice", "acme", `{"title":"VP Sales"}`, true)
+	contact(f.bob, "bob", "globex", `{"title":"Engineer"}`, false)
+	contact(f.carol, "carol", "acme", `{}`, true)
+
+	exec(`INSERT INTO categories (id, user_id, title, color, position) VALUES ($1, $2, 'Hot', '#ff0000', 0)`, f.category, f.owner)
+	exec(`INSERT INTO contact_categories (contact_id, category_id) VALUES ($1, $2)`, f.alice, f.category)
+	exec(`INSERT INTO campaign_leads (campaign_id, contact_id) VALUES ($1, $2)`, f.campaign, f.alice)
+	seq := uuid.New()
+	exec(`INSERT INTO sequences (id, campaign_id, organization_id, name, subject, body_plain, body_html) VALUES ($1, $2, $3, 'Email 1', 'Hi', 'Body', 'Body')`, seq, f.campaign, f.org)
+	exec(`INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, sent_at, opened_at, opened_machine)
+	      VALUES ($1, $2, $3, NOW() - interval '2 days', NOW() - interval '1 day', false)`, f.campaign, f.alice, seq)
+
+	t.Cleanup(func() {
+		c := context.Background()
+		for _, step := range []struct {
+			sql string
+			arg any
+		}{
+			{`DELETE FROM segments WHERE organization_id = $1`, f.org},
+			{`DELETE FROM campaign_contact_progress WHERE campaign_id = $1`, f.campaign},
+			{`DELETE FROM sequences WHERE campaign_id = $1`, f.campaign},
+			{`DELETE FROM contact_categories WHERE category_id = $1`, f.category},
+			{`DELETE FROM categories WHERE id = $1`, f.category},
+		} {
+			if _, err := pool.Exec(c, step.sql, step.arg); err != nil {
+				t.Errorf("cleanup %q: %v", step.sql, err)
+			}
+		}
+	})
+	return f, NewSegmentRepository(handle)
+}
+
+func segCount(t *testing.T, repo SegmentRepository, org uuid.UUID, match models.SegmentMatch, conds ...models.SegmentCondition) int {
+	t.Helper()
+	if err := models.ValidateSegmentConditions(conds, nil); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	n, xerr := repo.Count(context.Background(), org, nil, match, conds)
+	if xerr != nil {
+		t.Fatalf("count: %v", xerr)
+	}
+	return n
+}
+
+func TestLiveSegmentConditionsMatchEachFamily(t *testing.T) {
+	f, repo := newSegmentFixture(t)
+	cases := []struct {
+		name string
+		want int
+		cond models.SegmentCondition
+	}{
+		{"company equals", 2, models.SegmentCondition{Field: "company", Operator: "equals", Value: "ACME"}},
+		{"company contains escapes wildcards", 0, models.SegmentCondition{Field: "company", Operator: "contains", Value: "%"}},
+		{"email domain", 1, models.SegmentCondition{Field: "email_domain", Operator: "equals", Value: "globex.test"}},
+		{"custom field", 1, models.SegmentCondition{Field: "custom.title", Operator: "starts_with", Value: "vp"}},
+		{"custom field empty", 2, models.SegmentCondition{Field: "custom.title", Operator: "is_empty"}},
+		{"subscribed false", 1, models.SegmentCondition{Field: "subscribed", Operator: "is_false"}},
+		{"category in", 1, models.SegmentCondition{Field: "category", Operator: "in", Values: []string{f.category.String()}}},
+		{"category none", 3, models.SegmentCondition{Field: "category", Operator: "is_empty"}},
+		{"campaign in", 1, models.SegmentCondition{Field: "campaign", Operator: "in", Values: []string{f.campaign.String()}}},
+		{"campaign not in", 3, models.SegmentCondition{Field: "campaign", Operator: "not_in", Values: []string{f.campaign.String()}}},
+		{"campaign count", 3, models.SegmentCondition{Field: "campaign_count", Operator: "equals", Value: "0"}},
+		{"emails opened", 1, models.SegmentCondition{Field: "emails_opened", Operator: "gte", Value: "1"}},
+		{"last opened within", 1, models.SegmentCondition{Field: "last_opened_at", Operator: "within_days", Value: "7"}},
+		{"last opened not within", 3, models.SegmentCondition{Field: "last_opened_at", Operator: "not_within_days", Value: "7"}},
+		{"last replied empty", 4, models.SegmentCondition{Field: "last_replied_at", Operator: "is_empty"}},
+		{"created after yesterday", 4, models.SegmentCondition{Field: "created_at", Operator: "after", Value: "2000-01-01"}},
+		{"source enum", 4, models.SegmentCondition{Field: "source", Operator: "in", Values: []string{"unknown"}}},
+		{"suppressed", 0, models.SegmentCondition{Field: "suppressed", Operator: "is_true"}},
+	}
+	for _, tc := range cases {
+		if got := segCount(t, repo, f.org, models.SegmentMatchAll, tc.cond); got != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestLiveSegmentMatchAnyAndAll(t *testing.T) {
+	f, repo := newSegmentFixture(t)
+	acme := models.SegmentCondition{Field: "company", Operator: "equals", Value: "acme"}
+	opened := models.SegmentCondition{Field: "emails_opened", Operator: "gte", Value: "1"}
+	if got := segCount(t, repo, f.org, models.SegmentMatchAll, acme, opened); got != 1 {
+		t.Errorf("all: got %d, want 1", got)
+	}
+	unsub := models.SegmentCondition{Field: "subscribed", Operator: "is_false"}
+	if got := segCount(t, repo, f.org, models.SegmentMatchAny, opened, unsub); got != 2 {
+		t.Errorf("any: got %d, want 2", got)
+	}
+}
+
+func TestLiveSegmentOverridesNestingAndCampaign(t *testing.T) {
+	f, repo := newSegmentFixture(t)
+	ctx := context.Background()
+	acme, xerr := repo.Create(ctx, f.org, &f.owner, &models.Segment{
+		Name: "Acme", Color: "#0284c7", Match: models.SegmentMatchAll,
+		Conditions: []models.SegmentCondition{{Field: "company", Operator: "equals", Value: "acme"}},
+	})
+	if xerr != nil {
+		t.Fatalf("create: %v", xerr)
+	}
+	if acme.ContactCount != 2 {
+		t.Fatalf("acme count = %d, want 2", acme.ContactCount)
+	}
+
+	// Exclude carol, include bob: membership is (conditions OR include) AND NOT exclude.
+	if _, xerr := repo.SetMembers(ctx, f.org, acme.ID, []uuid.UUID{f.carol}, models.SegmentMemberExclude); xerr != nil {
+		t.Fatalf("exclude: %v", xerr)
+	}
+	if _, xerr := repo.SetMembers(ctx, f.org, acme.ID, []uuid.UUID{f.bob}, models.SegmentMemberInclude); xerr != nil {
+		t.Fatalf("include: %v", xerr)
+	}
+	got, xerr := repo.Get(ctx, f.org, acme.ID)
+	if xerr != nil {
+		t.Fatalf("get: %v", xerr)
+	}
+	if got.ContactCount != 2 || got.IncludedCount != 1 || got.ExcludedCount != 1 {
+		t.Fatalf("after overrides: count=%d included=%d excluded=%d", got.ContactCount, got.IncludedCount, got.ExcludedCount)
+	}
+	modes, xerr := repo.MemberModes(ctx, acme.ID, []uuid.UUID{f.alice, f.bob, f.carol})
+	if xerr != nil {
+		t.Fatalf("modes: %v", xerr)
+	}
+	if modes[f.bob] != models.SegmentMemberInclude || modes[f.carol] != models.SegmentMemberExclude || modes[f.alice] != "" {
+		t.Fatalf("modes = %v", modes)
+	}
+
+	// The contact-side view reports membership and the override per segment,
+	// and the overrides listing shows both pinned contacts.
+	forBob, xerr := repo.SegmentsForContact(ctx, f.org, f.bob)
+	if xerr != nil {
+		t.Fatalf("segments for contact: %v", xerr)
+	}
+	if len(forBob) != 1 || !forBob[0].Member || forBob[0].Mode != models.SegmentMemberInclude {
+		t.Fatalf("segments for bob = %+v", forBob)
+	}
+	forCarol, _ := repo.SegmentsForContact(ctx, f.org, f.carol)
+	if len(forCarol) != 1 || forCarol[0].Member || forCarol[0].Mode != models.SegmentMemberExclude {
+		t.Fatalf("segments for carol = %+v", forCarol)
+	}
+	overrides, xerr := repo.ListOverrides(ctx, f.org, acme.ID)
+	if xerr != nil || len(overrides) != 2 {
+		t.Fatalf("overrides = %+v, %v", overrides, xerr)
+	}
+
+	// A segment built on another one sees its overrides.
+	nested, xerr := repo.Create(ctx, f.org, &f.owner, &models.Segment{
+		Name: "Acme not opened", Color: "#0284c7", Match: models.SegmentMatchAll,
+		Conditions: []models.SegmentCondition{
+			{Field: "segment", Operator: "in", Values: []string{acme.ID.String()}},
+			{Field: "emails_opened", Operator: "equals", Value: "0"},
+		},
+	})
+	if xerr != nil {
+		t.Fatalf("create nested: %v", xerr)
+	}
+	if nested.ContactCount != 1 { // bob (included), since carol is excluded and alice opened
+		t.Fatalf("nested count = %d, want 1", nested.ContactCount)
+	}
+	names, xerr := repo.ReferencedBy(ctx, f.org, acme.ID)
+	if xerr != nil || len(names) != 1 || names[0] != "Acme not opened" {
+		t.Fatalf("referenced by = %v, %v", names, xerr)
+	}
+
+	// The contacts search honours segment_ids.
+	handle, _ := liveContactDB(t)
+	contacts := NewContactRepostory(handle)
+	res, xerr := contacts.Search(ctx, f.org.String(), nil, nil, models.SearchContacts{SegmentIDs: []string{acme.ID.String()}}, 50)
+	if xerr != nil {
+		t.Fatalf("search: %v", xerr)
+	}
+	if len(res.Data) != 2 {
+		t.Fatalf("search by segment = %d contacts, want 2", len(res.Data))
+	}
+
+	// Enrolling the segment adds only the members not already leads.
+	out, xerr := repo.AddToCampaign(ctx, f.org, f.mate.String(), acme.ID, f.other)
+	if xerr != nil {
+		t.Fatalf("add to campaign: %v", xerr)
+	}
+	if out.Added != 2 || out.Members != 2 {
+		t.Fatalf("add to campaign = %+v", out)
+	}
+	out, xerr = repo.AddToCampaign(ctx, f.org, f.mate.String(), acme.ID, f.other)
+	if xerr != nil || out.Added != 0 {
+		t.Fatalf("second add = %+v, %v", out, xerr)
+	}
+
+	// Duplicate names collide, and a referenced segment cannot be deleted
+	// (the service refuses; the repository reports the reference).
+	if _, xerr := repo.Create(ctx, f.org, nil, &models.Segment{Name: "ACME", Color: "#0284c7", Match: models.SegmentMatchAll}); xerr == nil {
+		t.Fatalf("duplicate name accepted")
+	}
+	if xerr := repo.Delete(ctx, f.org, nested.ID); xerr != nil {
+		t.Fatalf("delete nested: %v", xerr)
+	}
+	if got, _ := repo.Get(ctx, f.org, acme.ID); got == nil || got.ContactCount != 2 {
+		t.Fatalf("acme after nested delete: %+v", got)
+	}
+}

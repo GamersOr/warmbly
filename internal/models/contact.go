@@ -569,6 +569,7 @@ type SearchContacts struct {
 	LeadStatus         string                 `json:"lead_status"`          // Filter by derived lead status; requires exactly one campaign_id
 	Engagement         string                 `json:"engagement"`           // Filter by lead engagement (opened, not_opened, ...); ANDed with lead_status; requires exactly one campaign_id
 	CategoryIDs        []string               `json:"category_ids"`         // Contacts must have ALL these categories
+	SegmentIDs         []string               `json:"segment_ids"`          // Contacts must be members of ALL these segments
 	MinCampaigns       *int                   `json:"min_campaigns"`        // Minimum number of associated campaigns
 	MaxCampaigns       *int                   `json:"max_campaigns"`        // Maximum number of associated campaigns
 	Subscribed         *bool                  `json:"subscribed"`           // Filter by subscription status

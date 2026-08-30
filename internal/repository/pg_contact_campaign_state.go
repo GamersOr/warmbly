@@ -208,6 +208,10 @@ func stepLabel(name, kind string, action []byte, emailOrdinal int) string {
 			return "Add tag"
 		case "remove_tag":
 			return "Remove tag"
+		case "add_to_segment":
+			return "Add to segment"
+		case "remove_from_segment":
+			return "Remove from segment"
 		case "unsubscribe":
 			return "Unsubscribe"
 		case "notify":

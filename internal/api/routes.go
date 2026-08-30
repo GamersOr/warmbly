@@ -578,6 +578,7 @@ func Run(
 				contacts.GET("/:id/emails", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactEmails)
 				contacts.GET("/:id/timeline", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactTimeline)
 				contacts.GET("/:id/campaigns", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactCampaignStates)
+				contacts.GET("/:id/segments", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListContactSegments)
 
 				// AI contact research (dedicated AI_RESEARCH scope; JWT callers by
 				// the matching contact permission). Batch queues and drains in the
@@ -596,6 +597,24 @@ func Run(
 			}
 
 			// Group endpoints map to the resources they organize: campaign
+			// Segments: saved contact audiences. Contact permissions on both
+			// sides, since a segment is only a view over contacts.
+			segments := protected.Group("/segments")
+			segments.Use(m.RateLimitMiddleware(models.RateLimitWrite))
+			{
+				segments.GET("", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListSegments)
+				segments.GET("/fields", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListSegmentFields)
+				segments.POST("/preview", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.PreviewSegment)
+				segments.POST("", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.CreateSegment)
+				segments.GET("/:id", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetSegment)
+				segments.PATCH("/:id", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.UpdateSegment)
+				segments.DELETE("/:id", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.DeleteSegment)
+				segments.POST("/:id/members", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.SetSegmentMembers)
+				segments.POST("/:id/members/lookup", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetSegmentMemberModes)
+				segments.GET("/:id/overrides", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListSegmentOverrides)
+				segments.POST("/:id/add-to-campaign", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.AddSegmentToCampaign)
+			}
+
 			// folders, email-account tags, and contact categories.
 			grouph.New(protected, h.FolderService, h.AuditService, "folders", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns))
 			grouph.New(protected, h.TagService, h.AuditService, "tags", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails))

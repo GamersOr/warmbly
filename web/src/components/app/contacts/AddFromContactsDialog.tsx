@@ -21,6 +21,7 @@ import { SearchInput } from "@/components/ui/field";
 import CategoryPicker from "./CategoryPicker";
 import useSearchContacts from "@/lib/api/hooks/app/contacts/useSearchContacts";
 import useUpdateContactsBulk from "@/lib/api/hooks/app/contacts/useUpdateContactsBulk";
+import { useSetSegmentMembers } from "@/lib/api/hooks/app/segments";
 import searchContacts from "@/lib/api/client/app/contacts/searchContacts";
 import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import type Contact from "@/lib/api/models/app/contacts/Contact";
@@ -33,10 +34,17 @@ import { cn, hexToRgba } from "@/lib/utils";
 const PAGE = 100;
 const MAX_SELECTION = 1000;
 
+// The target is either a campaign (contacts become leads) or a segment
+// (contacts are pinned in as manual includes).
+export type AddFromContactsTarget =
+    | { kind: "campaign"; campaign: MiniCampaign }
+    | { kind: "segment"; segment: { id: string; name: string } };
+
 interface Props {
     open: boolean;
     onClose: () => void;
-    campaign: MiniCampaign;
+    campaign?: MiniCampaign;
+    target?: AddFromContactsTarget;
 }
 
 function displayName(c: Contact): string {
@@ -44,8 +52,14 @@ function displayName(c: Contact): string {
     return n || c.email;
 }
 
-export default function AddFromContactsDialog({ open, onClose, campaign }: Props) {
+export default function AddFromContactsDialog({ open, onClose, campaign: campaignProp, target: targetProp }: Props) {
     const bulk = useUpdateContactsBulk();
+    const members = useSetSegmentMembers();
+    const target: AddFromContactsTarget = React.useMemo(
+        () => targetProp ?? { kind: "campaign", campaign: campaignProp as MiniCampaign },
+        [targetProp, campaignProp],
+    );
+    const targetName = target.kind === "campaign" ? target.campaign.name : target.segment.name;
 
     const [query, setQuery] = React.useState("");
     const [categoryIds, setCategoryIds] = React.useState<string[]>([]);
@@ -87,8 +101,8 @@ export default function AddFromContactsDialog({ open, onClose, campaign }: Props
     }, [open]);
 
     const inCampaign = React.useCallback(
-        (c: Contact) => (c.campaigns ?? []).some((x) => x.id === campaign.id),
-        [campaign.id],
+        (c: Contact) => target.kind === "campaign" && (c.campaigns ?? []).some((x) => x.id === target.campaign.id),
+        [target],
     );
 
     const selectable = React.useMemo(() => contacts.filter((c) => !inCampaign(c)), [contacts, inCampaign]);
@@ -143,22 +157,27 @@ export default function AddFromContactsDialog({ open, onClose, campaign }: Props
     }
 
     async function submit() {
-        if (bulk.isPending || selected.size === 0) return;
+        if (busy || selected.size === 0) return;
         try {
-            await bulk.mutateAsync({
-                contacts: [...selected],
-                add_campaigns: [campaign.id],
-                remove_campaigns: [],
-                fields: [],
-            });
-            toast.success(`Added ${selected.size} lead${selected.size === 1 ? "" : "s"} to ${campaign.name}`);
+            if (target.kind === "campaign") {
+                await bulk.mutateAsync({
+                    contacts: [...selected],
+                    add_campaigns: [target.campaign.id],
+                    remove_campaigns: [],
+                    fields: [],
+                });
+                toast.success(`Added ${selected.size} lead${selected.size === 1 ? "" : "s"} to ${target.campaign.name}`);
+            } else {
+                await members.mutateAsync({ id: target.segment.id, contacts: [...selected], mode: "include" });
+                toast.success(`Added ${selected.size} contact${selected.size === 1 ? "" : "s"} to ${target.segment.name}`);
+            }
             onClose();
         } catch (err) {
             toast.error(buildError(err as AppError));
         }
     }
 
-    const busy = bulk.isPending;
+    const busy = bulk.isPending || members.isPending;
     const requestClose = React.useCallback(() => {
         if (!busy) onClose();
     }, [busy, onClose]);
@@ -206,12 +225,12 @@ export default function AddFromContactsDialog({ open, onClose, campaign }: Props
                                 <UsersIcon className="w-3 h-3" />
                             </div>
                             <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">
-                                Add leads
+                                {target.kind === "campaign" ? "Add leads" : "Add contacts"}
                             </span>
                             <div className="h-4 w-px bg-slate-200" />
                             <span className="text-[12.5px] text-slate-900 font-medium">From contacts</span>
                             <span className="hidden sm:inline-flex items-center h-5 px-1.5 rounded bg-sky-50 text-sky-700 text-[10px] font-medium max-w-[200px] truncate">
-                                → {campaign.name}
+                                → {targetName}
                             </span>
                             <button
                                 type="button"
@@ -385,7 +404,9 @@ export default function AddFromContactsDialog({ open, onClose, campaign }: Props
                             <span className="text-[11px] text-slate-400 min-w-0 truncate">
                                 {capped
                                     ? `Capped at ${MAX_SELECTION.toLocaleString()} per batch. Add these, then repeat for the rest.`
-                                    : "Contacts already in this campaign are skipped."}
+                                    : target.kind === "campaign"
+                                      ? "Contacts already in this campaign are skipped."
+                                      : "Added contacts stay in the segment whatever its conditions say."}
                             </span>
                             <button
                                 type="button"
@@ -402,7 +423,7 @@ export default function AddFromContactsDialog({ open, onClose, campaign }: Props
                                 className="h-7 px-2.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-50 shrink-0"
                             >
                                 {busy ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <UsersIcon className="w-3 h-3" />}
-                                Add {selected.size > 0 ? selected.size.toLocaleString() : ""} lead{selected.size === 1 ? "" : "s"}
+                                Add {selected.size > 0 ? selected.size.toLocaleString() : ""} {target.kind === "campaign" ? "lead" : "contact"}{selected.size === 1 ? "" : "s"}
                             </button>
                         </footer>
                     </motion.div>

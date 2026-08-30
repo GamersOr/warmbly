@@ -31,6 +31,7 @@ Every field is optional; an empty body matches all contacts in the organization.
 | `lead_status` | string | No | Filter to one derived lead status: `pending`, `active`, `completed`, `replied`, `bounced`, `failed`, `undeliverable`, or `unsubscribed`. Requires exactly one `campaign_ids` entry, otherwise the request is rejected with `lead_filter_requires_campaign`; an unknown value is rejected with `invalid_lead_status`. |
 | `engagement` | string | No | Filter by engagement inside that campaign: `opened`, `not_opened`, `clicked`, `not_clicked`, `replied`, `not_replied`, or `bounced`. `opened` means a human open (machine opens never count); the `not_*` values match only leads sent at least one step. Combines with `lead_status` as AND. Requires exactly one `campaign_ids` entry (`lead_filter_requires_campaign`); an unknown value is rejected with `invalid_engagement`. |
 | `category_ids` | string[] | No | Contact must have ALL of these categories. |
+| `segment_ids` | string[] | No | Contact must be a member of ALL of these segments (conditions plus manual overrides). An id that is not a valid UUID is rejected with `400`; an unknown segment matches nothing. |
 | `verification_status` | string | No | Filter by verification verdict: `valid`, `risky`, `invalid`, or `unknown`. |
 | `min_campaigns` | integer | No | Minimum number of associated campaigns. |
 | `max_campaigns` | integer | No | Maximum number of associated campaigns. |
@@ -978,3 +979,95 @@ Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
 ```
 
 `status` is `open`, `won`, or `lost`. `value`, `expected_close_date`, `won_at`, `lost_at`, `lost_reason`, `assigned_to`, `campaign_id`, and `source_mailbox_id` are nullable and omitted when unset.
+
+## Segments
+
+Segments are saved contact audiences: a list of conditions plus per-contact manual overrides. Membership is evaluated live on every read, so a segment never needs rebuilding. Every segment endpoint takes the contact scopes, except enrolling into a campaign, which writes leads and takes `WRITE_CAMPAIGNS`.
+
+A segment object:
+
+```json
+{
+  "id": "0b6f9c3e-2f7a-4c0e-9d8e-1a2b3c4d5e6f",
+  "organization_id": "…",
+  "name": "Warm fintech leads",
+  "description": "Opened in the last 30 days, not yet replied",
+  "color": "#0284c7",
+  "match": "all",
+  "conditions": [
+    { "field": "custom.industry", "operator": "equals", "value": "fintech" },
+    { "field": "last_opened_at", "operator": "within_days", "value": "30" },
+    { "field": "emails_replied", "operator": "equals", "value": "0" }
+  ],
+  "contact_count": 412,
+  "included_count": 3,
+  "excluded_count": 1,
+  "created_at": "2026-08-01T09:12:00Z",
+  "updated_at": "2026-08-20T14:03:00Z"
+}
+```
+
+`match` is `all` or `any`. A contact is a member when it matches the conditions or is manually included, and is not manually excluded. A segment with no conditions holds only its manual includes.
+
+### Conditions
+
+Each condition names a `field`, an `operator`, and either a `value` (scalar operators) or `values` (list operators). Fields and their kinds are returned by `GET /segments/fields`, including the workspace's custom fields as `custom.<key>` (written with the key in place of the angle-bracket placeholder, for example `custom.industry`).
+
+| Kind | Fields | Operators | Value |
+| --- | --- | --- | --- |
+| text | `first_name`, `last_name`, `email`, `email_domain`, `phone`, `company`, `custom.*` | `equals`, `not_equals`, `contains`, `not_contains`, `starts_with`, `ends_with`, `is_empty`, `is_not_empty` | `value` string; comparisons ignore case |
+| enum | `source`, `verification_status`, `esp_provider` | `in`, `not_in` | `values`, drawn from the field's `options` |
+| bool | `subscribed`, `suppressed`, `is_catch_all` | `is_true`, `is_false` | none |
+| date | `created_at`, `updated_at`, `last_sent_at`, `last_opened_at`, `last_clicked_at`, `last_replied_at` | `within_days`, `not_within_days` (`value` is a day count, 1 to 3650); `before`, `after` (`value` is `YYYY-MM-DD` or RFC 3339); `is_empty`, `is_not_empty` | see operators |
+| number | `campaign_count`, `emails_sent`, `emails_opened`, `emails_clicked`, `emails_replied`, `emails_bounced` | `equals`, `not_equals`, `gt`, `gte`, `lt`, `lte` | `value`, a whole number |
+| category | `category` | `in`, `not_in`, `is_empty`, `is_not_empty` | `values`, category ids |
+| campaign | `campaign` | `in`, `not_in`, `is_empty`, `is_not_empty` | `values`, campaign ids |
+| segment | `segment` | `in`, `not_in` | `values`, segment ids; at most five levels deep, no loops |
+
+Engagement counters add up every campaign the contact has been in, and opens count human opens only. Limits: 50 conditions per segment, 200 values per list condition, 200 segments per workspace. A condition that fails validation is rejected with `400` and a message naming the condition.
+
+### List, create, read, update, delete
+
+`GET /segments` returns every segment with live counts under `data`. `POST /segments` creates one from `name` (required), `description`, `color` (`#rrggbb`), `match` and `conditions`; a duplicate name is a `409`. `GET /segments/:id` returns one segment. `PATCH /segments/:id` accepts the same fields, all optional. `DELETE /segments/:id` returns `204`, or `409` when another segment's conditions reference it.
+
+Auth: **Scope** `READ_CONTACTS` for reads, `WRITE_CONTACTS` for writes · **Org permission** `view_contacts` / `manage_contacts`
+
+### Preview a definition
+
+`POST /segments/preview`
+
+Counts the contacts an unsaved definition would match. Send `match` and `conditions`; include `id` to keep that segment's manual overrides in the count while editing it.
+
+```json
+{ "contact_count": 412 }
+```
+
+### Manual overrides
+
+`POST /segments/:id/members`
+
+```json
+{ "contacts": ["…", "…"], "mode": "include" }
+```
+
+`mode` is `include` (pin in), `exclude` (pin out) or `auto` (clear the override). Up to 1,000 contact ids per call; ids outside the organization are ignored. Returns `{ "updated": n }`.
+
+`POST /segments/:id/members/lookup` takes `{ "contacts": [...] }` and returns `{ "data": { "<contact id>": "include" | "exclude" } }` for the contacts that carry an override.
+
+`GET /segments/:id/overrides` lists every pinned contact (`contact_id`, `first_name`, `last_name`, `email`, `company`, `mode`, `created_at`) under `data`, includes first, newest first, capped at 500.
+
+`GET /contacts/:id/segments` is the contact-side view: every segment in the organization with `member` (whether the contact is in it right now) and `mode` (its override, when any) under `data`.
+
+Sequence action steps `add_to_segment` and `remove_from_segment` take a `segment_id` and apply the include or exclude override to the contact when the step runs; see [campaigns](/api/reference/campaigns/).
+
+### Add to a campaign
+
+`POST /segments/:id/add-to-campaign`
+
+```json
+{ "campaign_id": "…" }
+```
+
+Enrols every current member as a lead. Contacts already in the campaign are skipped, each new lead gets a `campaign_added` activity, and a running campaign is woken so the leads are scheduled. Returns `{ "campaign_id", "added", "members" }`. This is a snapshot: later members are not added until the call is repeated. Safe to retry.
+
+Auth: **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`

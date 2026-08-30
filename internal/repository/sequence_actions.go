@@ -17,7 +17,8 @@ func validateActionConfig(a *models.ActionConfig) *errx.Error {
 		return nil
 	}
 	switch a.Type {
-	case "wait", "add_tag", "remove_tag", "label_email", "unsubscribe",
+	case "wait", "add_tag", "remove_tag", "add_to_segment", "remove_from_segment",
+		"label_email", "unsubscribe",
 		"notify", "create_task", "create_deal", "move_deal_stage",
 		"run_automation", "fire_event", "end":
 		// Type must be known. Sub-config (wait minutes, tag, event name, HTTP

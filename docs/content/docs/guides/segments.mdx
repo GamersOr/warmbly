@@ -1,0 +1,71 @@
+---
+title: Segments
+description: Save reusable audiences built from contact fields, categories, campaign activity and email engagement, then add them to campaigns in one step.
+---
+
+A segment is a saved audience: a set of conditions over your contacts plus any contacts you pin in or out by hand. A segment says which contacts belong together; a campaign says what happens to them. Membership is evaluated live, so a contact that starts matching (a new category, a reply, a bounce) is in the segment the next time anyone looks, with no rebuild step.
+
+Segments live under **Contacts > Segments**, next to **All contacts** and **Categories**, and need the same permissions as contacts: **View contacts** to browse, **Manage contacts** to create, edit or delete.
+
+## Building a segment
+
+The quickest start is from the contact list: set any filters in the bar above the list, then press **Save as segment** and the editor opens with those filters as conditions (free-text search and a campaign's lead status do not carry over; add a condition for them instead). Or start from scratch with **New segment** on the Segments tab.
+
+Give the segment a name and a color, then add conditions. Each condition is a field, an operator and a value. Pick whether a contact must match **all** conditions or **any** of them. The drawer shows a live count of matching contacts as you edit, so you can see the effect of every change before saving.
+
+| Group | Fields | Operators |
+|-------|--------|-----------|
+| Contact | First name, last name, email, email domain, phone, and every custom field | is, is not, contains, does not contain, starts with, ends with, is empty, is not empty |
+| Contact | Subscribed, on the suppression list, catch-all domain | is yes, is no |
+| Contact | Source, verification status, email provider | is any of, is none of |
+| Contact | Created, updated | in the last N days, not in the last N days, after, before |
+| Contact | Category | has any of, has none of, has none, has any |
+| Company | Company name | the text operators above |
+| Campaign activity | In campaign | is in any of, is in none of, is in no campaign, is in a campaign |
+| Campaign activity | Number of campaigns | is, is not, more than, at least, less than, at most |
+| Email engagement | Emails sent, emails opened, links clicked, replies, bounces | the number operators above |
+| Email engagement | Last email sent, last open, last click, last reply | in the last N days, not in the last N days, after, before, never, ever |
+| Segments | In segment | is in any of, is in none of |
+
+Engagement counts add up every campaign the contact has been in. Opens count human opens only; automated fetches are ignored, the same way the campaign analytics report them. Text comparisons ignore case.
+
+A segment can be built on other segments (**In segment**), up to five levels deep. A segment cannot reference itself or form a loop, and a segment that others depend on cannot be deleted until those references are removed.
+
+A segment with no conditions is a manual list: it holds only the contacts you add by hand.
+
+## Adding and removing contacts by hand
+
+Conditions decide membership, and two overrides sit on top of them:
+
+- **Add contacts** on a segment page (or **Segment** in the selection bar of any contact list) pins contacts in. They stay members whatever the conditions say.
+- **Remove from segment** in the selection bar of a segment's member list pins contacts out. They stay out even while the conditions still match them.
+
+The segment header shows how many contacts are pinned in or out, and a **Pinned contacts** panel below it lists them; **Back to automatic** clears an override so the conditions decide again. A contact's own drawer has a **Segments** section that shows every segment, whether the contact is in it, and the same pin in, pin out and back-to-automatic controls.
+
+Sequences can pin as well: the **Add to segment** and **Remove from segment** action steps apply the override to a contact as it moves through a campaign flow, so a positive reply can drop someone into a "warm" segment automatically.
+
+## Using a segment
+
+- **Browse**: a segment page lists its current members with the same table, filters, detail drawer and bulk actions as the contacts page.
+- **Add to campaign**: enrols every current member as a lead of the campaign you pick, from the segment page or with **From segment** on a campaign's Leads tab. Contacts already in that campaign are skipped, and a running campaign wakes up to schedule the new leads. This is a snapshot: contacts who join the segment later are not added until you run it again.
+- **Filter**: the contact list's filter bar has a **Segment** pill, and the same scope carries into an export.
+- **Duplicate**: the segment menu copies a definition to start a variation from.
+- **Search and export**: the contact search and export accept `segment_ids`, so anything that takes a contact filter can be scoped to a segment.
+
+<Callout type="info" title="Segments and categories">
+Categories are labels you put on a contact. Segments are rules that read those labels (and everything else) to decide who belongs. Use a category to mark a fact about a contact, and a segment to describe an audience.
+</Callout>
+
+## Limits
+
+- 200 segments per workspace
+- 50 conditions per segment, 200 values per list condition
+- 1,000 contacts per manual add or remove request
+
+## Where to go next
+
+<Cards>
+  <Card title="Contacts and CRM" href="/guides/contacts-crm/" />
+  <Card title="Campaigns" href="/guides/campaigns/" />
+  <Card title="Analytics" href="/guides/analytics/" />
+</Cards>

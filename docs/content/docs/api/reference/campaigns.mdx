@@ -877,7 +877,7 @@ All fields optional.
 | `wait_after` | integer | no | Days to wait before this step, counted from the contact's previous step (`0` to `60`). Spacing belongs to the target step, so there is no standalone wait node for email steps. |
 | `conditions` | object | no | The connections out of this step (`{branches: [...]}`), evaluated in order; a branch with no `conditions` is a plain "go there next" link. Routing follows connections only: a step with `{}` or no branches has no outgoing path and ends the flow for the contact. |
 | `kind` | string | no | `email` (default), `action`, or `wait`. |
-| `action` | object | no | Typed config for non-email nodes. `type` is the switch (`wait`, `add_tag`, `remove_tag`, `unsubscribe`, `notify`, `create_task`, `create_deal`, `move_deal_stage`, `run_automation`, `end`), the remaining fields are type-scoped. |
+| `action` | object | no | Typed config for non-email nodes. `type` is the switch (`wait`, `add_tag`, `remove_tag`, `add_to_segment`, `remove_from_segment` (each with a `segment_id`), `unsubscribe`, `notify`, `create_task`, `create_deal`, `move_deal_stage`, `run_automation`, `end`), the remaining fields are type-scoped. |
 
 ```json
 {

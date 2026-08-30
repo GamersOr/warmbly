@@ -1027,6 +1027,30 @@ func (r *contactRepository) Search(
 	}
 
 	// -----------------------------
+	// Segment membership (must be in ALL specified segments)
+	// -----------------------------
+	// Each segment compiles to its own predicate; args grow in lockstep with
+	// argIndex, which the builder relies on.
+	for _, raw := range filters.SegmentIDs {
+		sid, err := uuid.Parse(raw)
+		if err != nil {
+			return nil, errx.New(errx.BadRequest, "invalid segment id")
+		}
+		orgUUID, err := uuid.Parse(orgID)
+		if err != nil {
+			return nil, errx.New(errx.BadRequest, "invalid organization id")
+		}
+		clause, nextArgs, cerr := compileSavedSegment(ctx, r.DB, orgUUID, sid, args)
+		if cerr != nil {
+			db.CaptureError(cerr, "segment compile", nil, "query")
+			return nil, errx.InternalError()
+		}
+		args = nextArgs
+		argIndex = len(args) + 1
+		whereClauses = append(whereClauses, "("+clause+")")
+	}
+
+	// -----------------------------
 	// Sort logic
 	// -----------------------------
 	sortBy := "c.created_at"
@@ -1151,6 +1175,8 @@ func (r *contactRepository) Search(
 						WHEN s.kind = 'action' THEN (CASE s.action->>'type'
 							WHEN 'add_tag'     THEN 'Add tag'
 							WHEN 'remove_tag'  THEN 'Remove tag'
+							WHEN 'add_to_segment' THEN 'Add to segment'
+							WHEN 'remove_from_segment' THEN 'Remove from segment'
 							WHEN 'unsubscribe' THEN 'Unsubscribe'
 							WHEN 'notify'      THEN 'Notify'
 							ELSE 'Action' END)
