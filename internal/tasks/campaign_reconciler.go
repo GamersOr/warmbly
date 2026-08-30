@@ -82,7 +82,14 @@ func (s *tasksService) ReconcileCampaignSchedules(ctx context.Context, limit int
 			// record which of the several possible causes it was.
 			s.autoPauseCampaign(ctx, id, uuid.Nil, autoPauseReason(cerr))
 		case errors.Is(cerr, scheduler.ErrCampaignCompleted), errors.Is(cerr, scheduler.ErrCampaignEnded):
-			// Nothing left to send (or past its end date): close it out.
+			// Nothing left to send (or past its end date): close it out, unless
+			// what is left was refused by verification, which parks it instead.
+			if errors.Is(cerr, scheduler.ErrCampaignCompleted) {
+				if n, uerr := s.campaignProgressRepo.CountUndeliverableLeads(ctx, id); uerr == nil && n > 0 {
+					s.pauseUndeliverable(ctx, id, uuid.Nil, n)
+					continue
+				}
+			}
 			s.campaignRepo.UpdateStatus(ctx, id, "completed")
 		default:
 			// Transient error (DB blip): leave it; the next pass retries.

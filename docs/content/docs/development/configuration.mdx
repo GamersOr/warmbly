@@ -217,10 +217,13 @@ Before a campaign sends to an address, the backend can check it: syntax, then `M
 |---|---|---|---|
 | `EMAIL_VERIFY_HELO_HOST` | The hostname the probe announces in `EHLO`/`HELO`. Must be a public, fully-qualified name that belongs to this instance | the host of `APP_URL` | yes |
 | `EMAIL_VERIFY_MAIL_FROM` | The envelope sender the probe uses in `MAIL FROM` | `verify@` plus the `HELO` host | yes |
+| `EMAIL_VERIFY_MILLIONVERIFIER_API_KEY` | An instance-wide [MillionVerifier](https://www.millionverifier.com/) key. Every workspace that has not connected its own key is checked through this one, spending its credits, instead of the built-in probe | unset | yes |
 
 <Callout type="warn" title="An unqualified HELO name gets the whole session rejected">
 Mail servers refuse a greeting that is not a real hostname (`localhost`, a bare name, or anything under a reserved suffix such as `.local`, `.internal` or `.lan`). Postfix in particular applies that rejection at `RCPT` time rather than at `HELO`, so it arrives looking exactly like `504 5.5.2 <localhost>: Helo command rejected: need fully-qualified hostname` on the recipient's address. Warmbly reads a reply like that as a rejected probe, not as a dead mailbox, so it never marks the contact invalid. If neither `EMAIL_VERIFY_HELO_HOST` nor a usable `APP_URL` host is set, the probe is skipped entirely and every address stays `unknown`, which still sends.
 </Callout>
+
+Verdicts are re-checked after 90 days (30 for an inconclusive one), in passes of 200 contacts a minute that repeat while a backlog remains. A workspace that connected MillionVerifier under Integrations is checked through its own credits whether or not the instance-wide key is set.
 
 `EMAIL_VERIFY_HELO_HOST` is not `SMTP_EHLO_NAME`. `SMTP_EHLO_NAME` is the greeting your platform mail relay sees in [platform mail](#platform-mail); this one is the greeting recipients' servers see from the verifier.
 
@@ -258,7 +261,7 @@ On `filesystem`, a remote worker writes blobs to its own disk rather than a volu
 | Variable | What it does | Default | Restart needed |
 |---|---|---|---|
 | `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs images built with `GO_TAGS=kafka` | `nats` under compose, `kafka` for a bare binary | yes |
-| `NATS_URL` | JetStream address | `nats://nats:4222` | yes |
+| `NATS_URL` | JetStream address. Credentials in the URL are honored by every service, including the Rust tracking publisher: `nats://user:pass@host:4222` for a user, `nats://token@host:4222` for a token, `tls://` for TLS | `nats://nats:4222` | yes |
 | `NATS_STREAM_NAME`, `NATS_SUBJECT_PREFIX` | Stream and subject naming | `warmbly` | yes |
 | `KAFKA_BOOTSTRAP_SERVERS` | Broker list when `EVENTBUS_PROVIDER=kafka` | unset | yes |
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | Broker credentials | unset | yes |

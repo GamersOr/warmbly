@@ -33,9 +33,36 @@ export type ContactSource =
     | "api"
     | "ai_assistant";
 
+// One observed fact about the mailbox. Silence is never recorded: a contact
+// who does not open or reply has said nothing about their address.
+export type VerificationEvidenceKind =
+    | "delivered"
+    | "opened"
+    | "clicked"
+    | "replied"
+    | "auto_replied"
+    | "bounced_recipient"
+    | "bounced_other";
+
+export interface ContactVerificationEvidence {
+    kind: VerificationEvidenceKind;
+    detail?: string;
+    observed_at: string;
+}
+
+export interface ContactVerificationDetail {
+    status: "valid" | "risky" | "invalid" | "unknown";
+    confidence: number;
+    reasons: string[];
+    // True when real mail, not a check, decided the status.
+    decisive: boolean;
+    evidence: ContactVerificationEvidence[];
+}
+
 export default interface ContactDetail extends Contact {
     engagement: ContactEngagement;
     suppression?: ContactSuppression | null;
+    verification?: ContactVerificationDetail | null;
 
     // First-touch attribution; never changes after creation.
     source: ContactSource;

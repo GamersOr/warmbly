@@ -20,6 +20,7 @@ import { CampaignContext } from "@/hooks/context/campaign";
 import { useConfirm } from "@/hooks/context/confirm";
 import LaunchCampaignDialog from "@/components/app/campaigns/LaunchCampaignDialog";
 import CampaignActionsMenu from "@/components/app/campaigns/CampaignActionsMenu";
+import UndeliverableBanner from "@/components/app/campaigns/UndeliverableBanner";
 import { canStartCampaign } from "@/components/app/campaigns/useCampaignActions";
 import toast from "react-hot-toast";
 import { CAMPAIGN_DELETED_EVENT, type CampaignDeletedDetail } from "@/lib/realtime/campaignDeleted";
@@ -37,6 +38,7 @@ const TABS = [
 const STATUS_PILL: Record<string, string> = {
     active: "bg-emerald-50 text-emerald-700 border-emerald-200",
     paused: "bg-amber-50 text-amber-700 border-amber-200",
+    paused_undeliverable: "bg-amber-50 text-amber-700 border-amber-200",
     draft: "bg-slate-100 text-slate-600 border-slate-200",
     completed: "bg-slate-100 text-slate-600 border-slate-200",
 };
@@ -138,7 +140,7 @@ export default function CampaignLayout() {
                             <span
                                 className={`shrink-0 inline-flex items-center h-5 px-2 rounded-md border text-[10px] uppercase tracking-[0.12em] font-medium ${pill}`}
                             >
-                                {status}
+                                {status === "paused_undeliverable" ? "needs verification" : status}
                             </span>
                             <ResourceViewers resource={`campaign:${campaign.id}`} className="shrink-0" />
                         </div>
@@ -172,6 +174,8 @@ export default function CampaignLayout() {
                         />
                     </div>
                 </div>
+
+                <UndeliverableBanner campaignId={campaign.id} status={status} />
 
                 <div className="shrink-0 px-3 flex items-center gap-1 border-b border-slate-200 overflow-x-auto no-scrollbar">
                     {TABS.map(({ label, path, Icon }) => {
@@ -208,7 +212,7 @@ export default function CampaignLayout() {
             <LaunchCampaignDialog
                 campaign={launchOpen ? campaign : null}
                 onClose={() => setLaunchOpen(false)}
-                onConfirm={(cid) => startCampaign.mutateAsync(cid)}
+                onConfirm={(cid, options) => startCampaign.mutateAsync({ id: cid, options })}
             />
         </CampaignContext.Provider>
     );

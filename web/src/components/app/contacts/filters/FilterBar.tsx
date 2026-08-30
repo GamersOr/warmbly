@@ -26,7 +26,7 @@ import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
 import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import type SearchContactsFilter from "@/lib/api/models/app/contacts/SearchContactsFilter";
 import type { SearchContactsFilterType } from "@/lib/api/models/app/contacts/search-contacts.types";
-import type { LeadEngagement, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
+import type { LeadEngagement, LeadStatus, VerificationStatus } from "@/lib/api/models/app/contacts/Contact";
 import { cn } from "@/lib/utils";
 import { countActiveFilters, isCompleteCustomFilter } from "./helpers";
 
@@ -58,8 +58,15 @@ const ENGAGEMENT: { id: LeadEngagement; label: string }[] = [
     { id: "not_replied", label: "Not replied" },
 ];
 
+const VERIFICATION: { id: VerificationStatus; label: string }[] = [
+    { id: "valid", label: "Deliverable" },
+    { id: "risky", label: "Risky" },
+    { id: "invalid", label: "Undeliverable" },
+    { id: "unknown", label: "Unverified" },
+];
+
 // Optional pills, shown once added from the menu or when their value is set.
-type ExtraKey = "created" | "updated" | "campaign_count" | "lead_status" | "engagement";
+type ExtraKey = "created" | "updated" | "campaign_count" | "lead_status" | "engagement" | "verification";
 
 function toIso(d?: Date): string {
     return d ? new Date(d).toISOString().slice(0, 10) : "";
@@ -108,6 +115,8 @@ export default function FilterBar({
                 return !!filters.lead_status;
             case "engagement":
                 return !!filters.engagement;
+            case "verification":
+                return !!filters.verification_status;
         }
     };
 
@@ -129,6 +138,8 @@ export default function FilterBar({
                     return { ...s, lead_status: undefined };
                 case "engagement":
                     return { ...s, engagement: undefined };
+                case "verification":
+                    return { ...s, verification_status: undefined };
             }
         });
     }
@@ -173,6 +184,7 @@ export default function FilterBar({
         { key: "created", label: "Date added", hidden: shown("created") },
         { key: "updated", label: "Last updated", hidden: shown("updated") },
         { key: "campaign_count", label: "Number of campaigns", hidden: shown("campaign_count") },
+        { key: "verification", label: "Address verification", hidden: shown("verification") },
         { key: "lead_status", label: "Lead status", hidden: !campaignCtx || shown("lead_status") },
         { key: "engagement", label: "Engagement", hidden: !campaignCtx || shown("engagement") },
     ];
@@ -268,6 +280,18 @@ export default function FilterBar({
                     max={filters.max_campaigns}
                     onChange={(min, max) => setFilters((s) => ({ ...s, min_campaigns: min, max_campaigns: max }))}
                     onRemove={() => removeExtra("campaign_count")}
+                />
+            )}
+            {shown("verification") && (
+                <ChoicePill<VerificationStatus | undefined>
+                    id="verification"
+                    label="Verification"
+                    openKey={openKey}
+                    setOpenKey={setOpenKey}
+                    value={filters.verification_status}
+                    onChange={(v) => setFilters((s) => ({ ...s, verification_status: v }))}
+                    options={VERIFICATION}
+                    onRemove={() => removeExtra("verification")}
                 />
             )}
             {shown("lead_status") && (

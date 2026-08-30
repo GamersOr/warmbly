@@ -41,7 +41,20 @@ type ContactRepository interface {
 	// have never been conclusively checked (status 'unknown', never verified) so
 	// the batch scheduler can work them off a cap per tick.
 	UpdateContactVerification(ctx context.Context, contactID uuid.UUID, res emailverify.Result) *errx.Error
-	ListUnverifiedContacts(ctx context.Context, limit int) ([]models.Contact, *errx.Error)
+	// ListVerificationCandidates returns contacts due for a check: never
+	// checked, or checked long enough ago that the verdict has aged out.
+	// Manual verdicts are never candidates. Oldest first.
+	ListVerificationCandidates(ctx context.Context, limit int) ([]VerificationCandidate, *errx.Error)
+	// SetContactsVerification stores one verdict on many of the org's contacts
+	// (a manual "mark deliverable"). Returns how many rows changed.
+	SetContactsVerification(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID, w models.ContactVerificationWrite) (int, *errx.Error)
+	// ResetContactsVerification clears the verdict so the scheduler checks the
+	// contacts again on its next pass. Returns how many rows changed.
+	ResetContactsVerification(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) (int, *errx.Error)
+	// UndeliverableLeadIDs lists the campaign's leads verification refused.
+	UndeliverableLeadIDs(ctx context.Context, orgID, campaignID uuid.UUID) ([]uuid.UUID, *errx.Error)
+	// VerificationCounts is the org's contacts by verdict.
+	VerificationCounts(ctx context.Context, orgID uuid.UUID) (models.ContactVerificationCounts, *errx.Error)
 	// SetContactESP caches the recipient ESP/provider resolved from the contact's
 	// domain (control-plane only, no MX dial). Best-effort: a failure should not
 	// block sending.
@@ -233,6 +246,13 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		}
 		lead.SourceDetail = strings.TrimSpace(lead.SourceDetail)
 
+		// A verdict the caller brought along, in any vocabulary we can read.
+		if v, xerr := verificationFromRequest(lead.VerificationStatus, lead.VerificationProvider); xerr != nil {
+			return nil, xerr
+		} else if v != nil {
+			lead.Verification = v
+		}
+
 		normalized = append(normalized, lead)
 		campaignIDs = append(campaignIDs, cids)
 		categoryIDs = append(categoryIDs, cats)
@@ -248,6 +268,10 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 	// Upsert contacts in a single batch round-trip.
 	insertBatch := pgx.Batch{}
 	for _, lead := range normalized {
+		var vStatus, vSub, vReason, vProvider string
+		if lead.Verification != nil {
+			vStatus, vSub, vReason, vProvider = lead.Verification.Status, lead.Verification.SubStatus, lead.Verification.Reason, lead.Verification.Provider
+		}
 		insertBatch.Queue(
 			// $9 and $10 are the same value: a parameter used both as an
 			// INSERT value and inside the DO UPDATE set gives Postgres two
@@ -255,10 +279,16 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			// explicit casts. NULL means "leave the flag alone".
 			`INSERT INTO contacts (
 			 id, user_id, organization_id, first_name, last_name, email, company, phone, custom_fields, subscribed,
-			 source, source_detail, first_seen_at
+			 source, source_detail, first_seen_at,
+			 verification_status, verification_sub_status, verification_reason, verification_provider,
+			 verification_source, is_catch_all, verification_checked_at
 			 ) VALUES (
 			  gen_random_uuid(), $1, $2, $3, $4, LOWER($5), $6, $7, $8, COALESCE($9::boolean, TRUE),
-			  $11, $12, NOW()
+			  $11, $12, NOW(),
+			  COALESCE(NULLIF($13::text, ''), 'unknown'), $14, $15, $16,
+			  CASE WHEN $13::text <> '' THEN 'imported' ELSE '' END,
+			  ($14::text = 'catch_all'),
+			  CASE WHEN $13::text <> '' THEN NOW() ELSE NULL END
 			 )
 			 ON CONFLICT (user_id, (LOWER(email))) DO UPDATE SET
 			  organization_id = COALESCE(contacts.organization_id, EXCLUDED.organization_id),
@@ -270,12 +300,22 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			  phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone),
 			  custom_fields = contacts.custom_fields || EXCLUDED.custom_fields,
 			  subscribed = COALESCE($10::boolean, contacts.subscribed),
+			  -- A verdict in the file replaces whatever was recorded; a file
+			  -- without one leaves the existing verdict alone.
+			  verification_status = CASE WHEN $13::text <> '' THEN $13 ELSE contacts.verification_status END,
+			  verification_sub_status = CASE WHEN $13::text <> '' THEN $14 ELSE contacts.verification_sub_status END,
+			  verification_reason = CASE WHEN $13::text <> '' THEN $15 ELSE contacts.verification_reason END,
+			  verification_provider = CASE WHEN $13::text <> '' THEN $16 ELSE contacts.verification_provider END,
+			  verification_source = CASE WHEN $13::text <> '' THEN 'imported' ELSE contacts.verification_source END,
+			  is_catch_all = CASE WHEN $13::text <> '' THEN ($14::text = 'catch_all') ELSE contacts.is_catch_all END,
+			  verification_checked_at = CASE WHEN $13::text <> '' THEN NOW() ELSE contacts.verification_checked_at END,
 			  updated_at = NOW()
 			 -- xmax = 0 only on a fresh row: the source is first-touch, so an
 			 -- upsert that hit an existing contact is not a creation.
 			 RETURNING id, first_name, last_name, email, company, phone, custom_fields, subscribed, updated_at, created_at, (xmax = 0)`,
 			userID, orgID, lead.FirstName, lead.LastName, lead.Email, lead.Company, lead.Phone, lead.CustomFields,
 			lead.Subscribed, lead.Subscribed, string(lead.Source), lead.SourceDetail,
+			vStatus, vSub, vReason, vProvider,
 		)
 	}
 
@@ -469,6 +509,7 @@ func (r *contactRepository) GetByID(ctx context.Context, contactID uuid.UUID) (*
 			c.id, c.first_name, c.last_name, c.email, c.company, c.phone,
 			c.custom_fields, c.subscribed, c.updated_at, c.created_at,
 			c.verification_status, c.verification_reason, c.is_catch_all, c.verification_checked_at,
+			c.verification_source, c.verification_provider, c.verification_sub_status, c.verification_confidence,
 			c.esp_provider, c.esp_resolved_at
 		FROM contacts c
 		WHERE c.id = $1
@@ -480,6 +521,7 @@ func (r *contactRepository) GetByID(ctx context.Context, contactID uuid.UUID) (*
 		&contact.Company, &contact.Phone, &contact.CustomFields, &contact.Subscribed,
 		&contact.UpdatedAt, &contact.CreatedAt,
 		&contact.VerificationStatus, &contact.VerificationReason, &contact.IsCatchAll, &contact.VerificationCheckedAt,
+		&contact.VerificationSource, &contact.VerificationProvider, &contact.VerificationSubStatus, &contact.VerificationConfidence,
 		&contact.ESPProvider, &contact.ESPResolvedAt,
 	)
 	if err != nil {
@@ -520,6 +562,14 @@ func (r *contactRepository) UpdateContactVerification(ctx context.Context, conta
 	if checkedAt.IsZero() {
 		checkedAt = time.Now().UTC()
 	}
+	provider := res.Provider
+	if provider == "" {
+		provider = emailverify.ProviderBuiltin
+	}
+	source := models.VerificationSourceProvider
+	if provider == emailverify.ProviderBuiltin {
+		source = models.VerificationSourceProbe
+	}
 
 	query := `
 		UPDATE contacts
@@ -527,10 +577,14 @@ func (r *contactRepository) UpdateContactVerification(ctx context.Context, conta
 		    verification_reason = $3,
 		    is_catch_all = $4,
 		    verification_checked_at = $5,
+		    verification_source = $6,
+		    verification_provider = $7,
+		    verification_sub_status = $8,
+		    verification_confidence = $9,
 		    updated_at = NOW()
 		WHERE id = $1
 	`
-	params := []any{contactID, status, res.Reason, res.IsCatchAll, checkedAt}
+	params := []any{contactID, status, res.Reason, res.IsCatchAll, checkedAt, source, provider, string(res.SubStatus), res.Confidence}
 	cmd, err := r.DB.Exec(ctx, query, params...)
 	if err != nil {
 		db.CaptureError(err, query, params, "exec")
@@ -542,53 +596,170 @@ func (r *contactRepository) UpdateContactVerification(ctx context.Context, conta
 	return nil
 }
 
-// ListUnverifiedContacts returns up to `limit` contacts that have never been
-// conclusively verified (status 'unknown' and no recorded check). Oldest
-// contacts first so a backlog drains in creation order. The pre-send gate only
-// drops 'invalid', so 'risky'/'valid'/already-checked rows are intentionally
-// excluded here — they don't need re-verification on every tick.
-func (r *contactRepository) ListUnverifiedContacts(ctx context.Context, limit int) ([]models.Contact, *errx.Error) {
+// VerificationCandidate is one contact due for a verification check.
+type VerificationCandidate struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+	Email          string
+	// Requested is true when a member asked for this check (the verdict was
+	// reset), so it is worth spending a paid credit on even when the
+	// organization has none to spare.
+	Requested bool
+}
+
+// ListVerificationCandidates returns up to `limit` contacts due for a check.
+// Never-checked contacts come first (a reset counts as never checked), then
+// verdicts older than their shelf life: an unknown verdict is retried after
+// config.VerificationUnknownRecheckDays, everything else after
+// config.VerificationRecheckDays. Manual verdicts are never re-checked.
+func (r *contactRepository) ListVerificationCandidates(ctx context.Context, limit int) ([]VerificationCandidate, *errx.Error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	query := `
-		SELECT
-			c.id, c.first_name, c.last_name, c.email, c.company, c.phone,
-			c.custom_fields, c.subscribed, c.updated_at, c.created_at,
-			c.verification_status, c.verification_reason, c.is_catch_all, c.verification_checked_at
+		SELECT c.id, c.organization_id, c.email, c.verification_checked_at IS NULL
 		FROM contacts c
-		WHERE c.verification_status = 'unknown' AND c.verification_checked_at IS NULL
-		ORDER BY c.created_at ASC
+		WHERE c.organization_id IS NOT NULL
+		  AND c.verification_source <> 'manual'
+		  -- Real mail seen recently excuses the address from a check.
+		  AND (c.verification_evidence_at IS NULL OR c.verification_evidence_at < NOW() - make_interval(days => $4))
+		  AND (
+		    c.verification_checked_at IS NULL
+		    OR (c.verification_status = 'unknown' AND c.verification_checked_at < NOW() - make_interval(days => $2))
+		    OR c.verification_checked_at < NOW() - make_interval(days => $3)
+		  )
+		ORDER BY c.verification_checked_at ASC NULLS FIRST, c.created_at ASC
 		LIMIT $1
 	`
-	rows, err := r.DB.Query(ctx, query, limit)
+	params := []any{limit, config.VerificationUnknownRecheckDays, config.VerificationRecheckDays, config.VerificationEvidenceFreshDays}
+	rows, err := r.DB.Query(ctx, query, params...)
 	if err != nil {
-		db.CaptureError(err, query, []any{limit}, "query")
+		db.CaptureError(err, query, params, "query")
 		return nil, errx.InternalError()
 	}
 	defer rows.Close()
 
-	out := make([]models.Contact, 0, limit)
+	out := make([]VerificationCandidate, 0, limit)
 	for rows.Next() {
-		var c models.Contact
-		if err := rows.Scan(
-			&c.ID, &c.FirstName, &c.LastName, &c.Email,
-			&c.Company, &c.Phone, &c.CustomFields, &c.Subscribed,
-			&c.UpdatedAt, &c.CreatedAt,
-			&c.VerificationStatus, &c.VerificationReason, &c.IsCatchAll, &c.VerificationCheckedAt,
-		); err != nil {
-			db.CaptureError(err, "", nil, "ListUnverifiedContacts scan")
+		var c VerificationCandidate
+		if err := rows.Scan(&c.ID, &c.OrganizationID, &c.Email, &c.Requested); err != nil {
+			db.CaptureError(err, "", nil, "ListVerificationCandidates scan")
 			return nil, errx.InternalError()
 		}
-		c.Campaigns = []models.MiniCampaign{}
-		c.Categories = []models.MiniCategory{}
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
-		db.CaptureError(err, "", nil, "ListUnverifiedContacts rows")
+		db.CaptureError(err, "", nil, "ListVerificationCandidates rows")
 		return nil, errx.InternalError()
 	}
 	return out, nil
+}
+
+// SetContactsVerification writes one verdict onto the org's listed contacts.
+func (r *contactRepository) SetContactsVerification(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID, w models.ContactVerificationWrite) (int, *errx.Error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	query := `
+		UPDATE contacts
+		SET verification_status = $3,
+		    verification_sub_status = $4,
+		    verification_reason = $5,
+		    verification_provider = $6,
+		    verification_source = $7,
+		    is_catch_all = ($4 = 'catch_all'),
+		    verification_checked_at = NOW(),
+		    updated_at = NOW()
+		WHERE organization_id = $1 AND id = ANY($2)
+	`
+	params := []any{orgID, ids, w.Status, w.SubStatus, w.Reason, w.Provider, w.Source}
+	cmd, err := r.DB.Exec(ctx, query, params...)
+	if err != nil {
+		db.CaptureError(err, query, params, "exec")
+		return 0, errx.InternalError()
+	}
+	return int(cmd.RowsAffected()), nil
+}
+
+// ResetContactsVerification returns the org's listed contacts to "never
+// checked" so the next scheduler pass picks them up first.
+func (r *contactRepository) ResetContactsVerification(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) (int, *errx.Error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	query := `
+		UPDATE contacts
+		SET verification_status = 'unknown',
+		    verification_sub_status = '',
+		    verification_reason = 'verification requested',
+		    verification_provider = '',
+		    verification_source = '',
+		    is_catch_all = false,
+		    verification_checked_at = NULL,
+		    updated_at = NOW()
+		WHERE organization_id = $1 AND id = ANY($2)
+	`
+	params := []any{orgID, ids}
+	cmd, err := r.DB.Exec(ctx, query, params...)
+	if err != nil {
+		db.CaptureError(err, query, params, "exec")
+		return 0, errx.InternalError()
+	}
+	return int(cmd.RowsAffected()), nil
+}
+
+// UndeliverableLeadIDs lists the campaign's leads the routing predicate skips
+// for verification reasons (invalid, or risky with the risky toggle off).
+func (r *contactRepository) UndeliverableLeadIDs(ctx context.Context, orgID, campaignID uuid.UUID) ([]uuid.UUID, *errx.Error) {
+	query := `
+		SELECT c.id
+		FROM campaign_leads cl
+		JOIN contacts c ON c.id = cl.contact_id
+		JOIN campaigns cp ON cp.id = cl.campaign_id
+		WHERE cl.campaign_id = $1 AND cp.organization_id = $2
+		  AND (c.verification_status = 'invalid' OR (c.verification_status = 'risky' AND NOT cp.risky_emails))
+	`
+	params := []any{campaignID, orgID}
+	rows, err := r.DB.Query(ctx, query, params...)
+	if err != nil {
+		db.CaptureError(err, query, params, "query")
+		return nil, errx.InternalError()
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			db.CaptureError(err, "", nil, "UndeliverableLeadIDs scan")
+			return nil, errx.InternalError()
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, "", nil, "UndeliverableLeadIDs rows")
+		return nil, errx.InternalError()
+	}
+	return out, nil
+}
+
+// VerificationCounts is the org's contacts by verdict.
+func (r *contactRepository) VerificationCounts(ctx context.Context, orgID uuid.UUID) (models.ContactVerificationCounts, *errx.Error) {
+	var c models.ContactVerificationCounts
+	query := `
+		SELECT
+			COUNT(*) FILTER (WHERE verification_status = 'valid'),
+			COUNT(*) FILTER (WHERE verification_status = 'risky'),
+			COUNT(*) FILTER (WHERE verification_status = 'invalid'),
+			COUNT(*) FILTER (WHERE verification_status NOT IN ('valid','risky','invalid')),
+			COUNT(*) FILTER (WHERE verification_checked_at IS NULL)
+		FROM contacts
+		WHERE organization_id = $1
+	`
+	if err := r.DB.QueryRow(ctx, query, orgID).Scan(&c.Valid, &c.Risky, &c.Invalid, &c.Unknown, &c.Pending); err != nil {
+		db.CaptureError(err, query, []any{orgID}, "queryrow")
+		return c, errx.InternalError()
+	}
+	return c, nil
 }
 
 func (r *contactRepository) GetByEmailAndOrganization(ctx context.Context, organizationID uuid.UUID, email string) (*models.Contact, *errx.Error) {
@@ -750,6 +921,11 @@ func (r *contactRepository) Search(
 	if filters.Subscribed != nil {
 		whereClauses = append(whereClauses, fmt.Sprintf("c.subscribed = $%d", argIndex))
 		args = append(args, *filters.Subscribed)
+		argIndex++
+	}
+	if filters.VerificationStatus != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("c.verification_status = $%d", argIndex))
+		args = append(args, filters.VerificationStatus)
 		argIndex++
 	}
 
@@ -1029,6 +1205,8 @@ func (r *contactRepository) Search(
 		SELECT
 			c.id, c.first_name, c.last_name, c.email, c.company, c.phone,
 			c.custom_fields, c.subscribed, c.updated_at, c.created_at,
+			c.verification_status, c.verification_reason, c.is_catch_all, c.verification_checked_at,
+			c.verification_source, c.verification_provider, c.verification_sub_status, c.verification_confidence,
 			COALESCE(cl.campaign_count,0) AS campaign_count,
 			COALESCE(
 				(
@@ -1108,7 +1286,10 @@ func (r *contactRepository) Search(
 		if err := rows.Scan(
 			&c.ID, &c.FirstName, &c.LastName, &c.Email,
 			&c.Company, &c.Phone, &c.CustomFields, &c.Subscribed,
-			&c.UpdatedAt, &c.CreatedAt, &campaignCount, &campaignsJSON, &categoriesJSON, &leadProgressJSON,
+			&c.UpdatedAt, &c.CreatedAt,
+			&c.VerificationStatus, &c.VerificationReason, &c.IsCatchAll, &c.VerificationCheckedAt,
+			&c.VerificationSource, &c.VerificationProvider, &c.VerificationSubStatus, &c.VerificationConfidence,
+			&campaignCount, &campaignsJSON, &categoriesJSON, &leadProgressJSON,
 		); err != nil {
 			db.CaptureError(err, "", nil, "scan")
 			return nil, errx.InternalError()
@@ -3098,5 +3279,39 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	return &models.ContactTimelineResult{
 		Data:    events,
 		HasMore: hasMore,
+	}, nil
+}
+
+// verificationFromRequest normalises a verdict a caller supplied with a
+// contact. Empty means none; an unrecognised value is the caller's error.
+func verificationFromRequest(status, provider string) (*models.ContactVerificationWrite, *errx.Error) {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return nil, nil
+	}
+	provider = strings.TrimSpace(provider)
+	if provider != "" {
+		if _, ok := emailverify.KnownVocabulary(provider); !ok {
+			return nil, errx.NewWithIdentifier(errx.BadRequest, "unknown_verification_provider",
+				"unknown verification_provider "+strconv.Quote(provider))
+		}
+	}
+	v, ok := emailverify.NormalizeExternal(provider, status)
+	if !ok {
+		return nil, errx.NewWithIdentifier(errx.BadRequest, "unknown_verification_status",
+			"verification_status "+strconv.Quote(status)+" is not a value any known verification service writes")
+	}
+	name := provider
+	if name == "" {
+		name = "imported"
+	} else if k, ok := emailverify.KnownVocabulary(provider); ok {
+		name = k
+	}
+	return &models.ContactVerificationWrite{
+		Status:    string(v.Status),
+		SubStatus: string(v.SubStatus),
+		Reason:    "imported verdict: " + strings.ToLower(status),
+		Provider:  name,
+		Source:    models.VerificationSourceImported,
 	}, nil
 }

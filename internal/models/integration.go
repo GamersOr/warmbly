@@ -35,6 +35,9 @@ const (
 
 	// Data
 	IntegrationGoogleSheets IntegrationProvider = "google_sheets"
+
+	// Verification
+	IntegrationMillionVerifier IntegrationProvider = "millionverifier"
 )
 
 // AllIntegrationProviders lists every provider the dashboard exposes. The
@@ -52,6 +55,7 @@ var AllIntegrationProviders = []IntegrationProvider{
 	IntegrationCalendly,
 	IntegrationCalCom,
 	IntegrationGoogleSheets,
+	IntegrationMillionVerifier,
 }
 
 func IsValidIntegrationProvider(s string) bool {
@@ -118,6 +122,7 @@ const (
 	IntegrationCategoryNotifications IntegrationCategory = "notifications"
 	IntegrationCategoryMeetings      IntegrationCategory = "meetings"
 	IntegrationCategoryData          IntegrationCategory = "data"
+	IntegrationCategoryVerification  IntegrationCategory = "verification"
 )
 
 // IntegrationCatalogEntry is the static metadata for one provider that the

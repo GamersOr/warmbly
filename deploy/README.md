@@ -20,8 +20,12 @@ deploy/
 │   ├── rust-dev.Dockerfile
 │   ├── elixir-dev.Dockerfile
 │   └── air.toml
-└── config/
-    └── env.example
+├── config/
+│   └── env.example
+├── systemd/                        # one unit per service, Docker-free install
+│   └── warmbly-*.service
+└── nginx/
+    └── warmbly.conf                # static frontends + reverse proxies
 ```
 
 The tracking Dockerfile lives at `tracking/Dockerfile`, and the frontends build from `web/Dockerfile` and `admin/Dockerfile` (nginx static builds with runtime config injection). The self-host compose is `docker-compose.yml` at the repo root.
@@ -53,6 +57,10 @@ make reset  # nuke volumes
 ```
 
 Full reference: [local development](https://docs.warmbly.com/development/local-development/).
+
+## Deploying without Docker
+
+`deploy/systemd/` holds one unit per service and `deploy/nginx/warmbly.conf` a site that serves the static frontends and proxies the API, websocket and tracking hosts. The step-by-step guide that uses them is [Deploying without Docker](https://docs.warmbly.com/development/bare-metal/).
 
 ## Deploying the control plane
 

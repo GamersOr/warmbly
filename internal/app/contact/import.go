@@ -16,6 +16,7 @@ import (
 	"github.com/warmbly/warmbly/internal/email"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/emailverify"
 	"github.com/warmbly/warmbly/internal/pkg/listquality"
 	"github.com/warmbly/warmbly/internal/utils"
 	"github.com/xuri/excelize/v2"
@@ -60,7 +61,7 @@ func (s *contactService) ImportPreview(ctx context.Context, r io.Reader, filenam
 		Columns:          headers,
 		HasHeader:        hasHeader,
 		SampleRows:       sample,
-		SuggestedMapping: suggestMapping(headers),
+		SuggestedMapping: suggestMapping(headers, sample),
 	}, nil
 }
 
@@ -105,6 +106,15 @@ func resolveMapping(mapping []models.ContactImportColumnMapping) ([]importColumn
 			models.ContactImportTargetPhone,
 			models.ContactImportTargetSubscribed,
 			models.ContactImportTargetCategories:
+		case models.ContactImportTargetVerificationStatus:
+			if p := strings.TrimSpace(m.VerificationProvider); p != "" {
+				k, ok := emailverify.KnownVocabulary(p)
+				if !ok {
+					return nil, errx.New(errx.BadRequest,
+						"unknown verification provider "+strconv.Quote(p)+" for column "+strconv.Itoa(m.Index+1))
+				}
+				key = k
+			}
 		case models.ContactImportTargetCustom:
 		default:
 			// An unrecognised target with a custom key is how older clients
@@ -703,10 +713,38 @@ func padRow(row []string, n int) []string {
 // suggestMapping uses fuzzy header matches to pick a target for each
 // column. Anything we don't recognise becomes ignore — better than
 // inventing a custom-field key the user didn't ask for.
-func suggestMapping(headers []string) []models.ContactImportColumnMapping {
+func suggestMapping(headers []string, sample [][]string) []models.ContactImportColumnMapping {
 	out := make([]models.ContactImportColumnMapping, len(headers))
 	for i, h := range headers {
 		out[i] = guessTarget(i, h)
+		if out[i].Target != models.ContactImportTargetIgnore {
+			continue
+		}
+		// A verdict column from another verification service: the header
+		// says so, or every sample value is a word one of them writes.
+		provider, headerSays := emailverify.IsStatusHeader(h)
+		values := make([]string, 0, len(sample))
+		for _, row := range sample {
+			if i < len(row) {
+				values = append(values, row[i])
+			}
+		}
+		detected, valuesSay := emailverify.DetectVocabulary(values)
+		if !headerSays && !valuesSay {
+			continue
+		}
+		// A generic header ("status") only counts when the values agree,
+		// otherwise a CRM's deal-stage column would be read as a verdict.
+		if headerSays && provider == "" && !valuesSay {
+			continue
+		}
+		if provider == "" {
+			provider = detected
+		}
+		if provider == emailverify.ProviderBuiltin {
+			provider = ""
+		}
+		out[i] = models.ContactImportColumnMapping{Index: i, Target: models.ContactImportTargetVerificationStatus, VerificationProvider: provider}
 	}
 	return out
 }
@@ -785,6 +823,12 @@ func buildAddContact(
 				if name = strings.TrimSpace(name); name != "" {
 					categories = appendUnique(categories, name)
 				}
+			}
+		case models.ContactImportTargetVerificationStatus:
+			// Lenient on purpose: a stray "n/a" must not drop the lead.
+			if _, ok := emailverify.NormalizeExternal(col.customKey, val); ok {
+				ac.VerificationStatus = val
+				ac.VerificationProvider = col.customKey
 			}
 		case models.ContactImportTargetCustom:
 			ac.CustomFields[col.customKey] = val

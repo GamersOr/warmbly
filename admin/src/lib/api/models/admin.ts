@@ -522,7 +522,7 @@ export interface AdminCampaignSearch {
     q?: string;
     user_id?: string;
     org_id?: string;
-    status?: string; // "" | draft | active | paused | completed | paused_trial_expired | paused_no_accounts | paused_guardrail
+    status?: string; // "" | draft | active | paused | completed | paused_trial_expired | paused_no_accounts | paused_guardrail | paused_undeliverable
     // Boolean flags
     open_tracking?: boolean;
     link_tracking?: boolean;

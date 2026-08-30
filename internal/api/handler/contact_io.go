@@ -163,5 +163,9 @@ func (h *Handler) ImportCommitContacts(c *gin.Context) {
 		"failed":   fmt.Sprintf("%d", result.Failed),
 	})
 
+	// New addresses are checked right away rather than on the next tick.
+	if h.EmailVerifyService != nil {
+		h.EmailVerifyService.Kick()
+	}
 	c.JSON(http.StatusOK, result)
 }

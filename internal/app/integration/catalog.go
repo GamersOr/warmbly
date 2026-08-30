@@ -191,5 +191,19 @@ func Catalog() []models.IntegrationCatalogEntry {
 		// Lead Sync feature under Contacts), but it is no longer surfaced as an
 		// integration tile and has no event-driven append-row automation. See
 		// internal/app/leadsync.
+		// Verification --------------------------------------------------------
+		{
+			Provider:   models.IntegrationMillionVerifier,
+			Name:       "MillionVerifier",
+			Tagline:    "Pay-as-you-go address verification for every contact you import.",
+			Category:   models.IntegrationCategoryVerification,
+			AuthMethod: string(models.IntegrationAuthAPIKey),
+			DocsURL:    "https://www.millionverifier.com/",
+			Highlights: []string{
+				"Every new contact is checked automatically; nothing to run",
+				"One credit per address, bought from MillionVerifier as you go",
+				"Replaces the built-in check while credits last, falls back when they run out",
+			},
+		},
 	}
 }

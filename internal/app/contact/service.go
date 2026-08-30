@@ -101,7 +101,23 @@ type contactService struct {
 	// orgRisk files import-quality findings on the workspace's posture.
 	// Optional/nil-safe: without it a bad import is reported but not fused.
 	orgRisk orgrisk.Service
+	// explainer builds the verification "why" for the contact drawer.
+	explainer VerificationExplainer
 }
+
+// VerificationAware is implemented by the contact service so main can hand
+// it the explainer.
+type VerificationAware interface {
+	WireVerification(e VerificationExplainer)
+}
+
+// VerificationExplainer mirrors emailverify.Service.Explain.
+type VerificationExplainer interface {
+	Explain(ctx context.Context, contactID uuid.UUID) *models.ContactVerificationDetail
+}
+
+// WireVerification attaches the verification explainer.
+func (s *contactService) WireVerification(e VerificationExplainer) { s.explainer = e }
 
 // WireOrgRisk attaches the organization risk posture.
 func (s *contactService) WireOrgRisk(r orgrisk.Service) { s.orgRisk = r }

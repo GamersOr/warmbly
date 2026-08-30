@@ -1273,6 +1273,10 @@ func main() {
 		if aware, ok := campaignService.(campaign.AudienceAware); ok {
 			aware.WireAudience(campaignAudienceRepository)
 		}
+		// A start with nothing left to send says whether verification is why.
+		if aware, ok := campaignService.(campaign.ProgressAware); ok {
+			aware.WireProgress(campaignProgressRepository)
+		}
 		// Delete drops attachment objects and duplicate copies them, so the
 		// campaign service needs the store the attachment handler writes to.
 		if aware, ok := campaignService.(campaign.AttachmentAware); ok {
@@ -1647,23 +1651,42 @@ func main() {
 		warmupBatchPoller := jobs.NewWarmupBatchPoller(warmupContentService, 5*time.Minute)
 		go warmupBatchPoller.Start(ctx)
 
-		// Pre-send email verification: verify a capped batch of not-yet-checked
-		// contacts each tick so hard-bouncing addresses are dropped before any
-		// worker sends. CONTROL-PLANE ONLY — the SMTP RCPT probe dials remote MX
-		// on :25 from this backend host (a non-sending IP), never a worker.
-		// The HELO name must be a real, public FQDN: servers reject a bare or
-		// reserved greeting, and Postfix reports that rejection on RCPT, where
-		// the prober used to read it as a dead mailbox (issue #200). APP_URL's
-		// host is the instance's own public name, so it is the right fallback;
-		// when neither is usable the verifier declines to probe instead of
-		// inventing verdicts.
+		// Pre-send verification runs here, never on a worker (a sending IP).
+		// The HELO host must be a public FQDN or the probe declines to run.
 		emailVerifier := emailverify.New(emailverify.Config{
 			HeloHost: emailVerifyHeloHost(),               // e.g. verify.warmbly.com
 			MailFrom: os.Getenv("EMAIL_VERIFY_MAIL_FROM"), // e.g. verify@warmbly.com
 		})
-		emailVerifyService = emailverifyapp.NewService(contactRepostory, emailVerifier)
-		emailVerificationJob := jobs.NewEmailVerificationJob(emailVerifyService, 100)
-		emailVerificationScheduler := jobs.NewEmailVerificationScheduler(emailVerificationJob, 15*time.Minute)
+		// Org key first, operator key second, built-in check last.
+		emailVerifyService = emailverifyapp.NewService(contactRepostory, emailverifyapp.Options{
+			Builtin:                    emailVerifier,
+			BuiltinReady:               emailVerifier.ProbeReady(),
+			Providers:                  integrationServiceForHandler,
+			PlatformMillionVerifierKey: os.Getenv("EMAIL_VERIFY_MILLIONVERIFIER_API_KEY"),
+		})
+		verificationEvidence := emailverifyapp.NewEvidence(repository.NewVerificationEvidenceRepository(primaryDB))
+		emailVerifyService.SetEvidence(verificationEvidence)
+		if aware, ok := contactService.(contact.VerificationAware); ok {
+			aware.WireVerification(emailVerifyService)
+		}
+		if advancedService != nil {
+			if aware, ok := advancedService.(advanced.EvidenceAware); ok {
+				aware.WireEvidence(verificationEvidence)
+			}
+		}
+		go jobs.NewDeliveryEvidenceJob(verificationEvidence, 15*time.Minute, 2000).Start(ctx)
+		emailVerifyService.SetVerdictHook(func(ctx context.Context, orgID uuid.UUID) {
+			if campaignService != nil {
+				campaignService.ResumeVerificationPaused(ctx, orgID)
+			}
+			// Verdicts land outside any request; feed the audit spine by hand.
+			if streamingPublisher != nil {
+				streamingPublisher.PublishAuditCreated(ctx, orgID, uuid.Nil, "verify", string(models.AuditEntityContact), nil)
+				streamingPublisher.PublishAuditCreated(ctx, orgID, uuid.Nil, "verify", string(models.AuditEntityCampaign), nil)
+			}
+		})
+		emailVerificationJob := jobs.NewEmailVerificationJob(emailVerifyService, config.VerificationBatchSize)
+		emailVerificationScheduler := jobs.NewEmailVerificationScheduler(emailVerificationJob, time.Duration(config.VerificationIntervalSeconds)*time.Second)
 		go emailVerificationScheduler.Start(ctx)
 
 		// Seed inbox-placement testing: send a tokenized copy of a template

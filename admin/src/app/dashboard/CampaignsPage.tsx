@@ -56,6 +56,7 @@ const STATUS_TONE: Record<string, string> = {
     paused_trial_expired: "border-orange-300 text-orange-700 bg-orange-50",
     paused_no_accounts: "border-orange-300 text-orange-700 bg-orange-50",
     paused_guardrail: "border-rose-300 text-rose-700 bg-rose-50",
+    paused_undeliverable: "border-amber-300 text-amber-700 bg-amber-50",
 };
 
 const STATUS_OPTIONS = [
@@ -67,6 +68,7 @@ const STATUS_OPTIONS = [
     { value: "paused_trial_expired", label: "Paused — trial expired" },
     { value: "paused_no_accounts", label: "Paused — no accounts" },
     { value: "paused_guardrail", label: "Paused — guardrail" },
+    { value: "paused_undeliverable", label: "Paused — undeliverable leads" },
 ];
 
 const pct = (n: number, d: number) => (d ? ((n / d) * 100).toFixed(1) : "—");

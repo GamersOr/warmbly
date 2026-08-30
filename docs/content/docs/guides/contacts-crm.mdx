@@ -43,7 +43,7 @@ The result step also reports what the addresses themselves look like: how many w
 - **The import still happens.** These are your records, so nothing is refused here. A list bad enough to matter is stopped when you try to launch a campaign with it, which is where the damage would actually occur. See [the launch check](/guides/campaigns/).
 - **Lists under 20 rows are not judged**, since a share of a handful of rows means nothing.
 
-This is not address verification. It reads the addresses; verification asks the receiving server whether they exist, and runs separately in the background.
+This is not address verification. It reads the addresses; verification asks the receiving server whether they exist, and runs separately in the background, within a minute of the import. A file that already carries verification results from another service (a `status` or `ZeroBounce Status` column, say) is recognised during mapping and offered as **Verification status**; those verdicts are kept and the background check skips them. See [address verification](/guides/deliverability/#address-verification).
 
 ## Custom fields
 
@@ -67,7 +67,7 @@ See [Personalization & expressions](/guides/expressions/) for the full templatin
 
 ## Filtering the list
 
-A filter bar sits above the contact list. **Category**, **Segment**, **Status** and **Campaign** are always there; open one, tick values, and the list updates immediately with the matching count next to the bar. **Add filter** adds a custom-field condition (field, contains/is/starts with/ends with, value), a date-added or last-updated range, a number-of-campaigns range and, on a campaign's Leads tab, lead status and engagement. Each active filter is a pill you can reopen to change or remove with its cross; **Clear** drops them all, and **Save as segment** turns the current set into a [segment](/guides/segments/). Free-text search and sort stay in the toolbar.
+A filter bar sits above the contact list. **Category**, **Segment**, **Status** and **Campaign** are always there; open one, tick values, and the list updates immediately with the matching count next to the bar. **Add filter** adds a custom-field condition (field, contains/is/starts with/ends with, value), a date-added or last-updated range, a number-of-campaigns range, the address verification verdict and, on a campaign's Leads tab, lead status and engagement. Each active filter is a pill you can reopen to change or remove with its cross; **Clear** drops them all, and **Save as segment** turns the current set into a [segment](/guides/segments/). Free-text search and sort stay in the toolbar.
 
 ## Categories
 

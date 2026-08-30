@@ -27,6 +27,7 @@ type TrackingConsumer struct {
 	campaignProgressRepo repository.CampaignProgressRepository
 	campaignRepo         repository.CampaignRepository
 	contactRepo          repository.ContactRepository
+	evidence             advanced.EvidenceRecorder
 	streamingPublisher   *pubsub.StreamingPublisher
 	dedupeRepo           repository.TrackingDedupeRepository
 	// advancedService fires INSTANT open/click action chains the moment a
@@ -50,6 +51,7 @@ func NewTrackingConsumer(
 	streamingPublisher *pubsub.StreamingPublisher,
 	dedupeRepo repository.TrackingDedupeRepository,
 	advancedService advanced.Service,
+	evidence advanced.EvidenceRecorder,
 ) (*TrackingConsumer, error) {
 	return &TrackingConsumer{
 		bus:                  bus,
@@ -61,6 +63,7 @@ func NewTrackingConsumer(
 		streamingPublisher:   streamingPublisher,
 		dedupeRepo:           dedupeRepo,
 		advancedService:      advancedService,
+		evidence:             evidence,
 		topic:                topic,
 		group:                group,
 	}, nil
@@ -161,6 +164,11 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 			machineOpen)
 		if !machineOpen {
 			instantKind = "open"
+			// A human open proves the mailbox is live; a prefetch proves
+			// only that a proxy fetched an image.
+			if tc.evidence != nil {
+				tc.evidence.RecordEvidence(ctx, *campaignTask.ContactID, "opened", campaignTask.SequenceID.String(), "")
+			}
 		}
 	case events.EventTypeEmailClicked:
 		err = tc.campaignProgressRepo.RecordEmailClicked(ctx,
@@ -168,6 +176,9 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 			*campaignTask.ContactID,
 			*campaignTask.SequenceID)
 		instantKind = "click"
+		if tc.evidence != nil {
+			tc.evidence.RecordEvidence(ctx, *campaignTask.ContactID, "clicked", campaignTask.SequenceID.String(), "")
+		}
 	default:
 		// Unknown event type, skip
 		return nil

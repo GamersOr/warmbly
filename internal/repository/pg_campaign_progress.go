@@ -1368,18 +1368,80 @@ func branchHasPositiveReplyCondition(b *models.Branch) bool {
 	return false
 }
 
-// CountUndeliverableLeads counts the leads FindNextRoutedPair excludes, using
-// the same predicate it filters on.
+// CountUndeliverableLeads counts the leads that verification alone keeps out
+// of routing: the campaign's flow would still send them a step if their
+// verdict were ignored. It runs the same router the send path runs, so a lead
+// whose flow has ended (a STOP branch, no outgoing connection, every step
+// attempted, replied) is not counted, and neither is one another gate
+// excludes (bounced, failed, suppressed).
 func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context, campaignID uuid.UUID) (int, error) {
-	var n int
-	err := r.db.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM campaign_leads cl
-		JOIN contacts c ON c.id = cl.contact_id
-		WHERE cl.campaign_id = $1
-		  AND `+undeliverableClause("$1"), campaignID).Scan(&n)
+	router, err := r.loadRouter(ctx, campaignID)
 	if err != nil {
 		return 0, err
 	}
-	return n, nil
+	if router == nil {
+		return 0, nil
+	}
+	query := `
+		SELECT cl.contact_id,
+		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''),
+		       COALESCE(ss.ids, '{}') AS sent_ids,
+		       EXISTS (
+		         SELECT 1 FROM campaign_contact_progress rp
+		         WHERE rp.campaign_id = $1 AND rp.contact_id = cl.contact_id AND rp.replied_at IS NOT NULL
+		       ) AS has_replied
+		FROM campaign_leads cl
+		JOIN contacts c ON c.id = cl.contact_id
+		LEFT JOIN LATERAL (
+			SELECT sequence_id, sent_at, opened_at, clicked_at, replied_at, reply_class, ai_label
+			FROM campaign_contact_progress p
+			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
+			ORDER BY p.sent_at DESC LIMIT 1
+		) lp ON true
+		LEFT JOIN LATERAL (
+			SELECT array_agg(sequence_id) AS ids
+			FROM campaign_contact_progress p2
+			WHERE p2.campaign_id = $1 AND p2.contact_id = cl.contact_id
+			  AND (p2.sent_at IS NOT NULL OR p2.dispatched_at IS NOT NULL)
+		) ss ON true
+		WHERE cl.campaign_id = $1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM campaign_contact_progress b
+		    WHERE b.contact_id = cl.contact_id AND b.bounced_at IS NOT NULL
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM campaign_contact_progress f
+		    WHERE f.campaign_id = $1 AND f.contact_id = cl.contact_id
+		      AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
+		      AND f.send_attempts >= $2
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM suppressed_recipients sr
+		    JOIN campaigns camp ON camp.organization_id = sr.organization_id
+		    WHERE camp.id = $1
+		      AND LOWER(sr.email) = LOWER(c.email)
+		      AND (sr.expires_at IS NULL OR sr.expires_at > NOW())
+		  )
+		  AND ` + undeliverableClause("$1") + `
+	`
+	rows, err := r.db.Query(ctx, query, campaignID, config.CampaignSendMaxAttempts)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var in routeInput
+		var contactID uuid.UUID
+		if serr := rows.Scan(&contactID, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.sentIDs, &in.hasReplied); serr != nil {
+			return 0, serr
+		}
+		res := router.route(campaignID, contactID, in)
+		// A step to send (now or later) or a condition still deciding: the
+		// flow is not over for this lead.
+		if res.Target != nil || res.WaitUntil != nil {
+			n++
+		}
+	}
+	return n, rows.Err()
 }

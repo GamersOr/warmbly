@@ -15,6 +15,7 @@ export type ImportColumnTarget =
     | "phone"
     | "subscribed"
     | "categories"
+    | "verification_status"
     | string; // "custom:<key>"
 
 export type ImportDedupStrategy = "skip" | "update" | "create_duplicate";
@@ -23,6 +24,10 @@ export interface ImportColumnMapping {
     index: number;
     target: ImportColumnTarget;
     custom_key?: string;
+    // For a verification_status column: the vocabulary the header or its
+    // values were recognised as (e.g. "zerobounce"). Empty means each value
+    // is recognised by itself.
+    verification_provider?: string;
 }
 
 export interface ImportPreview {

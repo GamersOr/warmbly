@@ -309,7 +309,7 @@ type AdminCampaignSearch struct {
 	Query  string     `form:"q"`
 	UserID *uuid.UUID `form:"user_id"`
 	OrgID  *uuid.UUID `form:"org_id"`
-	Status string     `form:"status"` // draft, active, paused, completed, paused_trial_expired, paused_no_accounts
+	Status string     `form:"status"` // draft, active, paused, completed, paused_trial_expired, paused_no_accounts, paused_guardrail, paused_undeliverable
 
 	// Boolean flags
 	OpenTracking      bool `form:"open_tracking"`

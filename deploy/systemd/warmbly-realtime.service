@@ -1,0 +1,28 @@
+[Unit]
+Description=Warmbly realtime service (Phoenix websocket fanout)
+Documentation=https://docs.warmbly.com/development/bare-metal/
+After=network-online.target postgresql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warmbly
+Group=warmbly
+EnvironmentFile=/etc/warmbly/warmbly.env
+# A mix release only starts its HTTP listener when PHX_SERVER is set.
+Environment=PHX_SERVER=true
+Environment=HOME=/var/lib/warmbly
+WorkingDirectory=/opt/warmbly/realtime
+ExecStart=/opt/warmbly/realtime/bin/realtime start
+ExecStop=/opt/warmbly/realtime/bin/realtime stop
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/warmbly
+
+[Install]
+WantedBy=multi-user.target

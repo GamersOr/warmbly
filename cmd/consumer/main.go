@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"github.com/warmbly/warmbly/internal/app/cloudlink"
+	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
 	"log"
 	"os"
 	"os/signal"
@@ -296,6 +297,12 @@ func main() {
 		aware.WireSegments(repository.NewSegmentRepository(primaryDB))
 	}
 	advancedService.WireDispatcher(webhookService)
+	// Replies, bounces, opens and clicks teach verification what real mail
+	// showed about each address.
+	verificationEvidence := emailverifyapp.NewEvidence(repository.NewVerificationEvidenceRepository(primaryDB))
+	if aware, ok := advancedService.(advanced.EvidenceAware); ok {
+		aware.WireEvidence(verificationEvidence)
+	}
 	// Reply/open/click instant action chains run in THIS process (inbox ingest +
 	// tracking consumer), so a "run_automation" node on an instant branch must be
 	// able to launch the flow here too. Without this it would be stamped sent and
@@ -396,6 +403,7 @@ func main() {
 		CampaignProgressRepo:        campaignProgressRepo,
 		CampaignLogRepo:             repository.NewCampaignLogRepository(primaryDB),
 		ContactRepo:                 contactRepo,
+		Evidence:                    verificationEvidence,
 	}
 
 	jobsService.InitEvents()
@@ -474,6 +482,7 @@ func main() {
 		streamingPublisher,
 		repository.NewTrackingDedupeRepository(primaryDB.Pool),
 		advancedService,
+		verificationEvidence,
 	); terr != nil {
 		log.Println("tracking consumer unavailable; opens/clicks not consumed:", terr)
 	} else {

@@ -21,6 +21,7 @@ import type Contact from "@/lib/api/models/app/contacts/Contact";
 import { fmtAbsolute, fmtRelative } from "./format";
 import { sourceLabel } from "./ActivityTab";
 import { ContactSegmentsSection } from "./ContactSegmentsSection";
+import VerificationCard from "./VerificationCard";
 
 export default function OverviewTab({
     contact,
@@ -51,6 +52,10 @@ export default function OverviewTab({
                     </div>
                 </div>
             )}
+
+            <Section title="Deliverability">
+                <VerificationCard detail={detail?.verification} loading={detailLoading} />
+            </Section>
 
             <Section title="Engagement">
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">

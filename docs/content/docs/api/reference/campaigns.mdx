@@ -658,6 +658,9 @@ Start (activate) the campaign so it begins sending real mail. Works from `draft`
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
 | `id` | path | uuid | Campaign id. |
+| `acknowledge_list_risk` | body | boolean | Optional. Launch even though the list's projected bounce rate would be refused (`list_bounce_risk`), for a list verified elsewhere. |
+
+A start refused because every remaining lead was refused by address verification answers `leads_undeliverable` and parks the campaign at `paused_undeliverable`; re-verify the leads or mark them deliverable with [`POST /contacts/verification`](/api/reference/contacts/#verify-or-override-contacts), which resumes it.
 
 ### Response
 

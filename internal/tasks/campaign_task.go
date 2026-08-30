@@ -226,9 +226,16 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			if errors.Is(err, scheduler.ErrCampaignEnded) {
 				reason = "Campaign ended: reached its end date"
 			}
-			// Leads verification refused are never routed, so say so here
-			// rather than letting "all emails sent" cover for them.
+			// Leads verification refused are never routed. A campaign that ran
+			// out of leads only because of them is not finished: park it for the
+			// owner to re-verify or override (issue #264), instead of letting
+			// "all emails sent" cover for a verifier that may have been wrong.
 			if n, cerr := s.campaignProgressRepo.CountUndeliverableLeads(ctx, campaign.ID); cerr == nil && n > 0 {
+				if errors.Is(err, scheduler.ErrCampaignCompleted) {
+					s.pauseUndeliverable(ctx, campaign.ID, taskID, n)
+					executionStatus = "completed"
+					return nil
+				}
 				reason = fmt.Sprintf("%s (%d lead(s) skipped: address verification refused them)", reason, n)
 			}
 			s.campaignRepo.UpdateStatus(ctx, campaign.ID, "completed")
@@ -851,6 +858,37 @@ func autoPauseReason(err error) string {
 		return "Campaign auto-paused: every mailbox is outside its sending window or over its daily budget"
 	default:
 		return "Campaign auto-paused: no active email accounts available"
+	}
+}
+
+// UndeliverablePauseReason is the activity-log line for a campaign parked
+// because verification refused every remaining lead.
+func UndeliverablePauseReason(n int) string {
+	return fmt.Sprintf("Campaign paused: %d remaining lead(s) were refused by address verification. Re-verify them or mark them deliverable to continue", n)
+}
+
+// pauseUndeliverable parks a campaign whose only remaining leads were refused
+// by verification. Resumable: re-verifying or marking them deliverable
+// restarts it.
+func (s *tasksService) pauseUndeliverable(ctx context.Context, campaignID, taskID uuid.UUID, n int) {
+	s.campaignRepo.UpdateStatusWithLock(ctx, campaignID, "paused_undeliverable")
+	if taskID != uuid.Nil {
+		s.taskRepo.UpdateTaskStatus(ctx, taskID, "completed")
+	}
+	if s.campaignLogRepo != nil {
+		s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+			CampaignID: campaignID,
+			EventType:  "auto_paused",
+			Message:    UndeliverablePauseReason(n),
+			Metadata:   map[string]interface{}{"undeliverable": n},
+		})
+	}
+	if s.streamingPublisher != nil {
+		s.streamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
+			BaseEvent:  pubsub.BaseEvent{EventType: pubsub.EventCampaignCompleted},
+			CampaignID: campaignID.String(),
+			Status:     "paused_undeliverable",
+		})
 	}
 }
 
