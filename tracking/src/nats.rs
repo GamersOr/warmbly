@@ -17,12 +17,22 @@ pub struct NatsProducer {
 
 impl NatsProducer {
     pub async fn new(config: &Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let client = async_nats::connect(&config.nats_url).await?;
+        // async-nats ignores credentials in the URL, so lift `user:pass@` or
+        // `token@` into the options the way the Go client does on its own.
+        let addr: async_nats::ServerAddr = config.nats_url.parse()?;
+        let mut opts = async_nats::ConnectOptions::new();
+        if let Some(user) = addr.username() {
+            opts = match addr.password() {
+                Some(pass) => opts.user_and_password(user.to_string(), pass.to_string()),
+                None => opts.token(user.to_string()),
+            };
+        }
+        let client = opts.connect(addr).await?;
         let js = jetstream::new(client);
         let subject = format!("{}.{}", config.nats_subject_prefix, config.kafka_topic);
         tracing::info!(
             "NATS producer connected to {}, publishing to subject {}",
-            config.nats_url,
+            redact_url(&config.nats_url),
             subject
         );
         Ok(Self { js, subject })
@@ -62,5 +72,30 @@ impl NatsProducer {
                 ),
             ),
         }
+    }
+}
+
+// redact_url drops any userinfo so credentials never reach the logs.
+fn redact_url(raw: &str) -> String {
+    match (raw.find("://"), raw.rfind('@')) {
+        (Some(scheme_end), Some(at)) if at > scheme_end => {
+            format!("{}://***@{}", &raw[..scheme_end], &raw[at + 1..])
+        }
+        _ => raw.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_url;
+
+    #[test]
+    fn redacts_userinfo_only() {
+        assert_eq!(redact_url("nats://127.0.0.1:4222"), "nats://127.0.0.1:4222");
+        assert_eq!(
+            redact_url("tls://tok3n@nats.example.com:4222"),
+            "tls://***@nats.example.com:4222"
+        );
+        assert_eq!(redact_url("nats://u:p@h:4222"), "nats://***@h:4222");
     }
 }

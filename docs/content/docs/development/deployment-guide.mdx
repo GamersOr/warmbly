@@ -788,6 +788,8 @@ Restoring into a database that already has tables fails with "already exists" er
 
 The compose file is a template, not a requirement. The Dockerfiles in `deploy/docker/` plus `tracking/`, `web/`, and `admin/` are the deployment units, and any container host works with the environment reference above. The frontends are configured at container start from `WARMBLY_*` variables, so the same images run anywhere.
 
+No containers at all is also supported: every service is a static binary or a static build. [Deploying without Docker](/development/bare-metal/) builds them from source and runs them under systemd with nginx in front, using the units in `deploy/systemd/` and the site in `deploy/nginx/`.
+
 ## After you install
 
 Three pages carry the day-two answers, so they are not duplicated here:

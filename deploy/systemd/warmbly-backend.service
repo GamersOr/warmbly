@@ -1,0 +1,26 @@
+[Unit]
+Description=Warmbly backend API
+Documentation=https://docs.warmbly.com/development/bare-metal/
+After=network-online.target postgresql.service redis.service nats.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warmbly
+Group=warmbly
+EnvironmentFile=/etc/warmbly/warmbly.env
+# The backend serves the worker installer from this path (GET /worker-install.sh).
+Environment=WORKER_INSTALLER_PATH=/opt/warmbly/src/scripts/install-worker.sh
+WorkingDirectory=/opt/warmbly
+ExecStart=/opt/warmbly/bin/backend
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/warmbly
+
+[Install]
+WantedBy=multi-user.target
