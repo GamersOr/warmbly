@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/popover-menu";
 import { SectionBar } from "@/components/layout/Page";
 import CategoryPicker from "./CategoryPicker";
+import { SegmentMultiPicker } from "@/components/app/segments/SegmentPickers";
 
 interface Props {
     active: boolean;
@@ -264,6 +265,22 @@ export default function ContactFilters({
                                 />
                                 <p className="text-[10.5px] text-slate-400 mt-1.5 leading-tight">
                                     Contacts must have every selected category.
+                                </p>
+                            </div>
+
+                            <Section label="Segments" count={draft.segment_ids?.length ?? 0} />
+                            <div className="px-4 py-3">
+                                <SegmentMultiPicker
+                                    value={draft.segment_ids ?? []}
+                                    onChange={(next) =>
+                                        setDraft((s) => ({
+                                            ...s,
+                                            segment_ids: next.length > 0 ? next : undefined,
+                                        }))
+                                    }
+                                />
+                                <p className="text-[10.5px] text-slate-400 mt-1.5 leading-tight">
+                                    Contacts must be members of every selected segment.
                                 </p>
                             </div>
 
@@ -640,5 +657,6 @@ function countActiveFilters(f: SearchContacts, hasCampaignContext: boolean): num
     // Don't count campaign scoping if it's coming from an outer page context.
     if (!hasCampaignContext && f.campaign_ids.length > 0) n++;
     if (f.category_ids && f.category_ids.length > 0) n++;
+    if (f.segment_ids && f.segment_ids.length > 0) n++;
     return n;
 }
