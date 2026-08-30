@@ -83,10 +83,15 @@ If you enable `requirepass`, put the password in every `REDIS` and `REDIS_URL` v
 
 ### NATS with JetStream
 
-NATS is one static binary. Install it from your distribution or [nats.io](https://docs.nats.io/running-a-nats-system/introduction/installation), then run it with JetStream on and a storage directory:
+NATS is one static binary. Install it from your distribution or [nats.io](https://docs.nats.io/running-a-nats-system/introduction/installation), then run it with JetStream on, a storage directory, and both listeners bound to loopback:
 
 ```bash
 sudo useradd --system --home /var/lib/nats --create-home nats
+sudo tee /etc/nats.conf >/dev/null <<'EOF'
+listen: 127.0.0.1:4222
+http: 127.0.0.1:8222
+jetstream { store_dir: /var/lib/nats }
+EOF
 sudo tee /etc/systemd/system/nats.service >/dev/null <<'EOF'
 [Unit]
 Description=NATS server
@@ -95,7 +100,7 @@ Wants=network-online.target
 
 [Service]
 User=nats
-ExecStart=/usr/local/bin/nats-server -js -sd /var/lib/nats -m 8222
+ExecStart=/usr/local/bin/nats-server -c /etc/nats.conf
 Restart=always
 
 [Install]
@@ -105,7 +110,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now nats
 curl -s http://127.0.0.1:8222/healthz
 ```
 
-`-js` is the important flag. Without JetStream the backend starts, then fails on its first publish with a message about the stream not existing.
+Two lines matter. `jetstream` is required: without it the backend starts, then fails on its first publish with a message about the stream not existing. `listen: 127.0.0.1` is what keeps the bus private. Everything that goes over NATS is unauthenticated by default, and it carries worker commands (send this mail, sync this mailbox) and tracking events, so a client that can reach port 4222 can issue both. On a single host nothing but the services on that host needs it, and loopback is the whole access control.
+
+Only open it when a worker on another machine has to reach it, and then add authentication and TLS in the same change. See [workers on other machines](#workers-on-other-machines) for the configuration.
 
 </Step>
 
@@ -121,11 +128,14 @@ curl -s http://127.0.0.1:8222/healthz
 
 ```bash
 sudo useradd --system --home /var/lib/warmbly --create-home --shell /usr/sbin/nologin warmbly
-sudo mkdir -p /opt/warmbly/bin /opt/warmbly/src /etc/warmbly /var/lib/warmbly/blobs
+sudo mkdir -p /opt/warmbly/bin /etc/warmbly /var/lib/warmbly/blobs
 sudo chown -R warmbly:warmbly /var/lib/warmbly
 sudo chmod 0700 /etc/warmbly
-sudo git clone https://github.com/warmbly/warmbly /opt/warmbly/src
+sudo install -d -o "$USER" -g "$USER" /opt/warmbly/src
+git clone https://github.com/warmbly/warmbly /opt/warmbly/src
 ```
+
+The checkout belongs to you, not root: every build below runs as your normal user and writes into `/opt/warmbly/src`, and only the final `sudo install` or `sudo cp` of each artifact touches the root-owned `/opt/warmbly/bin`, `/opt/warmbly/web` and friends. Cloning with `sudo` leaves a root-owned tree that the builds cannot write to.
 
 Checkout a release tag rather than `main` when you want a known version: `git -C /opt/warmbly/src checkout vX.Y.Z`. Everything below runs from `/opt/warmbly/src`.
 
@@ -140,11 +150,10 @@ Five binaries come out of one module. Static builds, so the production host need
 ```bash
 cd /opt/warmbly/src
 export CGO_ENABLED=0
-go build -ldflags="-s -w" -o /opt/warmbly/bin/backend    ./cmd/backend
-go build -ldflags="-s -w" -o /opt/warmbly/bin/consumer   ./cmd/consumer
-go build -ldflags="-s -w" -o /opt/warmbly/bin/worker     ./cmd/worker
-go build -ldflags="-s -w" -o /opt/warmbly/bin/migrate    ./cmd/migrate
-go build -ldflags="-s -w" -o /opt/warmbly/bin/warmblyctl ./cmd/warmblyctl
+for cmd in backend consumer worker migrate warmblyctl; do
+  go build -ldflags="-s -w" -o "out/$cmd" "./cmd/$cmd"
+done
+sudo install -m 0755 out/backend out/consumer out/worker out/migrate out/warmblyctl /opt/warmbly/bin/
 sudo ln -sf /opt/warmbly/bin/warmblyctl /usr/local/bin/warmblyctl
 ```
 
@@ -159,7 +168,7 @@ The default build has no Kafka support, which is what you want: NATS is the even
 ```bash
 cd /opt/warmbly/src/tracking
 cargo build --release
-install -m 0755 target/release/tracking /opt/warmbly/bin/tracking
+sudo install -m 0755 target/release/tracking /opt/warmbly/bin/tracking
 ```
 
 The tracking snippet in `static/` is compiled into the binary, so nothing else needs copying.
@@ -451,15 +460,28 @@ The consumer and worker have no port; `journalctl -u warmbly-worker` shows the w
 
 ### Put nginx in front
 
-[`deploy/nginx/warmbly.conf`](https://github.com/warmbly/warmbly/blob/main/deploy/nginx/warmbly.conf) serves the two static frontends and proxies the API, websocket and tracking hosts. Copy it, replace `example.com`, and obtain certificates:
+[`deploy/nginx/warmbly.conf`](https://github.com/warmbly/warmbly/blob/main/deploy/nginx/warmbly.conf) serves the two static frontends and proxies the API, websocket and tracking hosts. It references Let's Encrypt certificate files by path, so the certificates have to exist before nginx will accept the site. Issue them first, in standalone mode with nothing on port 80, then enable the site:
 
 ```bash
+sudo systemctl stop nginx
+sudo certbot certonly --standalone --agree-tos -m you@yourdomain.com \
+  -d app.yourdomain.com -d admin.yourdomain.com -d api.yourdomain.com \
+  -d ws.yourdomain.com -d t.yourdomain.com \
+  --cert-name app.yourdomain.com
+
 sudo cp /opt/warmbly/src/deploy/nginx/warmbly.conf /etc/nginx/sites-available/warmbly.conf
 sudo sed -i 's/example\.com/yourdomain.com/g' /etc/nginx/sites-available/warmbly.conf
 sudo ln -s /etc/nginx/sites-available/warmbly.conf /etc/nginx/sites-enabled/
-sudo certbot --nginx -d app.yourdomain.com -d admin.yourdomain.com -d api.yourdomain.com -d ws.yourdomain.com -d t.yourdomain.com
-sudo nginx -t && sudo systemctl reload nginx
+sudo nginx -t && sudo systemctl start nginx
 ```
+
+`--cert-name app.yourdomain.com` puts all five names on one certificate under `/etc/letsencrypt/live/app.yourdomain.com/`, which is the path every server block in the shipped file uses. Renewals run from the timer certbot installs; because the certificate was issued standalone, tell it how to reload nginx once:
+
+```bash
+sudo certbot renew --dry-run --pre-hook 'systemctl stop nginx' --post-hook 'systemctl start nginx'
+```
+
+Those hooks are saved in the renewal config and reused on every real renewal.
 
 The frontends are plain files under `/opt/warmbly/web` and `/opt/warmbly/admin` with a history fallback to `index.html`, and `index.html` and `config.js` are served with `Cache-Control: no-store` so a redeploy is picked up on the next load. Any other web server can do the same; the config file has the exact headers.
 
@@ -513,7 +535,22 @@ sudo cp deploy/systemd/warmbly-worker.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now warmbly-worker
 ```
 
-The token is consumed on first use and the response carries the decryption material, so do this over HTTPS only. Before enrolling anything, set `API_PUBLIC_URL`, `NATS_URL` and `REDIS` on the backend to addresses the remote host can reach, and open those ports to it: the rendered file inherits the backend's own values, and `127.0.0.1` does not resolve to your control plane from another machine. Use `BLOB_PROVIDER=s3` with a bucket both sides can reach; a remote worker on the filesystem provider writes to its own disk. The [self-hosting guide](/development/deployment-guide/#remote-workers) has the same caveats in more detail.
+The token is consumed on first use and the response carries the decryption material, so do this over HTTPS only. Before enrolling anything, set `API_PUBLIC_URL`, `NATS_URL` and `REDIS` on the backend to addresses the remote host can reach, and open those ports to it: the rendered file inherits the backend's own values, and `127.0.0.1` does not resolve to your control plane from another machine.
+
+Opening NATS and Redis to another machine means they stop being protected by the loopback bind, so give both a credential and TLS first. For NATS, extend `/etc/nats.conf` and restart it:
+
+```
+listen: 0.0.0.0:4222
+http: 127.0.0.1:8222
+jetstream { store_dir: /var/lib/nats }
+authorization { token: "<openssl rand -hex 32>" }
+tls {
+  cert_file: "/etc/letsencrypt/live/app.yourdomain.com/fullchain.pem"
+  key_file:  "/etc/letsencrypt/live/app.yourdomain.com/privkey.pem"
+}
+```
+
+Then set `NATS_URL=tls://<token>@nats.yourdomain.com:4222` in `warmbly.env` and `worker.env`; the token in the URL is what every service authenticates with. Redis gets `requirepass` and `REDIS=redis://:<password>@redis.yourdomain.com:6379`, ideally over a private network or a tunnel. Restrict both ports at the firewall to the worker's address as well. Use `BLOB_PROVIDER=s3` with a bucket both sides can reach; a remote worker on the filesystem provider writes to its own disk. The [self-hosting guide](/development/deployment-guide/#remote-workers) has the same caveats in more detail.
 
 Because the worker is not in a container, the admin panel's SSH-driven day-two actions (pull image, restart container) do not apply to it. Manage it with `systemctl` and the update steps below.
 
@@ -547,7 +584,9 @@ Restore into an empty database before the backend starts, then start it and it a
 | Symptom | Cause |
 |---------|-------|
 | Backend exits at boot naming `AUTH_SECRET` or another variable | `APP_ENV=prod` refuses the published development defaults; the env file still holds a placeholder |
-| First publish fails with a stream or JetStream error | `nats-server` runs without `-js` |
+| First publish fails with a stream or JetStream error | `/etc/nats.conf` has no `jetstream` block |
+| `go build` or `cargo build` fails with permission denied | The checkout was cloned with `sudo` and is root-owned; `chown -R "$USER"` it and build as yourself |
+| `nginx -t` fails on a missing certificate file | The site was enabled before `certbot certonly` ran, or `--cert-name` does not match the path in the file |
 | `mkdir /var/lib/warmbly/blobs/...: permission denied` on the first send | `BLOB_FS_ROOT` is not writable by the `warmbly` user, or the unit's `ReadWritePaths` does not cover it |
 | Realtime unit starts and exits immediately | A release only listens when `PHX_SERVER=true`; the shipped unit sets it. Otherwise `journalctl -u warmbly-realtime` names the missing variable |
 | Realtime raises `JWT_SECRET ... required` | Prod releases read `JWT_SECRET`, `SECRET_KEY_BASE` and `DATABASE_URL`, not the backend's names; keep both spellings in the file |
