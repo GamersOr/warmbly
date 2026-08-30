@@ -8,9 +8,8 @@
 //   - since / until date range
 //   - sort: newest / oldest
 //
-// Sheet pattern matches ContactFilters (slim right-side panel,
-// sticky header + footer, draft state mirrors parent until Apply
-// so we don't refetch while the user is mid-build).
+// Slim right-side sheet pattern: sticky header + footer, draft state mirrors parent until Apply
+// so we do not refetch while the user is mid-build.
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";

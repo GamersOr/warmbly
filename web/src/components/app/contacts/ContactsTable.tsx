@@ -56,7 +56,8 @@ import {
 import toast from "react-hot-toast";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
-import ContactFilters from "./ContactFilters";
+import FilterBar from "./filters/FilterBar";
+import { isCompleteCustomFilter } from "./filters/helpers";
 import ContactEdit from "./ContactEdit";
 import type { ContactSlideTab } from "./contact-edit/tabs";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
@@ -114,7 +115,6 @@ export default function ContactsTable({
     const campaignWrite = useWriteGuard("MANAGE_CAMPAIGNS");
     const [selected, setSelected] = React.useState<string[]>([]);
     const [del, setDelete] = React.useState<boolean>(false);
-    const [filtersOpen, setFiltersOpen] = React.useState<boolean>(false);
     const [edit, setEdit] = React.useState<string>("");
     // Which tab the drawer opens on. Row click → default (overview); the
     // right-side 3-dots → "details", mirroring the mailbox 3-dots → settings.
@@ -152,11 +152,15 @@ export default function ContactsTable({
 
     function saveAsSegment(draft: SearchContacts) {
         const { conditions, dropped } = filtersToSegment(draft, current_campaign?.id);
-        setFiltersOpen(false);
         if (dropped.length > 0) toast(`Not carried over: ${dropped.join(", ")}. Add a condition for it in the editor.`);
         setSegmentPreset({ conditions });
     }
-    const contactsData = useSearchContacts({ options: searchProps });
+    // Half-filled custom-field pills stay in the bar but never reach the server.
+    const searchOptions = React.useMemo(
+        () => ({ ...searchProps, filters: searchProps.filters.filter(isCompleteCustomFilter) }),
+        [searchProps],
+    );
+    const contactsData = useSearchContacts({ options: searchOptions });
 
     // Inside a segment, "remove" pins the contact out as a manual exclude so
     // it stays out even while the conditions still match it.
@@ -403,13 +407,6 @@ export default function ContactsTable({
                     />
                     <TopbarAction
                         variant="ghost"
-                        icon={<Settings2Icon className="w-3 h-3" />}
-                        onClick={() => setFiltersOpen(true)}
-                    >
-                        Filters
-                    </TopbarAction>
-                    <TopbarAction
-                        variant="ghost"
                         icon={<UsersIcon className="w-3 h-3" />}
                         onClick={() => setFromContactsOpen(true)}
                     >
@@ -436,6 +433,14 @@ export default function ContactsTable({
                         Add lead
                     </TopbarAction>
                 </SectionBar>
+                <FilterBar
+                    filters={searchProps}
+                    setFilters={setSearchProps}
+                    activeCampaign={current_campaign}
+                    total={total}
+                    loading={contactsData.isFetching}
+                    onSaveAsSegment={saveAsSegment}
+                />
                 <LeadProgressStrip
                     contacts={contacts ?? []}
                     total={total}
@@ -467,15 +472,6 @@ export default function ContactsTable({
                     segment={segment}
                     onExclude={excludeFromSegment}
                     excluding={segmentMembers.isPending}
-                />
-                <ContactFilters
-                    active={filtersOpen}
-                    setActive={setFiltersOpen}
-                    filters={searchProps}
-                    setFilters={setSearchProps}
-                    activeCampaign={current_campaign}
-                    loading={contactsData.isLoading}
-                    onSaveAsSegment={saveAsSegment}
                 />
                 <ContactEdit
                     contacts={contacts ?? []}
@@ -660,20 +656,16 @@ export default function ContactsTable({
                         </PopoverMenuItem>
                     </PopoverMenuContent>
                 </PopoverMenu>
-
-                <TopbarAction
-                    variant="ghost"
-                    icon={<Settings2Icon className="w-3 h-3" />}
-                    onClick={() => setFiltersOpen(true)}
-                >
-                    Filters
-                    {searchProps.filters.length > 0 && (
-                        <span className="ml-1 font-mono text-[10px] text-sky-600 tabular-nums">
-                            {searchProps.filters.length}
-                        </span>
-                    )}
-                </TopbarAction>
             </SectionBar>
+
+            <FilterBar
+                filters={searchProps}
+                setFilters={setSearchProps}
+                hideSegments={!!segment}
+                total={total}
+                loading={contactsData.isFetching}
+                onSaveAsSegment={saveAsSegment}
+            />
 
             <PageBody>
                 {tableNode}
@@ -703,15 +695,6 @@ export default function ContactsTable({
 
             {filtered.length === 0 && !contactsData.isPending ? null : null}
 
-            <ContactFilters
-                active={filtersOpen}
-                setActive={setFiltersOpen}
-                filters={searchProps}
-                setFilters={setSearchProps}
-                activeCampaign={current_campaign}
-                loading={contactsData.isLoading}
-                onSaveAsSegment={saveAsSegment}
-            />
             <SegmentEditor
                 open={segmentPreset !== null}
                 onClose={() => setSegmentPreset(null)}
