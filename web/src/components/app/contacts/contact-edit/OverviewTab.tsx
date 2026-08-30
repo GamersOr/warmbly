@@ -20,6 +20,7 @@ import type ContactDetail from "@/lib/api/models/app/contacts/ContactDetail";
 import type Contact from "@/lib/api/models/app/contacts/Contact";
 import { fmtAbsolute, fmtRelative } from "./format";
 import { sourceLabel } from "./ActivityTab";
+import { ContactSegmentsSection } from "./ContactSegmentsSection";
 
 export default function OverviewTab({
     contact,
@@ -178,6 +179,8 @@ export default function OverviewTab({
                     />
                 </div>
             </Section>
+
+            <ContactSegmentsSection contactId={contact.id} />
 
             {detail && (
                 <Section title="Source">
