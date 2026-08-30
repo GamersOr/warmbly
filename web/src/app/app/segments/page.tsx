@@ -38,6 +38,8 @@ function SegmentsList() {
     // Menu items and topbar actions take a bare () => void, so give the
     // permission guard an empty event to swallow.
     const guarded = (fn: () => void) => () => write.guard(fn)({});
+    const campaigns = useWriteGuard("MANAGE_CAMPAIGNS");
+    const campaignGuarded = (fn: () => void) => () => campaigns.guard(fn)({});
     const segments = useSegments();
     const remove = useDeleteSegment();
     const create = useCreateSegment();
@@ -198,7 +200,7 @@ function SegmentsList() {
                                     <PopoverMenuContent minWidth={180}>
                                         <PopoverMenuItem onSelect={() => navigate(`/app/segments/${s.id}`)}>View contacts</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={guarded(() => openEdit(s))}>Edit conditions</PopoverMenuItem>
-                                        <PopoverMenuItem onSelect={() => setCampaignFor(s)}>Add to campaign</PopoverMenuItem>
+                                        <PopoverMenuItem onSelect={campaignGuarded(() => setCampaignFor(s))}>Add to campaign</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={guarded(() => duplicate(s))}>Duplicate</PopoverMenuItem>
                                         <PopoverMenuSeparator />
                                         <PopoverMenuItem onSelect={guarded(() => askDelete(s))}>Delete</PopoverMenuItem>

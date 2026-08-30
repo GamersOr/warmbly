@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 
 import { useConfirm } from "@/hooks/context/confirm";
+import { useWriteGuard } from "@/hooks/usePermission";
 import useSearchContacts from "@/lib/api/hooks/app/contacts/useSearchContacts";
 import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import useDeleteContacts from "@/lib/api/hooks/app/contacts/useDeleteContacts";
@@ -105,6 +106,8 @@ export default function ContactsTable({
 }) {
     const confirm = useConfirm();
     const segmentMembers = useSetSegmentMembers();
+    // Enrolling a segment writes campaign leads, so it takes the campaign permission.
+    const campaignWrite = useWriteGuard("MANAGE_CAMPAIGNS");
     const [selected, setSelected] = React.useState<string[]>([]);
     const [del, setDelete] = React.useState<boolean>(false);
     const [filtersOpen, setFiltersOpen] = React.useState<boolean>(false);
@@ -341,7 +344,7 @@ export default function ContactsTable({
                         <TopbarAction
                             variant="ghost"
                             icon={<LayersIcon className="w-3 h-3" />}
-                            onClick={() => setFromSegmentOpen(true)}
+                            onClick={() => campaignWrite.guard(() => setFromSegmentOpen(true))({})}
                         >
                             From segment
                         </TopbarAction>

@@ -1,8 +1,5 @@
--- Contact segments (issue #266): saved, reusable audiences. A segment is a
--- filter tree over contacts (properties, categories, campaign activity,
--- engagement, other segments) plus per-contact manual overrides. Membership
--- is evaluated at read time, so it is always current and never needs a
--- recompute job; only the definition and the overrides are stored.
+-- Contact segments (issue #266). Membership is evaluated at read time; only
+-- the definition and the manual overrides are stored.
 CREATE TABLE public.segments (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     organization_id uuid NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,

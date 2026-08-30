@@ -37,6 +37,8 @@ function SegmentDetail() {
     const navigate = useNavigate();
     const confirm = useConfirm();
     const write = useWriteGuard("MANAGE_CONTACTS");
+    // Enrolment writes campaign leads, so it takes the campaign permission.
+    const campaigns = useWriteGuard("MANAGE_CAMPAIGNS");
     const segment = useSegment(id);
     const fields = useSegmentFields();
     const remove = useDeleteSegment();
@@ -104,7 +106,7 @@ function SegmentDetail() {
                         </button>
                         <button
                             type="button"
-                            onClick={() => setCampaignOpen(true)}
+                            onClick={campaigns.guard(() => setCampaignOpen(true))}
                             className="h-7 px-2.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors"
                         >
                             <MegaphoneIcon className="w-3 h-3" />

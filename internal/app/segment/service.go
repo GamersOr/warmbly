@@ -1,6 +1,5 @@
-// Package segment manages saved contact audiences (issue #266). A segment is
-// a filter definition plus manual overrides; membership is computed at read
-// time by the repository's SQL compiler, so nothing here schedules work.
+// Package segment manages saved contact audiences; membership is computed at
+// read time, so nothing here schedules work.
 package segment
 
 import (

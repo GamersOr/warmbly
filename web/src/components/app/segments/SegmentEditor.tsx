@@ -1,4 +1,4 @@
-// SegmentEditor — right-side drawer that creates or edits a segment: name,
+// SegmentEditor: right-side drawer that creates or edits a segment: name,
 // color, all/any match and the condition list, with a live "matches N
 // contacts" preview fed by POST /segments/preview.
 
