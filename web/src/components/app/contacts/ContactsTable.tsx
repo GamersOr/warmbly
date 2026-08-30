@@ -20,6 +20,7 @@ import {
     ClockIcon,
     CornerUpLeftIcon,
     DownloadIcon,
+    LayersIcon,
     Loader2Icon,
     MailIcon,
     MailOpenIcon,
@@ -35,6 +36,7 @@ import {
     UploadIcon,
     UserPlusIcon,
     UsersIcon,
+    XIcon,
 } from "lucide-react";
 
 import { useConfirm } from "@/hooks/context/confirm";
@@ -63,6 +65,9 @@ import { NewContactDialog } from "./NewContactDialog";
 import ExportDialog from "./ExportDialog";
 import ImportWizard from "./ImportWizard";
 import AddFromContactsDialog from "./AddFromContactsDialog";
+import AddToSegmentMenu from "@/components/app/segments/AddToSegmentMenu";
+import AddSegmentLeadsDialog from "@/components/app/segments/AddSegmentLeadsDialog";
+import { useSetSegmentMembers } from "@/lib/api/hooks/app/segments";
 import useAiMetered from "@/hooks/useAiMetered";
 import SyncSourcesPanel from "./SyncSourcesPanel";
 import { CategoryChip } from "./CategoryPicker";
@@ -92,10 +97,14 @@ type SubFilter = "all" | "subscribed" | "unsubscribed";
 
 export default function ContactsTable({
     current_campaign,
+    segment,
 }: {
     current_campaign?: MiniCampaign;
+    // Scope the list to one segment's members (the segment detail page).
+    segment?: { id: string; name: string };
 }) {
     const confirm = useConfirm();
+    const segmentMembers = useSetSegmentMembers();
     const [selected, setSelected] = React.useState<string[]>([]);
     const [del, setDelete] = React.useState<boolean>(false);
     const [filtersOpen, setFiltersOpen] = React.useState<boolean>(false);
@@ -114,15 +123,30 @@ export default function ContactsTable({
     const [importOpen, setImportOpen] = React.useState<boolean>(false);
     const [syncOpen, setSyncOpen] = React.useState<boolean>(false);
     const [fromContactsOpen, setFromContactsOpen] = React.useState<boolean>(false);
+    const [fromSegmentOpen, setFromSegmentOpen] = React.useState<boolean>(false);
 
     const [searchProps, setSearchProps] = React.useState<SearchContacts>({
         query: "",
         filters: [],
         campaign_ids: current_campaign ? [current_campaign.id] : [],
+        segment_ids: segment ? [segment.id] : undefined,
         sort_by: "created_at",
         reverse: false,
     });
     const contactsData = useSearchContacts({ options: searchProps });
+
+    // Inside a segment, "remove" pins the contact out as a manual exclude so
+    // it stays out even while the conditions still match it.
+    async function excludeFromSegment() {
+        if (!segment || selected.length === 0 || segmentMembers.isPending) return;
+        try {
+            await segmentMembers.mutateAsync({ id: segment.id, contacts: selected, mode: "exclude" });
+            toast.success(`Removed ${selected.length} contact${selected.length === 1 ? "" : "s"} from ${segment.name}`);
+            setSelected([]);
+        } catch (err) {
+            toast.error(buildError(err as AppError));
+        }
+    }
     const contactsBulkDelete = useDeleteContacts();
 
     // Connected CRM targets the "Push to CRM" bulk action can reach. Driven by
@@ -316,6 +340,13 @@ export default function ContactsTable({
                         </TopbarAction>
                         <TopbarAction
                             variant="ghost"
+                            icon={<LayersIcon className="w-3 h-3" />}
+                            onClick={() => setFromSegmentOpen(true)}
+                        >
+                            From segment
+                        </TopbarAction>
+                        <TopbarAction
+                            variant="ghost"
                             icon={<UploadIcon className="w-3 h-3" />}
                             onClick={() => setImportOpen(true)}
                         >
@@ -409,6 +440,10 @@ export default function ContactsTable({
                         )
                     }
                     onClear={() => setSelected([])}
+                    selected={selected}
+                    segment={segment}
+                    onExclude={excludeFromSegment}
+                    excluding={segmentMembers.isPending}
                 />
                 <ContactFilters
                     active={filtersOpen}
@@ -440,6 +475,11 @@ export default function ContactsTable({
                     onClose={() => setFromContactsOpen(false)}
                     campaign={current_campaign}
                 />
+                <AddSegmentLeadsDialog
+                    open={fromSegmentOpen}
+                    onClose={() => setFromSegmentOpen(false)}
+                    campaign={current_campaign}
+                />
             </>
         );
     }
@@ -447,15 +487,26 @@ export default function ContactsTable({
     return (
         <Page>
             <PageTopbar
-                eyebrow="Contacts"
+                eyebrow={segment ? "Members" : "Contacts"}
                 subtitle={
                     contactsData.isPending
                         ? "Loading…"
                         : contactsData.isError
                             ? "Failed to load"
-                            : `${total.toLocaleString()} total`
+                            : segment
+                              ? `${total.toLocaleString()} in ${segment.name}`
+                              : `${total.toLocaleString()} total`
                 }
             >
+                {segment && (
+                    <TopbarAction
+                        variant="ghost"
+                        icon={<UsersIcon className="w-3 h-3" />}
+                        onClick={() => setFromContactsOpen(true)}
+                    >
+                        Add contacts
+                    </TopbarAction>
+                )}
                 <div className="hidden md:contents">
                     <TopbarAction
                         variant="ghost"
@@ -508,7 +559,7 @@ export default function ContactsTable({
                 </TopbarAction>
             </PageTopbar>
 
-            <StatStrip cols={4}>
+            {!segment && <StatStrip cols={4}>
                 <Stat
                     label="All"
                     value={counts.total}
@@ -534,10 +585,10 @@ export default function ContactsTable({
                     sub="active touchpoints"
                     last
                 />
-            </StatStrip>
+            </StatStrip>}
 
             <SectionBar
-                label={subFilter === "all" ? "All contacts" : `${subFilter[0].toUpperCase()}${subFilter.slice(1)}`}
+                label={segment ? "Segment members" : subFilter === "all" ? "All contacts" : `${subFilter[0].toUpperCase()}${subFilter.slice(1)}`}
                 count={filtered.length}
             >
                 <SearchInput
@@ -620,6 +671,10 @@ export default function ContactsTable({
                     )
                 }
                 onClear={() => setSelected([])}
+                selected={selected}
+                segment={segment}
+                onExclude={excludeFromSegment}
+                excluding={segmentMembers.isPending}
             />
 
             {filtered.length === 0 && !contactsData.isPending ? null : null}
@@ -635,6 +690,13 @@ export default function ContactsTable({
             <ContactEdit contacts={contacts ?? []} active={edit} setActive={setEdit} initialTab={editTab} />
             <ContactsEditBulk active={bulkEdit} setActive={setBulkEdit} selected={selected} />
             <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} />
+            {segment && (
+                <AddFromContactsDialog
+                    open={fromContactsOpen}
+                    onClose={() => setFromContactsOpen(false)}
+                    target={{ kind: "segment", segment }}
+                />
+            )}
             <ExportDialog
                 open={exportOpen}
                 onClose={() => setExportOpen(false)}
@@ -1321,6 +1383,10 @@ function SelectionBar({
     researching,
     onDelete,
     onClear,
+    selected,
+    segment,
+    onExclude,
+    excluding,
 }: {
     count: number;
     deleting: boolean;
@@ -1332,6 +1398,10 @@ function SelectionBar({
     researching: boolean;
     onDelete: () => void;
     onClear: () => void;
+    selected: string[];
+    segment?: { id: string; name: string };
+    onExclude: () => void;
+    excluding: boolean;
 }) {
     if (count === 0) return null;
     return (
@@ -1382,6 +1452,18 @@ function SelectionBar({
             >
                 Edit
             </button>
+            <AddToSegmentMenu contacts={selected} onDone={onClear} />
+            {segment && (
+                <button
+                    type="button"
+                    onClick={onExclude}
+                    disabled={excluding}
+                    className="h-7 px-2.5 rounded text-[12px] text-amber-700 hover:text-white hover:bg-amber-600 font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                >
+                    {excluding ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <XIcon className="w-3 h-3" />}
+                    <span className="hidden sm:inline">Remove from segment</span>
+                </button>
+            )}
             <button
                 type="button"
                 onClick={onResearch}
