@@ -1036,8 +1036,31 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		args = append(args, *data.RampCeiling)
 		argPos++
 	}
-	if data.RampStart != nil && data.RampCeiling != nil && *data.RampStart > *data.RampCeiling {
-		return nil, errx.New(errx.BadRequest, "ramp start cannot exceed ramp ceiling")
+	// start <= ceiling must hold on the EFFECTIVE pair: a partial update is
+	// checked against the stored counterpart or it could persist an invalid pair.
+	if data.RampStart != nil || data.RampCeiling != nil {
+		start, ceiling := 0, 0
+		if data.RampStart == nil || data.RampCeiling == nil {
+			err := r.DB.QueryRow(ctx,
+				"SELECT ramp_start, ramp_ceiling FROM campaigns WHERE user_id = $1 AND id = $2",
+				userID, campaignID).Scan(&start, &ceiling)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, errx.ErrNotFound
+				}
+				db.CaptureError(err, "", nil, "queryrow")
+				return nil, errx.InternalError()
+			}
+		}
+		if data.RampStart != nil {
+			start = *data.RampStart
+		}
+		if data.RampCeiling != nil {
+			ceiling = *data.RampCeiling
+		}
+		if start > ceiling {
+			return nil, errx.New(errx.BadRequest, "ramp start cannot exceed ramp ceiling")
+		}
 	}
 	if data.ESPMatchMode != nil {
 		if err := validate.CampaignESPMatchMode(*data.ESPMatchMode); err != nil {
