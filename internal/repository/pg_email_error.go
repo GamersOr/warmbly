@@ -50,6 +50,9 @@ type EmailAccountErrorRepository interface {
 	GetByUserID(ctx context.Context, userID uuid.UUID, limit int) ([]EmailAccountError, *errx.Error)
 	Resolve(ctx context.Context, errorID uuid.UUID, resolvedBy string) *errx.Error
 	ResolveByMethod(ctx context.Context, accountID uuid.UUID, method string) *errx.Error
+	// ResolveByCodes resolves the account's unresolved errors carrying any of
+	// the given codes, for a flow that just fixed that class of error.
+	ResolveByCodes(ctx context.Context, accountID uuid.UUID, codes []string, resolvedBy string) *errx.Error
 	ResolveAllForAccount(ctx context.Context, accountID uuid.UUID, resolvedBy string) *errx.Error
 }
 
@@ -215,6 +218,29 @@ func (r *emailAccountErrorRepository) ResolveByMethod(ctx context.Context, accou
 	_, err := r.DB.Exec(ctx, query, resolvedBy, accountID, method)
 	if err != nil {
 		db.CaptureError(err, query, []any{resolvedBy, accountID, method}, "exec")
+		return errx.InternalError()
+	}
+
+	return nil
+}
+
+// ResolveByCodes resolves the account's unresolved errors carrying any of the given codes
+func (r *emailAccountErrorRepository) ResolveByCodes(ctx context.Context, accountID uuid.UUID, codes []string, resolvedBy string) *errx.Error {
+	if len(codes) == 0 {
+		return nil
+	}
+
+	query := `
+		UPDATE email_account_errors
+		SET resolved_at = NOW(), resolved_by = $1
+		WHERE email_account_id = $2
+		  AND error_code = ANY($3::text[])
+		  AND resolved_at IS NULL
+	`
+
+	_, err := r.DB.Exec(ctx, query, resolvedBy, accountID, codes)
+	if err != nil {
+		db.CaptureError(err, query, []any{resolvedBy, accountID, codes}, "exec")
 		return errx.InternalError()
 	}
 

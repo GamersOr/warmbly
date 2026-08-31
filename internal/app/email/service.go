@@ -59,10 +59,18 @@ type EmailService interface {
 	RefreshDomainAuth(ctx context.Context, orgID, emailAccountID string) (*dnsauth.Result, *errx.Error)
 	Delete(ctx context.Context, userID, emailAccountID string) *errx.Error
 
-	// Onboarding flow
+	// Onboarding flow. OAuthFinish's second return is true when the round
+	// trip renewed an existing mailbox (OAuthReauth) rather than connecting
+	// a new one, so the handler can audit and answer accordingly.
 	OAuthStart(ctx context.Context, userID string, orgID *uuid.UUID, provider models.InboxProvider) (*models.EmailOnboardingStartResponse, *errx.Error)
-	OAuthFinish(ctx context.Context, userID, code, state string) (*models.Email, *errx.Error)
+	OAuthFinish(ctx context.Context, userID, code, state string) (*models.Email, bool, *errx.Error)
 	OnboardSMTPIMAP(ctx context.Context, userID string, orgID *uuid.UUID, data *models.NewSMTPIMAPAccount) (*models.Email, *errx.Error)
+	// OAuthReauth starts an OAuth round trip that renews the tokens of an
+	// existing Gmail/Outlook mailbox after the provider invalidated them.
+	OAuthReauth(ctx context.Context, userID string, orgID *uuid.UUID, accountID uuid.UUID) (*models.EmailOnboardingStartResponse, *errx.Error)
+	// UpdateSMTPIMAPCredentials validates replacement credentials against a
+	// live worker, stores them, and puts the mailbox back to work.
+	UpdateSMTPIMAPCredentials(ctx context.Context, orgID *uuid.UUID, accountID uuid.UUID, creds *models.SmtpImap) (*models.Email, *errx.Error)
 
 	// Optional: wire in the webhook dispatcher after construction. Once
 	// set, account-lifecycle events fan out to customer webhook endpoints.
@@ -84,6 +92,9 @@ type EmailService interface {
 	WirePoolLink(repo repository.PoolLinkRepository)
 	// WireCloudLink marks managed mailboxes, which ship to the worker without a credential.
 	WireCloudLink(repo repository.CloudLinkRepository)
+	// WireAccountErrors lets a successful reconnect resolve the credential
+	// errors it just fixed, which is what clears the mailbox's error banner.
+	WireAccountErrors(repo repository.EmailAccountErrorRepository)
 	// Brokered OAuth (cloud side): consent on this deployment's OAuth app for a linked instance.
 	OAuthAuthorizeURL(provider models.InboxProvider, state string) (string, *errx.Error)
 	OAuthConnectWithCode(ctx context.Context, userID string, orgID *uuid.UUID, provider models.InboxProvider, code string) (*models.Email, *errx.Error)
@@ -132,6 +143,13 @@ type emailService struct {
 	orgRiskRepo repository.OrgRiskRepository
 	// lifecycleRepo backs the owner's hold; without it SetSendHold refuses.
 	lifecycleRepo repository.SendLifecycleRepository
+	// accountErrors is resolved-on-reconnect error state. Optional/nil-safe.
+	accountErrors repository.EmailAccountErrorRepository
+}
+
+// WireAccountErrors attaches the mailbox error log so reconnects can resolve it.
+func (s *emailService) WireAccountErrors(repo repository.EmailAccountErrorRepository) {
+	s.accountErrors = repo
 }
 
 // WireLifecycle attaches the cold-sending lifecycle.

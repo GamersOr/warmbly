@@ -194,6 +194,9 @@ type EmailOnboardingState struct {
 	OrganizationID *uuid.UUID `json:"organization_id,omitempty"`
 	Provider       string     `json:"provider"`
 	Nonce          string     `json:"nonce"`
+	// EmailAccountID marks a re-authorization round trip: the finish leg
+	// renews this mailbox's tokens instead of connecting a new one.
+	EmailAccountID *uuid.UUID `json:"email_account_id,omitempty"`
 }
 
 // EmailOnboardingStartResponse is returned from POST /emails/onboarding/oauth/start.
