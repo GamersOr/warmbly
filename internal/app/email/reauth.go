@@ -111,7 +111,7 @@ func (s *emailService) finishReauth(ctx context.Context, sess *models.EmailOnboa
 		return nil, errx.InternalError()
 	}
 
-	return s.reconnectAccount(ctx, account)
+	return s.reconnectAccount(ctx, account.ID)
 }
 
 // UpdateSMTPIMAPCredentials is the SMTP/IMAP counterpart of the OAuth reauth:
@@ -122,11 +122,13 @@ func (s *emailService) UpdateSMTPIMAPCredentials(ctx context.Context, orgID *uui
 		return nil, errx.ErrNoOrganization
 	}
 
-	account, xerr := s.emailRepository.Get(ctx, orgID.String(), accountID.String())
+	// GetByID, not the org-scoped Get: the reconnect tail needs the owner's
+	// user id, which Get does not select. Tenancy is enforced right below.
+	account, xerr := s.emailRepository.GetByID(ctx, accountID)
 	if xerr != nil {
 		return nil, xerr
 	}
-	if account == nil {
+	if account == nil || account.OrganizationID == nil || *account.OrganizationID != *orgID {
 		return nil, errx.ErrNotFound
 	}
 	if models.InboxProvider(account.Provider) != models.InboxProviderSMTPIMAP {
@@ -157,13 +159,22 @@ func (s *emailService) UpdateSMTPIMAPCredentials(ctx context.Context, orgID *uui
 		return nil, errx.InternalError()
 	}
 
-	return s.reconnectAccount(ctx, account)
+	return s.reconnectAccount(ctx, accountID)
 }
 
 // reconnectAccount is the shared tail of both reconnect flows: resolve the
 // credential errors the new secret just fixed, then reactivate — Update carries
 // the status through pool membership, the worker, and the realtime fanout.
-func (s *emailService) reconnectAccount(ctx context.Context, account *models.Email) (*models.Email, *errx.Error) {
+// It loads the row itself because the owner-scoped Update needs user_id, which
+// not every caller's read path selects.
+func (s *emailService) reconnectAccount(ctx context.Context, accountID uuid.UUID) (*models.Email, *errx.Error) {
+	account, xerr := s.emailRepository.GetByID(ctx, accountID)
+	if xerr != nil {
+		return nil, xerr
+	}
+	if account == nil {
+		return nil, errx.ErrNotFound
+	}
 	s.resolveCredentialErrors(ctx, account.ID)
 	status := "active"
 	return s.Update(ctx, account.UserID, account.ID.String(), &models.UpdateEmail{Status: &status})

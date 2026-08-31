@@ -29,7 +29,12 @@ func (s *stubReauthRepo) GetByID(ctx context.Context, emailAccountID uuid.UUID) 
 }
 
 func (s *stubReauthRepo) Get(ctx context.Context, orgID, emailAccountID string) (*models.Email, *errx.Error) {
-	return s.account, nil
+	// The real org-scoped Get does not select user_id or organization_id;
+	// mimic that so a caller depending on them fails here too (it did once).
+	partial := *s.account
+	partial.UserID = ""
+	partial.OrganizationID = nil
+	return &partial, nil
 }
 
 func (s *stubReauthRepo) GetOAuthCredentials(ctx context.Context, emailAccountID uuid.UUID) (*repository.OAuthCredentials, *errx.Error) {
