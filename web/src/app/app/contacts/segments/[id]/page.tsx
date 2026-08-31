@@ -3,7 +3,7 @@
 
 import React from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeftIcon, ChevronDownIcon, MegaphoneIcon, PencilIcon, Trash2Icon } from "lucide-react";
+import { ArrowLeftIcon, CheckIcon, ChevronDownIcon, CopyIcon, MegaphoneIcon, PencilIcon, Trash2Icon } from "lucide-react";
 import toast from "react-hot-toast";
 
 import ContactsTable from "@/components/app/contacts/ContactsTable";
@@ -94,6 +94,7 @@ function SegmentDetail() {
                         </div>
                         {s.description && <p className="text-[12px] text-slate-500 mt-0.5">{s.description}</p>}
                         <ConditionSummary conditions={s.conditions} match={s.match} specs={fields.data ?? []} included={s.included_count} excluded={s.excluded_count} />
+                        <SegmentIdChip id={s.id} />
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                         <button
@@ -131,6 +132,39 @@ function SegmentDetail() {
             <SegmentEditor open={editorOpen} onClose={() => setEditorOpen(false)} segment={s} />
             <AddSegmentToCampaignDialog open={campaignOpen} onClose={() => setCampaignOpen(false)} segment={s} />
         </div>
+    );
+}
+
+// The segment's ID, click to copy: it is what the API takes (segments CRUD,
+// members, contact search segment_ids), so integrators need it at hand.
+function SegmentIdChip({ id }: { id: string }) {
+    const [copied, setCopied] = React.useState(false);
+    async function copy() {
+        try {
+            await navigator.clipboard.writeText(id);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1500);
+        } catch {
+            toast.error("Could not copy");
+        }
+    }
+    return (
+        <>
+            <button
+                type="button"
+                onClick={copy}
+                aria-label={copied ? "Segment ID copied" : "Copy segment ID"}
+                title="Copy segment ID"
+                className="mt-1 inline-flex items-center gap-1.5 max-w-full font-mono text-[10.5px] text-slate-400 hover:text-slate-700 transition-colors"
+            >
+                <span className="uppercase tracking-[0.14em] font-sans font-medium text-[9.5px]">ID</span>
+                <span className="truncate">{id}</span>
+                {copied ? <CheckIcon className="w-3 h-3 text-emerald-600 shrink-0" /> : <CopyIcon className="w-3 h-3 shrink-0" />}
+            </button>
+            <span className="sr-only" role="status" aria-live="polite">
+                {copied ? "Segment ID copied" : ""}
+            </span>
+        </>
     );
 }
 
