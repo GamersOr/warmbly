@@ -19,10 +19,8 @@ func (s *uniboxService) GetByID(
 	var snippet string
 	var fixtureMessage bool
 
-	// ownerID is the mailbox owner's user_id and accountID the mailbox the
-	// message belongs to. The body's object-storage key is built from both, so
-	// the body must be fetched under the owner even when a different teammate
-	// opens the message via the org-scoped read.
+	// The body's object-storage key is built from the mailbox owner and
+	// account, not the caller, who may be any teammate on the org-scoped read.
 	var ownerID, accountID uuid.UUID
 
 	// Fetch email data by id index
@@ -60,8 +58,7 @@ func (s *uniboxService) GetByID(
 		fixtureMessage = isFixtureMessage(msg.MessageID)
 	}
 
-	// Fetch body from object storage. Keyed by the mailbox OWNER's user_id and
-	// the mailbox account id, not the caller's identity.
+	// Fetch body from object storage under the mailbox owner and account.
 	{
 		out, err := s.GetBody(ctx, ownerID, accountID, id)
 		if err != nil {

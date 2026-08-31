@@ -9,10 +9,8 @@ import (
 )
 
 // GetBody reads a message's full body blob. The key must match what the
-// worker's StoreBody writes (users/<owner>/emails/<mailbox>/<message>.emsg),
-// which is why the mailbox account id travels here alongside the owner:
-// reading under any other key finds nothing and the message degrades to its
-// one-line snippet.
+// worker's StoreBody writes; any other key finds nothing and the message
+// degrades to its one-line snippet.
 func (s *uniboxService) GetBody(
 	ctx context.Context,
 	userID, emailID, id uuid.UUID,
