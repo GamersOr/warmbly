@@ -623,8 +623,8 @@ function Section({ section, first = false }: { section: NavSection; first?: bool
  *     (shares the dashboard page's query cache; realtime invalidation keeps
  *     it current)
  *
- * The capacity denominator is a derived cap based on mailbox count × 50
- * (default cold cap from internal/config/constants.go).
+ * The capacity denominator sums each mailbox's configured campaign_limit
+ * (default 50/day, from internal/config/constants.go).
  */
 function LivePanel() {
     const emails = useAppStore((s) => s.emails);
@@ -638,7 +638,11 @@ function LivePanel() {
             const st = mailboxDisplayStatus(e);
             return st === "healthy" || st === "warming";
         }).length;
-        return { active: a, mailboxes: m, capacity: m * 50 };
+        // Capacity = the sum of each mailbox's configured daily campaign
+        // limit (default 50/day), not a flat count × 50 — a tuned-down or
+        // raised mailbox should move the meter's denominator.
+        const cap = emails.reduce((sum, e) => sum + (e.campaign_limit ?? 50), 0);
+        return { active: a, mailboxes: m, capacity: cap };
     }, [emails]);
 
     const { sentToday, trend } = useMemo(() => {
