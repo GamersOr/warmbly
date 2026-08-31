@@ -1,9 +1,11 @@
 package validate
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/warmbly/warmbly/internal/bitmask"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 )
@@ -24,7 +26,7 @@ func CampaignDescription(description string) *errx.Error {
 }
 
 func CampaignDailyLimit(val int) *errx.Error {
-	if val < 3 || val > 100 {
+	if val < config.CampaignDailyLimitMin || val > config.LimitMax {
 		return errx.ErrCampaignDailyLimit
 	}
 	return nil
@@ -113,14 +115,14 @@ func CampaignSenderWeight(w int) *errx.Error {
 // min(daily_limit, ramp_ceiling, per-mailbox cap), so a ceiling above the
 // daily limit can only be clamped down, never over-send.
 func CampaignRamp(start, increment, ceiling int) *errx.Error {
-	if start < 1 || start > 100 {
-		return errx.New(errx.BadRequest, "ramp start must be between 1 and 100")
+	if start < 1 || start > config.LimitMax {
+		return errx.New(errx.BadRequest, fmt.Sprintf("ramp start must be between 1 and %d", config.LimitMax))
 	}
 	if increment < 0 || increment > 100 {
 		return errx.New(errx.BadRequest, "ramp increment must be between 0 and 100")
 	}
-	if ceiling < 1 || ceiling > 100 {
-		return errx.New(errx.BadRequest, "ramp ceiling must be between 1 and 100")
+	if ceiling < 1 || ceiling > config.LimitMax {
+		return errx.New(errx.BadRequest, fmt.Sprintf("ramp ceiling must be between 1 and %d", config.LimitMax))
 	}
 	if start > ceiling {
 		return errx.New(errx.BadRequest, "ramp start cannot exceed ramp ceiling")

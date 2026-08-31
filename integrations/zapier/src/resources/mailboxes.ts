@@ -142,7 +142,7 @@ const updateMailbox = {
     inputFields: [
       mailboxField,
       { key: 'name', label: 'Display name', type: 'string' },
-      { key: 'campaign_limit', label: 'Daily campaign cap', type: 'integer', helpText: '3 to 100.' },
+      { key: 'campaign_limit', label: 'Daily campaign cap', type: 'integer', helpText: '0 to 5000. Default 50; 30 to 50 per day is the safe cold-outreach band.' },
       { key: 'min_wait_time', label: 'Minimum gap between sends (seconds)', type: 'integer' },
       { key: 'reply_to', label: 'Reply-to address', type: 'string' },
     ],
