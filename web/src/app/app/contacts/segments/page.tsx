@@ -92,6 +92,16 @@ function SegmentsList() {
         setEditorOpen(true);
     }
 
+    // The ID is what the segments API takes; copying needs no write permission.
+    async function copyId(s: Segment) {
+        try {
+            await navigator.clipboard.writeText(s.id);
+            toast.success("Segment ID copied");
+        } catch {
+            toast.error("Could not copy");
+        }
+    }
+
     function askDelete(s: Segment) {
         confirm.show(`Delete the segment "${s.name}"? Contacts themselves are kept.`, async () => {
             try {
@@ -202,6 +212,7 @@ function SegmentsList() {
                                         <PopoverMenuItem onSelect={guarded(() => openEdit(s))}>Edit conditions</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={campaignGuarded(() => setCampaignFor(s))}>Add to campaign</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={guarded(() => duplicate(s))}>Duplicate</PopoverMenuItem>
+                                        <PopoverMenuItem onSelect={() => copyId(s)}>Copy segment ID</PopoverMenuItem>
                                         <PopoverMenuSeparator />
                                         <PopoverMenuItem onSelect={guarded(() => askDelete(s))}>Delete</PopoverMenuItem>
                                     </PopoverMenuContent>

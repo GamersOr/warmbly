@@ -52,6 +52,12 @@ Sequences can pin as well: the **Add to segment** and **Remove from segment** ac
 - **Duplicate**: the segment menu copies a definition to start a variation from.
 - **Search and export**: the contact search and export accept `segment_ids`, so anything that takes a contact filter can be scoped to a segment.
 
+## Segments in the API
+
+Everything above can be driven from the [API](/api/reference/contacts/#segments): list, create, update and delete segments, pin contacts in or out, look up a contact's segments, and enrol a segment into a campaign. Contact search and export take `segment_ids` to scope any contact query to a segment, so an external system (a signup form, a CRM sync) can keep a segment current and let campaigns pick it up from there.
+
+API calls address a segment by its ID. It is shown at the bottom of the segment page header (click it to copy), in the **Copy segment ID** entry of a segment's row menu on the Segments tab, and in every segment the API returns. Reads take the `READ_CONTACTS` key scope, writes `WRITE_CONTACTS`, and enrolling into a campaign `WRITE_CAMPAIGNS`.
+
 <Callout type="info" title="Segments and categories">
 Categories are labels you put on a contact. Segments are rules that read those labels (and everything else) to decide who belongs. Use a category to mark a fact about a contact, and a segment to describe an audience.
 </Callout>
@@ -68,4 +74,5 @@ Categories are labels you put on a contact. Segments are rules that read those l
   <Card title="Contacts and CRM" href="/guides/contacts-crm/" />
   <Card title="Campaigns" href="/guides/campaigns/" />
   <Card title="Analytics" href="/guides/analytics/" />
+  <Card title="Segments API reference" href="/api/reference/contacts/#segments" />
 </Cards>
