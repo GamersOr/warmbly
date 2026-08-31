@@ -99,12 +99,19 @@ func (s *emailService) finishReauth(ctx context.Context, sess *models.EmailOnboa
 	}
 
 	// A repeat consent may omit the refresh token; keep the stored one rather
-	// than blanking the row.
+	// than blanking the row. Writing without one would seal an empty string
+	// over the stored token and end all future access-token refreshes, so a
+	// failed fallback read refuses the reauth instead.
 	refresh := tok.RefreshToken
 	if refresh == "" {
-		if creds, cerr := s.emailRepository.GetOAuthCredentials(ctx, account.ID); cerr == nil && creds != nil {
-			refresh = creds.RefreshToken
+		creds, cerr := s.emailRepository.GetOAuthCredentials(ctx, account.ID)
+		if cerr != nil {
+			return nil, cerr
 		}
+		if creds == nil || creds.RefreshToken == "" {
+			return nil, errx.ErrEmailReauthNoRefreshToken
+		}
+		refresh = creds.RefreshToken
 	}
 
 	if err := s.emailRepository.RefreshBoxToken(ctx, account.ID, tok.AccessToken, refresh, tok.Expiry); err != nil {
@@ -162,11 +169,13 @@ func (s *emailService) UpdateSMTPIMAPCredentials(ctx context.Context, orgID *uui
 	return s.reconnectAccount(ctx, accountID)
 }
 
-// reconnectAccount is the shared tail of both reconnect flows: resolve the
-// credential errors the new secret just fixed, then reactivate — Update carries
-// the status through pool membership, the worker, and the realtime fanout.
-// It loads the row itself because the owner-scoped Update needs user_id, which
-// not every caller's read path selects.
+// reconnectAccount is the shared tail of both reconnect flows: reactivate,
+// then resolve the credential errors the new secret just fixed — Update
+// carries the status through pool membership, the worker, and the realtime
+// fanout. Errors resolve only after a successful reactivation, or a failed
+// Update would clear the banner (and its reconnect button) while the mailbox
+// stays broken. It loads the row itself because the owner-scoped Update needs
+// user_id, which not every caller's read path selects.
 func (s *emailService) reconnectAccount(ctx context.Context, accountID uuid.UUID) (*models.Email, *errx.Error) {
 	account, xerr := s.emailRepository.GetByID(ctx, accountID)
 	if xerr != nil {
@@ -175,9 +184,13 @@ func (s *emailService) reconnectAccount(ctx context.Context, accountID uuid.UUID
 	if account == nil {
 		return nil, errx.ErrNotFound
 	}
-	s.resolveCredentialErrors(ctx, account.ID)
 	status := "active"
-	return s.Update(ctx, account.UserID, account.ID.String(), &models.UpdateEmail{Status: &status})
+	updated, xerr := s.Update(ctx, account.UserID, account.ID.String(), &models.UpdateEmail{Status: &status})
+	if xerr != nil {
+		return nil, xerr
+	}
+	s.resolveCredentialErrors(ctx, account.ID)
+	return updated, nil
 }
 
 // resolveCredentialErrors clears the credential-class error rows; unrelated

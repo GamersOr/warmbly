@@ -18,6 +18,7 @@ type stubReauthRepo struct {
 
 	account       *models.Email
 	storedRefresh string
+	updateErr     *errx.Error
 
 	wroteAccess  string
 	wroteRefresh string
@@ -48,6 +49,9 @@ func (s *stubReauthRepo) RefreshBoxToken(ctx context.Context, id uuid.UUID, acce
 }
 
 func (s *stubReauthRepo) Update(ctx context.Context, userID, emailAccountID string, udata *models.UpdateEmail) (*models.Email, *errx.Error) {
+	if s.updateErr != nil {
+		return nil, s.updateErr
+	}
 	s.updated = udata
 	return s.account, nil
 }
@@ -137,6 +141,35 @@ func TestFinishReauth_KeepsStoredRefreshTokenWhenProviderOmitsIt(t *testing.T) {
 	}
 	if repo.wroteRefresh != "stored-refresh" {
 		t.Fatalf("stored refresh token must be kept, got %q", repo.wroteRefresh)
+	}
+}
+
+func TestFinishReauth_RefusesWhenNoRefreshTokenAnywhere(t *testing.T) {
+	svc, repo, _, sess := reauthFixture("gmail", "owner@example.com")
+	repo.storedRefresh = ""
+
+	tok := &oauth2.Token{AccessToken: "new-access"} // provider omitted it, nothing stored
+	_, xerr := svc.finishReauth(context.Background(), sess, models.InboxProviderGoogle, tok, &inboxOwner{Email: "owner@example.com"})
+	if xerr != errx.ErrEmailReauthNoRefreshToken {
+		t.Fatalf("expected ErrEmailReauthNoRefreshToken, got %v", xerr)
+	}
+	if repo.wroteAccess != "" {
+		t.Fatalf("must not seal an empty refresh token over the stored row")
+	}
+}
+
+func TestFinishReauth_KeepsErrorsWhenReactivationFails(t *testing.T) {
+	svc, repo, errs, sess := reauthFixture("gmail", "owner@example.com")
+	repo.updateErr = errx.InternalError()
+
+	tok := &oauth2.Token{AccessToken: "new-access", RefreshToken: "new-refresh"}
+	_, xerr := svc.finishReauth(context.Background(), sess, models.InboxProviderGoogle, tok, &inboxOwner{Email: "owner@example.com"})
+	if xerr == nil {
+		t.Fatal("expected the failed reactivation to surface")
+	}
+	// The banner (and its reconnect button) must survive a failed reactivation.
+	if len(errs.resolved) != 0 {
+		t.Fatalf("errors must stay unresolved when reactivation fails, resolved %v", errs.resolved)
 	}
 }
 
