@@ -716,13 +716,13 @@ function SendingStep({ draft, patch }: { draft: Draft; patch: (p: Partial<Draft>
                     <div className="min-w-0">
                         <p className="text-[12.5px] text-slate-900 font-medium">Daily limit per mailbox</p>
                         <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
-                            3 to 100. Stay near 50 until the mailboxes have proven their reputation.
+                            3 to 5,000. Stay near 50 until the mailboxes have proven their reputation.
                         </p>
                     </div>
                     <NumberInput
                         value={draft.dailyLimit}
                         min={3}
-                        max={100}
+                        max={5000}
                         onChange={(v) => patch({ dailyLimit: v })}
                         className="w-24 shrink-0"
                     />

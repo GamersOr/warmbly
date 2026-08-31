@@ -1013,8 +1013,8 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		argPos++
 	}
 	if data.RampStart != nil {
-		if *data.RampStart < 1 || *data.RampStart > 100 {
-			return nil, errx.New(errx.BadRequest, "ramp start must be between 1 and 100")
+		if *data.RampStart < 1 || *data.RampStart > config.LimitMax {
+			return nil, errx.New(errx.BadRequest, fmt.Sprintf("ramp start must be between 1 and %d", config.LimitMax))
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "ramp_start", argPos))
 		args = append(args, *data.RampStart)
@@ -1029,8 +1029,8 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		argPos++
 	}
 	if data.RampCeiling != nil {
-		if *data.RampCeiling < 1 || *data.RampCeiling > 100 {
-			return nil, errx.New(errx.BadRequest, "ramp ceiling must be between 1 and 100")
+		if *data.RampCeiling < 1 || *data.RampCeiling > config.LimitMax {
+			return nil, errx.New(errx.BadRequest, fmt.Sprintf("ramp ceiling must be between 1 and %d", config.LimitMax))
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "ramp_ceiling", argPos))
 		args = append(args, *data.RampCeiling)

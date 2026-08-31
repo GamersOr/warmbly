@@ -845,7 +845,7 @@ func (r *emailRepository) Update(ctx context.Context, userID, emailAccountID str
 		}
 	}
 	if udata.CampaignLimit != nil {
-		if *udata.CampaignLimit < 0 || *udata.CampaignLimit > 100 {
+		if *udata.CampaignLimit < config.LimitMin || *udata.CampaignLimit > config.LimitMax {
 			return nil, errx.ErrEmailCampaignLimit
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "campaign_limit", argPos))

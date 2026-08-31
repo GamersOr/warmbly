@@ -10,7 +10,7 @@ import SenderSelector from "./SenderSelector";
 import { SettingRow, Toggle } from "./components/CampaignPreferenceBoolBox";
 
 const DAILY_MIN = 3;
-const DAILY_MAX = 100;
+const DAILY_MAX = 5000;
 
 type SetCampaign = React.Dispatch<React.SetStateAction<Campaign>>;
 
@@ -61,6 +61,7 @@ export function SendingAccountsSection({
     setExplicitAccounts: React.Dispatch<React.SetStateAction<string[]>>;
 }) {
     const dailyInvalid = newCampaign.daily_limit < DAILY_MIN || newCampaign.daily_limit > DAILY_MAX;
+    const dailyHigh = !dailyInvalid && newCampaign.daily_limit > 100;
     return (
         <div className="space-y-4">
             <div>
@@ -86,10 +87,12 @@ export function SendingAccountsSection({
                     suffix="emails / day"
                     className="w-48"
                 />
-                <p className={`text-[11px] mt-1.5 ${dailyInvalid ? "text-rose-500" : "text-slate-400"}`}>
+                <p className={`text-[11px] mt-1.5 ${dailyInvalid ? "text-rose-500" : dailyHigh ? "text-amber-600" : "text-slate-400"}`}>
                     {dailyInvalid
                         ? `Must be between ${DAILY_MIN} and ${DAILY_MAX}.`
-                        : `${DAILY_MIN}–${DAILY_MAX}. Default 50 — stay conservative until reputation is proven.`}
+                        : dailyHigh
+                          ? "Well above the 30–50/day safe cold-outreach band. Every mailbox in the pool needs the reputation and provider capacity to carry this."
+                          : `${DAILY_MIN}–${DAILY_MAX}. Default 50 — stay conservative until reputation is proven.`}
                 </p>
             </div>
         </div>
