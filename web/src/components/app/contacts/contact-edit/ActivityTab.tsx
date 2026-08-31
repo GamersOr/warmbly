@@ -57,6 +57,7 @@ import type {
 } from "@/lib/api/models/app/contacts/ContactCampaignState";
 import type { LeadStatus } from "@/lib/api/models/app/contacts/Contact";
 import useClickOutside from "@/hooks/useClickOutside";
+import { useFlipAlignment } from "@/hooks/useFlipPlacement";
 import { fmtAbsolute, fmtRelative } from "./format";
 
 type FilterId =
@@ -755,6 +756,9 @@ function DateRange({
     const [open, setOpen] = React.useState(false);
     const ref = React.useRef<HTMLDivElement>(null);
     useClickOutside(ref, () => setOpen(false));
+    // The trigger wraps anywhere along the toolbar row, so the panel side is
+    // measured, not fixed: a fixed right-0 clipped it against the drawer edge.
+    const align = useFlipAlignment(ref, open, 256);
 
     const active = !!from || !!to;
     const label = active
@@ -784,7 +788,9 @@ function DateRange({
                 {label}
             </button>
             {open && (
-                <div className="absolute left-0 md:left-auto md:right-0 top-7 z-50 w-64 max-w-[min(256px,calc(100vw-2rem))] p-2.5 rounded-md border border-slate-200 bg-white shadow-lg">
+                <div
+                    className={`absolute ${align === "right" ? "right-0" : "left-0"} top-7 z-50 w-64 max-w-[min(256px,calc(100vw-2rem))] p-2.5 rounded-md border border-slate-200 bg-white shadow-lg`}
+                >
                     <div className="grid grid-cols-2 gap-2">
                         <div>
                             <label className="block text-[10px] uppercase tracking-[0.12em] font-medium text-slate-500 mb-1">
@@ -974,7 +980,8 @@ function EventRow({
                                     <span className="text-slate-400 uppercase tracking-[0.1em] text-[10px] font-medium pt-px">
                                         {k}
                                     </span>
-                                    <span className="text-slate-700 min-w-0 break-words whitespace-pre-wrap">
+                                    {/* wrap-anywhere: break-words leaves grid min-content wide, so long URLs overflowed the card */}
+                                    <span className="text-slate-700 min-w-0 wrap-anywhere whitespace-pre-wrap">
                                         {typeof v === "string" ? (
                                             <Highlight text={v} q={highlight} />
                                         ) : (

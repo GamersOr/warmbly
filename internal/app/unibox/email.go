@@ -19,10 +19,11 @@ func (s *uniboxService) GetByID(
 	var snippet string
 	var fixtureMessage bool
 
-	// ownerID is the mailbox owner's user_id. The S3 body key is built from it
-	// (emails/<ownerID>/<id>), so the body must be fetched under the owner even
-	// when a different teammate opens the message via the org-scoped read.
-	var ownerID uuid.UUID
+	// ownerID is the mailbox owner's user_id and accountID the mailbox the
+	// message belongs to. The body's object-storage key is built from both, so
+	// the body must be fetched under the owner even when a different teammate
+	// opens the message via the org-scoped read.
+	var ownerID, accountID uuid.UUID
 
 	// Fetch email data by id index
 	{
@@ -32,6 +33,7 @@ func (s *uniboxService) GetByID(
 			return nil, errx.InternalError()
 		}
 		ownerID = owner
+		accountID = msg.EmailID
 		resp.ID = msg.ID
 		resp.GmailID = msg.GmailID
 		resp.UID = msg.UID
@@ -58,10 +60,10 @@ func (s *uniboxService) GetByID(
 		fixtureMessage = isFixtureMessage(msg.MessageID)
 	}
 
-	// Fetch body from s3 storage. Keyed by the mailbox OWNER's user_id, not the
-	// caller's: the key is emails/<ownerID>/<id>.
+	// Fetch body from object storage. Keyed by the mailbox OWNER's user_id and
+	// the mailbox account id, not the caller's identity.
 	{
-		out, err := s.GetBody(ctx, ownerID, id)
+		out, err := s.GetBody(ctx, ownerID, accountID, id)
 		if err != nil {
 			// A missing blob is a degraded read, not a broken endpoint: mail
 			// synced before body storage existed, or a blob that never landed,

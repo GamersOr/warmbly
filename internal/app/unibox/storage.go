@@ -1,23 +1,23 @@
 package unibox
 
 import (
-	"bytes"
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/pkg/emsg"
 )
 
-func GetEmailKey(userID, id uuid.UUID) string {
-	return "emails/" + userID.String() + "/" + id.String()
-
-}
-
+// GetBody reads a message's full body blob. The key must match what the
+// worker's StoreBody writes (users/<owner>/emails/<mailbox>/<message>.emsg),
+// which is why the mailbox account id travels here alongside the owner:
+// reading under any other key finds nothing and the message degrades to its
+// one-line snippet.
 func (s *uniboxService) GetBody(
 	ctx context.Context,
-	userID, id uuid.UUID,
+	userID, emailID, id uuid.UUID,
 ) (*emsg.EmailBlob, error) {
-	key := GetEmailKey(userID, id)
+	key := config.StorageEndpointEmailBody(userID, emailID, id)
 	body, err := s.blob.Get(ctx, key)
 	if err != nil {
 		return nil, err
@@ -30,25 +30,4 @@ func (s *uniboxService) GetBody(
 	}
 
 	return obj, nil
-}
-
-func (s *uniboxService) PutBody(
-	ctx context.Context,
-	userID, id uuid.UUID,
-	plainText string,
-	htmlText string,
-) error {
-	key := GetEmailKey(userID, id)
-
-	blob := &emsg.EmailBlob{
-		PlainText: []byte(plainText),
-		HTMLBody:  []byte(htmlText),
-	}
-
-	body, err := blob.EncodeBinary()
-	if err != nil {
-		return err
-	}
-
-	return s.blob.Put(ctx, key, bytes.NewReader(body), "")
 }
