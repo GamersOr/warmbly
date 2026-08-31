@@ -53,7 +53,7 @@ func (s *uniboxService) StartBodyTextBackfill(ctx context.Context) {
 
 		for _, t := range targets {
 			cursor = t.ID
-			body, gerr := s.GetBody(ctx, t.UserID, t.ID)
+			body, gerr := s.GetBody(ctx, t.UserID, t.EmailID, t.ID)
 			if gerr != nil {
 				// A missing blob is expected here: fixtures and mail synced
 				// before body storage existed have no object to read.
