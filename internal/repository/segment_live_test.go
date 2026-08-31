@@ -241,3 +241,75 @@ func TestLiveSegmentOverridesNestingAndCampaign(t *testing.T) {
 		t.Fatalf("acme after nested delete: %+v", got)
 	}
 }
+
+// Issue #277: segments linked to a campaign are a live audience source. These
+// prove the link CRUD, the incremental enrolment sync, the sweep scan and the
+// delete guard against the real schema.
+func TestLiveSegmentCampaignLinks(t *testing.T) {
+	f, repo := newSegmentFixture(t)
+	ctx := context.Background()
+
+	acme, xerr := repo.Create(ctx, f.org, &f.owner, &models.Segment{
+		Name: "Acme live", Color: "#0284c7", Match: models.SegmentMatchAll,
+		Conditions: []models.SegmentCondition{{Field: "company", Operator: "equals", Value: "acme"}},
+	})
+	if xerr != nil {
+		t.Fatalf("create: %v", xerr)
+	}
+
+	// Linking replaces the set; a segment the org does not own is refused.
+	if xerr := repo.SetForCampaign(ctx, f.org, f.other, []uuid.UUID{acme.ID}); xerr != nil {
+		t.Fatalf("set: %v", xerr)
+	}
+	if xerr := repo.SetForCampaign(ctx, f.org, f.other, []uuid.UUID{uuid.New()}); xerr == nil {
+		t.Fatalf("unknown segment accepted")
+	}
+	links, xerr := repo.ListForCampaign(ctx, f.org, f.other)
+	if xerr != nil || len(links) != 1 || links[0].SegmentID != acme.ID || links[0].ContactCount != 2 {
+		t.Fatalf("links = %+v, %v", links, xerr)
+	}
+
+	// Sync enrols current members once; a second pass adds nothing.
+	added, xerr := repo.SyncCampaignSegments(ctx, f.org, f.other)
+	if xerr != nil || added != 2 {
+		t.Fatalf("sync = %d, %v", added, xerr)
+	}
+	if added, _ = repo.SyncCampaignSegments(ctx, f.org, f.other); added != 0 {
+		t.Fatalf("second sync = %d, want 0", added)
+	}
+
+	// A contact pinned into the segment is picked up by the next sync.
+	if _, xerr := repo.SetMembers(ctx, f.org, acme.ID, []uuid.UUID{f.bob}, models.SegmentMemberInclude); xerr != nil {
+		t.Fatalf("include: %v", xerr)
+	}
+	if added, _ = repo.SyncCampaignSegments(ctx, f.org, f.other); added != 1 {
+		t.Fatalf("post-include sync = %d, want 1", added)
+	}
+
+	// The sweep and the targeted lookup both see the linked campaign, and the
+	// delete guard reports it by name.
+	linked, xerr := repo.LinkedCampaigns(ctx, &f.org)
+	if xerr != nil || len(linked) != 1 || linked[0].CampaignID != f.other || linked[0].OrganizationID != f.org {
+		t.Fatalf("linked = %+v, %v", linked, xerr)
+	}
+	byseg, xerr := repo.LinkedCampaignsForSegments(ctx, f.org, []uuid.UUID{acme.ID})
+	if xerr != nil || len(byseg) != 1 || byseg[0].CampaignID != f.other {
+		t.Fatalf("by segment = %+v, %v", byseg, xerr)
+	}
+	names, xerr := repo.CampaignsUsingSegment(ctx, f.org, acme.ID)
+	if xerr != nil || len(names) != 1 || names[0] != "RevOps outreach" {
+		t.Fatalf("using = %v, %v", names, xerr)
+	}
+
+	// Unlinking everything keeps the enrolled leads (alice, carol, bob).
+	if xerr := repo.SetForCampaign(ctx, f.org, f.other, []uuid.UUID{}); xerr != nil {
+		t.Fatalf("unlink: %v", xerr)
+	}
+	if links, _ = repo.ListForCampaign(ctx, f.org, f.other); len(links) != 0 {
+		t.Fatalf("links after unlink = %+v", links)
+	}
+	inOther := models.SegmentCondition{Field: "campaign", Operator: "in", Values: []string{f.other.String()}}
+	if got := segCount(t, repo, f.org, models.SegmentMatchAll, inOther); got != 3 {
+		t.Errorf("leads after unlink = %d, want 3", got)
+	}
+}

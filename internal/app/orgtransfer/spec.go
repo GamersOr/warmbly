@@ -347,6 +347,12 @@ var Tables = []Table{
 		Scope: `campaign_id IN ` + orgCampaigns,
 	},
 	{
+		// Segments travel in the contacts group, which campaigns already
+		// require, so both ends of the link exist by the time this applies.
+		Name: "campaign_segments", Group: models.OrgDataGroupCampaigns,
+		Scope: `campaign_id IN ` + orgCampaigns,
+	},
+	{
 		Name: "campaign_ab_assignments", Group: models.OrgDataGroupCampaigns,
 		Scope: `campaign_id IN ` + orgCampaigns,
 	},

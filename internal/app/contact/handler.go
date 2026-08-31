@@ -67,6 +67,7 @@ func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID
 		attached = append(attached, contacts[i].Campaigns...)
 	}
 	s.wakeCampaigns(ctx, orgID, attached)
+	s.syncSegmentCampaigns(ctx, orgID)
 	return created, nil
 }
 
@@ -135,6 +136,7 @@ func (s *contactService) BulkUpdate(ctx context.Context, userID string, orgID uu
 
 	s.publishContactsReload(ctx, userID, "contacts:bulk_update")
 	s.wakeCampaigns(ctx, orgID, data.AddCampaigns)
+	s.syncSegmentCampaigns(ctx, orgID)
 	return updated, nil
 }
 
@@ -146,6 +148,7 @@ func (s *contactService) Update(ctx context.Context, userID, contactID string, o
 
 	s.publishContactsReload(ctx, userID, "contacts:update:"+contactID)
 	s.wakeCampaigns(ctx, orgID, data.Campaigns)
+	s.syncSegmentCampaigns(ctx, orgID)
 	return updated, nil
 }
 

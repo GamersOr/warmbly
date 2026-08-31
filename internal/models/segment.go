@@ -235,6 +235,32 @@ type SegmentAddToCampaignResult struct {
 	Members    int       `json:"members"`
 }
 
+// CampaignSegmentsMax bounds how many segments one campaign can link.
+const CampaignSegmentsMax = 20
+
+// CampaignSegmentsWrite replaces a campaign's linked segments.
+type CampaignSegmentsWrite struct {
+	SegmentIDs []string `json:"segment_ids"`
+}
+
+// CampaignSegmentLink is one segment linked to a campaign, for the Leads tab.
+type CampaignSegmentLink struct {
+	SegmentID    uuid.UUID `json:"segment_id"`
+	Name         string    `json:"name"`
+	Color        string    `json:"color"`
+	Description  string    `json:"description"`
+	ContactCount int       `json:"contact_count"`
+	LinkedAt     time.Time `json:"linked_at"`
+}
+
+// LinkedCampaign is one campaign that has segments attached, for the sync
+// sweep and the targeted per-segment syncs.
+type LinkedCampaign struct {
+	CampaignID     uuid.UUID
+	OrganizationID uuid.UUID
+	Status         string
+}
+
 // ContactSegment is one segment a contact belongs to, with its override.
 type ContactSegment struct {
 	ID    uuid.UUID `json:"id"`
