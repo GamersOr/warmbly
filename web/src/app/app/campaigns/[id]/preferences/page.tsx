@@ -28,7 +28,7 @@ import useCampaignSenders from "@/lib/api/hooks/app/campaigns/useCampaignSenders
 import useReplaceCampaignSenders from "@/lib/api/hooks/app/campaigns/useReplaceCampaignSenders";
 
 const DAILY_MIN = 3;
-const DAILY_MAX = 100;
+const DAILY_MAX = 5000;
 
 // One scrolling page — every section stacks in order and the left nav is a
 // scrollspy over these ids.

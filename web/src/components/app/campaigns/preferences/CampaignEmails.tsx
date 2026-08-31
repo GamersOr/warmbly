@@ -140,7 +140,7 @@ export function RotationRampSection({
                             <NumberInput
                                 value={newCampaign.ramp_start}
                                 min={1}
-                                max={500}
+                                max={5000}
                                 onChange={(v) => setNewCampaign((bef) => ({ ...bef, ramp_start: v }))}
                                 suffix="/ day"
                                 className="w-36"
@@ -162,7 +162,7 @@ export function RotationRampSection({
                             <NumberInput
                                 value={newCampaign.ramp_ceiling}
                                 min={1}
-                                max={500}
+                                max={5000}
                                 onChange={(v) => setNewCampaign((bef) => ({ ...bef, ramp_ceiling: v }))}
                                 suffix="/ day"
                                 className="w-36"
