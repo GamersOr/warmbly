@@ -425,6 +425,12 @@ func Run(
 				onboardingEmails.POST("/oauth/start", h.StartEmailOAuth)
 				onboardingEmails.POST("/oauth/finish", h.FinishEmailOAuth)
 				onboardingEmails.POST("/smtp-imap", h.ConnectEmailSMTPIMAP)
+				// Reconnect flows for an existing mailbox whose credential the
+				// provider invalidated (issue #274). They mutate an existing
+				// org asset, so unlike first connect they sit behind the same
+				// manage-emails bar as PATCH /emails/:id.
+				onboardingEmails.POST("/oauth/reauth/:id", m.RequireOrganization(), m.RequirePermission(models.PermManageEmails), h.ReauthEmailOAuth)
+				onboardingEmails.PUT("/smtp-imap/:id", m.RequireOrganization(), m.RequirePermission(models.PermManageEmails), h.UpdateEmailSMTPIMAP)
 			}
 
 			// Integration OAuth handshake is JWT-only — it writes user-encrypted

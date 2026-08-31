@@ -15,7 +15,7 @@ Open **Accounts** and choose **Add account**.
 | Outlook / Microsoft 365 | OAuth (`outlook`) | Recommended. No password stored. Runs on Microsoft Graph |
 | Any other server | IMAP + SMTP (`smtp_imap`) | Custom domains, self-hosted, or providers without OAuth |
 
-**OAuth** sends you to your provider's consent screen and returns a token instead of a password. Both OAuth providers use the provider's native API, never IMAP or SMTP, so consent asks to send mail and to read and organize your mailbox. It survives password changes and needs no app passwords or server settings.
+**OAuth** sends you to your provider's consent screen and returns a token instead of a password. Both OAuth providers use the provider's native API, never IMAP or SMTP, so consent asks to send mail and to read and organize your mailbox. It needs no app passwords or server settings. Note that Google revokes Gmail tokens when the account's password changes, so a password change there means [re-authorizing the mailbox](#reconnecting-an-account) once.
 
 **IMAP / SMTP** needs host, port, username, and password for each direction:
 
@@ -31,6 +31,17 @@ With two-factor authentication on, generate an app password in your provider's s
 </Callout>
 
 **Limits**: `200` mailboxes per workspace by default (higher allowances come through a reviewed limit-increase request), and `5` new mailboxes per workspace per day as an abuse guardrail that resets daily. Spread large onboarding batches across days.
+
+## Reconnecting an account
+
+When the provider stops accepting a mailbox's stored credential (a password change, a revoked grant, an expired app password), the mailbox is taken out of sending and syncing and its drawer shows the reason under **Needs attention**, with the fix right on the error:
+
+- **Gmail and Outlook**: a **Re-authorize** button re-runs the provider consent in a popup, preselecting the mailbox's own address. The consent must be for that same address; signing in with a different account is refused instead of quietly connecting the wrong mailbox.
+- **SMTP / IMAP**: an **Update credentials** button opens a form for the new password (or new host and port). The replacement is validated against your server before it is saved, the same as at connect time.
+
+A successful reconnect stores the new credential, clears the authentication error, reactivates the mailbox on its existing worker, and it resumes syncing from where it stopped. Nothing else changes: settings, history, warmup progress, and campaign membership all stay.
+
+Reconnecting never counts against the mailbox limit or the daily connect guardrail, so a workspace at its cap can still fix a broken mailbox. A mailbox whose sign-in is held by Warmbly Cloud is reconnected from your cloud workspace instead; the button says so if you try locally.
 
 ## What gets synced
 

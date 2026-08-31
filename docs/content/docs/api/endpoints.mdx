@@ -310,6 +310,7 @@ These never accept an API key. They depend on a human-bound session: billing flo
 - `POST /auth/logout`, `POST /auth/logout-all`, `GET /auth/me`, `PATCH /auth/me/onboarding`
 - `POST /auth/me/avatar`, `DELETE /auth/me/avatar`
 - `POST /emails/onboarding/oauth/start`, `POST /emails/onboarding/oauth/finish`, `POST /emails/onboarding/smtp-imap`
+- `POST /emails/onboarding/oauth/reauth/:id`, `PUT /emails/onboarding/smtp-imap/:id` (reconnect an existing mailbox after a credential change; JWT permission `MANAGE_EMAILS`)
 - `GET /oauth/authorize/details`, `POST /oauth/authorize` (the consent flow: a human approves a third-party app)
 - `GET /oauth/authorized-apps`, `DELETE /oauth/authorized-apps/:id` (apps the user has authorized)
 - `POST /getaway` (websocket bootstrap)
