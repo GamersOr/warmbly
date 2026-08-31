@@ -1013,8 +1013,8 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		argPos++
 	}
 	if data.RampStart != nil {
-		if *data.RampStart < 1 || *data.RampStart > 100 {
-			return nil, errx.New(errx.BadRequest, "ramp start must be between 1 and 100")
+		if *data.RampStart < 1 || *data.RampStart > config.LimitMax {
+			return nil, errx.New(errx.BadRequest, fmt.Sprintf("ramp start must be between 1 and %d", config.LimitMax))
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "ramp_start", argPos))
 		args = append(args, *data.RampStart)
@@ -1029,15 +1029,38 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		argPos++
 	}
 	if data.RampCeiling != nil {
-		if *data.RampCeiling < 1 || *data.RampCeiling > 100 {
-			return nil, errx.New(errx.BadRequest, "ramp ceiling must be between 1 and 100")
+		if *data.RampCeiling < 1 || *data.RampCeiling > config.LimitMax {
+			return nil, errx.New(errx.BadRequest, fmt.Sprintf("ramp ceiling must be between 1 and %d", config.LimitMax))
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "ramp_ceiling", argPos))
 		args = append(args, *data.RampCeiling)
 		argPos++
 	}
-	if data.RampStart != nil && data.RampCeiling != nil && *data.RampStart > *data.RampCeiling {
-		return nil, errx.New(errx.BadRequest, "ramp start cannot exceed ramp ceiling")
+	// start <= ceiling must hold on the EFFECTIVE pair: a partial update is
+	// checked against the stored counterpart or it could persist an invalid pair.
+	if data.RampStart != nil || data.RampCeiling != nil {
+		start, ceiling := 0, 0
+		if data.RampStart == nil || data.RampCeiling == nil {
+			err := r.DB.QueryRow(ctx,
+				"SELECT ramp_start, ramp_ceiling FROM campaigns WHERE user_id = $1 AND id = $2",
+				userID, campaignID).Scan(&start, &ceiling)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, errx.ErrNotFound
+				}
+				db.CaptureError(err, "", nil, "queryrow")
+				return nil, errx.InternalError()
+			}
+		}
+		if data.RampStart != nil {
+			start = *data.RampStart
+		}
+		if data.RampCeiling != nil {
+			ceiling = *data.RampCeiling
+		}
+		if start > ceiling {
+			return nil, errx.New(errx.BadRequest, "ramp start cannot exceed ramp ceiling")
+		}
 	}
 	if data.ESPMatchMode != nil {
 		if err := validate.CampaignESPMatchMode(*data.ESPMatchMode); err != nil {
