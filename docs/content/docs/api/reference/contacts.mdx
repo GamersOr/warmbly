@@ -982,7 +982,7 @@ Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
 
 ## Segments
 
-Segments are saved contact audiences: a list of conditions plus per-contact manual overrides. Membership is evaluated live on every read, so a segment never needs rebuilding. Every segment endpoint takes the contact scopes, except enrolling into a campaign, which writes leads and takes `WRITE_CAMPAIGNS`. Every endpoint here addresses a segment by its `id`; besides `GET /segments`, the dashboard shows it on the segment page header (click to copy) and in the row menu of the Segments tab.
+Segments are saved contact audiences: a list of conditions plus per-contact manual overrides. Membership is evaluated live on every read, so a segment never needs rebuilding. Every segment endpoint takes the contact scopes, except enrolling into a campaign, which writes leads and takes `WRITE_CAMPAIGNS`. Endpoints that operate on an existing segment address it by its `id`; besides `GET /segments`, the dashboard shows that ID on the segment page header (click to copy) and in the row menu of the Segments tab.
 
 A segment object:
 

@@ -149,16 +149,22 @@ function SegmentIdChip({ id }: { id: string }) {
         }
     }
     return (
-        <button
-            type="button"
-            onClick={copy}
-            title="Copy segment ID"
-            className="mt-1 inline-flex items-center gap-1.5 max-w-full font-mono text-[10.5px] text-slate-400 hover:text-slate-700 transition-colors"
-        >
-            <span className="uppercase tracking-[0.14em] font-sans font-medium text-[9.5px]">ID</span>
-            <span className="truncate">{id}</span>
-            {copied ? <CheckIcon className="w-3 h-3 text-emerald-600 shrink-0" /> : <CopyIcon className="w-3 h-3 shrink-0" />}
-        </button>
+        <>
+            <button
+                type="button"
+                onClick={copy}
+                aria-label={copied ? "Segment ID copied" : "Copy segment ID"}
+                title="Copy segment ID"
+                className="mt-1 inline-flex items-center gap-1.5 max-w-full font-mono text-[10.5px] text-slate-400 hover:text-slate-700 transition-colors"
+            >
+                <span className="uppercase tracking-[0.14em] font-sans font-medium text-[9.5px]">ID</span>
+                <span className="truncate">{id}</span>
+                {copied ? <CheckIcon className="w-3 h-3 text-emerald-600 shrink-0" /> : <CopyIcon className="w-3 h-3 shrink-0" />}
+            </button>
+            <span className="sr-only" role="status" aria-live="polite">
+                {copied ? "Segment ID copied" : ""}
+            </span>
+        </>
     );
 }
 
