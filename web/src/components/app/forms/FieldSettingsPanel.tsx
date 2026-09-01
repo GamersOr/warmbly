@@ -48,6 +48,15 @@ export default function FieldSettingsPanel({
                         className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-[16px] md:text-[12.5px] text-slate-900 outline-none transition-colors focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
                     />
                 </div>
+            ) : field.type === "page_break" ? (
+                <div>
+                    <Label>Page title</Label>
+                    <TextInput value={field.label} onChange={(v) => onChange({ label: v })} placeholder="Optional" />
+                    <p className="text-[11px] text-slate-500 mt-1">
+                        Fields after this break start a new page. The title labels it on the progress bar and in
+                        analytics.
+                    </p>
+                </div>
             ) : field.type !== "divider" ? (
                 <div>
                     <Label>{field.type === "heading" ? "Heading" : "Label"}</Label>

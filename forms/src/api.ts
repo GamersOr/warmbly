@@ -16,7 +16,8 @@ export type FormFieldType =
     | "hidden"
     | "heading"
     | "paragraph"
-    | "divider";
+    | "divider"
+    | "page_break";
 
 export interface FormField {
     id: string;
@@ -53,6 +54,12 @@ export interface FormDesign {
     max_width?: number;
     spacing?: string;
     shadow?: boolean;
+    theme?: string;
+    layout?: string;
+    mode?: string;
+    page_background_end?: string;
+    align?: string;
+    show_progress?: boolean;
 }
 
 export interface PublicForm {
@@ -60,7 +67,13 @@ export interface PublicForm {
     name: string;
     fields: FormField[];
     design: FormDesign;
+    logo_url?: string;
+    cover_url?: string;
+    background_url?: string;
     captcha_site_key?: string;
+    /** Present only when a valid personalized ?t= link opened the page. */
+    prefill?: Record<string, string>;
+    link_token?: string;
 }
 
 export interface SubmitPayload {
@@ -71,6 +84,9 @@ export interface SubmitPayload {
     _wt: number;
     captcha_token?: string;
     source_url?: string;
+    /** Personalized link ticket; attributes the submission to a contact. */
+    link_token?: string;
+    visitor_key?: string;
 }
 
 export interface SubmitResult {
@@ -87,23 +103,57 @@ export class FormNotFoundError extends Error {
 
 export class SubmitRejectedError extends Error {}
 
-export async function fetchForm(publicId: string): Promise<PublicForm> {
-    const res = await fetch(`/api/forms/${encodeURIComponent(publicId)}`, {
-        headers: { Accept: "application/json" },
-    });
+/** The tab outlived its render token; only a reload can mint a new one. */
+export class StalePageError extends Error {
+    constructor() {
+        super("stale page");
+        this.name = "StalePageError";
+    }
+}
+
+// The Go shell stamps the render token into this meta tag; every API call
+// must carry it, so a script that never loaded the page gets nothing.
+const renderToken =
+    document.querySelector('meta[name="wf-token"]')?.getAttribute("content") ?? "";
+
+export function apiHeaders(): Record<string, string> {
+    return { Accept: "application/json", "X-Warmbly-Render": renderToken };
+}
+
+// personalToken reads the ?t= ticket from a personalized link.
+export function personalToken(): string | null {
+    const t = new URLSearchParams(window.location.search).get("t");
+    return t && /^[A-Za-z0-9-]{1,64}$/.test(t) ? t : null;
+}
+
+async function throwForStatus(res: Response): Promise<never> {
+    const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
+    if (res.status === 403 && body?.error === "stale_page") throw new StalePageError();
     if (res.status === 404) throw new FormNotFoundError();
-    if (!res.ok) throw new Error(`form fetch failed (${res.status})`);
+    throw new Error(`request failed (${res.status})`);
+}
+
+export async function fetchForm(publicId: string, linkToken?: string | null): Promise<PublicForm> {
+    const qs = linkToken ? `?t=${encodeURIComponent(linkToken)}` : "";
+    const res = await fetch(`/api/forms/${encodeURIComponent(publicId)}${qs}`, {
+        headers: apiHeaders(),
+    });
+    if (!res.ok) await throwForStatus(res);
     return (await res.json()) as PublicForm;
 }
 
 export async function submitForm(publicId: string, payload: SubmitPayload): Promise<SubmitResult> {
     const res = await fetch(`/api/forms/${encodeURIComponent(publicId)}/submit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: { "Content-Type": "application/json", ...apiHeaders() },
         body: JSON.stringify(payload),
     });
+    const body = (await res.json().catch(() => null)) as {
+        error?: string;
+        message?: string;
+    } | null;
+    if (res.status === 403 && body?.error === "stale_page") throw new StalePageError();
     if (res.status === 404) throw new FormNotFoundError();
-    const body = (await res.json().catch(() => null)) as { message?: string } | null;
     if (!res.ok) {
         throw new SubmitRejectedError(body?.message || "Something went wrong. Try again.");
     }

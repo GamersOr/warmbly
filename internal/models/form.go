@@ -31,11 +31,21 @@ type Form struct {
 	CategoryIDs    []uuid.UUID `json:"category_ids"`
 	AllowedDomains []string    `json:"allowed_domains"`
 	CaptchaEnabled bool        `json:"captcha_enabled"`
+	// LogoURL, CoverURL and BackgroundURL are uploaded brand assets (public
+	// object URLs).
+	LogoURL       string `json:"logo_url"`
+	CoverURL      string `json:"cover_url"`
+	BackgroundURL string `json:"background_url"`
 
 	ViewsCount       int64      `json:"views_count"`
 	SubmissionsCount int64      `json:"submissions_count"`
 	LastSubmissionAt *time.Time `json:"last_submission_at,omitempty"`
 	PublishedAt      *time.Time `json:"published_at,omitempty"`
+
+	// Event-derived aggregates, populated by List only (nil Trend elsewhere).
+	StartsCount     int64   `json:"starts_count"`
+	IdentifiedCount int64   `json:"identified_count"`
+	Trend           []int64 `json:"trend,omitempty"`
 
 	// ShareURL is the hosted page URL, derived from config on read.
 	ShareURL string `json:"share_url,omitempty"`
@@ -82,6 +92,8 @@ const (
 	FormFieldHeading    FormFieldType = "heading"
 	FormFieldParagraph  FormFieldType = "paragraph"
 	FormFieldDivider    FormFieldType = "divider"
+	// FormFieldPageBreak splits the form into pages; its label is the page title.
+	FormFieldPageBreak FormFieldType = "page_break"
 )
 
 // Valid reports whether the type is a known block.
@@ -89,7 +101,7 @@ func (t FormFieldType) Valid() bool {
 	switch t {
 	case FormFieldText, FormFieldEmail, FormFieldPhone, FormFieldTextarea, FormFieldNumber,
 		FormFieldSelect, FormFieldRadio, FormFieldCheckboxes, FormFieldCheckbox, FormFieldDate,
-		FormFieldHidden, FormFieldHeading, FormFieldParagraph, FormFieldDivider:
+		FormFieldHidden, FormFieldHeading, FormFieldParagraph, FormFieldDivider, FormFieldPageBreak:
 		return true
 	}
 	return false
@@ -98,7 +110,7 @@ func (t FormFieldType) Valid() bool {
 // IsInput reports whether the block collects a value on submit.
 func (t FormFieldType) IsInput() bool {
 	switch t {
-	case FormFieldHeading, FormFieldParagraph, FormFieldDivider:
+	case FormFieldHeading, FormFieldParagraph, FormFieldDivider, FormFieldPageBreak:
 		return false
 	}
 	return true
@@ -153,6 +165,42 @@ type FormDesign struct {
 	MaxWidth         *int   `json:"max_width,omitempty"`
 	Spacing          string `json:"spacing,omitempty"`
 	Shadow           *bool  `json:"shadow,omitempty"`
+	// Theme records which preset seeded the current colors; renderers never
+	// read it, so new presets need no backend release.
+	Theme string `json:"theme,omitempty"`
+	// Layout is card (centered box), wide (no box) or split (cover panel).
+	Layout string `json:"layout,omitempty"`
+	// Mode is classic (pages of fields) or focus (one question per screen).
+	Mode string `json:"mode,omitempty"`
+	// PageBackgroundEnd turns the page background into a vertical gradient.
+	PageBackgroundEnd string `json:"page_background_end,omitempty"`
+	Align             string `json:"align,omitempty"`
+	ShowProgress      *bool  `json:"show_progress,omitempty"`
+
+	// BackgroundSize and BackgroundOverlay style the uploaded background_url:
+	// the overlay (0-100) veils the image with the page color so text on top
+	// stays legible.
+	BackgroundSize    string `json:"background_size,omitempty"`
+	BackgroundOverlay *int   `json:"background_overlay,omitempty"`
+
+	// A bar carrying the logo and a title: whether it spans the page or sits
+	// with the form, how its contents align, and whether it sticks on scroll.
+	HeaderEnabled    *bool  `json:"header_enabled,omitempty"`
+	HeaderTitle      string `json:"header_title,omitempty"`
+	HeaderBackground string `json:"header_background,omitempty"`
+	HeaderPlacement  string `json:"header_placement,omitempty"`
+	HeaderAlign      string `json:"header_align,omitempty"`
+	HeaderSticky     *bool  `json:"header_sticky,omitempty"`
+	HeaderShowLogo   *bool  `json:"header_show_logo,omitempty"`
+
+	// Copy over the split layout's cover panel.
+	CoverTitle    string `json:"cover_title,omitempty"`
+	CoverSubtitle string `json:"cover_subtitle,omitempty"`
+
+	// How the uploaded logo renders: its height, and whether it sits on the
+	// form surface or above the card on the page background.
+	LogoSize     string `json:"logo_size,omitempty"`
+	LogoPosition string `json:"logo_position,omitempty"`
 }
 
 // FormWrite is the PATCH payload; every field is optional.
@@ -172,17 +220,22 @@ type FormWrite struct {
 // FormSubmission is one public submit, kept verbatim. Data is keyed by field
 // id; checkbox groups store a string slice, everything else a string.
 type FormSubmission struct {
-	ID             uuid.UUID      `json:"id"`
-	FormID         uuid.UUID      `json:"form_id"`
-	OrganizationID uuid.UUID      `json:"organization_id"`
-	ContactID      *uuid.UUID     `json:"contact_id,omitempty"`
-	Data           map[string]any `json:"data"`
-	SourceURL      string         `json:"source_url"`
-	CreatedAt      time.Time      `json:"created_at"`
+	ID             uuid.UUID  `json:"id"`
+	FormID         uuid.UUID  `json:"form_id"`
+	OrganizationID uuid.UUID  `json:"organization_id"`
+	ContactID      *uuid.UUID `json:"contact_id,omitempty"`
+	// CampaignID is the campaign whose email carried the personalized link
+	// the visitor arrived through, when there was one.
+	CampaignID *uuid.UUID     `json:"campaign_id,omitempty"`
+	Data       map[string]any `json:"data"`
+	SourceURL  string         `json:"source_url"`
+	CreatedAt  time.Time      `json:"created_at"`
 
-	// Contact summary for the submissions table, populated by reads.
+	// Contact and campaign summaries for the submissions table, populated by
+	// reads.
 	ContactEmail string `json:"contact_email,omitempty"`
 	ContactName  string `json:"contact_name,omitempty"`
+	CampaignName string `json:"campaign_name,omitempty"`
 }
 
 // Form limits.
@@ -208,6 +261,7 @@ const (
 var (
 	formFieldIDRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}$`)
 	formHexRE     = regexp.MustCompile(`^#[a-fA-F0-9]{6}$`)
+	formThemeRE   = regexp.MustCompile(`^[a-z0-9-]{0,40}$`)
 )
 
 // FormContactColumns is every contact column a field may map to.
@@ -332,16 +386,71 @@ func ValidateFormDesign(d *FormDesign) *errx.Error {
 	for _, c := range []string{
 		d.PageBackground, d.FormBackground, d.TextColor, d.LabelColor, d.InputBackground,
 		d.InputBorderColor, d.InputTextColor, d.PlaceholderColor, d.AccentColor,
-		d.ButtonBackground, d.ButtonTextColor,
+		d.ButtonBackground, d.ButtonTextColor, d.PageBackgroundEnd, d.HeaderBackground,
 	} {
 		if c != "" && !formHexRE.MatchString(c) && c != "transparent" {
 			return errx.New(errx.BadRequest, "design colors must be #rrggbb values")
 		}
 	}
+	// The list must match FONT_CATALOG in the mirrored designCore.ts.
 	switch d.FontFamily {
-	case "", "system", "inter", "serif", "mono":
+	case "", "system", "inter", "serif", "mono", "manrope", "sora", "fraunces", "space-grotesk":
 	default:
-		return errx.New(errx.BadRequest, "font_family must be system, inter, serif or mono")
+		return errx.New(errx.BadRequest, "font_family is not a supported font")
+	}
+	switch d.Layout {
+	case "", "card", "wide", "split":
+	default:
+		return errx.New(errx.BadRequest, "layout must be card, wide or split")
+	}
+	switch d.Mode {
+	case "", "classic", "focus":
+	default:
+		return errx.New(errx.BadRequest, "mode must be classic or focus")
+	}
+	switch d.Align {
+	case "", "left", "center":
+	default:
+		return errx.New(errx.BadRequest, "align must be left or center")
+	}
+	switch d.HeaderPlacement {
+	case "", "page", "inline":
+	default:
+		return errx.New(errx.BadRequest, "header_placement must be page or inline")
+	}
+	switch d.HeaderAlign {
+	case "", "left", "center", "between":
+	default:
+		return errx.New(errx.BadRequest, "header_align must be left, center or between")
+	}
+	switch d.LogoSize {
+	case "", "sm", "md", "lg":
+	default:
+		return errx.New(errx.BadRequest, "logo_size must be sm, md or lg")
+	}
+	switch d.LogoPosition {
+	case "", "card", "page":
+	default:
+		return errx.New(errx.BadRequest, "logo_position must be card or page")
+	}
+	switch d.BackgroundSize {
+	case "", "cover", "contain", "tile":
+	default:
+		return errx.New(errx.BadRequest, "background_size must be cover, contain or tile")
+	}
+	if d.BackgroundOverlay != nil && (*d.BackgroundOverlay < 0 || *d.BackgroundOverlay > 100) {
+		return errx.New(errx.BadRequest, "background_overlay must be between 0 and 100")
+	}
+	for _, t := range []string{d.HeaderTitle, d.CoverTitle} {
+		if len(t) > FormMaxLabelLen {
+			return errx.New(errx.BadRequest, "title is too long")
+		}
+	}
+	if len(d.CoverSubtitle) > FormMaxTextLen {
+		return errx.New(errx.BadRequest, "cover subtitle is too long")
+	}
+	if !formThemeRE.MatchString(d.Theme) {
+		return errx.New(errx.BadRequest, "theme must be a short lowercase slug")
 	}
 	switch d.ButtonSize {
 	case "", "sm", "md", "lg":

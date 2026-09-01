@@ -7,6 +7,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
     ArrowLeftIcon,
+    ChartNoAxesColumnIcon,
     ExternalLinkIcon,
     EyeIcon,
     GlobeIcon,
@@ -42,6 +43,7 @@ import { isInputType } from "@/lib/api/models/app/forms/Form";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 
+import AnalyticsTab from "./AnalyticsTab";
 import DesignPanel from "./DesignPanel";
 import FieldSettingsPanel from "./FieldSettingsPanel";
 import FormPreview from "./FormPreview";
@@ -50,13 +52,14 @@ import ShareTab from "./ShareTab";
 import SubmissionsTab from "./SubmissionsTab";
 import { PALETTE, newField, type PaletteItem } from "./fieldCatalog";
 
-type TabKey = "build" | "design" | "settings" | "share" | "submissions";
+type TabKey = "build" | "design" | "settings" | "share" | "analytics" | "submissions";
 
 const TABS: { key: TabKey; label: string; Icon: typeof WrenchIcon }[] = [
     { key: "build", label: "Build", Icon: WrenchIcon },
     { key: "design", label: "Design", Icon: PaletteIcon },
     { key: "settings", label: "Settings", Icon: SettingsIcon },
     { key: "share", label: "Share", Icon: Share2Icon },
+    { key: "analytics", label: "Analytics", Icon: ChartNoAxesColumnIcon },
     { key: "submissions", label: "Submissions", Icon: InboxIcon },
 ];
 
@@ -141,6 +144,13 @@ export default function FormBuilder({ form }: { form: Form }) {
     const [draft, setDraft] = React.useState<Draft>(() => draftFrom(form));
     const [status, setStatus] = React.useState<Form["status"]>(form.status);
     const [shareUrl] = React.useState(form.share_url ?? "");
+    // Images are saved the moment they are picked, so they live outside the
+    // draft and Discard must not roll them back.
+    const [assets, setAssets] = React.useState({
+        logo: form.logo_url,
+        cover: form.cover_url,
+        background: form.background_url,
+    });
     // The last-saved draft: Discard returns here, not to the original prop.
     const savedRef = React.useRef<Draft>(draftFrom(form));
     const baselineRef = React.useRef(sig(draftFrom(form)));
@@ -255,6 +265,11 @@ export default function FormBuilder({ form }: { form: Form }) {
             if (!draft.fields.some((f) => f.type === "email")) {
                 toast("Without an email field, submissions are stored but never become contacts", { icon: "⚠️" });
             }
+            const firstInput = draft.fields.findIndex((f) => f.type !== "page_break");
+            const lastInput = draft.fields.map((f) => f.type !== "page_break").lastIndexOf(true);
+            if (draft.fields.some((f, i) => f.type === "page_break" && (i < firstInput || i > lastInput))) {
+                toast("A page break before the first field or after the last one makes an empty page", { icon: "⚠️" });
+            }
         }
         try {
             const saved = await update.mutateAsync({ id: form.id, w: writeFrom(draft, nextStatus) });
@@ -281,9 +296,13 @@ export default function FormBuilder({ form }: { form: Form }) {
             <FormPreview
                 fields={draft.fields}
                 design={draft.design}
+                logoUrl={assets.logo}
+                coverUrl={assets.cover}
+                backgroundUrl={assets.background}
                 selectedId={selectedId}
                 editable={canEdit && tab === "build"}
-                captchaBadge={draft.captcha_enabled && captchaAvailable}
+                showCaptchaBadge={draft.captcha_enabled && captchaAvailable}
+                previewPaging={tab === "design"}
                 onSelect={(id) => setSelectedId(id || null)}
                 onDelete={(id) => deleteField(id)}
                 onDuplicate={(id) => duplicateField(id)}
@@ -430,20 +449,26 @@ export default function FormBuilder({ form }: { form: Form }) {
                     <>
                         {canvas}
                         <aside className="w-full sm:w-80 shrink-0 border-l border-slate-200 bg-white overflow-y-auto">
-                            <DesignPanel design={draft.design} onChange={(patch) => patchDraft({ design: { ...draft.design, ...patch } })} />
+                            <DesignPanel
+                                formId={form.id}
+                                design={draft.design}
+                                logoUrl={assets.logo}
+                                coverUrl={assets.cover}
+                                backgroundUrl={assets.background}
+                                canEdit={canEdit}
+                                onChange={(patch) => patchDraft({ design: { ...draft.design, ...patch } })}
+                                onReplaceDesign={(design) => patchDraft({ design })}
+                                onAssetsSaved={(f) =>
+                                    setAssets({ logo: f.logo_url, cover: f.cover_url, background: f.background_url })
+                                }
+                            />
                         </aside>
                     </>
                 )}
 
                 {tab === "settings" && (
                     <div className="flex-1 overflow-y-auto">
-                        <div className="max-w-xl mx-auto">
-                            <SettingsPanel
-                                draft={draft}
-                                captchaAvailable={captchaAvailable}
-                                onChange={(patch) => patchDraft(patch)}
-                            />
-                        </div>
+                        <SettingsPanel draft={draft} captchaAvailable={captchaAvailable} onChange={(patch) => patchDraft(patch)} />
                     </div>
                 )}
 
@@ -453,9 +478,15 @@ export default function FormBuilder({ form }: { form: Form }) {
                     </div>
                 )}
 
+                {tab === "analytics" && (
+                    <div className="flex-1 overflow-y-auto">
+                        <AnalyticsTab form={{ ...form, fields: draft.fields }} />
+                    </div>
+                )}
+
                 {tab === "submissions" && (
                     <div className="flex-1 overflow-y-auto">
-                        <SubmissionsTab form={form} />
+                        <SubmissionsTab form={{ ...form, fields: draft.fields }} />
                     </div>
                 )}
             </div>

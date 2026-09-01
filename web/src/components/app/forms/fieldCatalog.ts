@@ -15,6 +15,7 @@ import {
     ListChecksIcon,
     MinusIcon,
     PhoneIcon,
+    SeparatorHorizontalIcon,
     TextIcon,
     TypeIcon,
 } from "lucide-react";
@@ -42,6 +43,7 @@ export const PALETTE: PaletteItem[] = [
     { type: "heading", label: "Heading", icon: HeadingIcon, group: "Layout" },
     { type: "paragraph", label: "Text block", icon: TextIcon, group: "Layout" },
     { type: "divider", label: "Divider", icon: MinusIcon, group: "Layout" },
+    { type: "page_break", label: "Page break", icon: SeparatorHorizontalIcon, group: "Layout" },
 ];
 
 const DEFAULT_LABELS: Partial<Record<FormFieldType, string>> = {

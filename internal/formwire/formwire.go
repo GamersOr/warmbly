@@ -13,8 +13,16 @@ type PublicForm struct {
 	Name           string             `json:"name"`
 	Fields         []models.FormField `json:"fields"`
 	Design         models.FormDesign  `json:"design"`
+	LogoURL        string             `json:"logo_url,omitempty"`
+	CoverURL       string             `json:"cover_url,omitempty"`
+	BackgroundURL  string             `json:"background_url,omitempty"`
 	AllowedDomains []string           `json:"allowed_domains,omitempty"`
 	CaptchaSiteKey string             `json:"captcha_site_key,omitempty"`
+	// Prefill and LinkToken appear only when a valid personalized ?t= ticket
+	// accompanied the fetch: values for the mapped fields, and the token
+	// echoed for submit/event attribution.
+	Prefill   map[string]string `json:"prefill,omitempty"`
+	LinkToken string            `json:"link_token,omitempty"`
 }
 
 // SubmitRequest carries a visitor's answers plus the abuse signals only the
@@ -27,6 +35,24 @@ type SubmitRequest struct {
 	HoneypotFilled bool                `json:"honeypot_filled,omitempty"`
 	// RenderedAt is the unix second the page was served; bots submit near-instantly.
 	RenderedAt int64 `json:"rendered_at,omitempty"`
+	// LinkToken is the personalized ?t= ticket; VisitorKey ties the
+	// submission to the visitor's funnel events.
+	LinkToken  string `json:"link_token,omitempty"`
+	VisitorKey string `json:"visitor_key,omitempty"`
+}
+
+// EventRequest is one funnel event forwarded by the forms service, plus the
+// request attributes the backend enriches from (RemoteIP becomes a country
+// and is discarded, UserAgent becomes a device class).
+type EventRequest struct {
+	Type       string `json:"type"`
+	PageIndex  int    `json:"page_index"`
+	PagesTotal int    `json:"pages_total"`
+	VisitorKey string `json:"visitor_key"`
+	SourceURL  string `json:"source_url,omitempty"`
+	LinkToken  string `json:"link_token,omitempty"`
+	RemoteIP   string `json:"remote_ip"`
+	UserAgent  string `json:"user_agent,omitempty"`
 }
 
 // SubmitResult is what the visitor sees after a successful submit.

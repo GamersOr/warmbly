@@ -16,7 +16,8 @@ export type FormFieldType =
     | "hidden"
     | "heading"
     | "paragraph"
-    | "divider";
+    | "divider"
+    | "page_break";
 
 export interface FormField {
     id: string;
@@ -55,6 +56,38 @@ export interface FormDesign {
     max_width?: number;
     spacing?: string;
     shadow?: boolean;
+    /** Preset id that seeded the current colors; renderers never read it. */
+    theme?: string;
+    /** "card" (centered box), "wide" (no box) or "split" (cover panel). */
+    layout?: string;
+    /** "classic" (pages of fields) or "focus" (one question per screen). */
+    mode?: string;
+    /** Second hex turns the page background into a vertical gradient. */
+    page_background_end?: string;
+    align?: string;
+    show_progress?: boolean;
+    /** Image layered over the page color; overlay veils it for legible text. */
+    page_background_image?: string;
+    /** "cover", "contain" or "tile". */
+    background_size?: string;
+    /** 0-100. */
+    background_overlay?: number;
+    header_enabled?: boolean;
+    header_title?: string;
+    header_background?: string;
+    /** "page" spans the viewport, "inline" sits with the form. */
+    header_placement?: string;
+    /** "left", "center" or "between"; defaults to the form's alignment. */
+    header_align?: string;
+    header_sticky?: boolean;
+    /** false keeps the logo in its own placement and leaves the header the title. */
+    header_show_logo?: boolean;
+    cover_title?: string;
+    cover_subtitle?: string;
+    /** "sm" | "md" | "lg". */
+    logo_size?: string;
+    /** "card" (on the form surface) or "page" (above the card). */
+    logo_position?: string;
 }
 
 export default interface Form {
@@ -72,8 +105,15 @@ export default interface Form {
     category_ids: string[];
     allowed_domains: string[];
     captcha_enabled: boolean;
+    logo_url: string;
+    cover_url: string;
+    background_url: string;
     views_count: number;
     submissions_count: number;
+    starts_count: number;
+    identified_count: number;
+    /** Daily submissions for the list sparkline, oldest first; list reads only. */
+    trend?: number[];
     last_submission_at?: Date;
     published_at?: Date;
     share_url?: string;
@@ -99,11 +139,14 @@ export interface FormSubmission {
     form_id: string;
     organization_id: string;
     contact_id?: string;
+    /** Campaign whose email carried the personalized link, when known. */
+    campaign_id?: string;
     data: Record<string, string | string[]>;
     source_url: string;
     created_at: Date;
     contact_email?: string;
     contact_name?: string;
+    campaign_name?: string;
 }
 
 export interface FormsConfig {
@@ -113,7 +156,7 @@ export interface FormsConfig {
 
 /** Field types that collect a value on submit. */
 export function isInputType(t: FormFieldType): boolean {
-    return t !== "heading" && t !== "paragraph" && t !== "divider";
+    return t !== "heading" && t !== "paragraph" && t !== "divider" && t !== "page_break";
 }
 
 /** Field types that need an options list. */

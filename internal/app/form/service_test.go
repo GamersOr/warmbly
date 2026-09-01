@@ -101,3 +101,68 @@ func TestPublicIDShape(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+func TestPageBreakIsStructureOnly(t *testing.T) {
+	fields := append(demoFields(), models.FormField{ID: "pb1", Type: models.FormFieldPageBreak, Label: "About you"})
+	if xerr := models.ValidateFormFields(fields); xerr != nil {
+		t.Fatalf("page_break rejected: %v", xerr)
+	}
+	// A titleless break is fine too.
+	fields = append(fields, models.FormField{ID: "pb2", Type: models.FormFieldPageBreak})
+	if xerr := models.ValidateFormFields(fields); xerr != nil {
+		t.Fatalf("untitled page_break rejected: %v", xerr)
+	}
+	data, _, xerr := buildSubmission(fields, map[string][]string{
+		"email": {"a@b.co"}, "agree": {"yes"},
+	})
+	if xerr != nil {
+		t.Fatalf("submit with page breaks: %v", xerr)
+	}
+	if _, ok := data["pb1"]; ok {
+		t.Fatal("page_break leaked into submission data")
+	}
+	// A form of only layout blocks stays unpublishable even with breaks.
+	if xerr := publishable([]models.FormField{{ID: "pb", Type: models.FormFieldPageBreak}}); xerr == nil {
+		t.Fatal("page-break-only form must not publish")
+	}
+	if got := formPageCount(fields); got != 3 {
+		t.Fatalf("page count = %d, want 3", got)
+	}
+}
+
+func TestValidateFormDesignV2(t *testing.T) {
+	good := models.FormDesign{
+		Layout: "split", Mode: "focus", Align: "center", Theme: "midnight",
+		PageBackgroundEnd: "#0f172a", FontFamily: "fraunces",
+	}
+	if xerr := models.ValidateFormDesign(&good); xerr != nil {
+		t.Fatalf("valid v2 design rejected: %v", xerr)
+	}
+	for _, bad := range []models.FormDesign{
+		{Layout: "sideways"},
+		{Mode: "carousel"},
+		{Align: "justify"},
+		{Theme: "Not A Slug"},
+		{PageBackgroundEnd: "blue"},
+		{FontFamily: "comic-sans"},
+	} {
+		b := bad
+		if xerr := models.ValidateFormDesign(&b); xerr == nil {
+			t.Fatalf("invalid design accepted: %+v", bad)
+		}
+	}
+}
+
+func TestReferrerDomain(t *testing.T) {
+	cases := map[string]string{
+		"https://www.example.com/pricing?x=1": "example.com",
+		"https://sub.shop.io/":                "sub.shop.io",
+		"not a url":                           "",
+		"":                                    "",
+	}
+	for in, want := range cases {
+		if got := referrerDomain(in); got != want {
+			t.Fatalf("referrerDomain(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

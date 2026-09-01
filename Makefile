@@ -40,6 +40,7 @@ fmt:
 	gofmt -w ./cmd ./internal
 
 lint: check-migrations
+	./scripts/check-forms-mirror.sh
 	$(GO_BIN)/golangci-lint run --timeout=5m
 
 # Duplicate migration versions only collide once two PRs are both on main, and

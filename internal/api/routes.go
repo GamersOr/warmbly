@@ -146,10 +146,10 @@ func Run(
 		internal.POST("/worker/heartbeat", h.InternalWorkerHeartbeat)
 
 		// Hosted forms: the forms service (cmd/forms) resolves published
-		// forms, reports deduped page views and forwards visitor submissions
+		// forms, forwards deduped funnel events and visitor submissions
 		// here; the answers-to-contact pipeline runs on this side.
 		internal.GET("/forms/:publicID", h.InternalGetPublicForm)
-		internal.POST("/forms/:publicID/views", h.InternalCountFormView)
+		internal.POST("/forms/:publicID/events", h.InternalRecordFormEvent)
 		internal.POST("/forms/:publicID/submissions", h.InternalSubmitForm)
 	}
 
@@ -489,6 +489,9 @@ func Run(
 				campaigns.POST("/:id/stop", m.RequireOrganization(), m.RequireAccess(models.PermSendCampaigns, models.APIPermSendCampaigns), h.StopCampaign)
 				campaigns.GET("/:id/logs", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.GetCampaignLogs)
 
+				// Form performance for this campaign's recipients.
+				campaigns.GET("/:id/forms", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.GetCampaignForms)
+
 				// Explicit sender pool (rotation/weighting).
 				campaigns.GET("/:id/senders", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.ListCampaignSenders)
 				campaigns.PUT("/:id/senders", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.ReplaceCampaignSenders)
@@ -636,12 +639,23 @@ func Run(
 			{
 				forms.GET("", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListForms)
 				forms.GET("/config", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetFormsConfig)
+				// The custom forms domain is workspace-wide branding, so it
+				// sits behind the settings gate rather than the contacts one.
+				// Static siblings, declared before the /:id routes.
+				forms.GET("/domain", m.RequireOrganization(), m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetFormsDomain)
+				forms.PUT("/domain", m.RequireOrganization(), m.RequireAccess(models.PermManageSettings, models.APIPermWriteContacts), h.SetFormsDomain)
+				forms.POST("/domain/verify", m.RequireOrganization(), m.RequireAccess(models.PermManageSettings, models.APIPermWriteContacts), h.VerifyFormsDomain)
 				forms.POST("", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.CreateForm)
 				forms.GET("/:id", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetForm)
 				forms.PATCH("/:id", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.UpdateForm)
 				forms.DELETE("/:id", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.DeleteForm)
 				forms.GET("/:id/submissions", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListFormSubmissions)
 				forms.DELETE("/:id/submissions/:sid", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.DeleteFormSubmission)
+				forms.GET("/:id/stats", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetFormStats)
+				// Minting writes a link row, hence the manage gate on a GET.
+				forms.GET("/:id/links/:contactID", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.MintFormLink)
+				forms.POST("/:id/assets/:kind", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.UploadFormAsset)
+				forms.DELETE("/:id/assets/:kind", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.DeleteFormAsset)
 			}
 
 			grouph.New(protected, h.FolderService, h.AuditService, "folders", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns))

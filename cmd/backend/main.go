@@ -1200,11 +1200,19 @@ func main() {
 		segmentRepository := repository.NewSegmentRepository(primaryDB)
 		segmentService = segment.NewService(segmentRepository, contactRepostory)
 		formRepository := repository.NewFormRepository(primaryDB)
+		formEventRepository := repository.NewFormEventRepository(primaryDB)
 		formService = form.NewService(formRepository)
 		formService.SetContacts(contactService)
 		formService.SetRealtime(streamingPublisher)
 		formService.SetCaptcha(captcha)
 		formService.SetWebhooks(webhookServiceForHandler)
+		formService.SetContactReader(contactRepostory)
+		formService.SetGeo(geoloc)
+		formService.SetLinks(repository.NewFormLinkRepository(primaryDB))
+		formService.SetEvents(formEventRepository)
+		formService.SetDomains(organizationRepoForHandler)
+		go jobs.NewFormEventsRetentionJob(formEventRepository).Start(ctx, 12*time.Hour)
+		go jobs.NewFormsDomainSweep(organizationRepoForHandler).Start(ctx, time.Hour)
 		// A visibly bad import is filed on the workspace's posture. On its own
 		// it can only reach `watch`, which changes nothing.
 		if aware, ok := contactService.(contact.OrgRiskAware); ok && orgRiskService != nil {
@@ -1530,6 +1538,9 @@ func main() {
 		if cloudLinkService != nil {
 			tasksService.SetCloudLink(cloudLinkService)
 		}
+		// {{form_link:...}} markers in campaign copy resolve to per-recipient
+		// personalized form URLs at send time.
+		tasksService.SetFormLinks(formService)
 		if w, ok := poolLinkService.(interface {
 			WireScheduler(poollink.WarmupScheduler)
 		}); ok {

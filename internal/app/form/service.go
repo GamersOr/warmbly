@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/geo"
 	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/utils"
 	"github.com/warmbly/warmbly/internal/utils/validate"
@@ -27,11 +28,39 @@ type Service interface {
 	Delete(ctx context.Context, orgID, id uuid.UUID) *errx.Error
 	ListSubmissions(ctx context.Context, orgID, formID uuid.UUID, limit int, before *time.Time) ([]models.FormSubmission, bool, *errx.Error)
 	DeleteSubmission(ctx context.Context, orgID, formID, subID uuid.UUID) *errx.Error
+	// SetAsset stores an uploaded brand asset URL; an empty url clears it.
+	SetAsset(ctx context.Context, orgID, id uuid.UUID, kind, url string) (*models.Form, *errx.Error)
+	// Stats aggregates the funnel events for the analytics tab.
+	Stats(ctx context.Context, orgID, formID uuid.UUID, rangeDays int) (*models.FormStats, *errx.Error)
+	// CampaignForms reports how every form this campaign links to performed
+	// for that campaign's recipients.
+	CampaignForms(ctx context.Context, orgID, campaignID uuid.UUID) ([]models.CampaignFormStats, *errx.Error)
+
+	// FormsHost is the host this organization's form URLs are built on: their
+	// verified custom domain, or the install's shared forms host.
+	FormsHost(ctx context.Context, orgID uuid.UUID) string
+	FormsDomainStatus(ctx context.Context, orgID uuid.UUID) (*models.FormsDomainStatus, *errx.Error)
+	SetFormsDomain(ctx context.Context, orgID uuid.UUID, raw string) (*models.FormsDomainStatus, *errx.Error)
+	VerifyFormsDomain(ctx context.Context, orgID uuid.UUID) (*models.FormsDomainStatus, *errx.Error)
+
+	// MintLink returns the personalized form URL for a contact (dashboard
+	// on-demand path). MintForContact backs the campaign-send resolver: it is
+	// public-id scoped to the org and reports ok=false for an unknown or
+	// unpublished form so the caller can fall back to the share URL.
+	MintLink(ctx context.Context, orgID, formID, contactID uuid.UUID) (string, *errx.Error)
+	MintForContact(ctx context.Context, orgID uuid.UUID, formPublicID string, contactID uuid.UUID, campaignID *uuid.UUID) (personalURL, shareURL string, ok bool)
 
 	// PublicForm resolves a published form for the hosted page.
 	PublicForm(ctx context.Context, publicID string) (*models.Form, *errx.Error)
 	// RecordView bumps the view counter, deduped per source by the caller.
 	RecordView(ctx context.Context, formID uuid.UUID)
+	// RecordEvent stores one funnel event, enriched server-side.
+	RecordEvent(ctx context.Context, publicID string, in EventInput) *errx.Error
+	// ResolveLink turns a ?t= token into the link it names (contact and the
+	// campaign whose email carried it) plus the prefill values for the form;
+	// anything invalid resolves to nil, never an error, so a bad token
+	// degrades to an anonymous visit.
+	ResolveLink(ctx context.Context, f *models.Form, token string) (*models.FormLink, map[string]string)
 	// Submit runs the public pipeline: validate, contact upsert, store.
 	Submit(ctx context.Context, publicID string, answers map[string][]string, meta SubmitMeta) (*SubmitResult, *errx.Error)
 
@@ -40,6 +69,16 @@ type Service interface {
 	SetRealtime(p RealtimePublisher)
 	SetWebhooks(d WebhookDispatcher)
 	SetContacts(a ContactAdder)
+	SetContactReader(r ContactReader)
+	SetGeo(g *geo.Client)
+	SetLinks(r repository.FormLinkRepository)
+	SetEvents(r repository.FormEventRepository)
+	SetDomains(d FormsDomainStore)
+}
+
+// ContactReader is the slice of the contact repository the link paths need.
+type ContactReader interface {
+	GetByID(ctx context.Context, contactID uuid.UUID) (*models.Contact, *errx.Error)
 }
 
 // ContactAdder is the slice of the contact service the submit pipeline needs.
@@ -72,6 +111,10 @@ type SubmitMeta struct {
 	HoneypotFilled bool
 	// RenderedAt is when the page was served; bots submit near-instantly.
 	RenderedAt time.Time
+	// LinkToken is the personalized ?t= ticket; its contact wins attribution.
+	LinkToken string
+	// VisitorKey ties the submission to the visitor's funnel events.
+	VisitorKey string
 }
 
 // SubmitResult is what the visitor sees after a successful submit.
@@ -81,24 +124,55 @@ type SubmitResult struct {
 }
 
 type service struct {
-	repo     repository.FormRepository
-	contacts ContactAdder
-	captcha  CaptchaVerifier
-	realtime RealtimePublisher
-	webhooks WebhookDispatcher
+	repo          repository.FormRepository
+	links         repository.FormLinkRepository
+	events        repository.FormEventRepository
+	domains       FormsDomainStore
+	contacts      ContactAdder
+	contactReader ContactReader
+	captcha       CaptchaVerifier
+	realtime      RealtimePublisher
+	webhooks      WebhookDispatcher
+	geo           *geo.Client
 }
 
 func NewService(repo repository.FormRepository) Service {
 	return &service{repo: repo}
 }
 
-func (s *service) SetCaptcha(v CaptchaVerifier)    { s.captcha = v }
-func (s *service) SetRealtime(p RealtimePublisher) { s.realtime = p }
-func (s *service) SetWebhooks(d WebhookDispatcher) { s.webhooks = d }
-func (s *service) SetContacts(a ContactAdder)      { s.contacts = a }
+func (s *service) SetCaptcha(v CaptchaVerifier)               { s.captcha = v }
+func (s *service) SetRealtime(p RealtimePublisher)            { s.realtime = p }
+func (s *service) SetWebhooks(d WebhookDispatcher)            { s.webhooks = d }
+func (s *service) SetContacts(a ContactAdder)                 { s.contacts = a }
+func (s *service) SetContactReader(r ContactReader)           { s.contactReader = r }
+func (s *service) SetGeo(g *geo.Client)                       { s.geo = g }
+func (s *service) SetLinks(r repository.FormLinkRepository)   { s.links = r }
+func (s *service) SetEvents(r repository.FormEventRepository) { s.events = r }
+func (s *service) SetDomains(d FormsDomainStore)              { s.domains = d }
+
+// formTrendDays is the sparkline window on the forms list.
+const formTrendDays = 14
 
 func (s *service) List(ctx context.Context, orgID uuid.UUID) ([]models.Form, *errx.Error) {
-	return s.repo.List(ctx, orgID)
+	forms, xerr := s.repo.List(ctx, orgID)
+	if xerr != nil || s.events == nil {
+		return forms, xerr
+	}
+	// Attach the event rollups; losing them must never fail the list.
+	aggs, aerr := s.events.ListAggregates(ctx, orgID, formTrendDays)
+	if aerr != nil {
+		return forms, nil
+	}
+	for i := range forms {
+		if a, ok := aggs[forms[i].ID]; ok {
+			forms[i].StartsCount = a.Starts
+			forms[i].IdentifiedCount = a.Identified
+			forms[i].Trend = a.Trend
+		} else {
+			forms[i].Trend = make([]int64, formTrendDays)
+		}
+	}
+	return forms, nil
 }
 
 func (s *service) Get(ctx context.Context, orgID, id uuid.UUID) (*models.Form, *errx.Error) {
@@ -215,6 +289,21 @@ func publishable(fields []models.FormField) *errx.Error {
 	return errx.New(errx.BadRequest, "add at least one input field before publishing")
 }
 
+func (s *service) SetAsset(ctx context.Context, orgID, id uuid.UUID, kind, url string) (*models.Form, *errx.Error) {
+	var logo, cover, background *string
+	switch kind {
+	case "logo":
+		logo = &url
+	case "cover":
+		cover = &url
+	case "background":
+		background = &url
+	default:
+		return nil, errx.New(errx.BadRequest, "kind must be logo, cover or background")
+	}
+	return s.repo.UpdateAssets(ctx, orgID, id, logo, cover, background)
+}
+
 func (s *service) Delete(ctx context.Context, orgID, id uuid.UUID) *errx.Error {
 	return s.repo.Delete(ctx, orgID, id)
 }
@@ -279,6 +368,11 @@ func (s *service) Submit(ctx context.Context, publicID string, answers map[strin
 		SourceURL:      truncate(meta.SourceURL, 2048),
 	}
 
+	link, _ := s.ResolveLink(ctx, f, meta.LinkToken)
+	if link != nil {
+		sub.CampaignID = link.CampaignID
+	}
+
 	// The contact write is best-effort: a plan cap or a bad address must not
 	// lose the submission, and never the visitor's success page.
 	var contactID string
@@ -297,9 +391,30 @@ func (s *service) Submit(ctx context.Context, publicID string, answers map[strin
 		}
 	}
 
+	// A personalized link identifies the visitor outright, so its contact
+	// wins over whatever the email upsert matched.
+	if link != nil {
+		id := link.ContactID
+		sub.ContactID = &id
+		contactID = id.String()
+	}
+
 	stored, xerr := s.repo.CreateSubmission(ctx, sub)
 	if xerr != nil {
 		return nil, xerr
+	}
+	if s.events != nil {
+		_ = s.events.Insert(ctx, &models.FormEvent{
+			OrganizationID: f.OrganizationID,
+			FormID:         f.ID,
+			Type:           models.FormEventSubmit,
+			VisitorKey:     truncate(meta.VisitorKey, 64),
+			PagesTotal:     formPageCount(f.Fields),
+			ContactID:      sub.ContactID,
+			CampaignID:     sub.CampaignID,
+			ReferrerDomain: referrerDomain(meta.SourceURL),
+			Device:         "unknown",
+		})
 	}
 	if sub.ContactID != nil {
 		_ = s.repo.LogSubmissionActivity(ctx, f.OrganizationID, *sub.ContactID, f.ID, f.Name, stored.ID)
@@ -317,6 +432,9 @@ func (s *service) Submit(ctx context.Context, publicID string, answers map[strin
 		}
 		if contactID != "" {
 			payload["contact_id"] = contactID
+		}
+		if sub.CampaignID != nil {
+			payload["campaign_id"] = sub.CampaignID.String()
 		}
 		_, _ = s.webhooks.Dispatch(ctx, f.OrganizationID, models.WebhookEventFormSubmitted, payload)
 	}

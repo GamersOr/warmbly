@@ -60,11 +60,14 @@ All paths below are relative to the versioned base URL `https://api.warmbly.com/
 | POST | `/campaigns/:id/start` | `SEND_CAMPAIGNS` |
 | POST | `/campaigns/:id/stop` | `SEND_CAMPAIGNS` |
 | GET | `/campaigns/:id/logs` | `READ_CAMPAIGNS` |
+| GET | `/campaigns/:id/forms` | `READ_CAMPAIGNS` |
 | GET/POST/PATCH/DELETE | `/campaigns/:id/steps[/:sid]` | `READ_CAMPAIGNS` for GET, `WRITE_CAMPAIGNS` otherwise |
 | PATCH | `/campaigns/:id/step-layout` | `WRITE_CAMPAIGNS` |
 | POST | `/generation/write` | `WRITE_CAMPAIGNS` |
 | POST | `/generation/edit` | `WRITE_CAMPAIGNS` |
 | POST | `/generation/ai-variable` | `WRITE_CAMPAIGNS` |
+
+`GET /campaigns/:id/forms` reports the forms this campaign links to and what its recipients did with them: personalized links handed out, who opened one, who started filling it in and who submitted. See the [forms guide](/guides/forms/).
 
 ### Contacts
 
@@ -134,8 +137,15 @@ Segments are saved contact audiences: a condition list plus per-contact manual o
 | DELETE | `/forms/:id` | `WRITE_CONTACTS` |
 | GET | `/forms/:id/submissions` | `READ_CONTACTS` |
 | DELETE | `/forms/:id/submissions/:sid` | `WRITE_CONTACTS` |
+| GET | `/forms/:id/stats` | `READ_CONTACTS` |
+| GET | `/forms/domain` | `READ_CONTACTS` |
+| PUT | `/forms/domain` | `WRITE_CONTACTS` |
+| POST | `/forms/domain/verify` | `WRITE_CONTACTS` |
+| GET | `/forms/:id/links/:contactID` | `WRITE_CONTACTS` |
+| POST | `/forms/:id/assets/:kind` | `WRITE_CONTACTS` |
+| DELETE | `/forms/:id/assets/:kind` | `WRITE_CONTACTS` |
 
-Hosted lead-capture forms; see the [forms guide](/guides/forms/). Contact scopes cover them because a form exists to create contacts. The public page (`/f/:public_id`), its submit endpoint and the embed loader (`/forms.js`) are served by the standalone forms service on its own host (`FORMS_DOMAIN`), not the API origin, and take no authentication; the unguessable public id is the capability.
+Hosted lead-capture forms; see the [forms guide](/guides/forms/). Contact scopes cover them because a form exists to create contacts. Minting a personalized link is a `GET` on top of an upsert, so retries always return the same token. The `/forms/domain` routes are the workspace-wide custom forms domain and additionally need the `manage_settings` organization permission for JWT callers; `PUT` resolves the record as part of saving, and only a verified domain is ever used to build a URL. The public page (`/f/:public_id`), its submit endpoint and the embed loader (`/forms.js`) are served by the standalone forms service on its own host (`FORMS_DOMAIN`), not the API origin, and take no authentication; the unguessable public id is the capability, and the JSON endpoints additionally require the render token the page shell carries.
 
 ### Lead sync
 

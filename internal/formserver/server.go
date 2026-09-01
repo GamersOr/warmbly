@@ -10,8 +10,7 @@
 package formserver
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +33,11 @@ const (
 	submitDefaultLimit = 30
 	viewDedupeTTL      = 30 * time.Minute
 	maxSourceURLLen    = 2048
+	// eventWindowLimit bounds funnel events per source IP per submitWindow; a
+	// long multi-page session emits a couple dozen.
+	eventWindowLimit = 120
+	// formMaxEventBytes caps an event body; it is a handful of short fields.
+	formMaxEventBytes = 8 << 10
 )
 
 type Config struct {
@@ -53,6 +57,8 @@ type Server struct {
 	client    *backendClient
 	views     *ttlSet
 	limits    *ipLimiter
+	events    *ipLimiter
+	renderKey []byte
 	shell     []byte
 	assetsDir string
 }
@@ -79,6 +85,8 @@ func New(cfg Config) (*Server, error) {
 		client:    newBackendClient(strings.TrimRight(cfg.BackendURL, "/"), cfg.InternalToken),
 		views:     newTTLSet(viewDedupeTTL),
 		limits:    newIPLimiter(limit, submitWindow),
+		events:    newIPLimiter(eventWindowLimit, submitWindow),
+		renderKey: renderKey(cfg.InternalToken),
 		shell:     shell,
 		assetsDir: filepath.Join(cfg.StaticDir, "assets"),
 	}, nil
@@ -105,10 +113,25 @@ func (s *Server) Router(trustedProxies []string) (*gin.Engine, error) {
 	})
 	assets.Static("/", s.assetsDir)
 
-	api := r.Group("/api")
+	// Every JSON call needs the render token minted with the page shell, so
+	// scripted clients that never load the page get nothing.
+	api := r.Group("/api", s.requireRenderToken)
 	api.GET("/forms/:publicID", s.GetPublicForm)
 	api.POST("/forms/:publicID/submit", s.SubmitForm)
+	api.POST("/forms/:publicID/events", s.RecordFormEvent)
 	return r, nil
+}
+
+// requireRenderToken rejects API calls whose X-Warmbly-Render token is
+// missing, forged, expired or minted for another form. The app treats the
+// stale_page error as "refresh this tab".
+func (s *Server) requireRenderToken(c *gin.Context) {
+	token := c.GetHeader("X-Warmbly-Render")
+	if token == "" || !verifyRenderToken(s.renderKey, c.Param("publicID"), token, time.Now()) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "stale_page"})
+		return
+	}
+	c.Next()
 }
 
 // fetchForm resolves a form or reports how the lookup ended.
@@ -120,10 +143,15 @@ func (s *Server) fetchForm(c *gin.Context) (*formwire.PublicForm, error) {
 	return s.client.Form(c.Request.Context(), publicID)
 }
 
+// wfTokenPlaceholder is the meta tag forms/index.html ships; the shell serve
+// stamps the real render token into it.
+const wfTokenPlaceholder = `<meta name="wf-token" content="" />`
+
 // ServeFormShell serves the app shell for a published form. Public and
 // unauthenticated: the unguessable public id is the capability. The form is
-// resolved before serving so unknown ids 404 like any dead link and the
-// per-form embed CSP rides on the document the browser frames.
+// resolved before serving so unknown ids 404 like any dead link, the
+// per-form embed CSP rides on the document the browser frames, and the shell
+// carries the render token the JSON API requires.
 func (s *Server) ServeFormShell(c *gin.Context) {
 	f, err := s.fetchForm(c)
 	if errors.Is(err, errFormNotFound) {
@@ -138,30 +166,38 @@ func (s *Server) ServeFormShell(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 
-	s.countFormView(c, f)
-
-	c.Data(http.StatusOK, "text/html; charset=utf-8", s.shell)
+	token := mintRenderToken(s.renderKey, f.PublicID, time.Now())
+	stamped := []byte(`<meta name="wf-token" content="` + token + `" />`)
+	shell := bytes.Replace(s.shell, []byte(wfTokenPlaceholder), stamped, 1)
+	if bytes.Equal(shell, s.shell) {
+		// Older build without the placeholder: inject before </head>.
+		shell = bytes.Replace(s.shell, []byte("</head>"), append(stamped, []byte("</head>")...), 1)
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", shell)
 }
 
-// countFormView reports the render once per source per half hour, and skips
-// prefetches so link previews do not inflate conversion stats.
-func (s *Server) countFormView(c *gin.Context, f *formwire.PublicForm) {
+// isPrefetch reports whether the request is a prefetch or link preview, so
+// they never count toward funnel stats.
+func isPrefetch(c *gin.Context) bool {
 	for _, header := range []string{"Sec-Purpose", "Purpose", "X-Purpose", "X-Moz"} {
 		if v := c.GetHeader(header); v != "" && strings.Contains(strings.ToLower(v), "prefetch") {
-			return
+			return true
 		}
 	}
-	sum := sha256.Sum256([]byte(c.ClientIP()))
-	if !s.views.Add(f.PublicID + ":" + hex.EncodeToString(sum[:8])) {
-		return
-	}
-	go s.client.CountView(f.PublicID)
+	return false
 }
 
 // GetPublicForm hands the app the form definition: what the visitor may see
-// and nothing more (the embed allowlist stays server-side with the CSP).
+// and nothing more (the embed allowlist stays server-side with the CSP). A
+// ?t= ticket bypasses the cache so prefill never leaks across visitors.
 func (s *Server) GetPublicForm(c *gin.Context) {
-	f, err := s.fetchForm(c)
+	var f *formwire.PublicForm
+	var err error
+	if token := c.Query("t"); token != "" && len(token) <= 64 {
+		f, err = s.client.FormWithToken(c.Request.Context(), c.Param("publicID"), token)
+	} else {
+		f, err = s.fetchForm(c)
+	}
 	if errors.Is(err, errFormNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 		return
@@ -176,8 +212,74 @@ func (s *Server) GetPublicForm(c *gin.Context) {
 		"name":             f.Name,
 		"fields":           f.Fields,
 		"design":           f.Design,
+		"logo_url":         f.LogoURL,
+		"cover_url":        f.CoverURL,
+		"background_url":   f.BackgroundURL,
 		"captcha_site_key": f.CaptchaSiteKey,
+		"prefill":          f.Prefill,
+		"link_token":       f.LinkToken,
 	})
+}
+
+// eventBody is what the app beacons; keep in sync with forms/src/events.ts.
+type eventBody struct {
+	Type       string `json:"type"`
+	PageIndex  int    `json:"page_index"`
+	PagesTotal int    `json:"pages_total"`
+	VisitorKey string `json:"visitor_key"`
+	SourceURL  string `json:"source_url"`
+	LinkToken  string `json:"link_token"`
+}
+
+// RecordFormEvent accepts a funnel beacon, applies the checks only this
+// process can make (prefetch filter, per-IP budget, view dedupe) and
+// forwards it for enrichment. Always 204: a beacon never surfaces errors.
+func (s *Server) RecordFormEvent(c *gin.Context) {
+	if isPrefetch(c) {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	ip := c.ClientIP()
+	if ip != "" && !s.events.Allow(ip) {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, formMaxEventBytes)
+	var body eventBody
+	if err := json.NewDecoder(c.Request.Body).Decode(&body); err != nil {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	publicID := c.Param("publicID")
+	if body.Type == "view" && !s.views.Add(publicID+":"+truncateStr(body.VisitorKey, 64)) {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	sourceURL := body.SourceURL
+	if sourceURL == "" {
+		sourceURL = c.GetHeader("Referer")
+	}
+	if len(sourceURL) > maxSourceURLLen {
+		sourceURL = sourceURL[:maxSourceURLLen]
+	}
+	go s.client.RecordEvent(publicID, &formwire.EventRequest{
+		Type:       body.Type,
+		PageIndex:  body.PageIndex,
+		PagesTotal: body.PagesTotal,
+		VisitorKey: truncateStr(body.VisitorKey, 64),
+		SourceURL:  sourceURL,
+		LinkToken:  truncateStr(body.LinkToken, 64),
+		RemoteIP:   ip,
+		UserAgent:  truncateStr(c.GetHeader("User-Agent"), 512),
+	})
+	c.Status(http.StatusNoContent)
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // submitBody is what the app posts; keep in sync with forms/src/api.ts.
@@ -188,6 +290,8 @@ type submitBody struct {
 	WT           int64  `json:"_wt"`
 	CaptchaToken string `json:"captcha_token"`
 	SourceURL    string `json:"source_url"`
+	LinkToken    string `json:"link_token"`
+	VisitorKey   string `json:"visitor_key"`
 }
 
 // SubmitForm accepts a public submission, runs the checks only this process
@@ -235,6 +339,8 @@ func (s *Server) SubmitForm(c *gin.Context) {
 		CaptchaToken:   body.CaptchaToken,
 		HoneypotFilled: strings.TrimSpace(body.Website) != "",
 		RenderedAt:     body.WT,
+		LinkToken:      truncateStr(body.LinkToken, 64),
+		VisitorKey:     truncateStr(body.VisitorKey, 64),
 	}
 
 	out, err := s.client.Submit(c.Request.Context(), c.Param("publicID"), req)

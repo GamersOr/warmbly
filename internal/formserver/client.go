@@ -171,14 +171,47 @@ func (b *backendClient) Submit(ctx context.Context, publicID string, in *formwir
 	}
 }
 
-// CountView bumps the form's view counter; best-effort, the page never waits.
-func (b *backendClient) CountView(publicID string) {
+// FormWithToken resolves a form together with its ?t= prefill. Deliberately
+// uncached: per-contact prefill must never be served to another visitor, and
+// the render-token gate plus the event budget bound the extra backend hits.
+func (b *backendClient) FormWithToken(ctx context.Context, publicID, linkToken string) (*formwire.PublicForm, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.formURL(publicID, "?t="+url.QueryEscape(linkToken)), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := b.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var f formwire.PublicForm
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&f); err != nil {
+			return nil, err
+		}
+		return &f, nil
+	case http.StatusNotFound:
+		b.store(publicID, nil, formNegCacheTTL)
+		return nil, errFormNotFound
+	default:
+		return nil, fmt.Errorf("formserver: backend returned %d for form fetch", resp.StatusCode)
+	}
+}
+
+// RecordEvent forwards one funnel event; best-effort, the page never waits.
+func (b *backendClient) RecordEvent(publicID string, ev *formwire.EventRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.formURL(publicID, "/views"), nil)
+	body, err := json.Marshal(ev)
 	if err != nil {
 		return
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.formURL(publicID, "/events"), bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := b.do(req)
 	if err != nil {
 		return

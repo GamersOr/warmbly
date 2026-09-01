@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -48,6 +49,34 @@ func FormsBaseURL() string {
 		return scheme + "://" + host
 	}
 	return ""
+}
+
+// FormsHostname is the bare host this install serves forms on. It is the
+// CNAME target a customer points their own forms subdomain at.
+func FormsHostname() string {
+	return hostWithoutPort(NormalizeTrackingHost(FormsBaseURL()))
+}
+
+// FormURLOn builds the hosted page URL on a specific host, which is how a
+// verified custom forms domain replaces the shared one. An empty host falls
+// back to this install's own forms base.
+func FormURLOn(host, publicID string) string {
+	host = NormalizeTrackingHost(host)
+	if host == "" {
+		return GetFormURL(publicID)
+	}
+	scheme := "https"
+	if name, port, err := net.SplitHostPort(host); err == nil {
+		if port != "" && port != "443" {
+			scheme = "http"
+		}
+		if name == "localhost" || strings.HasSuffix(name, ".localhost") {
+			scheme = "http"
+		}
+	} else if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		scheme = "http"
+	}
+	return scheme + "://" + host + "/f/" + url.PathEscape(publicID)
 }
 
 // GetFormURL is the hosted page for one form; empty when no base is known.

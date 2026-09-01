@@ -277,6 +277,11 @@ var Tables = []Table{
 		Scope: scopeOrg,
 		Note: "public_id travels so installed embed codes keep working after a move; " +
 			"campaign_id is a nullable crossing the importer blanks when campaigns stay behind.",
+		Blobs: []BlobColumn{
+			{Column: "logo_url", Kind: BlobKindPublicURL},
+			{Column: "cover_url", Kind: BlobKindPublicURL},
+			{Column: "background_url", Kind: BlobKindPublicURL},
+		},
 	},
 	{
 		Name: "form_categories", Group: models.OrgDataGroupContacts,
@@ -284,6 +289,18 @@ var Tables = []Table{
 	},
 	{
 		Name: "form_submissions", Group: models.OrgDataGroupContacts,
+		Scope: scopeOrg,
+	},
+	{
+		Name: "form_links", Group: models.OrgDataGroupContacts,
+		Scope: scopeOrg,
+		Note: "row ids are the tokens inside already-sent personalized URLs, so they travel verbatim; " +
+			"campaign_id is a nullable crossing the importer blanks when campaigns stay behind.",
+	},
+	{
+		// Kept in Contacts (not Events) because form_id is a NOT NULL crossing
+		// into forms; the 180-day retention bounds the volume.
+		Name: "form_events", Group: models.OrgDataGroupContacts,
 		Scope: scopeOrg,
 	},
 	{

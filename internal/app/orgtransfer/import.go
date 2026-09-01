@@ -561,6 +561,14 @@ var orgMergeExcluded = func() map[string]bool {
 		"created_at":             true,
 		"deletion_scheduled_at":  true,
 		"deletion_scheduled_for": true,
+		// forms_domain itself travels: it is the customer's own name and they
+		// will want it on the destination. The verdict must not, because it
+		// was reached against the SOURCE instance's forms host. Importing it
+		// verified would build every form URL on a name still pointing at the
+		// old install. Left unverified, links fall back to the shared host and
+		// the hourly sweep re-verifies once the customer repoints the record.
+		"forms_domain_verified":    true,
+		"forms_domain_verified_at": true,
 	}
 	for name := range OrgRiskColumns {
 		out[name] = true

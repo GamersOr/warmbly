@@ -2,14 +2,23 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
     createForm,
     deleteForm,
+    deleteFormImage,
     deleteFormSubmission,
     getForm,
     getFormsConfig,
+    getFormsDomain,
+    getFormStats,
+    listCampaignForms,
     listForms,
     listFormSubmissions,
+    setFormsDomain,
     updateForm,
+    uploadFormImage,
+    verifyFormsDomain,
 } from "@/lib/api/client/app/forms";
+import type { FormAssetKind } from "@/lib/api/client/app/forms";
 import type { FormWrite } from "@/lib/api/models/app/forms/Form";
+import type { FormStatsRange } from "@/lib/api/models/app/forms/FormStats";
 
 // Every form read lives under ["forms"]: the realtime spine invalidates that
 // prefix on any form mutation, and FORM_SUBMISSION_CREATED events refresh
@@ -65,11 +74,72 @@ export function useDeleteForm() {
     });
 }
 
+// Lives under ["forms", id]: the audit spine and FORM_SUBMISSION events keep
+// the analytics tab live without polling.
+export function useFormStats(id: string | undefined, range: FormStatsRange) {
+    return useQuery({
+        queryKey: ["forms", id, "stats", range],
+        queryFn: () => getFormStats(id as string, range),
+        enabled: !!id,
+    });
+}
+
+// Image uploads save immediately (they are not part of the builder draft), so
+// only the list needs refreshing; the caller applies the returned form.
+export function useUploadFormImage() {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: ({ id, kind, file }: { id: string; kind: FormAssetKind; file: Blob }) =>
+            uploadFormImage(id, kind, file),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ["forms", "list"] }),
+    });
+}
+
+export function useDeleteFormImage() {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: ({ id, kind }: { id: string; kind: FormAssetKind }) => deleteFormImage(id, kind),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ["forms", "list"] }),
+    });
+}
+
 export function useDeleteFormSubmission() {
     const queryClient = useQueryClient();
     return useMutation({
         mutationFn: ({ formId, submissionId }: { formId: string; submissionId: string }) =>
             deleteFormSubmission(formId, submissionId),
+        onSuccess: () => invalidateForms(queryClient),
+    });
+}
+
+// Campaign-scoped form performance. Keyed under ["forms"] so the audit spine
+// and form-submission events refresh it with everything else.
+export function useCampaignForms(campaignId: string | undefined) {
+    return useQuery({
+        queryKey: ["forms", "campaign", campaignId],
+        queryFn: () => listCampaignForms(campaignId as string),
+        enabled: !!campaignId,
+    });
+}
+
+// The custom forms domain is workspace-wide: every form URL is built on it,
+// so saving it invalidates every form read.
+export function useFormsDomain() {
+    return useQuery({ queryKey: ["forms", "domain"], queryFn: getFormsDomain });
+}
+
+export function useSetFormsDomain() {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: (domain: string) => setFormsDomain(domain),
+        onSuccess: () => invalidateForms(queryClient),
+    });
+}
+
+export function useVerifyFormsDomain() {
+    const queryClient = useQueryClient();
+    return useMutation({
+        mutationFn: () => verifyFormsDomain(),
         onSuccess: () => invalidateForms(queryClient),
     });
 }

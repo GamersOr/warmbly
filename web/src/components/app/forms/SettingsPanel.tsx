@@ -1,4 +1,9 @@
 // SettingsPanel — what happens after a submission, plus spam protection.
+//
+// Laid out like the campaign preferences page: stacked sections split by
+// hairlines, each a heading over a responsive grid of controls. Controls
+// spread across the width rather than sitting in one narrow column, and each
+// declares how much room it needs with a col-span.
 
 import React from "react";
 import { PlusIcon, XIcon } from "lucide-react";
@@ -8,6 +13,8 @@ import { SelectMenu } from "@/components/ui/select-menu";
 import { SettingRow, Toggle } from "@/components/app/campaigns/preferences/components/CampaignPreferenceBoolBox";
 import CategoryPicker from "@/components/app/contacts/CategoryPicker";
 import useCampaigns from "@/lib/api/hooks/app/campaigns/useCampaigns";
+
+import Section from "./SettingsSection";
 
 export interface FormSettingsDraft {
     success_message: string;
@@ -44,10 +51,12 @@ export default function SettingsPanel({
     }
 
     return (
-        <div className="flex flex-col gap-5 p-4">
-            <section className="flex flex-col gap-3">
-                <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">After submission</span>
-                <div>
+        <div className="px-4 lg:px-6 py-5 divide-y divide-slate-200/60">
+            <Section
+                title="After submission"
+                description="What the visitor sees the moment they finish the form."
+            >
+                <div className="xl:col-span-2">
                     <Label>Success message</Label>
                     <textarea
                         value={draft.success_message}
@@ -63,12 +72,16 @@ export default function SettingsPanel({
                         onChange={(v) => onChange({ redirect_url: v })}
                         placeholder="https://example.com/thanks (optional)"
                     />
-                    <p className="text-[11px] text-slate-500 mt-1">Leave empty to show the success message instead.</p>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                        Leave empty to show the success message instead.
+                    </p>
                 </div>
-            </section>
+            </Section>
 
-            <section className="flex flex-col gap-3 border-t border-slate-200 pt-4">
-                <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">Lead capture</span>
+            <Section
+                title="Lead capture"
+                description="Where a submitted contact lands in your workspace."
+            >
                 <div>
                     <Label>Add to categories</Label>
                     <CategoryPicker
@@ -91,29 +104,43 @@ export default function SettingsPanel({
                         aria-label="Campaign"
                     />
                     <p className="text-[11px] text-slate-500 mt-1">
-                        New contacts join this campaign as leads. Sending still follows the campaign's own schedule and limits.
+                        New contacts join this campaign as leads. Sending still follows the campaign's own schedule and
+                        limits.
                     </p>
                 </div>
-            </section>
+            </Section>
 
-            <section className="flex flex-col gap-3 border-t border-slate-200 pt-4">
-                <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">Spam protection</span>
-                <p className="text-[11px] text-slate-500 -mt-1.5">
-                    Every form already has a honeypot trap, a minimum fill time and per-address rate limits.
-                </p>
+            <Section
+                title="Spam protection"
+                description="Every form already has a honeypot trap, a minimum fill time and per-address rate limits."
+            >
                 {captchaAvailable ? (
-                    <SettingRow title="Captcha challenge" description="Ask visitors to pass a Cloudflare Turnstile check before submitting.">
-                        <Toggle value={draft.captcha_enabled} onChange={(v) => onChange({ captcha_enabled: v })} />
-                    </SettingRow>
+                    <div className="col-span-full">
+                            <SettingRow
+                            title="Captcha challenge"
+                            description="Ask visitors to pass a Cloudflare Turnstile check before submitting."
+                        >
+                            <Toggle
+                                value={draft.captcha_enabled}
+                                onChange={(v) => onChange({ captcha_enabled: v })}
+                            />
+                        </SettingRow>
+                    </div>
                 ) : (
-                    <p className="text-[11.5px] text-slate-500 rounded-md bg-slate-50 border border-slate-200 px-3 py-2">
+                    <p className="col-span-full text-[11.5px] text-slate-500 rounded-md bg-slate-50 border border-slate-200 px-3 py-2 max-w-3xl">
                         A captcha challenge becomes available once the operator configures Cloudflare Turnstile
                         (TURNSTILE_SECRET and TURNSTILE_SITE_KEY).
                     </p>
                 )}
-                <div>
-                    <Label>Allowed embed domains</Label>
-                    <div className="flex items-center gap-1.5">
+            </Section>
+
+            <Section
+                title="Embedding"
+                description="Which sites may host this form. Leave empty to allow any site."
+            >
+                <div className="xl:col-span-2">
+                    <Label>Allowed domains</Label>
+                    <div className="flex items-center gap-1.5 max-w-md">
                         <TextInput
                             value={domainInput}
                             onChange={setDomainInput}
@@ -130,20 +157,27 @@ export default function SettingsPanel({
                             type="button"
                             onClick={addDomain}
                             aria-label="Add domain"
-                            className="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-slate-200 text-[12px] text-slate-600 hover:bg-slate-50"
+                            className="h-7 px-2 inline-flex items-center gap-1 rounded-md border border-slate-200 text-[12px] text-slate-600 hover:bg-slate-50 shrink-0"
                         >
                             <PlusIcon className="w-3 h-3" /> Add
                         </button>
                     </div>
                     {draft.allowed_domains.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1.5">
+                        <div className="flex flex-wrap gap-1 mt-2">
                             {draft.allowed_domains.map((d) => (
-                                <span key={d} className="inline-flex items-center gap-1 h-5 pl-2 pr-1 rounded bg-sky-50 text-sky-700 text-[11px]">
+                                <span
+                                    key={d}
+                                    className="inline-flex items-center gap-1 h-5 pl-2 pr-1 rounded bg-sky-50 text-sky-700 text-[11px]"
+                                >
                                     {d}
                                     <button
                                         type="button"
                                         aria-label={`Remove ${d}`}
-                                        onClick={() => onChange({ allowed_domains: draft.allowed_domains.filter((x) => x !== d) })}
+                                        onClick={() =>
+                                            onChange({
+                                                allowed_domains: draft.allowed_domains.filter((x) => x !== d),
+                                            })
+                                        }
                                         className="size-4 inline-flex items-center justify-center rounded hover:bg-sky-100"
                                     >
                                         <XIcon className="w-2.5 h-2.5" />
@@ -152,11 +186,11 @@ export default function SettingsPanel({
                             ))}
                         </div>
                     )}
-                    <p className="text-[11px] text-slate-500 mt-1">
-                        With domains listed, only those sites (and their subdomains) can embed the form. Empty allows any site.
+                    <p className="text-[11px] text-slate-500 mt-1.5">
+                        With domains listed, only those sites and their subdomains can embed the form.
                     </p>
                 </div>
-            </section>
+            </Section>
         </div>
     );
 }
