@@ -15,7 +15,7 @@ Open **Accounts** and choose **Add account**.
 | Outlook / Microsoft 365 | OAuth (`outlook`) | Recommended. No password stored. Runs on Microsoft Graph |
 | Any other server | IMAP + SMTP (`smtp_imap`) | Custom domains, self-hosted, or providers without OAuth |
 
-**OAuth** sends you to your provider's consent screen and returns a token instead of a password. Both OAuth providers use the provider's native API, never IMAP or SMTP, so consent asks to send mail and to read and organize your mailbox. It survives password changes and needs no app passwords or server settings.
+**OAuth** sends you to your provider's consent screen and returns a token instead of a password. Both OAuth providers use the provider's native API, never IMAP or SMTP, so consent asks to send mail and to read and organize your mailbox. It needs no app passwords or server settings. Note that Google revokes Gmail tokens when the account's password changes, so a password change there means [re-authorizing the mailbox](#reconnecting-an-account) once.
 
 **IMAP / SMTP** needs host, port, username, and password for each direction:
 
@@ -31,6 +31,17 @@ With two-factor authentication on, generate an app password in your provider's s
 </Callout>
 
 **Limits**: `200` mailboxes per workspace by default (higher allowances come through a reviewed limit-increase request), and `5` new mailboxes per workspace per day as an abuse guardrail that resets daily. Spread large onboarding batches across days.
+
+## Reconnecting an account
+
+When the provider stops accepting a mailbox's stored credential (a password change, a revoked grant, an expired app password), the mailbox is taken out of sending and syncing and its drawer shows the reason under **Needs attention**, with the fix right on the error:
+
+- **Gmail and Outlook**: a **Re-authorize** button re-runs the provider consent in a popup, preselecting the mailbox's own address. The consent must be for that same address; signing in with a different account is refused instead of quietly connecting the wrong mailbox.
+- **SMTP / IMAP**: an **Update credentials** button opens a form for the new password (or new host and port). The replacement is validated against your server before it is saved, the same as at connect time.
+
+A successful reconnect stores the new credential, clears the authentication error, reactivates the mailbox on its existing worker, and it resumes syncing from where it stopped. Nothing else changes: settings, history, warmup progress, and campaign membership all stay.
+
+Reconnecting never counts against the mailbox limit or the daily connect guardrail, so a workspace at its cap can still fix a broken mailbox. A mailbox whose sign-in is held by Warmbly Cloud is reconnected from your cloud workspace instead; the button says so if you try locally.
 
 ## What gets synced
 
@@ -52,13 +63,15 @@ Set these on the mailbox's **Settings** tab. They apply to the next scheduled se
 
 | Control | Default | Range |
 |---------|---------|-------|
-| Daily campaign cap | `50`/day | `0` to `100` |
+| Daily campaign cap | `50`/day | `0` to `5000` |
 | Minimum gap between sends | `600s` (10 minutes) | A hard floor, with jitter added on top |
 
 The default of `50` is deliberately conservative. `30` to `50`/day is the normal safe band; a fresh mailbox should start at `10` to `20` and ramp. Raise the cap only for a mailbox with proven reputation and low complaint and bounce rates.
 
+The range goes up to `5000` so a high-capacity mailbox (a warmed Google Workspace account allows `2000`/day, Microsoft 365 more) is not artificially blocked, and the dashboard shows a warning on anything above `100`. A high cap only raises the ceiling: the campaign's own daily limit, the ramp, sending behaviour, and your workspace's daily send limit all still apply, and the smallest one wins. The minimum gap is a throughput bound of its own: at the default `600s` a mailbox tops out around `144` sends in a `24`-hour window, so a cap above that only takes effect together with a shorter gap.
+
 <Callout type="warn" title="Do not jump a new mailbox to a high cap">
-  A new mailbox has no reputation. Sudden high volume from a cold inbox is one of the fastest ways to land in spam.
+  A new mailbox has no reputation. Sudden high volume from a cold inbox is one of the fastest ways to land in spam. Scaling cold outreach means adding mailboxes, not cranking one mailbox's cap.
 </Callout>
 
 ### Keeping a copy of sent mail

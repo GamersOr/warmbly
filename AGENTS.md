@@ -316,7 +316,7 @@ These are the current built-in defaults and guardrails:
 - default warmup start per mailbox: `10` emails/day
 - default warmup ceiling per mailbox: `40` emails/day
 - default warmup ramp: `+1` email/day
-- `campaign_limit` updates are validated up to `100` max
+- `campaign_limit` updates are validated up to `config.LimitMax` (`5000`); the dashboard warns above `100`
 
 Relevant code:
 

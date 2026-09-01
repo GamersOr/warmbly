@@ -100,48 +100,57 @@ func (s *emailService) guardInboxLimit(ctx context.Context, orgID *uuid.UUID) *e
 	return errx.ErrEmailOnboardInboxLimit
 }
 
-// OAuthFinish validates the state, exchanges the code for tokens, fetches the inbox owner,
-// and persists a new email account.
-func (s *emailService) OAuthFinish(ctx context.Context, userID, code, state string) (*models.Email, *errx.Error) {
+// OAuthFinish validates the state, exchanges the code for tokens, fetches the
+// inbox owner, and persists a new email account — or, when the state carries an
+// account id (OAuthReauth), renews that mailbox's tokens in place instead.
+func (s *emailService) OAuthFinish(ctx context.Context, userID, code, state string) (*models.Email, bool, *errx.Error) {
 	if code = strings.TrimSpace(code); code == "" {
-		return nil, errx.ErrEmailOnboardCode
+		return nil, false, errx.ErrEmailOnboardCode
 	}
 	if state = strings.TrimSpace(state); state == "" {
-		return nil, errx.ErrEmailOnboardState
+		return nil, false, errx.ErrEmailOnboardState
 	}
 
 	sess, xerr := s.takeOnboardingState(ctx, state)
 	if xerr != nil {
-		return nil, xerr
+		return nil, false, xerr
 	}
 	if sess.UserID != userID {
-		return nil, errx.ErrEmailOnboardState
+		return nil, false, errx.ErrEmailOnboardState
 	}
 
-	if xerr := s.guardInboxLimit(ctx, sess.OrganizationID); xerr != nil {
-		return nil, xerr
+	// A reauth adds no mailbox, so an org over its inbox cap can still fix one.
+	if sess.EmailAccountID == nil {
+		if xerr := s.guardInboxLimit(ctx, sess.OrganizationID); xerr != nil {
+			return nil, false, xerr
+		}
 	}
 
 	provider := models.InboxProvider(sess.Provider)
 	cfg, xerr := s.oauthConfigFor(provider)
 	if xerr != nil {
-		return nil, xerr
+		return nil, false, xerr
 	}
 
 	tok, err := cfg.Exchange(ctx, code)
 	if err != nil {
-		return nil, errx.ErrEmailOnboardExchange
+		return nil, false, errx.ErrEmailOnboardExchange
 	}
 
 	owner, xerr := fetchInboxOwner(ctx, provider, tok.AccessToken)
 	if xerr != nil {
-		return nil, xerr
+		return nil, false, xerr
+	}
+
+	if sess.EmailAccountID != nil {
+		acc, xerr := s.finishReauth(ctx, sess, provider, tok, owner)
+		return acc, true, xerr
 	}
 
 	if exists, xerr := s.emailRepository.ExistsForUser(ctx, userID, owner.Email); xerr != nil {
-		return nil, xerr
+		return nil, false, xerr
 	} else if exists {
-		return nil, errx.ErrEmailOnboardAlreadyExists
+		return nil, false, errx.ErrEmailOnboardAlreadyExists
 	}
 
 	name := strings.TrimSpace(owner.Name)
@@ -150,7 +159,7 @@ func (s *emailService) OAuthFinish(ctx context.Context, userID, code, state stri
 	}
 
 	if xerr := s.guardMailboxThrottle(ctx, sess.OrganizationID); xerr != nil {
-		return nil, xerr
+		return nil, false, xerr
 	}
 
 	acc, xerr := s.emailRepository.NewOauthAccount(ctx, userID, models.NewOauthAccount{
@@ -170,7 +179,7 @@ func (s *emailService) OAuthFinish(ctx context.Context, userID, code, state stri
 		// immediately; the reconciler is the fallback if this fails.
 		s.loadAccountBestEffort(ctx, acc.ID)
 	}
-	return acc, xerr
+	return acc, false, xerr
 }
 
 // OnboardSMTPIMAP validates the supplied SMTP/IMAP credentials against a live worker, then

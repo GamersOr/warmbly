@@ -66,6 +66,15 @@ const (
 	MailErrorCodeAccountSuspended   MailErrorCode = "ACCOUNT_SUSPENDED"
 )
 
+// CredentialMailErrorCodes are the credential-class errors a successful
+// mailbox re-authorization or SMTP/IMAP credential update fixes.
+var CredentialMailErrorCodes = []MailErrorCode{
+	MailErrorCodeGoogleAuth,
+	MailErrorCodeAuthenticationFailed,
+	MailErrorCodeAuthorizationFailed,
+	MailErrorCodeInvalidCredentials,
+}
+
 var MailErrorCodeGoogleUnknown = func(code int) MailErrorCode {
 	return MailErrorCode(fmt.Sprintf("Unknown (%d)", code))
 }

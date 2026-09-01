@@ -607,31 +607,32 @@ function Section({ section, first = false }: { section: NavSection; first?: bool
  * Anatomy:
  *
  *   ┌──────────────────────────────────┐
- *   │  ●  LIVE         42 of 50 / day  │   ← status dot + label + cap pace
- *   │  8 mailboxes      sending now    │   ← mailbox composition
- *   │  ▂▃▅▇▆▄▂  ▂▃▅▇▆▄▂                │   ← optional 24h sparkline
+ *   │  128  of 400 sent today          │   ← hero number (scrubs on hover)
+ *   │  ━━━━━━━─────────                │   ← capacity meter (today vs cap)
+ *   │      ∿∿∿∿∿∿                     │   ← 14-day area sparkline
+ *   │  ✉ 8   ● 5              ⬇ 3     │   ← mailboxes · active · unread
  *   └──────────────────────────────────┘
  *
- * Reads as ambient telemetry: even when idle, it tells you "system is
- * up, n mailboxes ready." Clicking jumps to analytics. The dot pulses
- * when at least one mailbox is actively warming or sending.
+ * Reads as ambient telemetry: even when idle, it tells you "n mailboxes,
+ * n sent today." Clicking jumps to analytics; hovering a day on the
+ * sparkline swaps the hero number to that day. There is deliberately no
+ * LIVE/OFFLINE status row: the numbers ticking realtime already say the
+ * system is up, so the panel spends its pixels on the data instead.
  *
  * Data sources at this layer:
  *   - useAppStore.emails  → mailbox count, active count
- *   - useAppStore.connectionStatus → online/offline state
  *   - useDashboard("30d") daily_trend → today's sent volume + the sparkline
  *     (shares the dashboard page's query cache; realtime invalidation keeps
  *     it current)
  *
- * The capacity denominator is a derived cap based on mailbox count × 50
- * (default cold cap from internal/config/constants.go).
+ * The capacity denominator sums each mailbox's configured campaign_limit
+ * (default 50/day, from internal/config/constants.go).
  */
 function LivePanel() {
     const emails = useAppStore((s) => s.emails);
-    const connection = useAppStore((s) => s.connectionStatus);
-    const latencyMs = useAppStore((s) => s.wsLatencyMs);
     const unseenCount = useAppStore((s) => s.unseenCount);
     const dash = useDashboard("30d");
+    const [hovered, setHovered] = useState<number | null>(null);
 
     const { active, mailboxes, capacity } = useMemo(() => {
         const m = emails.length;
@@ -639,167 +640,283 @@ function LivePanel() {
             const st = mailboxDisplayStatus(e);
             return st === "healthy" || st === "warming";
         }).length;
-        return { active: a, mailboxes: m, capacity: m * 50 };
+        // Capacity = the sum of each mailbox's configured daily campaign
+        // limit (default 50/day), not a flat count × 50 — a tuned-down or
+        // raised mailbox should move the meter's denominator.
+        const cap = emails.reduce((sum, e) => sum + (e.campaign_limit ?? 50), 0);
+        return { active: a, mailboxes: m, capacity: cap };
     }, [emails]);
 
     const { sentToday, trend } = useMemo(() => {
-        const days = dash.data?.daily_trend ?? [];
-        const todayKey = new Date().toISOString().slice(0, 10);
-        const today = days.find((d) => d.date?.slice(0, 10) === todayKey);
-        return {
-            sentToday: today?.sent ?? 0,
-            trend: days.slice(-14).map((d) => d.sent),
-        };
+        // daily_trend only contains days that had sends; rebuild a continuous
+        // last-14-days axis (zero-filling the gaps) so the sparkline's x
+        // spacing is honest — otherwise a quiet week would be silently
+        // squeezed out and two distant days would read as adjacent.
+        const byDate = new Map(
+            (dash.data?.daily_trend ?? []).map((d) => [d.date?.slice(0, 10), d.sent]),
+        );
+        const out: { date: string; sent: number }[] = [];
+        const now = new Date();
+        for (let i = 13; i >= 0; i--) {
+            const d = new Date(now);
+            d.setUTCDate(now.getUTCDate() - i);
+            const key = d.toISOString().slice(0, 10);
+            out.push({ date: key, sent: byDate.get(key) ?? 0 });
+        }
+        return { sentToday: out[out.length - 1].sent, trend: out };
     }, [dash.data]);
 
-    const live = connection === "connected";
-    // Connected == green, always. When quiet we say READY (not the old "IDLE",
-    // which with a gray dot read as "not connected"); when a mailbox is warming
-    // or sending we say LIVE and pulse. Only a real disconnect is gray.
-    const label =
-        connection === "disconnected"
-            ? "OFFLINE"
-            : connection === "connecting"
-                ? "CONNECTING"
-                : active > 0
-                    ? "LIVE"
-                    : "READY";
-    const dotClass =
-        connection === "disconnected"
-            ? "bg-slate-300"
-            : connection === "connecting"
-                ? "bg-amber-500"
-                : "bg-emerald-500";
-    const labelTone =
-        connection === "disconnected"
-            ? "text-slate-400"
-            : connection === "connecting"
-                ? "text-amber-600"
-                : "text-emerald-600";
-
-    // Latency bucketing: <100ms great, <300ms okay, ≥300ms poor.
-    const latencyTone =
-        latencyMs == null
-            ? "text-slate-400"
-            : latencyMs < 100
-                ? "text-emerald-600"
-                : latencyMs < 300
-                    ? "text-amber-600"
-                    : "text-red-500";
+    const scrub = hovered != null ? trend[hovered] : undefined;
+    const pct = capacity > 0 ? Math.min(100, (sentToday / capacity) * 100) : 0;
 
     return (
         <Link
             to="/app/analytics"
-            className="group block mx-2 mt-2 mb-3 rounded-md bg-white/80 hover:bg-white border border-slate-200/70 hover:border-slate-300 px-2.5 py-2 transition-colors"
+            className="group block mx-2 mt-2 mb-3 rounded-md bg-white/80 hover:bg-white border border-slate-200/70 hover:border-slate-300 pt-2 overflow-hidden transition-colors"
         >
-            <div className="flex items-center gap-1.5">
-                <span className="relative inline-flex shrink-0">
-                    <span
-                        className={cn(
-                            "w-1.5 h-1.5 rounded-full",
-                            dotClass,
-                            connection === "connecting" && "animate-pulse",
-                        )}
-                    />
-                    {/* Active mailboxes ping; a quiet-but-connected workspace gets a
-                        slow breathing glow so "READY" reads alive, not stuck. */}
-                    {live && active > 0 ? (
-                        <span className="absolute inset-0 rounded-full bg-emerald-500/40 animate-ping" />
-                    ) : live ? (
-                        <span className="absolute -inset-[3px] rounded-full bg-emerald-400/50 status-breathe" />
-                    ) : null}
-                </span>
-                <span
-                    className={cn(
-                        "text-[10px] uppercase tracking-[0.14em] font-semibold",
-                        labelTone,
-                    )}
-                >
-                    {label}
-                </span>
-                <span
-                    className={cn(
-                        "ml-auto font-mono text-[10px] tabular-nums",
-                        latencyTone,
-                    )}
-                    title={latencyMs != null ? `Websocket roundtrip` : "Not connected"}
-                >
-                    {latencyMs != null ? `${latencyMs}ms` : "—"}
-                </span>
-            </div>
-
-            <div className="mt-1.5 flex items-baseline gap-1.5">
-                <span className="text-[15px] text-slate-900 tabular-nums leading-none">
-                    {mailboxes}
-                </span>
-                <span className="text-[11px] text-slate-500">
-                    {mailboxes === 1 ? "mailbox" : "mailboxes"}
-                </span>
-                {active > 0 && (
-                    <span className="ml-auto text-[10.5px] text-emerald-600 tabular-nums">
-                        {active} active
-                    </span>
+            {/* Hero: today's sends against the derived daily cap. While the
+                sparkline is being scrubbed it shows the hovered day instead. */}
+            <div className="px-2.5 flex items-baseline gap-1.5 whitespace-nowrap">
+                {scrub ? (
+                    <>
+                        <span className="text-[19px] font-semibold text-slate-900 leading-none">
+                            {scrub.sent.toLocaleString()}
+                        </span>
+                        <span className="text-[10.5px] text-slate-500">
+                            sent {formatTrendDay(scrub.date)}
+                        </span>
+                    </>
+                ) : (
+                    <>
+                        <AnimatedNumber
+                            value={sentToday}
+                            className="text-[19px] font-semibold text-slate-900 leading-none"
+                        />
+                        <span className="text-[10.5px] text-slate-500">
+                            {capacity > 0
+                                ? `of ${capacity.toLocaleString()} sent today`
+                                : "sent today"}
+                        </span>
+                    </>
                 )}
             </div>
 
-            <div className="mt-1.5 flex items-center justify-between gap-2 text-[10.5px]">
-                <span className="text-slate-400">Inbox</span>
+            {/* Capacity meter: same-ramp track so the unfilled part still reads
+                as "room left today", not as a broken bar. */}
+            <div
+                className="mt-1.5 px-2.5"
+                title={
+                    capacity > 0
+                        ? `${sentToday} of ${capacity} daily capacity used`
+                        : "Connect a mailbox to start sending"
+                }
+            >
+                <div className="h-1 rounded-full bg-sky-100 overflow-hidden">
+                    <div
+                        className="h-full rounded-full bg-sky-500 transition-[width] duration-700 ease-out"
+                        style={{ width: `${pct}%` }}
+                    />
+                </div>
+            </div>
+
+            <Sparkline points={trend} hovered={hovered} onHover={setHovered} />
+
+            {/* Glance chips: mailboxes · active senders · unread inbox. Icons
+                carry the labels (title attrs spell them out) so this stays one
+                quiet row instead of two label/value text lines. */}
+            <div className="border-t border-slate-100 px-2.5 py-1.5 flex items-center gap-3 text-[10.5px]">
+                <span
+                    className="inline-flex items-center gap-1 text-slate-500"
+                    title={`${mailboxes} ${mailboxes === 1 ? "mailbox" : "mailboxes"} connected`}
+                >
+                    <MailIcon className="w-3 h-3 text-slate-400" />
+                    <span className="font-mono tabular-nums">{mailboxes}</span>
+                </span>
+                {active > 0 && (
+                    <span
+                        className="inline-flex items-center gap-1 text-emerald-600"
+                        title={`${active} warming or sending`}
+                    >
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        <span className="font-mono tabular-nums">{active}</span>
+                    </span>
+                )}
                 <span
                     className={cn(
-                        "font-mono tabular-nums",
+                        "ml-auto inline-flex items-center gap-1",
                         unseenCount > 0 ? "text-sky-600" : "text-slate-400",
                     )}
+                    title={`${unseenCount} unread in inbox`}
                 >
-                    {unseenCount > 99 ? "99+" : unseenCount} unread
+                    <InboxIcon className="w-3 h-3" />
+                    <span className="font-mono tabular-nums">
+                        {unseenCount > 99 ? "99+" : unseenCount}
+                    </span>
                 </span>
             </div>
-
-            <div className="mt-1 flex items-center justify-between gap-2 text-[10.5px]">
-                <span className="text-slate-400">Today</span>
-                <span
-                    className={cn(
-                        "font-mono tabular-nums",
-                        sentToday > 0 ? "text-slate-600" : "text-slate-400",
-                    )}
-                >
-                    {sentToday}/{capacity || "—"}
-                </span>
-            </div>
-
-            <Sparkline values={trend} />
         </Link>
     );
 }
 
+/** "2026-08-30" → "Aug 30" for the sparkline scrub readout. */
+function formatTrendDay(iso: string): string {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+        ? iso
+        : d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+// Sparkline geometry. Width matches the card's inner width (sidebar w-64
+// minus mx-2 and borders) so preserveAspectRatio="none" barely distorts
+// the dots; side padding keeps markers clear of the overflow-hidden edges.
+const SPARK_W = 238;
+const SPARK_H = 34;
+const SPARK_PAD_X = 6;
+const SPARK_PAD_TOP = 6;
+const SPARK_PAD_BOTTOM = 3;
+
 /**
- * Sparkline — 14 thin vertical bars, the last two weeks of send volume
- * from the dashboard daily trend, normalized to the busiest day. Days
- * with volume render sky; empty days stay a faint slate baseline.
+ * Sparkline — the last two weeks of send volume as a smooth area line
+ * (Catmull-Rom smoothing, gradient wash under the stroke, end-of-series
+ * dot with a surface ring). Full-bleed across the card; the chips row's
+ * top border underneath doubles as the baseline. Invisible per-day hit
+ * columns report the hovered day via onHover so the hero number above
+ * scrubs with the cursor.
  */
-function Sparkline({ values }: { values: number[] }) {
-    const bars = useMemo(() => {
-        const padded =
-            values.length >= 14
-                ? values.slice(-14)
-                : [...Array.from({ length: 14 - values.length }, () => 0), ...values];
-        const max = Math.max(...padded, 1);
-        return padded.map((v) => Math.round((v / max) * 100));
-    }, [values]);
+function Sparkline({
+    points,
+    hovered,
+    onHover,
+}: {
+    points: { date: string; sent: number }[];
+    hovered: number | null;
+    onHover: (i: number | null) => void;
+}) {
+    const { linePath, areaPath, dots, hasVolume } = useMemo(() => {
+        const n = points.length;
+        const baseY = SPARK_H - SPARK_PAD_BOTTOM;
+        if (n < 2) {
+            return {
+                linePath: "",
+                areaPath: "",
+                dots: [] as { x: number; y: number }[],
+                hasVolume: false,
+            };
+        }
+        const max = Math.max(...points.map((p) => p.sent), 1);
+        const span = SPARK_W - SPARK_PAD_X * 2;
+        const usable = baseY - SPARK_PAD_TOP;
+        const pts = points.map((p, i) => ({
+            x: SPARK_PAD_X + (i / (n - 1)) * span,
+            y: baseY - (p.sent / max) * usable,
+        }));
+        // Catmull-Rom → cubic bezier; control ys are clamped so a spike next
+        // to a flat run never overshoots the frame.
+        const clamp = (y: number) =>
+            Math.min(baseY, Math.max(SPARK_PAD_TOP, y));
+        let d = `M ${pts[0].x} ${pts[0].y}`;
+        for (let i = 0; i < n - 1; i++) {
+            const p0 = pts[i - 1] ?? pts[i];
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            const p3 = pts[i + 2] ?? p2;
+            const c1x = p1.x + (p2.x - p0.x) / 6;
+            const c1y = clamp(p1.y + (p2.y - p0.y) / 6);
+            const c2x = p2.x - (p3.x - p1.x) / 6;
+            const c2y = clamp(p2.y - (p3.y - p1.y) / 6);
+            d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`;
+        }
+        return {
+            linePath: d,
+            areaPath: `${d} L ${pts[n - 1].x} ${baseY} L ${pts[0].x} ${baseY} Z`,
+            dots: pts,
+            hasVolume: points.some((p) => p.sent > 0),
+        };
+    }, [points]);
+
+    const n = points.length;
+    const step = n > 1 ? (SPARK_W - SPARK_PAD_X * 2) / (n - 1) : 0;
+    const hoverDot = hovered != null ? dots[hovered] : undefined;
+    const endDot = dots[dots.length - 1];
+
     return (
-        <div className="mt-2 flex items-end gap-0.5 h-4">
-            {bars.map((v, i) => (
-                <div
-                    key={i}
-                    className={cn(
-                        "flex-1 rounded-sm transition-colors",
-                        v > 0
-                            ? "bg-sky-300 group-hover:bg-sky-400"
-                            : "bg-slate-200 group-hover:bg-slate-300",
-                    )}
-                    style={{ height: `${Math.max(8, v)}%`, minHeight: "2px" }}
+        <svg
+            viewBox={`0 0 ${SPARK_W} ${SPARK_H}`}
+            preserveAspectRatio="none"
+            aria-hidden
+            className={cn(
+                "mt-1 block w-full h-[34px]",
+                hasVolume ? "text-sky-500" : "text-slate-300",
+            )}
+            onMouseLeave={() => onHover(null)}
+        >
+            <defs>
+                <linearGradient id="livepanel-spark-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="currentColor" stopOpacity="0.18" />
+                    <stop offset="100%" stopColor="currentColor" stopOpacity="0.02" />
+                </linearGradient>
+            </defs>
+            {linePath && hasVolume && (
+                <path d={areaPath} fill="url(#livepanel-spark-fill)" />
+            )}
+            {linePath && (
+                <path
+                    d={linePath}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    vectorEffect="non-scaling-stroke"
                 />
-            ))}
-        </div>
+            )}
+            {/* Hover scrub: hairline + marker on the hovered day. */}
+            {hoverDot && (
+                <>
+                    <line
+                        x1={hoverDot.x}
+                        y1={SPARK_PAD_TOP - 4}
+                        x2={hoverDot.x}
+                        y2={SPARK_H - SPARK_PAD_BOTTOM}
+                        className="stroke-slate-200"
+                        strokeWidth="1"
+                        vectorEffect="non-scaling-stroke"
+                    />
+                    <circle
+                        cx={hoverDot.x}
+                        cy={hoverDot.y}
+                        r="3"
+                        fill="currentColor"
+                        className="stroke-white"
+                        strokeWidth="1.5"
+                    />
+                </>
+            )}
+            {/* End-of-series marker (today), ringed in the surface color. */}
+            {endDot && hovered == null && (
+                <circle
+                    cx={endDot.x}
+                    cy={endDot.y}
+                    r="2.5"
+                    fill="currentColor"
+                    className="stroke-white"
+                    strokeWidth="1.5"
+                />
+            )}
+            {/* Invisible per-day hit columns driving the scrub. */}
+            {n >= 2 &&
+                points.map((_, i) => (
+                    <rect
+                        key={i}
+                        x={SPARK_PAD_X + i * step - step / 2}
+                        y={0}
+                        width={step}
+                        height={SPARK_H}
+                        fill="transparent"
+                        onMouseEnter={() => onHover(i)}
+                    />
+                ))}
+        </svg>
     );
 }
 

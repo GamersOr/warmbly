@@ -84,10 +84,12 @@ type UniboxRepository interface {
 }
 
 // UniboxBodyTarget is one message awaiting a search-text backfill. UserID is
-// the mailbox owner, which is what the body's object-storage key is built from.
+// the mailbox owner and EmailID the mailbox account; the body's object-storage
+// key is built from both.
 type UniboxBodyTarget struct {
-	ID     uuid.UUID
-	UserID uuid.UUID
+	ID      uuid.UUID
+	UserID  uuid.UUID
+	EmailID uuid.UUID
 }
 
 type uniboxRepository struct {
@@ -253,8 +255,9 @@ func (r *uniboxRepository) GetByID(ctx context.Context, userID, id uuid.UUID) (*
 // GetByIDForOrg reads a single message scoped to the org's mailboxes (not the
 // caller's user_id), mirroring GetByThread, so a non-owner teammate who sees a
 // message in the org-scoped list can open it. It also returns the row's owner
-// user_id: the S3 body key is built from the owner (emails/<ownerID>/<id>), so
-// the caller must fetch the body under the owner, not under itself.
+// user_id: the body's object-storage key is built from the owner (and the
+// row's email_id), so the caller must fetch the body under the owner, not
+// under itself.
 func (r *uniboxRepository) GetByIDForOrg(ctx context.Context, orgID, id uuid.UUID) (*models.EmailMessageStoreData, uuid.UUID, error) {
 	query := fmt.Sprintf(`
 		SELECT user_id, %s
@@ -1148,7 +1151,7 @@ func (r *uniboxRepository) Overview(ctx context.Context, orgID uuid.UUID) (*mode
 // out to be empty and stays that way.
 func (r *uniboxRepository) ListMissingBodyText(ctx context.Context, afterID uuid.UUID, limit int) ([]UniboxBodyTarget, error) {
 	query := `
-		SELECT id, user_id
+		SELECT id, user_id, email_id
 		FROM unibox_emails
 		WHERE body_text = '' AND id > $1
 		ORDER BY id
@@ -1163,7 +1166,7 @@ func (r *uniboxRepository) ListMissingBodyText(ctx context.Context, afterID uuid
 	out := make([]UniboxBodyTarget, 0, limit)
 	for rows.Next() {
 		var t UniboxBodyTarget
-		if err := rows.Scan(&t.ID, &t.UserID); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.EmailID); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

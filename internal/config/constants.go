@@ -3,8 +3,14 @@ package config
 const (
 	DefaultColor = "#c4c8cf"
 	Domain       = "warmbly.com"
-	LimitMin     = 10
-	LimitMax     = 200
+	// LimitMin/LimitMax bound every per-mailbox and per-campaign daily send
+	// cap the API will store. 5000 covers real provider ceilings (Google
+	// Workspace 2000/day, M365 10000 recipients/day); the safe cold band
+	// stays 30-50/day and is steered by defaults, warnings and the advisor.
+	LimitMin = 0
+	LimitMax = 5000
+
+	CampaignDailyLimitMin = 3
 
 	CampaignLimitDefault  = 50
 	MinWaitTimeDefault    = 600

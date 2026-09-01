@@ -57,6 +57,11 @@ import useEmailTrackingDomain from "@/lib/api/hooks/app/emails/useEmailTrackingD
 import useVerifyEmailTrackingDomain from "@/lib/api/hooks/app/emails/useVerifyEmailTrackingDomain";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
+import { useQueryClient } from "@tanstack/react-query";
+import reauthEmailOAuth from "@/lib/api/client/app/emails/reauthEmailOAuth";
+import onboardOAuthFinish from "@/lib/api/client/app/emails/onboardOAuthFinish";
+import { openEmailOAuthPopup } from "@/lib/emails/emailOAuthPopup";
+import UpdateCredentialsDialog from "./UpdateCredentialsDialog";
 import EmailEditor from "../EmailEditor";
 import SendingBehaviorTab from "./SendingBehaviorTab";
 import SyncStatusCard from "./SyncStatusCard";
@@ -90,7 +95,7 @@ function RampHoldNotice({ hold }: { hold: import("@/lib/api/models/app/analytics
     const hours = Math.max(0, Math.round((new Date(hold.resumes_at).getTime() - Date.now()) / 3_600_000));
     const resumesIn = hours > 0 ? ` for about ${hours} more ${hours === 1 ? "hour" : "hours"}` : "";
     return (
-        <div className="px-5 pb-4">
+        <div className="px-5 py-4">
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 flex items-start gap-2">
                 <AlertTriangleIcon className="w-3.5 h-3.5 mt-px shrink-0 text-amber-600" />
                 <div className="min-w-0">
@@ -147,7 +152,7 @@ function LifecycleNotice({
             onError: (e) => toast.error(buildError(e as unknown as AppError)),
         });
     return (
-        <div className="px-5 pb-4">
+        <div className="px-5 py-4">
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 flex items-start gap-2">
                 <PauseIcon className="w-3.5 h-3.5 mt-px shrink-0 text-slate-500" />
                 <div className="min-w-0 flex-1">
@@ -208,7 +213,7 @@ function SendHoldControl({ mailboxId, state }: { mailboxId: string; state?: impo
 // A cold cap below the configured one reads as a bug unless it says why.
 function ColdRampNotice({ ramp }: { ramp: import("@/lib/api/models/app/analytics/AccountStatus").ColdRampInfo }) {
     return (
-        <div className="px-5 pb-4">
+        <div className="px-5 py-4">
             <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 flex items-start gap-2">
                 <GaugeIcon className="w-3.5 h-3.5 mt-px shrink-0 text-sky-600" />
                 <div className="min-w-0">
@@ -264,7 +269,7 @@ function FieldShell({ label, hint, children }: { label: string; hint?: string; c
     );
 }
 
-function NumField({ value, onChange, suffix }: { value: number; onChange: (v: number) => void; suffix?: string }) {
+function NumField({ value, onChange, suffix, max }: { value: number; onChange: (v: number) => void; suffix?: string; max?: number }) {
     // Themed number field with our own steppers, no native spinner.
     return (
         <NumberInput
@@ -272,6 +277,7 @@ function NumField({ value, onChange, suffix }: { value: number; onChange: (v: nu
             onChange={onChange}
             suffix={suffix}
             min={0}
+            max={max}
             align="right"
             className="w-full h-9"
         />
@@ -487,6 +493,75 @@ function Detail({ mailbox, onClose, initialTab = "overview", canWarmup = true }:
 
 /* ── Overview ─────────────────────── */
 
+// Credential-class error codes a reconnect fixes (mirror of the backend's
+// errx.CredentialMailErrorCodes). Any of these gets the reconnect button.
+const CREDENTIAL_ERROR_CODES = new Set([
+    "GOOGLE_AUTHENTICATION_FAILED",
+    "AUTHENTICATION_FAILED",
+    "AUTHORIZATION_FAILED",
+    "INVALID_CREDENTIALS",
+]);
+
+// The missing re-verify button of issue #274. OAuth mailboxes re-run the
+// provider consent in a popup; SMTP/IMAP mailboxes get a replacement-
+// credentials dialog. Either way the backend renews the stored credential,
+// clears the error, and reactivates the mailbox.
+function ReconnectAction({ mailbox }: { mailbox: Inbox }) {
+    const qc = useQueryClient();
+    const [busy, setBusy] = useState(false);
+    const [credsOpen, setCredsOpen] = useState(false);
+    const oauth = mailbox.provider === "gmail" || mailbox.provider === "outlook";
+    const providerLabel = mailbox.provider === "gmail" ? "Google" : "Microsoft";
+
+    const reauth = async () => {
+        if (busy) return;
+        setBusy(true);
+        try {
+            const { url, state } = await reauthEmailOAuth(mailbox.id);
+            const { code } = await openEmailOAuthPopup(url, state);
+            await onboardOAuthFinish(code, state);
+            toast.success("Mailbox re-authorized. It's back online.");
+            qc.invalidateQueries({ queryKey: ["emails", "list"] });
+            qc.invalidateQueries({ queryKey: ["analytics", "accounts"] });
+        } catch (e) {
+            toast.error(e instanceof Error ? e.message : buildError(e as AppError));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <div className="mt-2">
+            {oauth ? (
+                <button
+                    type="button"
+                    onClick={() => void reauth()}
+                    disabled={busy}
+                    className="h-7 px-2.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                >
+                    {busy ? <Loading className="!w-3 h-3 text-white" /> : <ShieldCheckIcon className="w-3 h-3" />}
+                    {busy ? "Waiting for authorization…" : `Re-authorize with ${providerLabel}`}
+                </button>
+            ) : (
+                <button
+                    type="button"
+                    onClick={() => setCredsOpen(true)}
+                    className="h-7 px-2.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors"
+                >
+                    <ShieldCheckIcon className="w-3 h-3" />
+                    Update credentials
+                </button>
+            )}
+            <UpdateCredentialsDialog
+                mailboxId={mailbox.id}
+                mailboxEmail={mailbox.email}
+                open={credsOpen}
+                onClose={() => setCredsOpen(false)}
+            />
+        </div>
+    );
+}
+
 function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/models/app/analytics/AccountStatus").default; loading: boolean; mailbox: Inbox }) {
     const health = status?.health;
     const usage = status?.daily_usage;
@@ -505,6 +580,10 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
             : health?.status === "warning" ? { bar: "bg-amber-500", text: "text-amber-600", icon: AlertTriangleIcon }
                 : { bar: "bg-rose-500", text: "text-rose-600", icon: AlertCircleIcon };
     const HealthIcon = healthTone.icon;
+
+    // One reconnect button per drawer, on the first credential-class error;
+    // every such error is fixed by the same reconnect.
+    const firstCredentialErrorId = status?.errors?.find((e) => CREDENTIAL_ERROR_CODES.has(e.error_code))?.id;
 
     const synced = mailbox.last_synced_at ? new Date(mailbox.last_synced_at) : null;
 
@@ -587,6 +666,7 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
                                 <div className="text-[12px] font-medium text-rose-800">{e.title}</div>
                                 <div className="text-[11px] text-rose-700/90 mt-0.5 leading-relaxed">{e.message}</div>
                                 {e.action_required && <div className="text-[11px] text-rose-900 mt-1 font-medium">{e.action_required}</div>}
+                                {e.id === firstCredentialErrorId && <ReconnectAction mailbox={mailbox} />}
                             </div>
                         ))}
                     </div>
@@ -1481,14 +1561,21 @@ function SettingsTab({ form, update, mailbox }: { form: Inbox; update: (p: Parti
 
             <div className="px-5 py-5 space-y-5">
                 <Eyebrow>Sending limits</Eyebrow>
-                <FieldShell label="Daily campaign cap" hint="Max cold-campaign emails per day. Default 50; raise only with good reputation.">
-                    <NumField value={form.campaign_limit} onChange={(v) => update({ campaign_limit: v })} suffix="emails / day" />
+                <FieldShell label="Daily campaign cap" hint="Max cold-campaign emails per day, up to 5,000. Default 50; raise only with good reputation.">
+                    <NumField value={form.campaign_limit} onChange={(v) => update({ campaign_limit: v })} suffix="emails / day" max={5000} />
+                    {form.campaign_limit > 100 && (
+                        <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
+                            Well above the 30–50/day safe band for cold outreach. Caps this high need a warmed,
+                            established mailbox and a provider that allows the volume (Google Workspace tops out at
+                            2,000/day). Deliverability damage shows up as spam placement, not as errors.
+                        </p>
+                    )}
                 </FieldShell>
                 <FieldShell
                     label="Minimum gap"
                     hint={`Smallest delay between two sends from this mailbox — currently ${formatGap(form.min_wait_time)}. Overridden while Sending behaviour is on, which draws a fresh delay for every send.`}
                 >
-                    <NumField value={form.min_wait_time} onChange={(v) => update({ min_wait_time: v })} suffix="seconds" />
+                    <NumField value={form.min_wait_time} onChange={(v) => update({ min_wait_time: v })} suffix="seconds" max={86400} />
                 </FieldShell>
             </div>
 

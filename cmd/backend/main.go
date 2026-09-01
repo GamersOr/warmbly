@@ -1168,6 +1168,8 @@ func main() {
 		}
 		analyticsRepository := repository.NewAnalyticsRepository(primaryDB)
 		emailAccountErrorRepository := repository.NewEmailAccountErrorRepository(primaryDB)
+		// A successful mailbox reconnect resolves the credential errors it fixed.
+		emailService.WireAccountErrors(emailAccountErrorRepository)
 		analyticsService = analytics.NewService(analyticsRepository, emailRepostory, campaignRepostory, emailAccountErrorRepository, warmupRepository)
 		// A mailbox out of cold rotation says so in its drawer; an active one
 		// needs no notice.
