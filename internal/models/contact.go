@@ -402,6 +402,7 @@ const (
 	TimelineCampaignRemoved ContactTimelineEventType = "campaign_removed"
 	TimelineCategoryAdded   ContactTimelineEventType = "category_added"
 	TimelineCategoryRemoved ContactTimelineEventType = "category_removed"
+	TimelineFormSubmitted   ContactTimelineEventType = "form_submitted"
 
 	// A page view from the website tracking snippet, tied to the contact
 	// through an email-link ticket. Detail rides in PageHit.
@@ -449,6 +450,10 @@ type ContactTimelineEvent struct {
 	CategoryID    *uuid.UUID `json:"category_id,omitempty"`
 	CategoryTitle *string    `json:"category_title,omitempty"`
 	SourceDetail  *string    `json:"source_detail,omitempty"`
+
+	// Form submission (form_submitted): which hosted form was filled in.
+	FormID   *uuid.UUID `json:"form_id,omitempty"`
+	FormName *string    `json:"form_name,omitempty"`
 
 	// Website page view (page_hit): URL, referrer, device, UTM, location.
 	PageHit *WebsitePageHit `json:"page_hit,omitempty"`
@@ -534,13 +539,14 @@ const (
 	ContactSourceSheetSync   ContactSource = "sheet_sync"
 	ContactSourceAPI         ContactSource = "api"
 	ContactSourceAIAssistant ContactSource = "ai_assistant"
+	ContactSourceForm        ContactSource = "form"
 )
 
 // Valid reports whether the value is one the database accepts.
 func (s ContactSource) Valid() bool {
 	switch s {
 	case ContactSourceUnknown, ContactSourceManual, ContactSourceCampaign, ContactSourceImport,
-		ContactSourceSheetSync, ContactSourceAPI, ContactSourceAIAssistant:
+		ContactSourceSheetSync, ContactSourceAPI, ContactSourceAIAssistant, ContactSourceForm:
 		return true
 	}
 	return false

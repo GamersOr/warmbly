@@ -54,7 +54,9 @@ const ROUTE_TITLES: Record<string, string> = {
   "/app/crm/meetings": "Meetings",
   "/app/templates": "Templates",
   "/app/automations": "Automations",
+  "/app/forms": "Forms",
   "/app/api-keys": "API keys",
+  "/app/oauth-apps": "OAuth apps",
   "/app/integrations": "Integrations",
   "/app/audit": "Audit log",
   "/app/unibox": "Unibox",
@@ -80,7 +82,6 @@ const ROUTE_TITLES: Record<string, string> = {
   "/app/settings/connections": "Connections",
   "/app/settings/data": "Data",
   "/app/settings/danger": "Danger zone",
-
 };
 
 // Parameterised routes: [regex, label]. Ordered most-specific first so a
@@ -93,6 +94,8 @@ const PARAM_ROUTES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/app\/campaigns\/[^/]+\/steps$/, "Campaign steps"],
   [/^\/app\/campaigns\/[^/]+$/, "Campaign"],
   [/^\/app\/automations\/[^/]+$/, "Automation"],
+  [/^\/app\/forms\/[^/]+$/, "Form"],
+  [/^\/app\/contacts\/segments\/[^/]+$/, "Segment"],
   [/^\/app\/unibox(\/.*)?$/, "Unibox"],
   [/^\/app\/settings\/billing\/[^/]+$/, "Billing"],
   [/^\/app\/admin\/workers\/[^/]+$/, "Worker"],

@@ -17,6 +17,7 @@ flowchart LR
     API --> BUS{{"NATS JetStream"}}
     BUS --> CONS["consumer"] --> PG
     TRK["tracking :3000"] --> BUS
+    FRM["forms :8090"] --> API
     RT["realtime :4000"] --- RD[("Redis")]
   end
   BUS --> W1["worker"]
@@ -159,13 +160,14 @@ Rotating the secrets means recreating the containers, which `make up` does. Chan
 make status
 ```
 
-`backend`, `postgres`, `redis` and `nats` report `(healthy)`. The backend applies its migrations on boot, so it takes a few seconds longer than the rest. `realtime` and `tracking` have no healthcheck and show as `running`.
+`backend`, `forms`, `postgres`, `redis` and `nats` report `(healthy)`. The backend applies its migrations on boot, so it takes a few seconds longer than the rest. `realtime` and `tracking` have no healthcheck and show as `running`.
 
 Each entry point answers on its own port:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/health   # backend
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/health   # tracking
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8090/health   # forms
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:4000/health   # realtime
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5173          # dashboard
 ```
@@ -181,13 +183,14 @@ The admin panel's **System Status** page shows the same probes plus the platform
 | web / admin | 5173 / 5174 | Dashboard and admin panel (static nginx builds, URLs injected at container start) |
 | backend | 8080 | REST API; applies migrations on every boot; `GET /health` |
 | tracking | 3000 | Open pixels and click redirects; `GET /health` |
+| forms | 8090 | Hosted form pages, embeds and public submissions; `GET /health` |
 | realtime | 4000 | WebSocket fanout; `GET /health` |
 | consumer / worker | none | Event processor; send and sync executor |
 | postgres / redis | 15432 / 16379 | PostgreSQL 16; cache and realtime bridge |
 | nats | 4222 (monitoring 8222) | Event bus (JetStream) |
 | mailpit | 18025 (SMTP 11025), bound to localhost | Not started by `make up`. An SMTP sink for the demo environment, in the `sandbox` profile. Its UI has no authentication, so it is never published to the network |
 
-Ten containers, idling near 300 MB in total. Nothing that only the demo environment needs is started: the mail catcher and the local IMAP server sit in the `sandbox` profile and come up only when `make sandbox`, `make dev` or `make infra` name them.
+Eleven containers, idling near 300 MB in total. Nothing that only the demo environment needs is started: the mail catcher and the local IMAP server sit in the `sandbox` profile and come up only when `make sandbox`, `make dev` or `make infra` name them.
 
 There is no separate migration step. Migrations are embedded in the backend binary, and a standalone `/app/migrate` binary ships in the image as well.
 
@@ -219,6 +222,7 @@ These are the ones that break things quietly when they drift, because each servi
 | consumer | The same shared block as the backend. It writes to Postgres, so it needs `PRIMARY_DB` and the encryption keys |
 | worker | No database. It needs the event bus, `REDIS`, the encryption keys, `ENCRYPTED_KEYS_BACKEND_URL` plus the internal token, and the `BOX_*` OAuth clients |
 | tracking | The event bus, `BACKEND_INTERNAL_URL`, and `INTERNAL_API_TOKEN` |
+| forms | No database and no event bus: only `BACKEND_INTERNAL_URL` and `INTERNAL_API_TOKEN` |
 | realtime | `JWT_SECRET`, `SECRET_KEY_BASE`, `DATABASE_URL`, `REDIS_URL`, `PHX_HOST` |
 | web / admin | Only `WARMBLY_*` URLs, read at container start and written into `/config.js`. The same image runs anywhere |
 
