@@ -151,7 +151,7 @@ A JSON array of contact objects (at least one, up to the per-request maximum; an
 | `phone` | string | No | Phone number. |
 | `campaigns` | string[] | No | Campaign IDs to add the contact to. |
 | `categories` | string[] | No | Category IDs to assign. |
-| `segments` | string[] | No | Segment IDs to pin the contact into, as a manual include override, so it belongs whether or not the conditions match it. An unknown id is rejected with `400` before any contact is written. |
+| `segments` | string[] | No | Segment IDs to pin the contact into, as a manual include override, so it belongs whether or not the conditions match it. An unknown id is rejected with `400` before any contact is written, and the override is written in the same transaction as the contact, so a success response always means the membership exists. |
 | `custom_fields` | object | No | String key/value custom fields. Keys may use letters, numbers, underscores, spaces, and dashes. |
 | `subscribed` | boolean | No | Marketing-consent flag. Omit it to let a new contact default to subscribed and an existing one keep whatever it already had. |
 | `verification_status` | string | No | A verdict you already hold for the address, in Warmbly's vocabulary (`valid`, `risky`, `invalid`, `unknown`) or any known service's (`ok`, `catch-all`, `do_not_mail`, `deliverable`, `ok_for_all`, ...). Stored as an imported verdict that the background check leaves alone. A value no known service writes is rejected with `unknown_verification_status`. |

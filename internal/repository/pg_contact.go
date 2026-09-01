@@ -166,6 +166,7 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 	normalized := make([]models.AddContact, 0, len(contacts))
 	campaignIDs := make([][]uuid.UUID, 0, len(contacts))
 	categoryIDs := make([][]uuid.UUID, 0, len(contacts))
+	segmentIDs := make([][]uuid.UUID, 0, len(contacts))
 	for _, lead := range contacts {
 		lead.Email = strings.TrimSpace(lead.Email)
 		if !email.IsValid(lead.Email) {
@@ -236,6 +237,27 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			cats = append(cats, cid)
 		}
 
+		// Parse + dedupe segment IDs. Same rules again; these become manual
+		// include overrides written in this transaction, so a contact created
+		// inside a segment cannot come back without it.
+		segSet := make(map[uuid.UUID]struct{}, len(lead.Segments))
+		segs := make([]uuid.UUID, 0, len(lead.Segments))
+		for _, raw := range lead.Segments {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			sid, serr := uuid.Parse(raw)
+			if serr != nil {
+				return nil, errx.ErrUuid
+			}
+			if _, dup := segSet[sid]; dup {
+				continue
+			}
+			segSet[sid] = struct{}{}
+			segs = append(segs, sid)
+		}
+
 		// First-touch attribution. Every creation path stamps one; an empty
 		// value is recorded honestly rather than guessed.
 		if lead.Source == "" {
@@ -256,6 +278,7 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		normalized = append(normalized, lead)
 		campaignIDs = append(campaignIDs, cids)
 		categoryIDs = append(categoryIDs, cats)
+		segmentIDs = append(segmentIDs, segs)
 	}
 
 	tx, err := r.DB.Begin(ctx)
@@ -479,6 +502,26 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 			return nil, errx.InternalError()
 		}
 		ncontacts[i].Categories = linked
+	}
+
+	// Pin into segments, in the same transaction as the contact itself: a
+	// failed override write must not answer with a contact that quietly never
+	// joined the segment it was created in (issue #285). Scoped to the org, so
+	// a foreign segment id links nothing.
+	for i, segs := range segmentIDs {
+		if len(segs) == 0 {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO segment_members (segment_id, contact_id, mode)
+			SELECT s.id, $1, 'include'
+			FROM   segments s
+			WHERE  s.id = ANY($2) AND s.organization_id = $3
+			ON CONFLICT (segment_id, contact_id) DO UPDATE SET mode = EXCLUDED.mode, created_at = now()
+		`, ncontacts[i].ID, segs, orgID); err != nil {
+			db.CaptureError(err, "", nil, "segment_members insert")
+			return nil, errx.InternalError()
+		}
 	}
 
 	if err := logContactCreated(ctx, tx, orgID, actor, createdIDs); err != nil {

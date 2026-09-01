@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -57,10 +56,11 @@ func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID
 		return nil, xerr
 	}
 
-	// Resolved before the write so an unknown segment is a 400 rather than a
-	// contact that exists but never reached the segment it was created in.
-	pins, xerr := s.segmentPins(ctx, orgID, contacts)
-	if xerr != nil {
+	// Checked before the write so an unknown segment is a 400 rather than a
+	// silently-skipped link. The override itself is written inside the
+	// repository's transaction, so a contact is never created without the
+	// segment membership the caller asked for.
+	if xerr := s.checkSegmentTargets(ctx, orgID, contacts); xerr != nil {
 		return nil, xerr
 	}
 
@@ -68,7 +68,6 @@ func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID
 	if xerr != nil {
 		return nil, xerr
 	}
-	s.applySegmentPins(ctx, orgID, pins, created)
 
 	s.publishContactsReload(ctx, userID, "contacts:add")
 	var attached []string
@@ -80,70 +79,20 @@ func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID
 	return created, nil
 }
 
-// segmentPins maps each target segment to the positions in `contacts` that
-// asked for it. Existence is checked once for the whole batch, so N contacts
-// naming the same segment cost one lookup.
-func (s *contactService) segmentPins(ctx context.Context, orgID uuid.UUID, contacts []models.AddContact) (map[uuid.UUID][]int, *errx.Error) {
+// checkSegmentTargets rejects a create whose segments do not exist in the
+// organization. Existence is checked once for the whole batch, so N contacts
+// naming the same segment cost one lookup; the repository writes the overrides
+// itself, inside the same transaction as the contacts.
+func (s *contactService) checkSegmentTargets(ctx context.Context, orgID uuid.UUID, contacts []models.AddContact) *errx.Error {
 	var raw []string
 	for i := range contacts {
 		raw = append(raw, contacts[i].Segments...)
 	}
 	if len(raw) == 0 {
-		return nil, nil
+		return nil
 	}
-	valid, xerr := s.parseSegmentIDs(ctx, orgID, raw)
-	if xerr != nil {
-		return nil, xerr
-	}
-	known := make(map[uuid.UUID]bool, len(valid))
-	for _, id := range valid {
-		known[id] = true
-	}
-
-	pins := make(map[uuid.UUID][]int, len(valid))
-	for i := range contacts {
-		seen := make(map[uuid.UUID]bool, len(contacts[i].Segments))
-		for _, r := range contacts[i].Segments {
-			id, err := uuid.Parse(strings.TrimSpace(r))
-			if err != nil || !known[id] {
-				return nil, errx.New(errx.BadRequest, "invalid segment id")
-			}
-			if seen[id] {
-				continue
-			}
-			seen[id] = true
-			pins[id] = append(pins[id], i)
-		}
-	}
-	return pins, nil
-}
-
-// applySegmentPins writes the include overrides for a batch that has just been
-// created. The repository answers one row per input contact, in order, so
-// position i of `created` is the contact that position i of the request asked
-// to pin. Best effort like wakeCampaigns: the contacts are already stored.
-func (s *contactService) applySegmentPins(ctx context.Context, orgID uuid.UUID, pins map[uuid.UUID][]int, created []models.Contact) {
-	if len(pins) == 0 || s.segmentLinker == nil {
-		return
-	}
-	for segmentID, positions := range pins {
-		ids := make([]uuid.UUID, 0, len(positions))
-		for _, i := range positions {
-			if i < len(created) {
-				ids = append(ids, created[i].ID)
-			}
-		}
-		if len(ids) == 0 {
-			continue
-		}
-		if _, xerr := s.segmentLinker.SetMembers(ctx, orgID, segmentID, ids, models.SegmentMemberInclude); xerr != nil {
-			log.Warn().
-				Str("organization_id", orgID.String()).
-				Str("segment_id", segmentID.String()).
-				Int("contacts", len(ids)).
-				Msg("could not pin the new contacts into their segment")
-		}
-	}
+	_, xerr := s.parseSegmentIDs(ctx, orgID, raw)
+	return xerr
 }
 
 func (s *contactService) Search(ctx context.Context, orgID, cursor, category, limit string, filters models.SearchContacts) (*models.ContactsResult, *errx.Error) {
