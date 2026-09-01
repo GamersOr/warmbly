@@ -353,6 +353,11 @@ var Tables = []Table{
 		Scope: `campaign_id IN ` + orgCampaigns,
 	},
 	{
+		Name: "campaign_lead_removals", Group: models.OrgDataGroupCampaigns,
+		Scope: `campaign_id IN ` + orgCampaigns,
+		Note:  "Must travel, or linked segments on the destination re-add every lead the user removed by hand.",
+	},
+	{
 		Name: "campaign_ab_assignments", Group: models.OrgDataGroupCampaigns,
 		Scope: `campaign_id IN ` + orgCampaigns,
 	},

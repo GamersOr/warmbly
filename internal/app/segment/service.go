@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -68,6 +69,9 @@ type service struct {
 	fields  CustomFieldLister
 	waker   CampaignWaker
 	starter CampaignStarter
+	// orgSyncInFlight dedupes concurrent org-wide enrolment passes, keyed by
+	// org id.
+	orgSyncInFlight sync.Map
 }
 
 func NewService(repo repository.SegmentRepository, fields CustomFieldLister) Service {
@@ -388,25 +392,44 @@ func (s *service) syncLinkedCampaign(ctx context.Context, lc models.LinkedCampai
 
 // syncLinkedCampaignsForSegments re-enrols the campaigns linked to any of the
 // given segments. Nested references (a linked segment built on this one) are
-// not chased here; the periodic sweep covers them.
+// not chased here; the periodic sweep covers them. Detached from the caller's
+// request: the enrolment scans grow with the contact list, and this is
+// declared best effort with the sweep as the backstop.
 func (s *service) syncLinkedCampaignsForSegments(ctx context.Context, orgID uuid.UUID, segmentIDs []uuid.UUID) {
-	links, xerr := s.repo.LinkedCampaignsForSegments(ctx, orgID, segmentIDs)
-	if xerr != nil {
-		return
-	}
-	for _, lc := range links {
-		s.syncLinkedCampaign(ctx, lc)
-	}
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		rctx, cancel := context.WithTimeout(bg, 2*time.Minute)
+		defer cancel()
+		links, xerr := s.repo.LinkedCampaignsForSegments(rctx, orgID, segmentIDs)
+		if xerr != nil {
+			return
+		}
+		for _, lc := range links {
+			s.syncLinkedCampaign(rctx, lc)
+		}
+	}()
 }
 
 func (s *service) SyncOrgLinkedCampaigns(ctx context.Context, orgID uuid.UUID) {
-	links, xerr := s.repo.LinkedCampaigns(ctx, &orgID)
-	if xerr != nil {
+	// One in-flight pass per org: every contact write calls this, and a burst
+	// of writes must not stack org-wide enrolment scans. A write landing while
+	// a pass runs is picked up by the sweep within its interval.
+	if _, running := s.orgSyncInFlight.LoadOrStore(orgID, struct{}{}); running {
 		return
 	}
-	for _, lc := range links {
-		s.syncLinkedCampaign(ctx, lc)
-	}
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		defer s.orgSyncInFlight.Delete(orgID)
+		rctx, cancel := context.WithTimeout(bg, 2*time.Minute)
+		defer cancel()
+		links, xerr := s.repo.LinkedCampaigns(rctx, &orgID)
+		if xerr != nil {
+			return
+		}
+		for _, lc := range links {
+			s.syncLinkedCampaign(rctx, lc)
+		}
+	}()
 }
 
 func (s *service) StartCampaignSegmentSync(ctx context.Context, interval time.Duration) {
@@ -427,16 +450,23 @@ func (s *service) StartCampaignSegmentSync(ctx context.Context, interval time.Du
 }
 
 func (s *service) sweepLinkedCampaigns(ctx context.Context) {
-	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	links, xerr := s.repo.LinkedCampaigns(rctx, nil)
+	scanCtx, scanCancel := context.WithTimeout(ctx, 30*time.Second)
+	links, xerr := s.repo.LinkedCampaigns(scanCtx, nil)
+	scanCancel()
 	if xerr != nil {
 		log.Warn().Str("error", xerr.Message).Msg("segment sync: sweep scan failed")
 		return
 	}
 	total := 0
+	// Each campaign gets its own deadline: one shared budget would starve the
+	// same tail campaigns every pass once the instance holds enough links.
 	for _, lc := range links {
-		total += s.syncLinkedCampaign(rctx, lc)
+		if ctx.Err() != nil {
+			return
+		}
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		total += s.syncLinkedCampaign(cctx, lc)
+		cancel()
 	}
 	if total > 0 {
 		log.Info().Int("added", total).Msg("segment sync: sweep enrolled new leads")

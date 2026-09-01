@@ -108,6 +108,12 @@ export default function CampaignSegmentsDialog({
     }
 
     const loading = segments.isPending || (linked.isPending && !seeded);
+    // A failed load must not strand the dialog as "loaded but Save disabled".
+    const loadError = segments.isError || (linked.isError && !seeded);
+    const retryLoad = () => {
+        if (segments.isError) void segments.refetch();
+        if (linked.isError) void linked.refetch();
+    };
 
     return (
         <AnimatePresence>
@@ -167,6 +173,18 @@ export default function CampaignSegmentsDialog({
                                     {[...Array(4)].map((_, i) => (
                                         <div key={i} className="h-9 rounded-md bg-slate-100 animate-pulse" />
                                     ))}
+                                </div>
+                            ) : loadError ? (
+                                <div className="px-5 py-10 text-center">
+                                    <p className="text-[12.5px] text-slate-900 font-medium">Couldn't load segments</p>
+                                    <p className="text-[11.5px] text-slate-400 mt-0.5">Check your connection and try again.</p>
+                                    <button
+                                        type="button"
+                                        onClick={retryLoad}
+                                        className="mt-3 h-7 px-2.5 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-700 hover:text-slate-900 transition-colors"
+                                    >
+                                        Retry
+                                    </button>
                                 </div>
                             ) : list.length === 0 ? (
                                 <div className="px-5 py-10 text-center">

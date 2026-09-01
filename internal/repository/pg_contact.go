@@ -1828,14 +1828,23 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		toDelete := utils.Difference(currentCampaignIDs, wantIDs)
 
 		if len(toDelete) > 0 {
+			// Record the removal so linked-segment enrolment does not re-add
+			// the pair; a later manual add clears it again.
 			query = `
-				DELETE FROM campaign_leads cl
-				USING campaigns cam
-				WHERE cl.contact_id = $1
-				  AND cl.campaign_id = cam.id
-				  AND cam.id = ANY($2::uuid[])
-				  AND cam.organization_id = $3
-				RETURNING cl.campaign_id
+				WITH gone AS (
+					DELETE FROM campaign_leads cl
+					USING campaigns cam
+					WHERE cl.contact_id = $1
+					  AND cl.campaign_id = cam.id
+					  AND cam.id = ANY($2::uuid[])
+					  AND cam.organization_id = $3
+					RETURNING cl.contact_id, cl.campaign_id
+				), mark AS (
+					INSERT INTO campaign_lead_removals (campaign_id, contact_id)
+					SELECT campaign_id, contact_id FROM gone
+					ON CONFLICT (campaign_id, contact_id) DO UPDATE SET created_at = now()
+				)
+				SELECT campaign_id FROM gone
 			`
 			params := []any{contactID, toDelete, orgID}
 			rows, err := tx.Query(ctx, query, params...)
@@ -1853,6 +1862,14 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 
 		if len(toInsert) > 0 {
 			query = `
+				WITH cleared AS (
+					DELETE FROM campaign_lead_removals r
+					USING campaigns cam
+					WHERE r.contact_id = $1
+					  AND r.campaign_id = cam.id
+					  AND cam.id = ANY($2::uuid[])
+					  AND cam.organization_id = $3
+				)
 				INSERT INTO campaign_leads (contact_id, campaign_id)
 				SELECT $1, cam.id
 				FROM campaigns cam
@@ -2109,7 +2126,11 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 		return nil
 	}
 	if len(data.RemoveCampaigns) > 0 {
-		if xerr := link(`DELETE FROM campaign_leads cl
+		// Only pairs that actually held a lead are recorded as removals, so
+		// the automatic segment enrolment never re-adds a hand-removed lead
+		// while contacts merely listed in the request stay eligible.
+		if xerr := link(`WITH gone AS (
+		         DELETE FROM campaign_leads cl
 		         USING contacts c, campaigns cam
 		         WHERE cl.contact_id = c.id
 		           AND cl.campaign_id = cam.id
@@ -2117,14 +2138,32 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 		           AND cam.organization_id = $1
 		           AND cl.contact_id = ANY($2)
 		           AND cl.campaign_id = ANY($3)
-		         RETURNING cl.contact_id, cl.campaign_id`,
+		         RETURNING cl.contact_id, cl.campaign_id
+		         ), mark AS (
+		         INSERT INTO campaign_lead_removals (campaign_id, contact_id)
+		         SELECT campaign_id, contact_id FROM gone
+		         ON CONFLICT (campaign_id, contact_id) DO UPDATE SET created_at = now()
+		         )
+		         SELECT contact_id, campaign_id FROM gone`,
 			models.ActivityCampaignRemoved, logCampaignLinks, orgID, data.Contacts, data.RemoveCampaigns); xerr != nil {
 			return nil, xerr
 		}
 	}
 
 	if len(data.AddCampaigns) > 0 {
-		if xerr := link(`INSERT INTO campaign_leads (contact_id, campaign_id)
+		// A manual add clears the removal record: the user changed their mind,
+		// so linked segments may manage this pair again.
+		if xerr := link(`WITH cleared AS (
+		         DELETE FROM campaign_lead_removals r
+		         USING contacts c, campaigns cam
+		         WHERE r.contact_id = c.id
+		           AND r.campaign_id = cam.id
+		           AND c.organization_id = $1
+		           AND cam.organization_id = $1
+		           AND r.contact_id = ANY($2)
+		           AND r.campaign_id = ANY($3::uuid[])
+		         )
+		         INSERT INTO campaign_leads (contact_id, campaign_id)
 		         SELECT c.id, cam.id
 		         FROM contacts c
 		         CROSS JOIN campaigns cam

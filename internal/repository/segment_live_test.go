@@ -286,6 +286,38 @@ func TestLiveSegmentCampaignLinks(t *testing.T) {
 		t.Fatalf("post-include sync = %d, want 1", added)
 	}
 
+	// A hand-removed lead stays removed: the sync skips the pair until a
+	// manual add clears the record, and the explicit one-shot enrol overrides
+	// and clears it too.
+	handle, _ := liveContactDB(t)
+	contacts := NewContactRepostory(handle)
+	removeBob := &models.BulkEditContactsData{Contacts: []string{f.bob.String()}, RemoveCampaigns: []string{f.other.String()}}
+	if _, xerr := contacts.BulkUpdate(ctx, f.owner.String(), f.org, removeBob); xerr != nil {
+		t.Fatalf("remove: %v", xerr)
+	}
+	if added, _ = repo.SyncCampaignSegments(ctx, f.org, f.other); added != 0 {
+		t.Fatalf("sync after manual removal = %d, want 0", added)
+	}
+	if _, xerr := contacts.BulkUpdate(ctx, f.owner.String(), f.org, &models.BulkEditContactsData{
+		Contacts: []string{f.bob.String()}, AddCampaigns: []string{f.other.String()},
+	}); xerr != nil {
+		t.Fatalf("re-add: %v", xerr)
+	}
+	var removals int
+	if err := handle.QueryRow(ctx, `SELECT COUNT(*) FROM campaign_lead_removals WHERE campaign_id = $1`, f.other).Scan(&removals); err != nil || removals != 0 {
+		t.Fatalf("removals after manual re-add = %d, %v", removals, err)
+	}
+	if _, xerr := contacts.BulkUpdate(ctx, f.owner.String(), f.org, removeBob); xerr != nil {
+		t.Fatalf("remove again: %v", xerr)
+	}
+	out, xerr := repo.AddToCampaign(ctx, f.org, f.owner.String(), acme.ID, f.other)
+	if xerr != nil || out.Added != 1 {
+		t.Fatalf("one-shot after removal = %+v, %v", out, xerr)
+	}
+	if err := handle.QueryRow(ctx, `SELECT COUNT(*) FROM campaign_lead_removals WHERE campaign_id = $1`, f.other).Scan(&removals); err != nil || removals != 0 {
+		t.Fatalf("removals after one-shot = %d, %v", removals, err)
+	}
+
 	// The sweep and the targeted lookup both see the linked campaign, and the
 	// delete guard reports it by name.
 	linked, xerr := repo.LinkedCampaigns(ctx, &f.org)

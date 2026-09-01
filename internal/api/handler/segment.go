@@ -248,6 +248,12 @@ func (h *Handler) SetCampaignSegments(c *gin.Context) {
 		errx.Handle(c, errx.ErrInvalid)
 		return
 	}
+	// An omitted field must not read as "detach everything"; only an
+	// explicit [] does that.
+	if in.SegmentIDs == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "segment_ids is required; send [] to detach all segments"))
+		return
+	}
 	links, added, xerr := h.SegmentService.SetCampaignSegments(c.Request.Context(), orgID, campaignID, &in)
 	if xerr != nil {
 		errx.Handle(c, xerr)

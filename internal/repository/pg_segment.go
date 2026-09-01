@@ -299,7 +299,7 @@ func (r *segmentRepository) AddToCampaign(ctx context.Context, orgID uuid.UUID, 
 		return nil, errx.InternalError()
 	}
 
-	links, err := insertSegmentLeads(ctx, tx, orgID, actorID(actor), clause, args, campaignID)
+	links, err := insertSegmentLeads(ctx, tx, orgID, actorID(actor), clause, args, campaignID, false)
 	if err != nil {
 		db.CaptureError(err, "segment enrol", nil, "query")
 		return nil, errx.InternalError()
@@ -314,12 +314,26 @@ func (r *segmentRepository) AddToCampaign(ctx context.Context, orgID uuid.UUID, 
 // insertSegmentLeads enrols every contact matching the precompiled segment
 // clause as a lead, logging a campaign_added activity for each row that was
 // actually new. The campaign is bound after the clause's own parameters.
-func insertSegmentLeads(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, actor *uuid.UUID, clause string, args []any, campaignID uuid.UUID) ([]contactLink, error) {
+//
+// respectRemovals decides what a manual "remove from campaign" means here:
+// the automatic sync honours the removal record and skips the pair, while an
+// explicit enrol (the one-shot add-to-campaign) clears it and re-adds.
+func insertSegmentLeads(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, actor *uuid.UUID, clause string, args []any, campaignID uuid.UUID, respectRemovals bool) ([]contactLink, error) {
 	args = append(args, campaignID)
+	guard := ""
+	if respectRemovals {
+		guard = fmt.Sprintf(` AND NOT EXISTS (SELECT 1 FROM campaign_lead_removals r WHERE r.campaign_id = $%d AND r.contact_id = c.id)`, len(args))
+	} else {
+		clearQ := fmt.Sprintf(`DELETE FROM campaign_lead_removals r
+			WHERE r.campaign_id = $%d AND r.contact_id IN (SELECT c.id FROM contacts c WHERE c.organization_id = $1 AND (%s))`, len(args), clause)
+		if _, err := tx.Exec(ctx, clearQ, args...); err != nil {
+			return nil, err
+		}
+	}
 	insertQ := fmt.Sprintf(`INSERT INTO campaign_leads (contact_id, campaign_id)
-		SELECT c.id, $%d::uuid FROM contacts c WHERE c.organization_id = $1 AND (%s)
+		SELECT c.id, $%d::uuid FROM contacts c WHERE c.organization_id = $1 AND (%s)%s
 		ON CONFLICT DO NOTHING
-		RETURNING contact_id, campaign_id`, len(args), clause)
+		RETURNING contact_id, campaign_id`, len(args), clause, guard)
 	rows, err := tx.Query(ctx, insertQ, args...)
 	if err != nil {
 		return nil, err
@@ -376,6 +390,12 @@ func (r *segmentRepository) ListForCampaign(ctx context.Context, orgID, campaign
 		out = append(out, l)
 		matches = append(matches, models.SegmentMatch(match))
 		conds = append(conds, cs)
+	}
+	// A mid-stream read failure ends Next() early with no scan error; without
+	// this the Leads tab would render a truncated link list as the truth.
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, "campaign segments list", nil, "rows")
+		return nil, errx.InternalError()
 	}
 	for i := range out {
 		n, xerr := r.Count(ctx, orgID, &out[i].SegmentID, matches[i], conds[i])
@@ -461,6 +481,12 @@ func (r *segmentRepository) SyncCampaignSegments(ctx context.Context, orgID, cam
 		segmentIDs = append(segmentIDs, id)
 	}
 	rows.Close()
+	// A truncated id list here would enrol part of the audience and still
+	// commit as a success, so a read failure has to abort the sync.
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, "campaign segments sync", nil, "rows")
+		return 0, errx.InternalError()
+	}
 
 	total := 0
 	for _, segID := range segmentIDs {
@@ -474,7 +500,7 @@ func (r *segmentRepository) SyncCampaignSegments(ctx context.Context, orgID, cam
 		if clause == "FALSE" {
 			continue
 		}
-		links, lerr := insertSegmentLeads(ctx, tx, orgID, nil, clause, args, campaignID)
+		links, lerr := insertSegmentLeads(ctx, tx, orgID, nil, clause, args, campaignID, true)
 		if lerr != nil {
 			db.CaptureError(lerr, "segment enrol", nil, "query")
 			return 0, errx.InternalError()
@@ -504,6 +530,10 @@ func scanLinkedCampaigns(rows pgx.Rows) ([]models.LinkedCampaign, *errx.Error) {
 			return nil, errx.InternalError()
 		}
 		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, "linked campaigns", nil, "rows")
+		return nil, errx.InternalError()
 	}
 	return out, nil
 }
@@ -554,6 +584,10 @@ func (r *segmentRepository) CampaignsUsingSegment(ctx context.Context, orgID, se
 			return nil, errx.InternalError()
 		}
 		names = append(names, n)
+	}
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, "campaigns using segment", nil, "rows")
+		return nil, errx.InternalError()
 	}
 	return names, nil
 }
