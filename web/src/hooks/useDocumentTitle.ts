@@ -30,14 +30,21 @@ const ROUTE_TITLES: Record<string, string> = {
   "/auth/register/confirm": "Confirm your email",
   "/auth/reset-password": "Reset your password",
   "/auth/reset-password/confirm": "Set a new password",
+  "/auth/sso": "Signing you in",
 
   // Onboarding / workspace selection
   "/onboarding": "Welcome",
   "/select-org": "Select workspace",
+  "/invite": "Join workspace",
+  "/setup": "Set up Warmbly",
+  "/oauth/authorize": "Authorize app",
+  "/cloud-oauth/done": "Mailbox connected",
 
   // App
   "/app/emails": "Mailboxes",
   "/app/contacts": "Contacts",
+  "/app/contacts/segments": "Segments",
+  "/app/contacts/categories": "Categories",
   "/app/campaigns": "Campaigns",
   "/app/analytics": "Analytics",
   "/app/deliverability": "Deliverability",
@@ -61,10 +68,17 @@ const ROUTE_TITLES: Record<string, string> = {
   "/app/settings/members": "Members",
   "/app/settings/teams": "Teams",
   "/app/settings/workspace": "Workspace",
+  "/app/settings/sending": "Sending",
+  "/app/settings/tracking": "Website tracking",
+  "/app/settings/ai-skills": "AI skills",
   "/app/settings/billing": "Billing",
+  "/app/settings/referral": "Refer & earn",
   "/app/settings/limits": "Plan & limits",
   "/app/settings/roles": "Roles",
   "/app/settings/oauth-apps": "OAuth apps",
+  "/app/settings/webhooks": "Webhooks",
+  "/app/settings/connections": "Connections",
+  "/app/settings/data": "Data",
   "/app/settings/danger": "Danger zone",
 
 };
@@ -72,6 +86,7 @@ const ROUTE_TITLES: Record<string, string> = {
 // Parameterised routes: [regex, label]. Ordered most-specific first so a
 // nested path matches its own entry before the shorter parent pattern.
 const PARAM_ROUTES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^\/app\/contacts\/segments\/[^/]+$/, "Segment"],
   [/^\/app\/campaigns\/[^/]+\/leads$/, "Campaign leads"],
   [/^\/app\/campaigns\/[^/]+\/preferences$/, "Campaign settings"],
   [/^\/app\/campaigns\/[^/]+\/schedule$/, "Campaign schedule"],

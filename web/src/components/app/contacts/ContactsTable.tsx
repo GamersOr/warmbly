@@ -789,7 +789,7 @@ export default function ContactsTable({
             />
             <ContactEdit contacts={contacts ?? []} active={edit} setActive={setEdit} initialTab={editTab} />
             <ContactsEditBulk active={bulkEdit} setActive={setBulkEdit} selected={selected} />
-            <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} />
+            <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} segment={segment} />
             {segment && (
                 <AddFromContactsDialog
                     open={fromContactsOpen}
