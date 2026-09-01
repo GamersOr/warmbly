@@ -69,13 +69,23 @@ type service struct {
 	fields  CustomFieldLister
 	waker   CampaignWaker
 	starter CampaignStarter
-	// orgSyncInFlight dedupes concurrent org-wide enrolment passes, keyed by
-	// org id.
-	orgSyncInFlight sync.Map
+	// orgSync coalesces org-wide enrolment passes, one entry per org that is
+	// currently syncing. Guarded by syncMu, which owns every transition so an
+	// entry is only dropped when nothing is running or queued.
+	syncMu  sync.Mutex
+	orgSync map[uuid.UUID]*orgSyncState
+}
+
+// orgSyncState is a running pass plus a "do it once more" flag. A write that
+// lands mid-pass cannot be served by that pass (it read the old membership),
+// so it asks for a follow-up instead of being dropped.
+type orgSyncState struct {
+	running bool
+	again   bool
 }
 
 func NewService(repo repository.SegmentRepository, fields CustomFieldLister) Service {
-	return &service{repo: repo, fields: fields}
+	return &service{repo: repo, fields: fields, orgSync: map[uuid.UUID]*orgSyncState{}}
 }
 
 func (s *service) SetCampaignWaker(w CampaignWaker)      { s.waker = w }
@@ -411,25 +421,53 @@ func (s *service) syncLinkedCampaignsForSegments(ctx context.Context, orgID uuid
 }
 
 func (s *service) SyncOrgLinkedCampaigns(ctx context.Context, orgID uuid.UUID) {
-	// One in-flight pass per org: every contact write calls this, and a burst
-	// of writes must not stack org-wide enrolment scans. A write landing while
-	// a pass runs is picked up by the sweep within its interval.
-	if _, running := s.orgSyncInFlight.LoadOrStore(orgID, struct{}{}); running {
+	// One pass per org at a time, so a burst of contact writes cannot stack
+	// org-wide enrolment scans. Requests that arrive mid-pass are coalesced
+	// into a single follow-up rather than dropped: an import writes its
+	// segment membership after the contact rows, so the pass already running
+	// read the old membership and would leave those contacts to the sweep.
+	s.syncMu.Lock()
+	st := s.orgSync[orgID]
+	if st == nil {
+		st = &orgSyncState{}
+		s.orgSync[orgID] = st
+	}
+	if st.running {
+		st.again = true
+		s.syncMu.Unlock()
 		return
 	}
+	st.running = true
+	s.syncMu.Unlock()
+
 	bg := context.WithoutCancel(ctx)
 	go func() {
-		defer s.orgSyncInFlight.Delete(orgID)
-		rctx, cancel := context.WithTimeout(bg, 2*time.Minute)
-		defer cancel()
-		links, xerr := s.repo.LinkedCampaigns(rctx, &orgID)
-		if xerr != nil {
+		for {
+			s.runOrgSyncPass(bg, orgID)
+			s.syncMu.Lock()
+			if st.again {
+				st.again = false
+				s.syncMu.Unlock()
+				continue
+			}
+			delete(s.orgSync, orgID)
+			s.syncMu.Unlock()
 			return
 		}
-		for _, lc := range links {
-			s.syncLinkedCampaign(rctx, lc)
-		}
 	}()
+}
+
+// runOrgSyncPass enrols every linked campaign in one organization once.
+func (s *service) runOrgSyncPass(ctx context.Context, orgID uuid.UUID) {
+	rctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	links, xerr := s.repo.LinkedCampaigns(rctx, &orgID)
+	if xerr != nil {
+		return
+	}
+	for _, lc := range links {
+		s.syncLinkedCampaign(rctx, lc)
+	}
 }
 
 func (s *service) StartCampaignSegmentSync(ctx context.Context, interval time.Duration) {
