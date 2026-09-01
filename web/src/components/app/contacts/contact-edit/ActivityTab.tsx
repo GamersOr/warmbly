@@ -20,6 +20,7 @@ import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { DatePicker } from "@/components/ui/DatePicker";
 import {
+    ClipboardListIcon,
     AlertOctagonIcon,
     BanIcon,
     CalendarIcon,
@@ -104,6 +105,7 @@ const LIFECYCLE_TYPES: ContactTimelineEventType[] = [
     "contact_created",
     "category_added",
     "category_removed",
+    "form_submitted",
     ...CAMPAIGN_TYPES,
 ];
 
@@ -1183,6 +1185,15 @@ function EventMeta({
                 </span>,
             );
         }
+    } else if (event.type === "form_submitted") {
+        if (event.form_name) {
+            parts.push(
+                <span key="form" className="inline-flex items-center gap-1">
+                    <ClipboardListIcon className="w-3 h-3 text-slate-400" />
+                    <Highlight text={event.form_name} q={highlight} />
+                </span>,
+            );
+        }
     } else if (event.type === "category_added" || event.type === "category_removed") {
         if (event.category_title) {
             parts.push(
@@ -1300,6 +1311,8 @@ export function sourceLabel(source?: string | null): string {
             return "Created via the API";
         case "ai_assistant":
             return "Created by the AI assistant";
+        case "form":
+            return "Submitted a form";
         case "unknown":
         case undefined:
         case null:
@@ -1348,6 +1361,8 @@ function visualFor(e: ContactTimelineEvent): {
             return { Icon: TagIcon, label: "Added to category" };
         case "category_removed":
             return { Icon: TagIcon, label: "Removed from category" };
+        case "form_submitted":
+            return { Icon: ClipboardListIcon, label: "Submitted a form" };
         case "page_hit":
             return { Icon: GlobeIcon, label: e.page_hit?.landing ? "Landed on" : "Page hit" };
         default:
@@ -1367,6 +1382,8 @@ function createdLabel(source?: string | null): string {
             return "Added from campaign";
         case "ai_assistant":
             return "Created by AI assistant";
+        case "form":
+            return "Submitted a form";
         case "manual":
             return "Created manually";
         default:

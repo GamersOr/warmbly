@@ -273,6 +273,20 @@ var Tables = []Table{
 		Scope: `segment_id IN (SELECT id FROM segments WHERE organization_id = $1)`,
 	},
 	{
+		Name: "forms", Group: models.OrgDataGroupContacts,
+		Scope: scopeOrg,
+		Note: "public_id travels so installed embed codes keep working after a move; " +
+			"campaign_id is a nullable crossing the importer blanks when campaigns stay behind.",
+	},
+	{
+		Name: "form_categories", Group: models.OrgDataGroupContacts,
+		Scope: `form_id IN (SELECT id FROM forms WHERE organization_id = $1)`,
+	},
+	{
+		Name: "form_submissions", Group: models.OrgDataGroupContacts,
+		Scope: scopeOrg,
+	},
+	{
 		Name: "contact_activities", Group: models.OrgDataGroupContacts,
 		Scope: scopeOrg,
 	},

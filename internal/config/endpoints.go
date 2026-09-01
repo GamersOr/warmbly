@@ -32,3 +32,29 @@ func GetPasswordResetURL(sessionToken string) string {
 func GetInviteURL(token string) string {
 	return AppBaseURL() + "/invite?token=" + url.QueryEscape(token)
 }
+
+// FormsBaseURL is the origin hosted form pages are served from: FORMS_DOMAIN,
+// the host routed to the forms service (cmd/forms). Empty when unset — the
+// pages do not live on the API origin, so there is nothing to fall back to,
+// and a share link pointing at the wrong process is worse than none.
+func FormsBaseURL() string {
+	if host := strings.TrimSpace(os.Getenv("FORMS_DOMAIN")); host != "" {
+		host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+		host = strings.TrimRight(host, "/")
+		scheme := "https"
+		if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") {
+			scheme = "http"
+		}
+		return scheme + "://" + host
+	}
+	return ""
+}
+
+// GetFormURL is the hosted page for one form; empty when no base is known.
+func GetFormURL(publicID string) string {
+	base := FormsBaseURL()
+	if base == "" {
+		return ""
+	}
+	return base + "/f/" + url.PathEscape(publicID)
+}

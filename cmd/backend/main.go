@@ -52,6 +52,7 @@ import (
 	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
 	"github.com/warmbly/warmbly/internal/app/feature"
 	"github.com/warmbly/warmbly/internal/app/fleet"
+	"github.com/warmbly/warmbly/internal/app/form"
 	"github.com/warmbly/warmbly/internal/app/group"
 	"github.com/warmbly/warmbly/internal/app/guardrail"
 	idempotencyapp "github.com/warmbly/warmbly/internal/app/idempotency"
@@ -164,6 +165,7 @@ func main() {
 	var sequenceService sequence.SequenceService
 	var contactService contact.ContactService
 	var segmentService segment.Service
+	var formService form.Service
 	var websiteTrackingService websitetracking.Service
 	var socketService socket.SocketService
 	var uniboxService unibox.UniboxService
@@ -1195,6 +1197,12 @@ func main() {
 		contactService = contact.NewService(contactRepostory, subscriptionRepository, planRepository, streamingPublisher)
 		segmentRepository := repository.NewSegmentRepository(primaryDB)
 		segmentService = segment.NewService(segmentRepository, contactRepostory)
+		formRepository := repository.NewFormRepository(primaryDB)
+		formService = form.NewService(formRepository)
+		formService.SetContacts(contactService)
+		formService.SetRealtime(streamingPublisher)
+		formService.SetCaptcha(captcha)
+		formService.SetWebhooks(webhookServiceForHandler)
 		// A visibly bad import is filed on the workspace's posture. On its own
 		// it can only reach `watch`, which changes nothing.
 		if aware, ok := contactService.(contact.OrgRiskAware); ok && orgRiskService != nil {
@@ -1830,6 +1838,7 @@ func main() {
 		RateLimitService: rateLimitService,
 		ContactService:   contactService,
 		SegmentService:   segmentService,
+		FormService:      formService,
 		SequenceService:  sequenceService,
 		UniboxService:    uniboxService,
 

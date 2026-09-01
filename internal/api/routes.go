@@ -144,6 +144,13 @@ func Run(
 		// instead of carrying it all in the install-time env file.
 		internal.GET("/worker/config", h.InternalWorkerConfig)
 		internal.POST("/worker/heartbeat", h.InternalWorkerHeartbeat)
+
+		// Hosted forms: the forms service (cmd/forms) resolves published
+		// forms, reports deduped page views and forwards visitor submissions
+		// here; the answers-to-contact pipeline runs on this side.
+		internal.GET("/forms/:publicID", h.InternalGetPublicForm)
+		internal.POST("/forms/:publicID/views", h.InternalCountFormView)
+		internal.POST("/forms/:publicID/submissions", h.InternalSubmitForm)
 	}
 
 	corsConfig := cors.Config{
@@ -616,6 +623,21 @@ func Run(
 			}
 
 			// folders, email-account tags, and contact categories.
+			// Forms: hosted lead capture. Contact permissions on both sides,
+			// since a form exists only to create and update contacts.
+			forms := protected.Group("/forms")
+			forms.Use(m.RateLimitMiddleware(models.RateLimitWrite))
+			{
+				forms.GET("", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListForms)
+				forms.GET("/config", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetFormsConfig)
+				forms.POST("", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.CreateForm)
+				forms.GET("/:id", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.GetForm)
+				forms.PATCH("/:id", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.UpdateForm)
+				forms.DELETE("/:id", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.DeleteForm)
+				forms.GET("/:id/submissions", m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListFormSubmissions)
+				forms.DELETE("/:id/submissions/:sid", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.DeleteFormSubmission)
+			}
+
 			grouph.New(protected, h.FolderService, h.AuditService, "folders", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns))
 			grouph.New(protected, h.TagService, h.AuditService, "tags", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails))
 			grouph.New(protected, h.CategoryService, h.AuditService, "categories", m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts))

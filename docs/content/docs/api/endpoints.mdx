@@ -122,6 +122,21 @@ AI contact research charges credits (2 per run, billable even when it finds noth
 
 Segments are saved contact audiences: a condition list plus per-contact manual overrides, evaluated live. Contact scopes cover them because a segment is a view over contacts; enrolling one into a campaign writes leads, so that call takes the campaign write scope. `POST /contacts/search` and `POST /contacts/export` accept `segment_ids` to scope any contact query to a segment. See [contacts](/api/reference/contacts/#segments) for the condition format.
 
+### Forms
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/forms` | `READ_CONTACTS` |
+| GET | `/forms/config` | `READ_CONTACTS` |
+| POST | `/forms` | `WRITE_CONTACTS` |
+| GET | `/forms/:id` | `READ_CONTACTS` |
+| PATCH | `/forms/:id` | `WRITE_CONTACTS` |
+| DELETE | `/forms/:id` | `WRITE_CONTACTS` |
+| GET | `/forms/:id/submissions` | `READ_CONTACTS` |
+| DELETE | `/forms/:id/submissions/:sid` | `WRITE_CONTACTS` |
+
+Hosted lead-capture forms; see the [forms guide](/guides/forms/). Contact scopes cover them because a form exists to create contacts. The public page (`/f/:public_id`), its submit endpoint and the embed loader (`/forms.js`) are served by the standalone forms service on its own host (`FORMS_DOMAIN`), not the API origin, and take no authentication; the unguessable public id is the capability.
+
 ### Lead sync
 
 Saved Google Sheets sources that upsert contacts on demand. Gated under the contact write scope because a sync ultimately writes contacts. Nothing syncs on a timer: a source only runs when `/lead-sync/sources/:id/sync` is called.

@@ -3171,7 +3171,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			FROM contact_activities
 			WHERE contact_id = $1
 			  AND organization_id = $2
-			  AND activity_type IN ('contact_created', 'campaign_added', 'campaign_removed', 'category_added', 'category_removed')
+			  AND activity_type IN ('contact_created', 'campaign_added', 'campaign_removed', 'category_added', 'category_removed', 'form_submitted')
 			  AND created_at < $3
 			ORDER BY created_at DESC
 			LIMIT $4
@@ -3215,6 +3215,9 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			case models.TimelineCategoryAdded, models.TimelineCategoryRemoved:
 				ev.CategoryID = id("category_id")
 				ev.CategoryTitle = str("category_title")
+			case models.TimelineFormSubmitted:
+				ev.FormID = id("form_id")
+				ev.FormName = str("form_name")
 			}
 			events = append(events, ev)
 		}

@@ -12,6 +12,8 @@ import "@fontsource/poppins/700.css";
 import RootAppLayout from './app/app/layout';
 import AddressesPage from './app/app/emails/page';
 import ContactsPage from './app/app/contacts/page';
+import FormsPage from './app/app/forms/page';
+import FormBuilderPage from './app/app/forms/[id]/page';
 import ContactsLayout from './app/app/contacts/layout';
 import SegmentsPage from './app/app/contacts/segments/page';
 import CategoriesPage from './app/app/contacts/categories/page';
@@ -250,6 +252,13 @@ const router = createBrowserRouter([
                 ],
               },
               { path: "categories", element: <CategoriesPage /> },
+            ],
+          },
+          {
+            path: "forms",
+            children: [
+              { index: true, element: <FormsPage /> },
+              { path: ":id", element: <FormBuilderPage /> },
             ],
           },
           {
