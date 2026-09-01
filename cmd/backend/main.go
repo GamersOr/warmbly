@@ -1197,6 +1197,11 @@ func main() {
 		contactService = contact.NewService(contactRepostory, subscriptionRepository, planRepository, streamingPublisher)
 		segmentRepository := repository.NewSegmentRepository(primaryDB)
 		segmentService = segment.NewService(segmentRepository, contactRepostory)
+		// Imports write segment include overrides, and every contact-mutating
+		// path re-enrols the org's segment-linked campaigns.
+		if aware, ok := contactService.(contact.SegmentAware); ok {
+			aware.WireSegments(segmentRepository, segmentService)
+		}
 		// A visibly bad import is filed on the workspace's posture. On its own
 		// it can only reach `watch`, which changes nothing.
 		if aware, ok := contactService.(contact.OrgRiskAware); ok && orgRiskService != nil {
@@ -1290,6 +1295,9 @@ func main() {
 		// and Cloud Tasks client exist.
 		if segmentService != nil {
 			segmentService.SetCampaignWaker(campaignService)
+			// A completed campaign whose linked segments grow is restarted
+			// through the full launch checks, never by a raw status flip.
+			segmentService.SetCampaignStarter(campaignService)
 		}
 		if contactService != nil {
 			contactService.SetCampaignWaker(campaignService)
@@ -1581,6 +1589,13 @@ func main() {
 		// crash between send and enqueue). Campaigns have no other bootstrap once
 		// started, so without this a stranded campaign stops sending forever.
 		go tasksService.StartCampaignReconciler(ctx, 5*time.Minute)
+
+		// Segment-linked campaigns: enrol contacts that drifted into a linked
+		// segment (date windows, engagement counters, nested segments) that
+		// the write-path syncs cannot see.
+		if segmentService != nil {
+			go segmentService.StartCampaignSegmentSync(ctx, 2*time.Minute)
+		}
 
 		// Worker reconciler: assign + (re)load every active mailbox onto its
 		// worker. Workers hold accounts in memory only, so this is what makes a

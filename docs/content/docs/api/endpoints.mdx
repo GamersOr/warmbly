@@ -48,6 +48,8 @@ All paths below are relative to the versioned base URL `https://api.warmbly.com/
 | PATCH | `/campaigns/:id` | `WRITE_CAMPAIGNS` |
 | DELETE | `/campaigns/:id` | `WRITE_CAMPAIGNS` |
 | POST | `/campaigns/:id/duplicate` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id/segments` | `READ_CAMPAIGNS` |
+| PUT | `/campaigns/:id/segments` | `WRITE_CAMPAIGNS` |
 | GET | `/campaigns/:id/advanced` | `READ_CAMPAIGNS` |
 | PATCH | `/campaigns/:id/advanced` | `WRITE_CAMPAIGNS` |
 | GET | `/campaigns/:id/ab-variants` | `READ_CAMPAIGNS` |
@@ -120,7 +122,7 @@ AI contact research charges credits (2 per run, billable even when it finds noth
 | GET | `/segments/:id/overrides` | `READ_CONTACTS` |
 | POST | `/segments/:id/add-to-campaign` | `WRITE_CAMPAIGNS` |
 
-Segments are saved contact audiences: a condition list plus per-contact manual overrides, evaluated live. Contact scopes cover them because a segment is a view over contacts; enrolling one into a campaign writes leads, so that call takes the campaign write scope. `POST /contacts/search` and `POST /contacts/export` accept `segment_ids` to scope any contact query to a segment. See [contacts](/api/reference/contacts/#segments) for the condition format.
+Segments are saved contact audiences: a condition list plus per-contact manual overrides, evaluated live. Contact scopes cover them because a segment is a view over contacts; enrolling one into a campaign writes leads, so that call takes the campaign write scope, as does managing a campaign's linked segments (`/campaigns/:id/segments` above). `POST /contacts/search` and `POST /contacts/export` accept `segment_ids` to scope any contact query to a segment. See [contacts](/api/reference/contacts/#segments) for the condition format.
 
 ### Lead sync
 

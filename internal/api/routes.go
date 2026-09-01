@@ -486,6 +486,12 @@ func Run(
 				campaigns.GET("/:id/senders", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.ListCampaignSenders)
 				campaigns.PUT("/:id/senders", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.ReplaceCampaignSenders)
 
+				// Linked segments: a live audience source; members are enrolled
+				// as leads automatically. PUT replaces the set, so retries are
+				// naturally safe.
+				campaigns.GET("/:id/segments", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.ListCampaignSegments)
+				campaigns.PUT("/:id/segments", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.SetCampaignSegments)
+
 				// Campaign-scoped tracking-domain verification.
 				campaigns.POST("/:id/tracking-domain/verify", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.VerifyCampaignTrackingDomain)
 
