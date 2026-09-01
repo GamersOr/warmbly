@@ -13,10 +13,12 @@ import (
 	"github.com/warmbly/warmbly/internal/pkg/trackdns"
 )
 
-// FormsDomainStore is the slice of the organization repository the custom
-// forms domain needs. Kept narrow so the form service does not take a
-// dependency on the whole organization repository.
-type FormsDomainStore interface {
+// OrgStore is the slice of the organization repository the form service
+// needs: the custom forms domain, and the workspace owner used as the
+// fallback actor when a form outlives the member who created it. Kept narrow
+// so the service does not depend on the whole organization repository.
+type OrgStore interface {
+	GetByID(ctx context.Context, id uuid.UUID) (*models.Organization, error)
 	GetFormsDomain(ctx context.Context, orgID uuid.UUID) (string, bool, error)
 	SetFormsDomain(ctx context.Context, orgID uuid.UUID, domain string) error
 	SetFormsDomainVerified(ctx context.Context, orgID uuid.UUID, verified bool, at *time.Time) error

@@ -288,7 +288,7 @@ func (r *formEventRepository) ListAggregates(ctx context.Context, orgID uuid.UUI
 		SELECT form_id, (occurred_at AT TIME ZONE 'UTC')::date, COUNT(*)
 		FROM form_events
 		WHERE organization_id = $1 AND event_type = 'submit'
-			AND occurred_at >= NOW() - ($2 || ' days')::interval
+			AND occurred_at >= NOW() - make_interval(days => $2)
 		GROUP BY form_id, (occurred_at AT TIME ZONE 'UTC')::date
 	`, orgID, trendDays)
 	if err != nil {

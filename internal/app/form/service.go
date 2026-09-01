@@ -73,7 +73,7 @@ type Service interface {
 	SetGeo(g *geo.Client)
 	SetLinks(r repository.FormLinkRepository)
 	SetEvents(r repository.FormEventRepository)
-	SetDomains(d FormsDomainStore)
+	SetDomains(d OrgStore)
 }
 
 // ContactReader is the slice of the contact repository the link paths need.
@@ -127,7 +127,7 @@ type service struct {
 	repo          repository.FormRepository
 	links         repository.FormLinkRepository
 	events        repository.FormEventRepository
-	domains       FormsDomainStore
+	domains       OrgStore
 	contacts      ContactAdder
 	contactReader ContactReader
 	captcha       CaptchaVerifier
@@ -148,7 +148,7 @@ func (s *service) SetContactReader(r ContactReader)           { s.contactReader 
 func (s *service) SetGeo(g *geo.Client)                       { s.geo = g }
 func (s *service) SetLinks(r repository.FormLinkRepository)   { s.links = r }
 func (s *service) SetEvents(r repository.FormEventRepository) { s.events = r }
-func (s *service) SetDomains(d FormsDomainStore)              { s.domains = d }
+func (s *service) SetDomains(d OrgStore)                      { s.domains = d }
 
 // formTrendDays is the sparkline window on the forms list.
 const formTrendDays = 14
@@ -377,7 +377,17 @@ func (s *service) Submit(ctx context.Context, publicID string, answers map[strin
 	// lose the submission, and never the visitor's success page.
 	var contactID string
 	if lead != nil && s.contacts != nil {
-		if owner := f.CreatedBy; owner != nil {
+		// A form outlives the member who made it: created_by is ON DELETE SET
+		// NULL, so offboarding that person would otherwise stop lead capture
+		// silently while submissions kept storing. Contacts are org-owned, so
+		// the workspace owner is the right stand-in actor.
+		owner := f.CreatedBy
+		if owner == nil && s.domains != nil {
+			if org, oerr := s.domains.GetByID(ctx, f.OrganizationID); oerr == nil && org != nil {
+				owner = &org.OwnerUserID
+			}
+		}
+		if owner != nil {
 			lead.Campaigns = campaignList(f.CampaignID)
 			lead.Categories = categoryList(f.CategoryIDs)
 			lead.Source = models.ContactSourceForm

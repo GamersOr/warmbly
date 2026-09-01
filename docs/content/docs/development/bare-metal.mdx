@@ -41,8 +41,8 @@ flowchart LR
 | Rust (stable, 1.93 or newer) | Builds the tracking service |
 | Elixir 1.18 on OTP 26 | Builds the realtime service |
 | Node 22 and pnpm | Builds the dashboard, admin panel and forms app |
-| nginx | Serves the static frontends and terminates TLS for the API, websocket and tracking hosts |
-| Five DNS names | `app`, `admin`, `api`, `ws` and `t` under your domain, all pointing at the host |
+| nginx | Serves the static frontends and terminates TLS for the API, websocket, tracking and forms hosts |
+| Six DNS names | `app`, `admin`, `api`, `ws`, `t` and `forms` under your domain, all pointing at the host |
 
 The toolchains are only needed on the machine that builds. If you would rather not install compilers on the production host, build on another machine of the same architecture and copy `/opt/warmbly` over; nothing below is path-dependent beyond the values you put in the env file.
 

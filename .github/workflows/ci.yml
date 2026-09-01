@@ -61,6 +61,11 @@ jobs:
               - 'site/**'
             forms:
               - 'forms/**'
+              # The mirrored design engine has a copy in web/; editing only
+              # that side must still run the drift check below.
+              - 'web/src/components/app/forms/designCore.ts'
+              - 'web/src/components/app/forms/form-theme.css'
+              - 'scripts/check-forms-mirror.sh'
             make:
               - 'integrations/make/**'
             ios:
@@ -206,6 +211,10 @@ jobs:
         working-directory: forms
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check forms mirror
+        working-directory: .
+        run: ./scripts/check-forms-mirror.sh
 
       - uses: ./.github/actions/setup-pnpm
         with:

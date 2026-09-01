@@ -549,7 +549,30 @@ func (s *service) mergeOrganization(ctx context.Context, tx pgx.Tx, orgID uuid.U
 	if err != nil {
 		return err
 	}
-	return s.repo.MergeOrganization(ctx, tx, orgID, cols, raw)
+	if err := s.repo.MergeOrganization(ctx, tx, orgID, cols, raw); err != nil {
+		return err
+	}
+
+	// The verdict columns are excluded above, which preserves whatever the
+	// DESTINATION already held rather than resetting them. On a workspace that
+	// had its own verified forms domain, importing a different one would
+	// inherit that verified flag and start building form URLs on a name whose
+	// CNAME still points at the source instance. Clear it whenever the domain
+	// itself moved; the hourly sweep re-earns it once DNS points here.
+	for _, c := range cols {
+		if c != "forms_domain" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE organizations
+			SET forms_domain_verified = false, forms_domain_verified_at = NULL
+			WHERE id = $1
+		`, orgID); err != nil {
+			return err
+		}
+		break
+	}
+	return nil
 }
 
 // orgMergeExcluded are the organization columns an archive may never set.
