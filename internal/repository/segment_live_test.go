@@ -345,3 +345,60 @@ func TestLiveSegmentCampaignLinks(t *testing.T) {
 		t.Errorf("leads after unlink = %d, want 3", got)
 	}
 }
+
+// Issue #285: a contact created inside a segment joins it, and the include
+// override is written in the same transaction as the contact. A segment that
+// vanishes between the service's existence check and this insert must roll the
+// whole create back rather than answer with a membership that never happened.
+func TestLiveContactAddPinsSegments(t *testing.T) {
+	f, repo := newSegmentFixture(t)
+	ctx := context.Background()
+	handle, pool := liveContactDB(t)
+	contacts := NewContactRepostory(handle)
+
+	acme, xerr := repo.Create(ctx, f.org, &f.owner, &models.Segment{
+		Name: "Pin target", Color: "#0284c7", Match: models.SegmentMatchAll,
+		Conditions: []models.SegmentCondition{{Field: "company", Operator: "equals", Value: "acme"}},
+	})
+	if xerr != nil {
+		t.Fatalf("create segment: %v", xerr)
+	}
+
+	// A company the conditions do not match, so membership can only come from
+	// the pin. The second contact names no segment and must stay out.
+	tag := uuid.New().String()[:6]
+	made, xerr := contacts.Add(ctx, f.owner.String(), f.org, []models.AddContact{
+		{Email: "pinned-" + tag + "@initech.test", FirstName: "Pinned", Company: "initech", Segments: []string{acme.ID.String(), acme.ID.String()}},
+		{Email: "loose-" + tag + "@initech.test", FirstName: "Loose", Company: "initech"},
+	})
+	if xerr != nil || len(made) != 2 {
+		t.Fatalf("add: %+v, %v", made, xerr)
+	}
+	modes, xerr := repo.MemberModes(ctx, acme.ID, []uuid.UUID{made[0].ID, made[1].ID})
+	if xerr != nil {
+		t.Fatalf("modes: %v", xerr)
+	}
+	if modes[made[0].ID] != models.SegmentMemberInclude {
+		t.Errorf("pinned contact mode = %q, want include", modes[made[0].ID])
+	}
+	if _, ok := modes[made[1].ID]; ok {
+		t.Errorf("contact that named no segment was pinned")
+	}
+
+	// A segment id that is not in the organization (the state the race leaves
+	// behind) fails the create instead of dropping the membership silently.
+	gone := uuid.New().String()
+	email := "vanished-" + tag + "@initech.test"
+	if _, xerr := contacts.Add(ctx, f.owner.String(), f.org, []models.AddContact{
+		{Email: email, FirstName: "Vanished", Company: "initech", Segments: []string{gone}},
+	}); xerr == nil {
+		t.Fatalf("create with a vanished segment succeeded")
+	}
+	var stranded int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM contacts WHERE organization_id = $1 AND email = $2`, f.org, email).Scan(&stranded); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if stranded != 0 {
+		t.Errorf("rolled-back create left %d contacts behind", stranded)
+	}
+}

@@ -512,15 +512,23 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		if len(segs) == 0 {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO segment_members (segment_id, contact_id, mode)
 			SELECT s.id, $1, 'include'
 			FROM   segments s
 			WHERE  s.id = ANY($2) AND s.organization_id = $3
 			ON CONFLICT (segment_id, contact_id) DO UPDATE SET mode = EXCLUDED.mode, created_at = now()
-		`, ncontacts[i].ID, segs, orgID); err != nil {
+		`, ncontacts[i].ID, segs, orgID)
+		if err != nil {
 			db.CaptureError(err, "", nil, "segment_members insert")
 			return nil, errx.InternalError()
+		}
+		// One row per requested segment, since `segs` is deduplicated and a
+		// conflicting row still counts as affected. Fewer means a segment was
+		// deleted between the service's check and this statement, so the
+		// create is rolled back rather than answered without the membership.
+		if int(tag.RowsAffected()) != len(segs) {
+			return nil, errx.New(errx.BadRequest, "a selected segment does not exist")
 		}
 	}
 
