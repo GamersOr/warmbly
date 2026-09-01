@@ -496,6 +496,12 @@ func Run(
 				campaigns.GET("/:id/senders", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.ListCampaignSenders)
 				campaigns.PUT("/:id/senders", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.ReplaceCampaignSenders)
 
+				// Linked segments: a live audience source; members are enrolled
+				// as leads automatically. PUT replaces the set, so retries are
+				// naturally safe.
+				campaigns.GET("/:id/segments", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.ListCampaignSegments)
+				campaigns.PUT("/:id/segments", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.SetCampaignSegments)
+
 				// Campaign-scoped tracking-domain verification.
 				campaigns.POST("/:id/tracking-domain/verify", m.RequireOrganization(), m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.VerifyCampaignTrackingDomain)
 
@@ -533,6 +539,18 @@ func Run(
 				skillsGroup.POST("", m.RequireAccess(models.PermManageSettings, models.APIPermAIAgent), h.CreateSkill)
 				skillsGroup.PATCH("/:id", m.RequireAccess(models.PermManageSettings, models.APIPermAIAgent), h.UpdateSkill)
 				skillsGroup.DELETE("/:id", m.RequireAccess(models.PermManageSettings, models.APIPermAIAgent), h.DeleteSkill)
+			}
+
+			// REST tool surface for non-MCP agents (Hermes/OpenAI-style function
+			// calling). No route-level permission gate on purpose, matching the
+			// advisor apply path and the MCP endpoint: the registry enforces each
+			// tool's own permission bits, the list reflects only what the caller
+			// may use, and send-class tools are never exposed.
+			agentTools := protected.Group("/ai/tools")
+			agentTools.Use(m.RequireOrganization())
+			{
+				agentTools.GET("", m.RateLimitMiddleware(models.RateLimitRead), h.ListAgentTools)
+				agentTools.POST("/:name/call", m.RateLimitMiddleware(models.RateLimitWrite), h.CallAgentTool)
 			}
 
 			// Advisor. Reads are an analytics read of the org's sending

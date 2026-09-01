@@ -491,6 +491,11 @@ type AddContact struct {
 	Campaigns  []string `json:"campaigns"`
 	Categories []string `json:"categories"`
 
+	// Segments the new contact joins as an include override, so a contact
+	// created from inside a segment belongs to it whatever the conditions
+	// say. Unknown ids are a 400 before anything is written.
+	Segments []string `json:"segments,omitempty"`
+
 	CustomFields map[string]string `json:"custom_fields"`
 
 	// VerificationStatus is a verdict the caller already holds for this
