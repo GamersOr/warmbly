@@ -561,7 +561,12 @@ export default function ContactsTable({
                     active={edit}
                     setActive={setEdit}
                 />
-                <ContactsEditBulk active={bulkEdit} setActive={setBulkEdit} selected={selected} />
+                <ContactsEditBulk
+                    active={bulkEdit}
+                    setActive={setBulkEdit}
+                    selected={selected}
+                    scope={current_campaign ? { kind: "campaign", name: current_campaign.name } : undefined}
+                />
                 <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} campaign={current_campaign} />
                 <SyncSourcesPanel
                     open={syncOpen}
@@ -788,7 +793,12 @@ export default function ContactsTable({
                 onSaved={(saved) => navigate(`/app/contacts/segments/${saved.id}`)}
             />
             <ContactEdit contacts={contacts ?? []} active={edit} setActive={setEdit} initialTab={editTab} />
-            <ContactsEditBulk active={bulkEdit} setActive={setBulkEdit} selected={selected} />
+            <ContactsEditBulk
+                active={bulkEdit}
+                setActive={setBulkEdit}
+                selected={selected}
+                scope={segment ? { kind: "segment", name: segment.name } : undefined}
+            />
             <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} segment={segment} />
             {segment && (
                 <AddFromContactsDialog
