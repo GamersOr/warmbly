@@ -376,13 +376,25 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     // Reduced motion draws no fill, so no animationend: a timer advances instead.
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const arm = () => {
+    let left = HOLD_MS;
+    let since = 0;
+    const paused = () => frame.classList.contains('is-held') || frame.classList.contains('is-idle');
+    // Runs only while the frame is neither held nor off screen; pausing keeps the remaining time.
+    const run = () => {
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        if (frame.classList.contains('is-held') || frame.classList.contains('is-idle')) arm();
-        else go(i + 1);
-      }, HOLD_MS);
+      if (paused()) return;
+      since = Date.now();
+      timer = setTimeout(() => go(i + 1), left);
     };
+    const hold = () => {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+      left = Math.max(0, left - (Date.now() - since));
+    };
+    const arm = () => { left = HOLD_MS; run(); };
+    // Held and idle flip on hover and visibility; keep the timer in step with them.
+    const sync = () => { if (!reduced) return; paused() ? hold() : run(); };
     const paint = () => {
       bars.forEach((b, k) => {
         b.classList.toggle('is-done', k < i);
@@ -409,8 +421,8 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     });
     frame.querySelector('.feat-prev')?.addEventListener('click', () => go(i - 1));
     frame.querySelector('.feat-next')?.addEventListener('click', () => go(i + 1));
-    frame.addEventListener('pointerenter', () => frame.classList.add('is-held'));
-    frame.addEventListener('pointerleave', () => frame.classList.remove('is-held'));
+    frame.addEventListener('pointerenter', () => { frame.classList.add('is-held'); sync(); });
+    frame.addEventListener('pointerleave', () => { frame.classList.remove('is-held'); sync(); });
 
     let startX: number | null = null;
     frame.addEventListener('pointerdown', (e) => { startX = e.clientX; });
@@ -424,9 +436,11 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     if (typeof IntersectionObserver !== 'undefined') {
       new IntersectionObserver((entries) => {
         frame.classList.toggle('is-idle', !entries.some((e) => e.isIntersecting));
+        sync();
       }, { threshold: 0.35 }).observe(frame);
     } else {
       frame.classList.remove('is-idle');
+      sync();
     }
     paint();
   }
