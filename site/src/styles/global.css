@@ -904,6 +904,16 @@ body {
    hidden, one radius. A transformed child (a scaled screen, a sliding track)
    gets its own compositor layer, and Safari and Chrome both skip a rounded
    overflow clip on those unless the box is a layer itself and masked. */
+/* Phones: a backdrop filter inside a scaled app shell makes iOS Safari keep a
+   snapshot of everything behind it per mock, and at that size the blur is
+   invisible anyway. Desktop keeps the real thing. */
+@media (hover: none) {
+  [data-stage] [class*="backdrop-blur"] {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
 .round-clip {
   position: relative;
   overflow: hidden;

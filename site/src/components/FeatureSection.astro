@@ -312,6 +312,11 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     .feat-track { transition: none; }
     .feat-bar.is-active .feat-fill { animation: none; transform: scaleX(1); }
   }
+  /* Parked (a viewport or more away): the screens are not rendered at all. */
+  .feat-frame.is-parked .feat-track { content-visibility: hidden; }
+  @supports not (content-visibility: hidden) {
+    .feat-frame.is-parked .feat-track { display: none; }
+  }
 </style>
 
 <script>
@@ -326,6 +331,8 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     const frame = screen.closest<HTMLElement>('.feat-frame');
     const shell = frame?.parentElement as HTMLElement | null;
     if (!box || !frame || !shell) return;
+    // A parked screen has no layout to measure; its last sizes stay put.
+    if (frame.classList.contains('is-parked')) return;
 
     if (window.innerWidth >= 1024) {
       const zoom = Number(screen.dataset.zoom) || 1000;
@@ -445,6 +452,19 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     paint();
   }
 
+  // Sections more than a viewport away drop their screens from rendering
+  // (content-visibility), so iOS Safari holds the layers of two or three
+  // windows at a time instead of fourteen; the frame keeps its size, and the
+  // screens are fitted again as the section comes back within reach.
+  function park(frame: HTMLElement) {
+    if (typeof IntersectionObserver === 'undefined') return;
+    new IntersectionObserver((entries) => {
+      const near = entries.some((e) => e.isIntersecting);
+      if (frame.classList.toggle('is-parked', !near)) return;
+      frame.querySelectorAll<HTMLElement>('.feat-screen').forEach(fit);
+    }, { rootMargin: '100% 0px' }).observe(frame);
+  }
+
   function init() {
     document.querySelectorAll<HTMLElement>('.feat-screen').forEach((screen) => {
       const run = () => fit(screen);
@@ -456,6 +476,7 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     window.addEventListener('load', fitAll);
     window.addEventListener('resize', fitAll);
     document.querySelectorAll<HTMLElement>('.feat-frame').forEach(carousel);
+    document.querySelectorAll<HTMLElement>('.feat-frame').forEach(park);
     // Screens are pictures: nothing inside them is a real tab stop.
     document.querySelectorAll<HTMLElement>('.feat-screen button, .feat-screen input, .feat-screen a, .feat-screen [tabindex]').forEach((el) => { el.tabIndex = -1; });
   }
