@@ -477,7 +477,8 @@ const online = [
     };
 
     let onScreen = false;
-    const sync = () => (onScreen && !document.hidden ? start() : stop());
+    // Reduced motion never ticks the counters; the observer still parks the shell.
+    const sync = () => (onScreen && !document.hidden && !REDUCED ? start() : stop());
     new IntersectionObserver((entries) => {
       onScreen = entries.some((e) => e.isIntersecting);
       // Off screen, the pings and pulses inside stop too (see global.css).
@@ -487,7 +488,7 @@ const online = [
     document.addEventListener('visibilitychange', sync);
   }
 
-  if (!REDUCED) document.querySelectorAll<HTMLElement>('[data-shell]').forEach(live);
+  document.querySelectorAll<HTMLElement>('[data-shell]').forEach(live);
   // The shell is a picture: nothing inside it is a real tab stop.
   document.querySelectorAll<HTMLElement>('[data-shell] button, [data-shell] input, [data-shell] a, [data-shell] [tabindex]').forEach((el) => { el.tabIndex = -1; });
 </script>

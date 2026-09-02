@@ -143,7 +143,10 @@ const websiteJsonLd = {
       <script type="application/ld+json" is:inline set:html={JSON.stringify(schema)} />
     ))}
     <!-- Phone diagnostics: ?noshell / ?noanim / ?nogl switch heavy subsystems off (global.css, GrainBackdrop). -->
-    <script is:inline>document.documentElement.dataset.diag = (location.search.match(/\b(noshell|noanim|nogl)\b/g) || []).join(' ');</script>
+    <script is:inline>
+      var diagParams = new URLSearchParams(location.search);
+      document.documentElement.dataset.diag = ['noshell', 'noanim', 'nogl'].filter(function (f) { return diagParams.has(f); }).join(' ');
+    </script>
   </head>
   <body class="min-h-screen flex flex-col antialiased">
     {!bare && <LaunchBanner />}

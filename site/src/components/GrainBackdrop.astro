@@ -53,7 +53,7 @@ const t = GRAIN_TONES[tone];
   // Phones: a 3x canvas per frame is what pushes iOS Safari over its GPU
   // memory limit while scrolling; 2x grain reads the same at that size.
   const touch = window.matchMedia('(hover: none)').matches;
-  const noGl = /[?&]nogl\b/.test(location.search);
+  const noGl = new URLSearchParams(location.search).has('nogl');
   const maxPixels = touch ? 1280 * 720 : 1920 * 1080 * 2;
 
   // Every frame gets its own rotation, drift and shape. Sharing one palette
