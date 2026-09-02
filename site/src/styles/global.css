@@ -7,6 +7,10 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Nothing may widen the page: on iOS one overflowing row scales the whole
+   layout viewport. clip (not hidden) keeps the sticky header working. */
+html, body { overflow-x: clip; }
+
 /* ----------------------------------------------------------------
    Color tokens — mirrors web/src/global.css OKLCH neutrals,
    with brand sky/indigo accents for the marketing surface.
