@@ -122,8 +122,8 @@ const t = GRAIN_TONES[tone];
   }
   // Frees the GL context and its canvas; the CSS gradient stays underneath.
   function unmount(el: HTMLElement) {
-    const m = (el as HTMLElement & { paperShaderMount?: { disconnect: () => void } }).paperShaderMount;
-    if (m) m.disconnect();
+    const m = (el as HTMLElement & { paperShaderMount?: { dispose: () => void } }).paperShaderMount;
+    if (m) m.dispose();
     delete el.dataset.grainReady;
   }
 
