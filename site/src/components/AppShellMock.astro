@@ -178,11 +178,11 @@ const online = [
   { initials: 'RS', hot: false },
 ];
 ---
-<!-- SkyChrome - #f5f6f8 base + ambient cloud blurs -->
-<div class="relative overflow-hidden" style="background:#f5f6f8; contain: paint;" data-stage data-shell aria-hidden="true">
-  <span aria-hidden="true" class="absolute pointer-events-none" style="top:-80px; left:-60px; width:520px; height:240px; background:rgba(255,255,255,0.95); border-radius:50% 50% 18% 18%; filter:blur(60px); opacity:0.7;"></span>
-  <span aria-hidden="true" class="absolute pointer-events-none" style="top:10%; right:8%; width:380px; height:180px; background:rgba(255,255,255,0.85); border-radius:50% 50% 18% 18%; filter:blur(70px); opacity:0.55;"></span>
-  <span aria-hidden="true" class="absolute pointer-events-none" style="top:32%; left:26%; width:300px; height:140px; background:rgba(255,255,255,0.9); border-radius:50% 50% 22% 22%; filter:blur(70px); opacity:0.45;"></span>
+<!-- SkyChrome: #f5f6f8 base + its three ambient cloud blurs, baked into one
+     SVG (public/backdrops/shell-ambient.svg). Fifteen shells on a page each
+     running three live 70px blur layers is what iOS Safari runs out of GPU
+     memory on. -->
+<div class="relative overflow-hidden" style="background:#f5f6f8 url(/backdrops/shell-ambient.svg) 0 0 / 100% 100% no-repeat; contain: paint;" data-stage data-shell aria-hidden="true">
 
   <!-- ── AppHeader (h-14) ── -->
   <div class={`relative z-10 h-14 items-center shrink-0 ${headerShow}`}>
@@ -480,6 +480,8 @@ const online = [
     const sync = () => (onScreen && !document.hidden ? start() : stop());
     new IntersectionObserver((entries) => {
       onScreen = entries.some((e) => e.isIntersecting);
+      // Off screen, the pings and pulses inside stop too (see global.css).
+      shell.classList.toggle('is-off', !onScreen);
       sync();
     }, { threshold: 0.1 }).observe(shell);
     document.addEventListener('visibilitychange', sync);

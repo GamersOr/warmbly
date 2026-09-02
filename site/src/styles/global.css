@@ -914,15 +914,30 @@ body {
   }
 }
 
+/* clip-path, not the translateZ + mask-image trick: that pairs a forced 3D
+   layer with a mask buffer per frame, and iOS Safari runs out of GPU memory
+   with fourteen of them on one page. clip-path clips composited children
+   (the WebGL canvas, scaled screens) just as well. */
 .round-clip {
   position: relative;
   overflow: hidden;
   border-radius: 28px;
   isolation: isolate;
-  transform: translateZ(0);
-  -webkit-mask-image: -webkit-radial-gradient(white, black);
-  mask-image: radial-gradient(white, black);
+  clip-path: inset(0 round 28px);
 }
+
+/* A shell that is off screen (AppShellMock's observer) keeps its pings and
+   pulses still; a phone with fifteen shells cannot animate them all. */
+[data-stage].is-off *,
+[data-stage].is-off *::before,
+[data-stage].is-off *::after {
+  animation-play-state: paused !important;
+}
+
+/* Diagnostics for the phone: ?noshell hides every app shell, ?noanim stops
+   every animation, ?nogl (GrainBackdrop) skips WebGL. */
+html[data-diag~="noshell"] [data-stage] { display: none !important; }
+html[data-diag~="noanim"] *, html[data-diag~="noanim"] *::before, html[data-diag~="noanim"] *::after { animation: none !important; transition: none !important; }
 
 /* The outer clip. clip-path (not just overflow) because the shader canvas
    carries `contain: strict` and a negative z-index from the library's own

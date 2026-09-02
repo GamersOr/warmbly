@@ -142,6 +142,8 @@ const websiteJsonLd = {
     {extraJsonLd.map((schema) => (
       <script type="application/ld+json" is:inline set:html={JSON.stringify(schema)} />
     ))}
+    <!-- Phone diagnostics: ?noshell / ?noanim / ?nogl switch heavy subsystems off (global.css, GrainBackdrop). -->
+    <script is:inline>document.documentElement.dataset.diag = (location.search.match(/\b(noshell|noanim|nogl)\b/g) || []).join(' ');</script>
   </head>
   <body class="min-h-screen flex flex-col antialiased">
     {!bare && <LaunchBanner />}
