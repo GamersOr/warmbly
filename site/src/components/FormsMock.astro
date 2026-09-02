@@ -176,8 +176,9 @@ const num = 'px-3 text-right font-mono text-[12px] tabular-nums whitespace-nowra
       </tr>
     </thead>
     <tbody>
-      {rows.map((r) => {
+      {rows.map((r, i) => {
         const s = r.trend.some((v) => v > 0) ? spark(r.trend) : null;
+        const gid = `${sparkId}-${i}`;
         return (
           <tr class="h-11 border-b border-slate-100 cursor-pointer transition-colors">
             <td class="pl-5 pr-2"><input type="checkbox" class="w-3.5 h-3.5 rounded accent-sky-600 align-middle" /></td>
@@ -209,12 +210,12 @@ const num = 'px-3 text-right font-mono text-[12px] tabular-nums whitespace-nowra
               {s ? (
                 <svg width={SW} height={SH} viewBox={`0 0 ${SW} ${SH}`} class="block">
                   <defs>
-                    <linearGradient id={`${sparkId}-${r.name.length}`} x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stop-color="#0284c7" stop-opacity="0.18" />
                       <stop offset="100%" stop-color="#0284c7" stop-opacity="0" />
                     </linearGradient>
                   </defs>
-                  <path d={s.area} fill={`url(#${sparkId}-${r.name.length})`} />
+                  <path d={s.area} fill={`url(#${gid})`} />
                   <path d={s.line} fill="none" stroke="#0284c7" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" />
                 </svg>
               ) : (

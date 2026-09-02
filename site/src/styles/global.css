@@ -896,6 +896,7 @@ body {
    clip-path would cut it off. */
 .feat-frame-shell {
   --frame-radius: 28px;
+
   border-radius: var(--frame-radius);
 }
 
@@ -995,8 +996,9 @@ body {
   --radius: 0.5rem;
   --foreground: oklch(0.15 0.01 260);
   --muted-foreground: oklch(0.55 0.01 260);
+
   color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 [data-stage] svg[stroke="currentColor"] {
   stroke-linecap: round;
@@ -1019,7 +1021,6 @@ body {
   width: 4px;
   aspect-ratio: 1;
   border-radius: 50%;
-  color: currentColor;
   transform-origin: 0 0;
   transform: scale(0.26) translateX(-38px);
   box-shadow:

@@ -179,7 +179,7 @@ const online = [
 ];
 ---
 <!-- SkyChrome - #f5f6f8 base + ambient cloud blurs -->
-<div class="relative overflow-hidden" style="background:#f5f6f8; contain: paint;" data-stage data-shell>
+<div class="relative overflow-hidden" style="background:#f5f6f8; contain: paint;" data-stage data-shell aria-hidden="true">
   <span aria-hidden="true" class="absolute pointer-events-none" style="top:-80px; left:-60px; width:520px; height:240px; background:rgba(255,255,255,0.95); border-radius:50% 50% 18% 18%; filter:blur(60px); opacity:0.7;"></span>
   <span aria-hidden="true" class="absolute pointer-events-none" style="top:10%; right:8%; width:380px; height:180px; background:rgba(255,255,255,0.85); border-radius:50% 50% 18% 18%; filter:blur(70px); opacity:0.55;"></span>
   <span aria-hidden="true" class="absolute pointer-events-none" style="top:32%; left:26%; width:300px; height:140px; background:rgba(255,255,255,0.9); border-radius:50% 50% 22% 22%; filter:blur(70px); opacity:0.45;"></span>
@@ -246,11 +246,11 @@ const online = [
       <span class="relative flex items-center justify-center size-7 rounded-md text-slate-500">
         <svg viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4" aria-hidden="true"><path d="M9.5 4c.62 4.7 3.3 7.38 8 8-4.7.62-7.38 3.3-8 8-.62-4.7-3.3-7.38-8-8 4.7-.62 7.38-3.3 8-8Z"/><path d="M18.5 2c.31 2.35 1.65 3.69 4 4-2.35.31-3.69 1.65-4 4-.31-2.35-1.65-3.69-4-4 2.35-.31 3.69-1.65 4-4Z"/></svg>
       </span>
-      <button class="flex items-center gap-2 px-2 h-7 rounded-md text-slate-500 text-[12.5px]">
+      <span class="flex items-center gap-2 px-2 h-7 rounded-md text-slate-500 text-[12.5px]">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
         <span>Search</span>
         <kbd class="inline-flex h-4 items-center px-1 rounded border border-slate-300/70 bg-white/60 font-mono text-[10px] text-slate-500 ml-0.5">&#8984;K</kbd>
-      </button>
+      </span>
     </div>
   </div>
 
@@ -486,4 +486,6 @@ const online = [
   }
 
   if (!REDUCED) document.querySelectorAll<HTMLElement>('[data-shell]').forEach(live);
+  // The shell is a picture: nothing inside it is a real tab stop.
+  document.querySelectorAll<HTMLElement>('[data-shell] button, [data-shell] input, [data-shell] a, [data-shell] [tabindex]').forEach((el) => { el.tabIndex = -1; });
 </script>

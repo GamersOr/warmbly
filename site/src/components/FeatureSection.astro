@@ -220,7 +220,7 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
                          its own window, so a right-anchored screen that overflows
                          to the left cannot bleed over the slide before it. -->
                     <div class="feat-slide absolute top-0 bottom-0 w-full overflow-hidden" style={`left:${i * 100}%`}>
-                      <div class={`feat-screen absolute w-[900px] lg:w-[1280px] ${screenPos[anchor]}`} data-zoom={zoom}>
+                      <div class={`feat-screen absolute w-[900px] lg:w-[1280px] ${screenPos[anchor]}`} data-zoom={zoom} aria-hidden="true">
                         <!-- Browser chrome is part of the screenshot, so it
                              scales and crops with everything else. The address
                              is centred, Safari-style, so a right-anchored crop
@@ -373,6 +373,16 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     frame.classList.add('is-idle');
 
     let i = 0;
+    // Reduced motion draws no fill, so no animationend: a timer advances instead.
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (frame.classList.contains('is-held') || frame.classList.contains('is-idle')) arm();
+        else go(i + 1);
+      }, HOLD_MS);
+    };
     const paint = () => {
       bars.forEach((b, k) => {
         b.classList.toggle('is-done', k < i);
@@ -383,6 +393,7 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
       // Reflow between remove and add restarts the fill from zero.
       void active.offsetWidth;
       active.classList.add('is-active');
+      if (reduced) arm();
     };
     const go = (n: number) => {
       i = ((n % count) + count) % count;
@@ -431,6 +442,8 @@ const mockCol = wide ? `lg:col-span-8 ${side === 'left' ? 'lg:-ml-10' : 'lg:-mr-
     window.addEventListener('load', fitAll);
     window.addEventListener('resize', fitAll);
     document.querySelectorAll<HTMLElement>('.feat-frame').forEach(carousel);
+    // Screens are pictures: nothing inside them is a real tab stop.
+    document.querySelectorAll<HTMLElement>('.feat-screen button, .feat-screen input, .feat-screen a, .feat-screen [tabindex]').forEach((el) => { el.tabIndex = -1; });
   }
   init();
 </script>
