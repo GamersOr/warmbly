@@ -512,6 +512,16 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 	}
 
+	// STEP 10.6: A plain-text campaign ships no HTML part at all. Tracking
+	// below only rewrites HTML, so dropping it here is what makes the
+	// setting's "disables tracking" promise true.
+	if campaign.TextOnly {
+		if bodyPlain == "" && bodyHTML != "" {
+			bodyPlain = ExtractPlainTextFromHTML(bodyHTML)
+		}
+		bodyHTML = ""
+	}
+
 	// STEP 10.75: Score the copy the recipient will actually receive, after
 	// merge fields, spintax, A/B and AI blocks have resolved. Advisory: it
 	// warns once per step and never blocks or delays the send.
@@ -575,8 +585,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	messageID := generateMessageID(account.Email)
 
 	// STEP 15: Build tracking info (worker receives the already-resolved host).
+	// A plain-text send carries none: there is no HTML for a pixel or a
+	// wrapped link to live in.
 	var tracking *models.TrackingInfo
-	if campaign.OpenTracking || campaign.LinkTracking {
+	if !campaign.TextOnly && (campaign.OpenTracking || campaign.LinkTracking) {
 		tracking = &models.TrackingInfo{
 			OpenTracking:   campaign.OpenTracking,
 			LinkTracking:   campaign.LinkTracking,

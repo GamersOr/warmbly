@@ -1300,6 +1300,10 @@ func main() {
 		if aware, ok := campaignService.(campaign.ProgressAware); ok {
 			aware.WireProgress(campaignProgressRepository)
 		}
+		// The wizard's audience-versus-pool estimate counts segment members.
+		if aware, ok := campaignService.(campaign.SegmentAware); ok {
+			aware.WireSegments(segmentService)
+		}
 		// Delete drops attachment objects and duplicate copies them, so the
 		// campaign service needs the store the attachment handler writes to.
 		if aware, ok := campaignService.(campaign.AttachmentAware); ok {
