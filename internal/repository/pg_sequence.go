@@ -130,7 +130,7 @@ func (r *sequenceRepository) Create(ctx context.Context, userID string, campaign
 	defer tx.Rollback(ctx)
 
 	query := `
-		SELECT user_id, organization_id
+		SELECT user_id, organization_id, kind
 		FROM campaigns WHERE id = $1
 	`
 
@@ -140,11 +140,12 @@ func (r *sequenceRepository) Create(ctx context.Context, userID string, campaign
 
 	var ownerID string
 	var orgID uuid.UUID
+	var kind string
 	err = tx.QueryRow(
 		ctx,
 		query,
 		params...,
-	).Scan(&ownerID, &orgID)
+	).Scan(&ownerID, &orgID, &kind)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errx.ErrNotFound
@@ -155,6 +156,19 @@ func (r *sequenceRepository) Create(ctx context.Context, userID string, campaign
 
 	if ownerID != userID {
 		return nil, errx.ErrForbidden
+	}
+
+	// A one-time email is a single message: a second email step would turn
+	// it into a sequence without the list, status wording or docs saying so.
+	if kind == models.CampaignKindOneTime {
+		var emailSteps int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM sequences WHERE campaign_id = $1 AND kind = 'email'`, campaignID).Scan(&emailSteps); err != nil {
+			db.CaptureError(err, "", params, "queryrow")
+			return nil, errx.InternalError()
+		}
+		if emailSteps > 0 {
+			return nil, errx.New(errx.BadRequest, "a one-time email has a single message; create a sequence campaign for follow-ups")
+		}
 	}
 
 	// Get the next position for this campaign's sequences

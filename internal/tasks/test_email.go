@@ -44,6 +44,11 @@ func (s *tasksService) SendTestEmail(ctx context.Context, userID string, account
 	if bodyPlain == "" && bodyHTML != "" {
 		bodyPlain = ExtractPlainTextFromHTML(bodyHTML)
 	}
+	// The test shows what the campaign will send: plain-text campaigns get
+	// no HTML part here either.
+	if campaign.TextOnly {
+		bodyHTML = ""
+	}
 
 	// Prepend [TEST] to subject
 	subject = "[TEST] " + subject

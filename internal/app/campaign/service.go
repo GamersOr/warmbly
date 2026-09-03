@@ -20,8 +20,12 @@ const campaignCooldownSeconds = 60
 type CampaignService interface {
 	Create(ctx context.Context, userID string, orgID *uuid.UUID, data *models.CreateCampaign) (*models.Campaign, *errx.Error)
 	Get(ctx context.Context, userID, id string) (*models.Campaign, *errx.Error)
-	Search(ctx context.Context, userID, query, cursor, folder, status, limit string) (*models.CampaignsResult, *errx.Error)
+	Search(ctx context.Context, userID, query, cursor, folder, status, kind, limit string) (*models.CampaignsResult, *errx.Error)
 	Overview(ctx context.Context, orgID string) (*models.CampaignsOverview, *errx.Error)
+	// Estimate projects how many contacts a set of segments reaches and how
+	// many sending days a mailbox pool needs under the per-mailbox caps.
+	// Read-only; the wizard shows it before a one-time email is created.
+	Estimate(ctx context.Context, orgID uuid.UUID, in *models.CampaignEstimate) (*models.CampaignEstimateResult, *errx.Error)
 	Update(ctx context.Context, userID, id string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error)
 	// Delete removes an organization's campaign outright. A running campaign
 	// is stopped as part of it: its pending tasks are cancelled in the same
@@ -78,6 +82,24 @@ type campaignService struct {
 	// campaignProgressRepo counts the leads verification refused, so a start
 	// with nothing left to send can say why. Optional/nil-safe.
 	campaignProgressRepo repository.CampaignProgressRepository
+	// segments counts an audience for Estimate. Optional: without it an
+	// estimate reports zero recipients.
+	segments SegmentCounter
+}
+
+// SegmentCounter is the slice of the segment service Estimate needs.
+// Satisfied structurally by segment.Service.
+type SegmentCounter interface {
+	Preview(ctx context.Context, orgID uuid.UUID, in *models.SegmentPreview) (int, *errx.Error)
+}
+
+// SegmentAware lets main hand the campaign service the segment counter.
+type SegmentAware interface {
+	WireSegments(c SegmentCounter)
+}
+
+func (s *campaignService) WireSegments(c SegmentCounter) {
+	s.segments = c
 }
 
 // WireAudience attaches the launch-time list gate.

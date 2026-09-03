@@ -11,9 +11,23 @@ You need at least one active mailbox and a contact list. Warm new mailboxes befo
 
 ## Create a campaign
 
-**Campaigns** > **New campaign** opens a four-step wizard: **Basics** (name, description), **Schedule** (timezone, sending days, hours), **Sending** (mailbox tags, daily limit per mailbox, stop on reply, open and click tracking, unsubscribe header), and **First email** (subject, body, optional follow-ups). Follow-ups added here are connected in order, each waiting the number of days you set after the previous step; open the Steps tab to rearrange, branch, or change the waits. Only a name is required; the first email can be skipped and written in the full editor on the Steps tab, and everything else can be changed later from settings. Closing a wizard with unsaved edits asks before discarding them.
+**Campaigns** > **New campaign** opens a wizard that first asks what you are sending: a **sequence** or a [one-time email](#one-time-emails). For a sequence the steps are **Basics** (name, description), **Schedule** (timezone, sending days, hours), **Sending** (mailbox tags, daily limit per mailbox, stop on reply, open and click tracking, unsubscribe header), and **First email** (subject, body, optional follow-ups). Follow-ups added here are connected in order, each waiting the number of days you set after the previous step; open the Steps tab to rearrange, branch, or change the waits. Only a name is required; the first email can be skipped and written in the full editor on the Steps tab, and everything else can be changed later from settings. Closing a wizard with unsaved edits asks before discarding them.
 
 The campaign starts as a **draft**. Nothing sends until you start it.
+
+## One-time emails
+
+A one-time email is a campaign with a single message and no follow-ups: an announcement, an update, a single ask to a segment. It is still a campaign underneath, so it sends through your mailbox pool with the same rotation, per-mailbox daily caps, spacing, suppression, tracking and analytics as a sequence. What changes is the flow and the wording.
+
+Pick **One-time email** on the wizard's first step. The steps are then **Basics**, **Email** (subject and body, both required), **Audience** (one or more [segments](/guides/segments/); every current member becomes a lead, and a contact in several of them is emailed once), **Sending** (mailbox tags, daily limit, tracking, unsubscribe header) and **Send**. The last step chooses **Send now** or **Schedule for later** with a date and time, sets the sending days and window, and shows an estimate: how many recipients the segments resolve to, how many mailboxes will send, the pool's daily ceiling, and the day the last send is expected to land. The estimate is the earliest finish under the daily caps, not a promise. A thousand contacts on one mailbox at the default cap is a multi-week send, and the wizard says so before you confirm.
+
+Confirming creates the campaign, links the segments (so the campaign keeps enrolling contacts who join them later, exactly like [linking a segment](/guides/segments/#linking-a-segment-to-a-campaign)), and starts it. A scheduled one waits for its date, then sends inside the window. If the start is refused, for example because the segments are empty or the list fails the [launch check](#the-launch-check-on-your-list), the email is kept as a draft and its page explains why.
+
+In the campaigns list a one-time email carries a **One-time** badge and reads **draft**, **scheduled** (started, waiting for its date), **sending** or **sent**; the **Type** filter shows only sequences or only one-time emails. The Overview tab reports opens, clicks, replies and bounces the same way it does for a sequence. Adding a second email step to a one-time email is refused: create a sequence when you want a reminder later.
+
+## Plain text only
+
+**Settings** > **Plain text only** sends the campaign without an HTML part. Recipients get the plain-text body with the mailbox's plain-text signature, and because open pixels and wrapped links need HTML, open and click tracking are off for that campaign whatever their toggles say. Test emails respect it too, so what lands in your own inbox is what recipients get.
 
 ## Senders and rotation
 
