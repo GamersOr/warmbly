@@ -537,7 +537,7 @@ Auth: **Scope** `READ_CONTACTS` · **Org permission** `view_contacts`
 }
 ```
 
-`engagement.total_opened` and `engagement.last_opened_at` count opens by a person; opens a mail client or security gateway fetched automatically are left out, as they are in campaign analytics, and a click counts as an open.
+`engagement.total_opened` and `engagement.last_opened_at` count opens by a person; opens a mail client or security gateway fetched automatically are left out, as they are in campaign analytics. A person's click counts as an open too; an automated click does not add to either field.
 
 When the contact is suppressed, `suppression` is an object: `{ "id", "kind", "value", "reason", "source", "expires_at", "created_at" }`. `kind` is `email` when the contact's own address is on the list or `domain` when its whole domain is, `value` is the matching entry, and `source` is `bounce`, `complaint`, `unsubscribe`, `manual`, or `import`. `id` is the suppression entry, which `DELETE /suppressions/:id` lifts; see [deliverability and ops](/api/reference/deliverability-ops/#list-the-suppression-list).
 

@@ -3024,7 +3024,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			(ccp.opened_at IS NOT NULL AND EXISTS (
 				SELECT 1 FROM email_opens o
 				WHERE o.campaign_id = ccp.campaign_id AND o.contact_id = ccp.contact_id AND o.sequence_id = ccp.sequence_id
-				  AND o.opened_at <= ccp.opened_at + INTERVAL '1 minute'
+				  AND o.opened_at BETWEEN ccp.opened_at - INTERVAL '1 minute' AND ccp.opened_at + INTERVAL '1 minute'
 			)) AS has_open_log,
 			(ccp.clicked_at IS NOT NULL AND EXISTS (
 				SELECT 1 FROM email_link_clicks lc
