@@ -53,9 +53,32 @@ export interface ContactPageHit {
     city: string;
 }
 
+// The exact link behind an email_clicked event: where it went, the anchor
+// text it was minted from, and the UTM parameters the destination carried.
+export interface ContactLinkClick {
+    id: string;
+    url: string;
+    label?: string;
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
+    utm_term?: string;
+    utm_content?: string;
+    user_agent?: string;
+}
+
 export default interface ContactTimelineEvent {
     type: ContactTimelineEventType;
     at: string;
+
+    // Engagement classification (email_opened / email_clicked): true when an
+    // automated fetcher (mail privacy proxy, security gateway) did it rather
+    // than a person; machine_reason names the rule (prefetch / instant / burst).
+    machine?: boolean;
+    machine_reason?: string | null;
+
+    // Per-link detail behind an email_clicked event.
+    link?: ContactLinkClick | null;
 
     email_account_id?: string | null;
     email_account_email?: string | null;

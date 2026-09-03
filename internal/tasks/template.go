@@ -13,7 +13,6 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/tmplfuncs"
 	"github.com/warmbly/warmbly/internal/pkg/warmpersona"
-	"github.com/warmbly/warmbly/internal/repository"
 )
 
 // Conversation represents a warmup conversation for AI generation
@@ -292,63 +291,6 @@ func AddOpenTrackingPixel(htmlBody string, taskID uuid.UUID, trackingDomain stri
 
 	// Otherwise append to end
 	return htmlBody + pixel
-}
-
-// WrapLinksForTracking rewrites every external link to an opaque
-// click-tracking ticket (https://<domain>/c/<id>) and returns the minted
-// rows. The destination never travels inside the link, so there is nothing
-// to forge: the tracking service resolves tickets via the backend internal
-// API and 404s anything it does not know. The caller MUST persist the
-// returned rows before using the rewritten body (and fall back to the
-// original body on failure) so an email can never ship dead tickets.
-func WrapLinksForTracking(htmlBody string, taskID, campaignID uuid.UUID, trackingDomain string) (string, []repository.TrackedLink) {
-	// No tracking host means no ticket can be resolved, and a wrapped link
-	// would be a dead link in a real customer's email. Ship the originals.
-	trackingDomain = config.NormalizeTrackingHost(trackingDomain)
-	if trackingDomain == "" {
-		return htmlBody, nil
-	}
-
-	// Regex to find href attributes
-	linkRegex := regexp.MustCompile(`href="([^"]+)"`)
-	var links []repository.TrackedLink
-
-	result := linkRegex.ReplaceAllStringFunc(htmlBody, func(match string) string {
-		// Extract the original URL
-		originalURL := linkRegex.FindStringSubmatch(match)[1]
-
-		// Skip if already a tracking link, an unsubscribe link, or an anchor
-		if strings.HasPrefix(originalURL, "#") ||
-			strings.Contains(originalURL, trackingDomain) ||
-			strings.Contains(originalURL, unsubscribePathMarker) ||
-			strings.HasPrefix(originalURL, "mailto:") ||
-			strings.HasPrefix(originalURL, "tel:") {
-			return match
-		}
-
-		// Skip data URLs and javascript links
-		if strings.HasPrefix(originalURL, "data:") ||
-			strings.HasPrefix(originalURL, "javascript:") {
-			return match
-		}
-
-		// Only http(s) destinations are storable redirect targets
-		if !strings.HasPrefix(originalURL, "http://") && !strings.HasPrefix(originalURL, "https://") {
-			return match
-		}
-
-		id := uuid.New()
-		links = append(links, repository.TrackedLink{
-			ID:          id,
-			TaskID:      taskID,
-			CampaignID:  campaignID,
-			Destination: originalURL,
-		})
-
-		return fmt.Sprintf(`href="%s"`, config.TrackingURL(trackingDomain, "/c/"+id.String()))
-	})
-
-	return result, links
 }
 
 // personaPick chooses from a mailbox's preferred subset of phrasing options so

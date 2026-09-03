@@ -132,6 +132,19 @@ const (
 	// it must stay well clear of a slow provider handshake.
 	CampaignSendReclaimAfterMinutes = 30
 
+	// TrackingMachineWindowSeconds is how soon after a step was dispatched an
+	// open or click is treated as automated rather than a person. The clock
+	// starts when the send is handed to the worker, before the provider has
+	// even accepted the message, so a person cannot plausibly have read and
+	// acted on it inside this window; security gateways that detonate every
+	// link at delivery time routinely do.
+	TrackingMachineWindowSeconds = 10
+
+	// TrackingClickBurstSeconds is the window inside which clicks on two
+	// different links of the same email from the same source are treated as
+	// a scanner walking the message. A person follows one link at a time.
+	TrackingClickBurstSeconds = 5
+
 	// CampaignSendStampAttempts is how many times the control plane retries the
 	// sent_at stamp after a send is already on the bus. The reservation is what
 	// keeps the step from being re-sent, so a lost stamp is a pacing problem,

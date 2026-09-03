@@ -164,6 +164,7 @@ pub async fn track_open(
                 event_type: "EMAIL_OPENED".to_string(),
                 task_id,
                 original_url: None,
+                link_id: None,
                 timestamp: Utc::now().to_rfc3339(),
                 user_agent,
                 ip_hash,
@@ -245,12 +246,14 @@ pub async fn track_click(
     // Publish event asynchronously (fire and forget)
     let producer = state.producer.clone();
     let destination = link.destination.clone();
+    let ticket = link_id.clone();
     tokio::spawn(async move {
         producer
             .publish(TrackingEvent {
                 event_type: "EMAIL_CLICKED".to_string(),
                 task_id: link.task_id,
                 original_url: Some(destination),
+                link_id: Some(ticket),
                 timestamp: Utc::now().to_rfc3339(),
                 user_agent,
                 ip_hash,

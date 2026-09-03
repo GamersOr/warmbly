@@ -658,6 +658,10 @@ function applyFilters(
                 e.page_hit?.referrer_domain,
                 e.page_hit?.utm_source,
                 e.page_hit?.utm_campaign,
+                e.link?.url,
+                e.link?.label,
+                e.link?.utm_content,
+                e.link?.utm_campaign,
             ]
                 .filter(Boolean)
                 .join(" ")
@@ -942,6 +946,12 @@ function EventRow({
                             <span className="text-[12px] font-medium text-slate-900 shrink-0">
                                 {label}
                             </span>
+                            {event.link && (
+                                <span className="text-[11.5px] text-slate-700 truncate">
+                                    <Highlight text={event.link.label || linkHost(event.link.url)} q={highlight} />
+                                </span>
+                            )}
+                            {event.machine && <MachineBadge reason={event.machine_reason} />}
                             {event.subject && (
                                 <span className="text-[11.5px] text-slate-600 truncate">
                                     · <Highlight text={event.subject} q={highlight} />
@@ -1077,10 +1087,71 @@ function detailsFor(e: ContactTimelineEvent): [string, React.ReactNode][] {
         add("UTM content", h.utm_content);
         add("Session", <span className="font-mono">{h.session_key.slice(0, 8)}</span>);
     }
+    if (e.link) {
+        const l = e.link;
+        add("Link text", l.label);
+        add(
+            "Link URL",
+            safeHttpUrl(l.url) ? (
+                <a
+                    href={l.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sky-600 hover:text-sky-700 break-all"
+                >
+                    {l.url}
+                </a>
+            ) : (
+                l.url
+            ),
+        );
+        add("UTM source", l.utm_source);
+        add("UTM medium", l.utm_medium);
+        add("UTM campaign", l.utm_campaign);
+        add("UTM term", l.utm_term);
+        add("UTM content", l.utm_content);
+        add("Browser", l.user_agent);
+    }
+    if (e.type === "email_opened" || e.type === "email_clicked") {
+        add("Classified as", e.machine ? machineLabel(e.machine_reason) : "A person");
+    }
     add("Reason", e.reason);
     add("Content", e.content);
     if (e.task_id) add("Task", <span className="font-mono">{e.task_id}</span>);
     return out;
+}
+
+// What the classifier caught, in words a reader can act on.
+function machineLabel(reason?: string | null): string {
+    switch (reason) {
+        case "instant":
+            return "Automated: fetched within seconds of sending, before anyone could have read it";
+        case "burst":
+            return "Automated: several links followed within seconds, the way a security scanner walks an email";
+        case "prefetch":
+            return "Automated: fetched by a mail proxy or a client with no browser";
+        default:
+            return "Automated: a mail privacy proxy or scanner, not a person";
+    }
+}
+
+function linkHost(url: string): string {
+    try {
+        return new URL(url).host;
+    } catch {
+        return url;
+    }
+}
+
+function MachineBadge({ reason }: { reason?: string | null }) {
+    return (
+        <span
+            className="inline-flex items-center rounded-sm bg-amber-50 text-amber-700 border border-amber-200 px-1 text-[9.5px] font-medium uppercase tracking-[0.1em] shrink-0"
+            title={machineLabel(reason)}
+        >
+            auto
+        </span>
+    );
 }
 
 function cap(s: string): string {
@@ -1233,6 +1304,13 @@ function EventMeta({
                 </span>,
             );
         }
+        if (event.link?.utm_content) {
+            parts.push(
+                <span key="utm">
+                    utm <Highlight text={event.link.utm_content} q={highlight} />
+                </span>,
+            );
+        }
         if (event.intent) {
             parts.push(<span key="intent">intent: {event.intent}</span>);
         }
@@ -1339,7 +1417,7 @@ function visualFor(e: ContactTimelineEvent): {
         case "email_opened":
             return { Icon: MailOpenIcon, label: "Opened" };
         case "email_clicked":
-            return { Icon: MousePointerClickIcon, label: "Clicked link" };
+            return { Icon: MousePointerClickIcon, label: e.link ? "Clicked" : "Clicked link" };
         case "email_replied":
             return { Icon: ReplyIcon, label: "Replied" };
         case "reply_received":

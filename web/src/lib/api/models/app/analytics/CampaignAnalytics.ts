@@ -17,6 +17,9 @@ export interface CampaignSummary {
     // Subset of unique_opens from automated fetchers (Apple MPP prefetch
     // and UA-less clients). Human opens = unique_opens - machine_opens.
     machine_opens: number
+    // Steps whose only clicks came from automated fetchers (security
+    // gateways walking the links). Not part of unique_clicks.
+    machine_clicks: number
     unique_clicks: number
     replies: number
     bounces: number

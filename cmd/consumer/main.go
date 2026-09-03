@@ -481,6 +481,8 @@ func main() {
 		contactRepo,
 		streamingPublisher,
 		repository.NewTrackingDedupeRepository(primaryDB.Pool),
+		repository.NewTrackedLinkRepository(primaryDB.Pool),
+		repository.NewLinkClickRepository(primaryDB.Pool),
 		advancedService,
 		verificationEvidence,
 	); terr != nil {

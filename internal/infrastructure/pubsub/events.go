@@ -217,8 +217,10 @@ type TrackingEventPayload struct {
 	ContactEmail string `json:"contact_email,omitempty"`
 	SequenceID   string `json:"step_id,omitempty"`
 	OriginalURL  string `json:"original_url,omitempty"` // For click events
-	// Machine marks an automated open (Apple MPP prefetch, UA-less fetcher)
-	// so live views can badge it instead of presenting it as a human open.
+	LinkLabel    string `json:"link_label,omitempty"`   // Anchor text of the clicked link
+	// Machine marks an automated open or click (Apple MPP prefetch, UA-less
+	// fetcher, a security gateway walking the links) so live views can badge
+	// it instead of presenting it as a person's.
 	Machine bool `json:"machine,omitempty"`
 }
 

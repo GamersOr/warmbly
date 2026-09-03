@@ -654,6 +654,13 @@ var Tables = []Table{
 		Scope: `campaign_id IN ` + orgCampaigns,
 		Note:  "Click tickets already in the wild keep resolving after the move, provided the tracking domain follows.",
 	},
+	{
+		// Campaign engagement like campaign_contact_progress, one row per
+		// link. Sits below tracked_links because of the nullable ticket
+		// reference, which the importer blanks when send history stays behind.
+		Name: "email_link_clicks", Group: models.OrgDataGroupCampaigns,
+		Scope: `campaign_id IN ` + orgCampaigns,
+	},
 
 	// ---------- delivery events ----------
 	{

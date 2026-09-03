@@ -1,6 +1,12 @@
 package jobs
 
-import "strings"
+import (
+	"strings"
+	"time"
+
+	"github.com/warmbly/warmbly/internal/config"
+	"github.com/warmbly/warmbly/internal/repository"
+)
 
 // isMachineOpen reports whether an open event came from an automated fetcher
 // rather than a human-rendered view. The edge already filters crawlers and
@@ -24,4 +30,42 @@ func isMachineOpen(userAgent *string) bool {
 		return true
 	}
 	return strings.HasSuffix(ua, "(khtml, like gecko)")
+}
+
+// isInstant reports whether an engagement arrived so soon after the step was
+// dispatched that no person could have read the email yet. Security
+// gateways (Safe Links, Proofpoint, Mimecast) open the pixel and walk every
+// link at delivery time with an ordinary browser UA, which is exactly what
+// the UA rules cannot see. An unknown dispatch time never counts as instant.
+func isInstant(sentAt *time.Time, at time.Time) bool {
+	if sentAt == nil {
+		return false
+	}
+	return at.Sub(*sentAt) < time.Duration(config.TrackingMachineWindowSeconds)*time.Second
+}
+
+// classifyClick applies the per-event click rules (the burst rule needs the
+// click log and lives in the consumer). It returns whether the click is
+// automated and the reason recorded with it; an empty reason is a person.
+func classifyClick(userAgent *string, sentAt *time.Time, at time.Time) (bool, string) {
+	if userAgent == nil || strings.TrimSpace(*userAgent) == "" {
+		return true, repository.LinkClickReasonPrefetch
+	}
+	if isInstant(sentAt, at) {
+		return true, repository.LinkClickReasonInstant
+	}
+	return false, ""
+}
+
+// eventTime is when the tracking service saw the event, falling back to now
+// when the stamp is missing or unreadable, so consumer lag never turns a
+// delivery-time scan into a plausible human open.
+func eventTime(stamp string) time.Time {
+	if t, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, stamp); err == nil {
+		return t
+	}
+	return time.Now()
 }

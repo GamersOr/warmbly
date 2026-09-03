@@ -405,7 +405,7 @@ func scanSuppressedRecipient(row pgx.Row) (*models.SuppressedRecipient, error) {
 // row first, else a row for its domain. Same predicate as the SQL function
 // recipient_suppressed() the send gates use, spelled out here because the
 // caller wants the row, not a boolean. Stored values are lowercase (every
-// write folds them; migration 000123 folded the rest), so the comparison is
+// write folds them; migration 000124 folded the rest), so the comparison is
 // an equality the unique index serves.
 func (r *advancedOutreachRepository) IsRecipientSuppressed(ctx context.Context, organizationID uuid.UUID, email string) (*models.SuppressedRecipient, error) {
 	query := `
