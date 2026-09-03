@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/warmbly/warmbly/internal/models"
 )
 
 // LinkClick is one recorded click on one tracked link. Machine clicks (a
@@ -25,6 +26,8 @@ type LinkClick struct {
 	Machine       bool
 	MachineReason string
 	ClickedAt     time.Time
+	// Origin is what the click said about where it came from.
+	Origin models.EngagementOrigin
 }
 
 // Machine-click reasons stored in email_link_clicks.machine_reason.
@@ -57,6 +60,8 @@ type LinkClickRepository interface {
 	// identity when known (two links may share a destination); the
 	// destination is the fallback for events from an older tracking build.
 	HasHumanClickOn(ctx context.Context, taskID uuid.UUID, linkID *uuid.UUID, destination string) (bool, error)
+	// Cleanup deletes clicks older than the retention window.
+	Cleanup(ctx context.Context, olderThanDays int) (int64, error)
 }
 
 type linkClickRepository struct {
@@ -78,14 +83,28 @@ func (r *linkClickRepository) Insert(ctx context.Context, c *LinkClick) error {
 	query := `
 		INSERT INTO email_link_clicks
 			(id, tracked_link_id, task_id, campaign_id, contact_id, sequence_id,
-			 destination, label, user_agent, ip_hash, machine, machine_reason, clicked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			 destination, label, user_agent, ip_hash, machine, machine_reason, clicked_at,
+			 client, device_type, os, browser, browser_version, country_code, region, city)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+		        $14, $15, $16, $17, $18, $19, $20, $21)
 	`
 	_, err := r.db.Exec(ctx, query,
 		c.ID, c.TrackedLinkID, c.TaskID, c.CampaignID, c.ContactID, c.SequenceID,
 		c.Destination, c.Label, c.UserAgent, c.IPHash, c.Machine, c.MachineReason, c.ClickedAt,
+		c.Origin.Client, c.Origin.DeviceType, c.Origin.OS, c.Origin.Browser, c.Origin.BrowserVersion,
+		c.Origin.CountryCode, c.Origin.Region, c.Origin.City,
 	)
 	return err
+}
+
+func (r *linkClickRepository) Cleanup(ctx context.Context, olderThanDays int) (int64, error) {
+	tag, err := r.db.Exec(ctx,
+		`DELETE FROM email_link_clicks WHERE clicked_at < NOW() - $1 * INTERVAL '1 day'`,
+		olderThanDays)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID uuid.UUID, ipHash string, linkID *uuid.UUID, destination string, since time.Time) (int, error) {

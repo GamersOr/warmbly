@@ -389,6 +389,9 @@ services:
     environment:
       <<: *selfhost-env
       ENCRYPTED_KEYS_PROVIDER: postgres
+      # Optional, as on the backend: turns an open or click's network into a
+      # country and city on the contact's timeline.
+      GEODB_PATH: ${GEODB_PATH:-/app/data/GeoLite2-City.mmdb}
     volumes:
       - blobs:/data/blobs
     depends_on:

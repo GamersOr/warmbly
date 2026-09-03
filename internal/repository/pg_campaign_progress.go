@@ -435,10 +435,17 @@ func (r *campaignProgressRepository) RecordEmailOpened(ctx context.Context, camp
 }
 
 // RecordEmailClicked records that an email link was clicked
+// RecordEmailClicked stamps a person's click. It also counts as an open:
+// the person had the email in front of them whatever the pixel saw, so a
+// client that blocks images no longer reads "clicked, not opened". The
+// implied open shares the click's timestamp, which is how UnrecordEmailClicked
+// tells it from a pixel open.
 func (r *campaignProgressRepository) RecordEmailClicked(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
 	query := `
 		UPDATE campaign_contact_progress
-		SET clicked_at = NOW()
+		SET clicked_at = NOW(),
+		    opened_at = COALESCE(opened_at, NOW()),
+		    opened_machine = false
 		WHERE campaign_id = $1
 		  AND contact_id = $2
 		  AND sequence_id = $3
@@ -457,7 +464,14 @@ func (r *campaignProgressRepository) RecordEmailClicked(ctx context.Context, cam
 func (r *campaignProgressRepository) UnrecordEmailClicked(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
 	query := `
 		UPDATE campaign_contact_progress ccp
-		SET clicked_at = NULL
+		SET clicked_at = NULL,
+		    opened_at = CASE
+		        WHEN ccp.opened_at = ccp.clicked_at AND NOT EXISTS (
+		            SELECT 1 FROM email_opens o
+		            WHERE o.campaign_id = $1 AND o.contact_id = $2 AND o.sequence_id = $3 AND o.machine = false
+		        ) THEN NULL
+		        ELSE ccp.opened_at
+		    END
 		WHERE ccp.campaign_id = $1
 		  AND ccp.contact_id = $2
 		  AND ccp.sequence_id = $3
@@ -726,10 +740,14 @@ func (r *campaignProgressRepository) GetCampaignRollingRates(ctx context.Context
 	return out, err
 }
 
-// GetContactProgress retrieves progress for a specific contact in a campaign
+// GetContactProgress retrieves progress for a specific contact in a campaign.
+// A machine open comes back as NULL: this feeds routing and instant actions,
+// and an automated fetch is not intent (machine clicks never stamp at all).
 func (r *campaignProgressRepository) GetContactProgress(ctx context.Context, campaignID, contactID uuid.UUID) ([]CampaignContactProgress, error) {
 	query := `
-		SELECT campaign_id, contact_id, sequence_id, sent_at, opened_at, clicked_at, replied_at, bounced_at, complained_at, COALESCE(reply_class, ''), COALESCE(ai_label, '')
+		SELECT campaign_id, contact_id, sequence_id, sent_at,
+		       CASE WHEN opened_machine THEN NULL ELSE opened_at END,
+		       clicked_at, replied_at, bounced_at, complained_at, COALESCE(reply_class, ''), COALESCE(ai_label, '')
 		FROM campaign_contact_progress
 		WHERE campaign_id = $1 AND contact_id = $2
 		ORDER BY sent_at ASC
@@ -938,7 +956,9 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		FROM campaign_leads cl
 		JOIN contacts c ON c.id = cl.contact_id
 		LEFT JOIN LATERAL (
-			SELECT sequence_id, sent_at, opened_at, clicked_at, replied_at, reply_class, ai_label
+			SELECT sequence_id, sent_at,
+			       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END AS opened_at,
+			       clicked_at, replied_at, reply_class, ai_label
 			FROM campaign_contact_progress p
 			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
 			ORDER BY p.sent_at DESC LIMIT 1
@@ -1084,7 +1104,9 @@ func (r *campaignProgressRepository) RouteContact(ctx context.Context, campaignI
 		FROM campaign_leads cl
 		JOIN contacts c ON c.id = cl.contact_id
 		LEFT JOIN LATERAL (
-			SELECT sequence_id, sent_at, opened_at, clicked_at, replied_at, reply_class, ai_label
+			SELECT sequence_id, sent_at,
+			       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END AS opened_at,
+			       clicked_at, replied_at, reply_class, ai_label
 			FROM campaign_contact_progress p
 			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
 			ORDER BY p.sent_at DESC LIMIT 1
@@ -1447,7 +1469,9 @@ func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context
 		FROM campaign_leads cl
 		JOIN contacts c ON c.id = cl.contact_id
 		LEFT JOIN LATERAL (
-			SELECT sequence_id, sent_at, opened_at, clicked_at, replied_at, reply_class, ai_label
+			SELECT sequence_id, sent_at,
+			       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END AS opened_at,
+			       clicked_at, replied_at, reply_class, ai_label
 			FROM campaign_contact_progress p
 			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
 			ORDER BY p.sent_at DESC LIMIT 1

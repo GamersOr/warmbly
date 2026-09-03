@@ -21,6 +21,7 @@ import {
     ClockIcon,
     CornerUpLeftIcon,
     DownloadIcon,
+    InfoIcon,
     LayersIcon,
     Loader2Icon,
     MailIcon,
@@ -958,7 +959,17 @@ function ContactsTableBody({
                         <Th className="w-auto md:w-32">{embedded ? "Progress" : "Status"}</Th>
                         {embedded && (
                             <>
-                                <Th className="w-16 hidden md:table-cell">Opened</Th>
+                                <Th className="w-16 hidden md:table-cell">
+                                    <span className="inline-flex items-center gap-1">
+                                        Opened
+                                        <span
+                                            className="inline-flex cursor-help text-slate-300 hover:text-slate-500"
+                                            title="Opens rely on the mail client loading images. Clients that block images show no open even when the email was read. A click by the person always counts as an open."
+                                        >
+                                            <InfoIcon className="w-3 h-3" aria-label="How opens are counted" />
+                                        </span>
+                                    </span>
+                                </Th>
                                 <Th className="w-16 hidden md:table-cell">Clicked</Th>
                                 <Th className="w-16 hidden md:table-cell">Replied</Th>
                             </>

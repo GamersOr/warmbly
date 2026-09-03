@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mileusna/useragent"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/app/advanced"
 	"github.com/warmbly/warmbly/internal/config"
@@ -15,6 +18,7 @@ import (
 	"github.com/warmbly/warmbly/internal/infrastructure/eventbus"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/geo"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -41,8 +45,12 @@ type TrackingConsumer struct {
 	// ProcessIncomingReply). Best-effort and nil-safe: when unset, opens/clicks
 	// are still recorded and routed at the next step boundary by the scheduler.
 	advancedService advanced.Service
-	topic           string
-	group           string
+	// opens is the per-event open log; geo resolves a source network to a
+	// location for opens and clicks. Both optional.
+	opens repository.EmailOpenRepository
+	geo   *geo.Client
+	topic string
+	group string
 }
 
 // NewTrackingConsumer wires the tracking consumer to the shared event bus.
@@ -60,6 +68,8 @@ func NewTrackingConsumer(
 	linkClicks repository.LinkClickRepository,
 	advancedService advanced.Service,
 	evidence advanced.EvidenceRecorder,
+	opens repository.EmailOpenRepository,
+	geoClient *geo.Client,
 ) (*TrackingConsumer, error) {
 	return &TrackingConsumer{
 		bus:                  bus,
@@ -79,14 +89,51 @@ func NewTrackingConsumer(
 		},
 		advancedService: advancedService,
 		evidence:        evidence,
+		opens:           opens,
+		geo:             geoClient,
 		topic:           topic,
 		group:           group,
 	}, nil
 }
 
 // Start subscribes to the tracking topic and blocks until ctx is cancelled.
+// It also runs the daily prune of the open and click logs.
 func (tc *TrackingConsumer) Start(ctx context.Context) error {
+	if tc.opens != nil || tc.linkClicks != nil {
+		go tc.pruneEngagementLogs(ctx)
+	}
 	return tc.bus.Subscribe(ctx, []string{tc.topic}, tc.group, tc.receive)
+}
+
+// pruneEngagementLogs deletes opens and clicks older than the retention
+// window, at start and then daily. The progress-row summary stays, so
+// nothing a count, filter or branch reads is affected.
+func (tc *TrackingConsumer) pruneEngagementLogs(ctx context.Context) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		pctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		if tc.opens != nil {
+			if n, err := tc.opens.Cleanup(pctx, config.EngagementEventRetentionDays); err != nil {
+				log.Warn().Err(err).Msg("open log prune failed")
+			} else if n > 0 {
+				log.Info().Int64("deleted", n).Msg("open log pruned")
+			}
+		}
+		if tc.linkClicks != nil {
+			if n, err := tc.linkClicks.Cleanup(pctx, config.EngagementEventRetentionDays); err != nil {
+				log.Warn().Err(err).Msg("click log prune failed")
+			} else if n > 0 {
+				log.Info().Int64("deleted", n).Msg("click log pruned")
+			}
+		}
+		cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // Close is a no-op: the event bus lifecycle is owned by the consumer main,
@@ -162,13 +209,17 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 	var reason string
 	switch event.EventType {
 	case events.EventTypeEmailOpened:
-		machine = isMachineOpen(event.UserAgent) || isInstant(sentAt, at)
+		machine, reason = classifyOpen(event.UserAgent, sentAt, at)
 	case events.EventTypeEmailClicked:
 		machine, reason = classifyClick(event.UserAgent, sentAt, at)
 	default:
 		// Unknown event type, skip
 		return nil
 	}
+
+	// What the request said about where it came from, for the logs and the
+	// live feed. The source network is resolved here and goes no further.
+	origin := tc.originOf(event)
 
 	// Check for duplicate at consumer level (belt and suspenders with Rust service)
 	if tc.dedupeRepo != nil {
@@ -181,6 +232,11 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 			// label (a gateway scanned at delivery; the person acted later).
 			// Quiet write only: the event was already counted once, so no
 			// automations and no re-publish.
+			if event.EventType == events.EventTypeEmailOpened {
+				// Every open is logged, repeats and machines included: a
+				// second open from another device is worth seeing.
+				tc.logOpen(ctx, campaignTask, event, at, machine, reason, origin)
+			}
 			if machine {
 				return nil
 			}
@@ -188,7 +244,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 			case events.EventTypeEmailOpened:
 				_ = tc.campaignProgressRepo.RecordEmailOpened(ctx, campaignID, contactID, sequenceID, false)
 			case events.EventTypeEmailClicked:
-				tc.upgradeClick(ctx, campaignTask, event, at)
+				tc.upgradeClick(ctx, campaignTask, event, at, origin)
 			}
 			return nil
 		}
@@ -205,6 +261,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 	switch event.EventType {
 	case events.EventTypeEmailOpened:
 		err = tc.campaignProgressRepo.RecordEmailOpened(ctx, campaignID, contactID, sequenceID, machine)
+		tc.logOpen(ctx, campaignTask, event, at, machine, reason, origin)
 		if !machine {
 			instantKind = "open"
 			// A human open proves the mailbox is live; a prefetch proves
@@ -215,7 +272,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 		}
 	case events.EventTypeEmailClicked:
 		var click *repository.LinkClick
-		machine, reason, click, err = tc.recordClick(ctx, campaignTask, event, at, machine, reason)
+		machine, reason, click, err = tc.recordClick(ctx, campaignTask, event, at, machine, reason, origin)
 		if click != nil {
 			linkLabel = click.Label
 		}
@@ -226,7 +283,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 			if err == nil && click != nil && tc.afterBurstWindow != nil {
 				deferred = true
 				task, ev, clickID, label := campaignTask, *event, click.ID, linkLabel
-				tc.afterBurstWindow(func() { tc.finishHumanClick(task, ev, clickID, label) })
+				tc.afterBurstWindow(func() { tc.finishHumanClick(task, ev, clickID, label, origin) })
 			} else if err == nil {
 				instantKind = "click"
 				if tc.evidence != nil {
@@ -264,7 +321,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 	// Publish to Pub/Sub for realtime updates (a deferred human click
 	// publishes once its verdict is final)
 	if !deferred {
-		tc.publishTrackingEvent(ctx, campaignTask, *event, machine, linkLabel)
+		tc.publishTrackingEvent(ctx, campaignTask, *event, machine, linkLabel, origin)
 	}
 
 	return nil
@@ -279,7 +336,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 // re-read with retries and, when it cannot be read at all, nothing fires:
 // an automation for a scanner's click is worse than a missed one, and the
 // step boundary still routes on the stored stamp.
-func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, event events.TrackingEvent, clickID uuid.UUID, label string) {
+func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, event events.TrackingEvent, clickID uuid.UUID, label string, origin models.EngagementOrigin) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -299,7 +356,7 @@ func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, even
 		return
 	}
 	if machine {
-		tc.publishTrackingEvent(ctx, task, event, true, label)
+		tc.publishTrackingEvent(ctx, task, event, true, label, origin)
 		return
 	}
 	if tc.evidence != nil {
@@ -308,7 +365,7 @@ func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, even
 	if tc.advancedService != nil {
 		tc.advancedService.FireInstantActions(ctx, *task.CampaignID, *task.ContactID, *task.SequenceID, "click")
 	}
-	tc.publishTrackingEvent(ctx, task, event, false, label)
+	tc.publishTrackingEvent(ctx, task, event, false, label, origin)
 }
 
 // resolveLink names the clicked link: the minted ticket when the event
@@ -342,7 +399,7 @@ func (tc *TrackingConsumer) resolveLink(ctx context.Context, event *events.Track
 // that leaves the step with no human click, the clicked stamp the first
 // click already wrote is walked back. Returns the final classification and
 // the logged row (nil when nothing could be logged).
-func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, machine bool, reason string) (bool, string, *repository.LinkClick, error) {
+func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, machine bool, reason string, origin models.EngagementOrigin) (bool, string, *repository.LinkClick, error) {
 	if tc.linkClicks == nil {
 		return machine, reason, nil, nil
 	}
@@ -383,6 +440,7 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 		Machine:       machine,
 		MachineReason: reason,
 		ClickedAt:     at,
+		Origin:        origin,
 	}
 	if err := tc.linkClicks.Insert(ctx, click); err != nil {
 		return machine, reason, click, err
@@ -402,7 +460,7 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 // upgradeClick handles a human click on a link this email was already
 // credited for: the step is stamped clicked if only machines had clicked so
 // far, and the click is logged once so the timeline shows the person's.
-func (tc *TrackingConsumer) upgradeClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time) {
+func (tc *TrackingConsumer) upgradeClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, origin models.EngagementOrigin) {
 	_ = tc.campaignProgressRepo.RecordEmailClicked(ctx, *task.CampaignID, *task.ContactID, *task.SequenceID)
 	if tc.linkClicks == nil {
 		return
@@ -432,12 +490,73 @@ func (tc *TrackingConsumer) upgradeClick(ctx context.Context, task *repository.C
 		UserAgent:     userAgent,
 		IPHash:        ipHash,
 		ClickedAt:     at,
+		Origin:        origin,
 	})
+}
+
+// logOpen writes one row to the open log for this event, whatever it was
+// classified as; the label travels with it.
+func (tc *TrackingConsumer) logOpen(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, machine bool, reason string, origin models.EngagementOrigin) {
+	if tc.opens == nil {
+		return
+	}
+	open := &repository.EmailOpen{
+		TaskID:        task.TaskID,
+		CampaignID:    *task.CampaignID,
+		ContactID:     *task.ContactID,
+		SequenceID:    *task.SequenceID,
+		OpenedAt:      at,
+		Machine:       machine,
+		MachineReason: reason,
+		Origin:        origin,
+	}
+	if event.UserAgent != nil {
+		open.UserAgent = clipString(*event.UserAgent, 512)
+	}
+	if event.IPHash != nil {
+		open.IPHash = *event.IPHash
+	}
+	if err := tc.opens.Insert(ctx, open); err != nil {
+		log.Warn().Err(err).Str("task_id", task.TaskID.String()).Msg("failed to log open")
+	}
+}
+
+// originOf reads what the event says about its source: the user agent parsed
+// to client, browser and device, and the source network resolved to a
+// location. The network is used here and dropped.
+func (tc *TrackingConsumer) originOf(event *events.TrackingEvent) models.EngagementOrigin {
+	var o models.EngagementOrigin
+	if event.UserAgent != nil && strings.TrimSpace(*event.UserAgent) != "" {
+		ua := useragent.Parse(*event.UserAgent)
+		o.OS, o.Browser, o.BrowserVersion = ua.OS, ua.Name, ua.Version
+		o.DeviceType = deviceType(ua)
+		o.Client = clientName(*event.UserAgent)
+	}
+	if event.ClientIP != nil && tc.geo != nil {
+		if addr, err := netip.ParseAddr(strings.TrimSpace(*event.ClientIP)); err == nil && !addr.IsPrivate() && !addr.IsLoopback() {
+			if info, err := tc.geo.Lookup(addr); err == nil && info != nil {
+				o.CountryCode = info.CountryCode
+				o.Region = info.Region
+				if info.City != "Unknown" {
+					o.City = info.City
+				}
+			}
+		}
+	}
+	return o
+}
+
+func clipString(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
 }
 
 // publishTrackingEvent publishes the tracking event to Pub/Sub for realtime UI
 // updates AND fans an opt-in firehose webhook (campaign.email_opened/clicked).
-func (tc *TrackingConsumer) publishTrackingEvent(ctx context.Context, task *repository.CampaignTask, event events.TrackingEvent, machine bool, linkLabel string) {
+func (tc *TrackingConsumer) publishTrackingEvent(ctx context.Context, task *repository.CampaignTask, event events.TrackingEvent, machine bool, linkLabel string, origin models.EngagementOrigin) {
 	// Get campaign to find user ID + org
 	campaign, err := tc.campaignRepo.GetByID(ctx, *task.CampaignID)
 	if err != nil || campaign == nil {
@@ -513,6 +632,11 @@ func (tc *TrackingConsumer) publishTrackingEvent(ctx context.Context, task *repo
 		ContactEmail: contactEmail,
 		SequenceID:   task.SequenceID.String(),
 		Machine:      machine,
+		OccurredAt:   eventTime(event.Timestamp),
+		Client:       origin.Client,
+		DeviceType:   origin.DeviceType,
+		CountryCode:  origin.CountryCode,
+		City:         origin.City,
 	}
 
 	if event.EventType == events.EventTypeEmailClicked && event.OriginalURL != nil {

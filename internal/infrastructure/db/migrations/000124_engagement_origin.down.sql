@@ -1,0 +1,11 @@
+DROP TABLE email_opens;
+DROP INDEX idx_email_link_clicks_campaign;
+ALTER TABLE email_link_clicks
+    DROP COLUMN client,
+    DROP COLUMN device_type,
+    DROP COLUMN os,
+    DROP COLUMN browser,
+    DROP COLUMN browser_version,
+    DROP COLUMN country_code,
+    DROP COLUMN region,
+    DROP COLUMN city;

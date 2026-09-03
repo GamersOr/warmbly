@@ -14,4 +14,7 @@ pub struct TrackingEvent {
     pub timestamp: String,
     pub user_agent: Option<String>,
     pub ip_hash: Option<String>,
+    /// The source network (last IPv4 octet zeroed, IPv6 cut to 48 bits),
+    /// enough for the consumer's location lookup without naming a host.
+    pub client_ip: Option<String>,
 }

@@ -35,6 +35,35 @@ export interface ActivityItem {
     timestamp: Date;
 }
 
+// Open/click payload (pubsub.TrackingEventPayload): who, whether a person
+// did it, and what the logs say about client and location.
+interface TrackingPayload {
+    contact_email?: string;
+    original_url?: string;
+    link_label?: string;
+    machine?: boolean;
+    // When the tracking service saw it; the envelope timestamp is the publish time.
+    occurred_at?: string;
+    timestamp?: string;
+    client?: string;
+    device_type?: string;
+    country_code?: string;
+    city?: string;
+}
+
+// The edge's time when it is carried and parses; receipt time otherwise.
+function occurredAt(p: TrackingPayload): Date {
+    const raw = p.occurred_at || p.timestamp;
+    const d = raw ? new Date(raw) : null;
+    return d && !Number.isNaN(d.getTime()) ? d : new Date();
+}
+
+// " (Gmail, Berlin DE)" or "" when the logs say nothing.
+function whereFrom(p: TrackingPayload): string {
+    const bits = [p.client, [p.city, p.country_code].filter(Boolean).join(' ')].filter(Boolean);
+    return bits.length ? ` (${bits.join(', ')})` : '';
+}
+
 // Hook return type
 export interface CampaignChannelState {
     isConnected: boolean;
@@ -118,35 +147,30 @@ export function useCampaignChannel(campaignId: string): CampaignChannelState {
                 break;
             }
             case 'EMAIL_OPENED': {
-                const data = payload as { contact_email?: string };
+                const data = payload as TrackingPayload;
                 addActivity({
                     id: nextId('open'),
                     type: 'opened',
                     contactEmail: data.contact_email || 'Unknown',
-                    message: `Opened by ${data.contact_email || 'Unknown'}`,
-                    timestamp: new Date(),
+                    message: `${data.machine ? 'Auto-opened' : 'Opened'} by ${data.contact_email || 'Unknown'}${whereFrom(data)}`,
+                    timestamp: occurredAt(data),
                 });
                 break;
             }
             case 'EMAIL_CLICKED': {
-                const data = payload as {
-                    contact_email?: string;
-                    original_url?: string;
-                    link_label?: string;
-                    machine?: boolean;
-                };
-                const who = data.contact_email || 'Unknown';
+                const data = payload as TrackingPayload;
+                const who = `${data.contact_email || 'Unknown'}${whereFrom(data)}`;
                 const target = data.link_label || data.original_url;
                 addActivity({
                     id: nextId('click'),
                     type: 'clicked',
-                    contactEmail: who,
+                    contactEmail: data.contact_email || 'Unknown',
                     message: data.machine
                         ? `Automated click on ${target ?? 'a link'} for ${who} (not counted)`
                         : target
                           ? `Click from ${who} → ${target}`
                           : `Click from ${who}`,
-                    timestamp: new Date(),
+                    timestamp: occurredAt(data),
                 });
                 break;
             }

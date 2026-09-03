@@ -305,7 +305,7 @@ Redis holds rate limit counters, the organization key cache, the realtime bridge
 |---|---|---|---|
 | `GEODB_PATH` | Path to a GeoLite2 City database | none, and the backend refuses to start without the variable | yes |
 
-The variable must be set on the backend in every environment. The file itself is optional: a missing file at that path means sessions and audit rows are recorded without a city, and nothing else changes.
+The variable must be set on the backend in every environment. The file itself is optional: a missing file at that path means sessions and audit rows are recorded without a city, and nothing else changes. The consumer reads the same variable, optionally, to put a country and city on each email open and click; without it those records carry client and device only.
 
 ## Workers
 

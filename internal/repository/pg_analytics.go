@@ -18,6 +18,11 @@ type AnalyticsRepository interface {
 	GetCampaignSummary(ctx context.Context, userID, campaignID uuid.UUID) (*models.CampaignSummary, *errx.Error)
 	GetCampaignDailyStats(ctx context.Context, campaignID uuid.UUID, from, to time.Time) ([]models.CampaignDailyStats, *errx.Error)
 	GetSequenceStats(ctx context.Context, campaignID uuid.UUID) ([]models.SequenceStats, *errx.Error)
+	// GetCampaignEngagementBreakdown groups the campaign's human opens and
+	// clicks by country, client and device: distinct contacts per bucket, the
+	// busiest `limit` buckets of each. A click counts as an open, as it does
+	// on the progress row.
+	GetCampaignEngagementBreakdown(ctx context.Context, campaignID uuid.UUID, limit int) (*models.CampaignEngagementBreakdown, *errx.Error)
 
 	// Email account status
 	GetAccountsWithErrors(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, *errx.Error)
@@ -178,6 +183,70 @@ func (r *analyticsRepository) GetCampaignDailyStats(ctx context.Context, campaig
 	}
 
 	return stats, nil
+}
+
+func (r *analyticsRepository) GetCampaignEngagementBreakdown(ctx context.Context, campaignID uuid.UUID, limit int) (*models.CampaignEngagementBreakdown, *errx.Error) {
+	if limit <= 0 {
+		limit = 8
+	}
+	// One query per dimension over the union of both logs; the key
+	// expression is the only difference. The client falls back to the
+	// browser so a plain webmail open still lands in a named bucket, and
+	// unknown stays the empty key.
+	bucket := func(keyExpr string) ([]models.EngagementBucket, *errx.Error) {
+		query := `
+			WITH ev AS (
+				SELECT contact_id, 'open' AS kind, client, browser, device_type, country_code
+				FROM email_opens
+				WHERE campaign_id = $1 AND NOT machine
+				UNION ALL
+				SELECT contact_id, 'click' AS kind, client, browser, device_type, country_code
+				FROM email_link_clicks
+				WHERE campaign_id = $1 AND NOT machine
+			)
+			SELECT ` + keyExpr + ` AS key,
+			       COUNT(DISTINCT contact_id) AS opens,
+			       COUNT(DISTINCT contact_id) FILTER (WHERE kind = 'click') AS clicks
+			FROM ev
+			GROUP BY 1
+			ORDER BY opens + clicks DESC, key ASC
+			LIMIT $2
+		`
+		rows, err := r.DB.Query(ctx, query, campaignID, limit)
+		if err != nil {
+			db.CaptureError(err, query, []any{campaignID, limit}, "GetCampaignEngagementBreakdown")
+			return nil, errx.InternalError()
+		}
+		defer rows.Close()
+		out := []models.EngagementBucket{}
+		for rows.Next() {
+			var b models.EngagementBucket
+			if err := rows.Scan(&b.Key, &b.Opens, &b.Clicks); err != nil {
+				db.CaptureError(err, "", nil, "GetCampaignEngagementBreakdown scan")
+				return nil, errx.InternalError()
+			}
+			out = append(out, b)
+		}
+		if err := rows.Err(); err != nil {
+			db.CaptureError(err, query, []any{campaignID, limit}, "GetCampaignEngagementBreakdown rows")
+			return nil, errx.InternalError()
+		}
+		return out, nil
+	}
+
+	countries, xerr := bucket(`country_code`)
+	if xerr != nil {
+		return nil, xerr
+	}
+	clients, xerr := bucket(`COALESCE(NULLIF(client, ''), browser)`)
+	if xerr != nil {
+		return nil, xerr
+	}
+	devices, xerr := bucket(`CASE WHEN device_type = 'unknown' THEN '' ELSE device_type END`)
+	if xerr != nil {
+		return nil, xerr
+	}
+	return &models.CampaignEngagementBreakdown{Countries: countries, Clients: clients, Devices: devices}, nil
 }
 
 func (r *analyticsRepository) GetSequenceStats(ctx context.Context, campaignID uuid.UUID) ([]models.SequenceStats, *errx.Error) {

@@ -47,6 +47,7 @@ import (
 	"github.com/warmbly/warmbly/internal/observability"
 	"github.com/warmbly/warmbly/internal/pkg/encrypt"
 	"github.com/warmbly/warmbly/internal/pkg/generation"
+	"github.com/warmbly/warmbly/internal/pkg/geo"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -468,6 +469,14 @@ func main() {
 	// open/click action chains (advancedService), the open/click analog of the
 	// reply path. Decodes with the same codec the Rust tracking service writes
 	// (Avro on Kafka, JSON on NATS).
+	// GeoIP is optional here as on the backend: it only turns an open or
+	// click's source network into a country and city on the logs.
+	geoPath, _ := cfg.LoadGeoDBPath(ctx)
+	geoloc, gerr := geo.New(geoPath)
+	if gerr != nil {
+		log.Printf("GeoIP database not found at %s; engagement locations are disabled.", geoPath)
+		geoloc, _ = geo.New("")
+	}
 	if trackingCfg, terr := cfg.LoadTrackingConsumerConfig(ctx); terr != nil {
 		log.Println("tracking consumer config unavailable; opens/clicks not consumed:", terr)
 	} else if trackingConsumer, terr := jobs.NewTrackingConsumer(
@@ -485,6 +494,8 @@ func main() {
 		repository.NewLinkClickRepository(primaryDB.Pool),
 		advancedService,
 		verificationEvidence,
+		repository.NewEmailOpenRepository(primaryDB.Pool),
+		geoloc,
 	); terr != nil {
 		log.Println("tracking consumer unavailable; opens/clicks not consumed:", terr)
 	} else {

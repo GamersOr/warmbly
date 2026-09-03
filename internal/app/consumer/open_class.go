@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mileusna/useragent"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/repository"
 )
@@ -68,4 +69,60 @@ func eventTime(stamp string) time.Time {
 		return t
 	}
 	return time.Now()
+}
+
+// classifyOpen applies the per-event open rules and names the one that
+// caught it: prefetch for a mail proxy or a fetch with no browser, instant
+// for a fetch inside the machine window after dispatch. An empty reason is
+// a person.
+func classifyOpen(userAgent *string, sentAt *time.Time, at time.Time) (bool, string) {
+	if isMachineOpen(userAgent) {
+		return true, repository.EmailOpenReasonPrefetch
+	}
+	if isInstant(sentAt, at) {
+		return true, repository.EmailOpenReasonInstant
+	}
+	return false, ""
+}
+
+// clientName names the mail client or image proxy behind a user agent when
+// it says so; empty for a plain browser, which the parsed fields describe.
+func clientName(userAgent string) string {
+	ua := strings.ToLower(strings.TrimSpace(userAgent))
+	switch {
+	case ua == "":
+		return ""
+	case strings.Contains(ua, "googleimageproxy"):
+		return "Gmail"
+	case strings.Contains(ua, "yahoomailproxy"), strings.Contains(ua, "yahoo mail"):
+		return "Yahoo Mail"
+	case strings.Contains(ua, "outlook"), strings.Contains(ua, "microsoft office"):
+		return "Outlook"
+	case strings.Contains(ua, "thunderbird"):
+		return "Thunderbird"
+	case strings.Contains(ua, "superhuman"):
+		return "Superhuman"
+	case strings.Contains(ua, "protonmail"), strings.Contains(ua, "proton mail"):
+		return "Proton Mail"
+	case strings.Contains(ua, "hey.com"):
+		return "HEY"
+	case strings.HasSuffix(ua, "(khtml, like gecko)"):
+		// Apple Mail Privacy Protection's prefetch fingerprint.
+		return "Apple Mail"
+	}
+	return ""
+}
+
+// deviceType folds the parser's flags into desktop, mobile, tablet or unknown.
+func deviceType(ua useragent.UserAgent) string {
+	switch {
+	case ua.Tablet:
+		return "tablet"
+	case ua.Mobile:
+		return "mobile"
+	case ua.Desktop:
+		return "desktop"
+	default:
+		return "unknown"
+	}
 }

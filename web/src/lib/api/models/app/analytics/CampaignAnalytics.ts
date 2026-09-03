@@ -41,6 +41,21 @@ export interface SequenceStats {
     bounces: number
 }
 
+// One slice of the engagement breakdown: distinct contacts who opened and
+// clicked from that country (ISO code), client or browser, or device type.
+// An empty key is "unknown".
+export interface EngagementBucket {
+    key: string
+    opens: number
+    clicks: number
+}
+
+export interface CampaignEngagementBreakdown {
+    countries: EngagementBucket[]
+    clients: EngagementBucket[]
+    devices: EngagementBucket[]
+}
+
 export default interface CampaignAnalytics {
     campaign_id: string
     name: string
@@ -49,4 +64,6 @@ export default interface CampaignAnalytics {
     summary: CampaignSummary
     steps: SequenceStats[]
     daily_stats?: DailyStats[]
+    // Where and on what people opened and clicked; human events only.
+    engagement?: CampaignEngagementBreakdown | null
 }

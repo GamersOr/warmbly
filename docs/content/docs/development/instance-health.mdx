@@ -241,7 +241,7 @@ A reachable realtime service that still leaves the dashboard dead has a differen
 | Service | Needs |
 |---|---|
 | backend | The five secrets, `PRIMARY_DB`, `REDIS`, the provider switches, the public URLs, `EMAIL_ADDRESS`, `EMAIL_NAME` and `GEODB_PATH` |
-| consumer | The same shared block. It writes to Postgres, so it needs `PRIMARY_DB` and both encryption keys, and it needs the mail identity or it silently sends nothing |
+| consumer | The same shared block. It writes to Postgres, so it needs `PRIMARY_DB` and both encryption keys, and it needs the mail identity or it silently sends nothing. `GEODB_PATH` is optional and only adds a location to opens and clicks |
 | worker | No database. The event bus, `REDIS`, both encryption keys, `ENCRYPTED_KEYS_BACKEND_URL` plus the worker token, and the `BOX_*` OAuth clients |
 | tracking | The event bus, plus `BACKEND_INTERNAL_URL` and `INTERNAL_API_TOKEN`. It exits at boot without either of those two |
 | realtime | `JWT_SECRET` equal to the backend's `AUTH_SECRET`, plus `SECRET_KEY_BASE` and `DATABASE_URL`. It refuses to boot without all three. `REDIS_URL`, `PHX_HOST` and the connection limits have defaults |

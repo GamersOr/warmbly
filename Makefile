@@ -605,6 +605,7 @@ forms-web:
 consumer:
 	$(GO_DEV_ENV) \
 	$(AI_DEV_ENV) \
+	GEODB_PATH=data/GeoLite2-City.mmdb \
 	go run ./cmd/consumer
 
 # Send/sync worker. No Postgres by design. WORKER_ID is an explicit UUID

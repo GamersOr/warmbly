@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useCampaign } from "@/hooks/context/campaign";
 import useCampaignAnalytics from "@/lib/api/hooks/app/analytics/useCampaignAnalytics";
+import type { CampaignEngagementBreakdown, EngagementBucket } from "@/lib/api/models/app/analytics/CampaignAnalytics";
 import useCampaignDailyStats from "@/lib/api/hooks/app/analytics/useCampaignDailyStats";
 import { SectionBar, Stat, StatStrip } from "@/components/layout/Page";
 import { MultiTrend, type TrendSeries } from "@/components/ui/charts";
@@ -271,6 +272,8 @@ export default function CampaignOverview() {
                         )}
                     </div>
 
+                    <EngagementAudience breakdown={analytics.data?.engagement ?? null} loading={loading} />
+
                     <CampaignFormsPanel campaignId={id} />
 
                     {/* quick breakdown strip below sequence table, mobile-friendly summary */}
@@ -326,6 +329,96 @@ export default function CampaignOverview() {
                     </div>
                 </aside>
             </div>
+        </div>
+    );
+}
+
+// Country names from the browser's own locale data; the code stays as the
+// fallback for anything it does not know.
+const REGION_NAMES = (() => {
+    try {
+        return new Intl.DisplayNames(undefined, { type: "region" });
+    } catch {
+        return null;
+    }
+})();
+
+function countryName(code: string): string {
+    if (!code) return "Unknown";
+    try {
+        return REGION_NAMES?.of(code.toUpperCase()) ?? code;
+    } catch {
+        return code;
+    }
+}
+
+function bucketLabel(kind: "countries" | "clients" | "devices", key: string): string {
+    if (kind === "countries") return countryName(key);
+    if (!key) return "Unknown";
+    if (kind === "devices") return key.charAt(0).toUpperCase() + key.slice(1);
+    return key;
+}
+
+// Where and on what people opened and clicked: the busiest countries, mail
+// clients and devices, from the per-event logs (human events only, so a
+// security scanner's data centre never leads the list).
+function EngagementAudience({
+    breakdown,
+    loading,
+}: {
+    breakdown: CampaignEngagementBreakdown | null;
+    loading: boolean;
+}) {
+    const columns: { kind: "countries" | "clients" | "devices"; label: string; rows: EngagementBucket[] }[] = [
+        { kind: "countries", label: "Country", rows: breakdown?.countries ?? [] },
+        { kind: "clients", label: "Mail client", rows: breakdown?.clients ?? [] },
+        { kind: "devices", label: "Device", rows: breakdown?.devices ?? [] },
+    ];
+    const empty = columns.every((c) => c.rows.length === 0);
+    return (
+        <div className="rounded-md border border-slate-200 overflow-hidden bg-white">
+            <SectionBar label="Who engaged, and from where" />
+            {loading ? (
+                <div className="h-24 animate-pulse bg-slate-50" />
+            ) : empty ? (
+                <div className="px-5 py-8 text-center">
+                    <p className="text-[12.5px] text-slate-700 font-medium mb-1">No opens or clicks yet</p>
+                    <p className="text-[11.5px] text-slate-400 max-w-[36ch] mx-auto leading-relaxed">
+                        Once people open and click, this shows which countries, mail clients and devices they did it from.
+                    </p>
+                </div>
+            ) : (
+                <div className="grid md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-slate-200/60">
+                    {columns.map((c) => (
+                        <div key={c.kind} className="min-w-0">
+                            <div className="h-8 px-5 flex items-center gap-3 text-[10px] uppercase tracking-[0.12em] text-slate-400 font-medium">
+                                <span className="flex-1 min-w-0">{c.label}</span>
+                                <span className="w-12 text-right">Opens</span>
+                                <span className="w-12 text-right">Clicks</span>
+                            </div>
+                            {c.rows.length === 0 ? (
+                                <div className="px-5 py-3 text-[11.5px] text-slate-400">Nothing yet</div>
+                            ) : (
+                                <div className="divide-y divide-slate-200/60">
+                                    {c.rows.map((r) => (
+                                        <div key={r.key || "unknown"} className="h-9 px-5 flex items-center gap-3">
+                                            <span className="flex-1 min-w-0 text-[12px] text-slate-700 truncate" title={r.key || undefined}>
+                                                {bucketLabel(c.kind, r.key)}
+                                            </span>
+                                            <span className="w-12 text-right font-mono text-[11.5px] text-emerald-600 tabular-nums">
+                                                {r.opens}
+                                            </span>
+                                            <span className="w-12 text-right font-mono text-[11.5px] text-violet-600 tabular-nums">
+                                                {r.clicks}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
         </div>
     );
 }

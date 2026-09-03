@@ -469,6 +469,10 @@ type ContactTimelineEvent struct {
 	// logged per link (every click since link attribution shipped).
 	Link *ContactLinkClick `json:"link,omitempty"`
 
+	// Where an email_opened / email_clicked event came from, when it was
+	// logged per event: mail client, device and rough location.
+	Origin *EngagementOrigin `json:"origin,omitempty"`
+
 	// Author (notes, lifecycle events).
 	UserID *uuid.UUID `json:"user_id,omitempty"`
 }
@@ -486,6 +490,27 @@ type ContactLinkClick struct {
 	UTMTerm     string    `json:"utm_term,omitempty"`
 	UTMContent  string    `json:"utm_content,omitempty"`
 	UserAgent   string    `json:"user_agent,omitempty"`
+}
+
+// EngagementOrigin is what an open or click said about where it came from.
+// Client names the mail client or image proxy when the user agent does
+// (Gmail, Apple Mail, Outlook); the browser fields describe the rest. The
+// location is resolved from the source network and the address itself is
+// never stored. Every field is empty when unknown.
+type EngagementOrigin struct {
+	Client         string `json:"client,omitempty"`
+	DeviceType     string `json:"device_type,omitempty"`
+	OS             string `json:"os,omitempty"`
+	Browser        string `json:"browser,omitempty"`
+	BrowserVersion string `json:"browser_version,omitempty"`
+	CountryCode    string `json:"country_code,omitempty"`
+	Region         string `json:"region,omitempty"`
+	City           string `json:"city,omitempty"`
+}
+
+// Empty reports whether nothing about the origin is known.
+func (o EngagementOrigin) Empty() bool {
+	return o == EngagementOrigin{}
 }
 
 type ContactTimelineResult struct {
