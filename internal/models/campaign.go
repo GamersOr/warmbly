@@ -116,6 +116,8 @@ type Campaign struct {
 	DailyLimit        int  `json:"daily_limit"`
 	UnsubscribeHeader bool `json:"unsubscribe_header"`
 	RiskyEmails       bool `json:"risky_emails"`
+	// UnsubscribeMode is the in-body opt-out: inherit | text | link | off.
+	UnsubscribeMode string `json:"unsubscribe_mode"`
 
 	CC  []string `json:"cc"`
 	BCC []string `json:"bcc"`
@@ -273,13 +275,14 @@ type UpdateCampaign struct {
 	Description *string `json:"description"`
 	Status      *string `json:"status,omitempty"`
 
-	StopOnReply       *bool `json:"stop_on_reply"`
-	OpenTracking      *bool `json:"open_tracking"`
-	LinkTracking      *bool `json:"link_tracking"`
-	TextOnly          *bool `json:"text_only"`
-	DailyLimit        *int  `json:"daily_limit"`
-	UnsubscribeHeader *bool `json:"unsubscribe_header"`
-	RiskyEmails       *bool `json:"risky_emails"`
+	StopOnReply       *bool   `json:"stop_on_reply"`
+	OpenTracking      *bool   `json:"open_tracking"`
+	LinkTracking      *bool   `json:"link_tracking"`
+	TextOnly          *bool   `json:"text_only"`
+	DailyLimit        *int    `json:"daily_limit"`
+	UnsubscribeHeader *bool   `json:"unsubscribe_header"`
+	RiskyEmails       *bool   `json:"risky_emails"`
+	UnsubscribeMode   *string `json:"unsubscribe_mode"`
 
 	CC  []string `json:"cc"`
 	BCC []string `json:"bcc"`
@@ -353,13 +356,14 @@ type CreateCampaign struct {
 	Kind *string `json:"kind,omitempty"`
 
 	// Sending rules / tracking
-	StopOnReply       *bool `json:"stop_on_reply,omitempty"`
-	OpenTracking      *bool `json:"open_tracking,omitempty"`
-	LinkTracking      *bool `json:"link_tracking,omitempty"`
-	TextOnly          *bool `json:"text_only,omitempty"`
-	DailyLimit        *int  `json:"daily_limit,omitempty"`
-	UnsubscribeHeader *bool `json:"unsubscribe_header,omitempty"`
-	RiskyEmails       *bool `json:"risky_emails,omitempty"`
+	StopOnReply       *bool   `json:"stop_on_reply,omitempty"`
+	OpenTracking      *bool   `json:"open_tracking,omitempty"`
+	LinkTracking      *bool   `json:"link_tracking,omitempty"`
+	TextOnly          *bool   `json:"text_only,omitempty"`
+	DailyLimit        *int    `json:"daily_limit,omitempty"`
+	UnsubscribeHeader *bool   `json:"unsubscribe_header,omitempty"`
+	RiskyEmails       *bool   `json:"risky_emails,omitempty"`
+	UnsubscribeMode   *string `json:"unsubscribe_mode,omitempty"`
 
 	CC  []string `json:"cc,omitempty"`
 	BCC []string `json:"bcc,omitempty"`

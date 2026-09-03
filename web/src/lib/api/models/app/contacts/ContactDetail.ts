@@ -16,8 +16,13 @@ export interface ContactEngagement {
 }
 
 export interface ContactSuppression {
+    id: string;
+    // "email" when the contact's own address is listed, "domain" when its
+    // whole domain is; value is the list entry that matched.
+    kind: "email" | "domain";
+    value: string;
     reason: string;
-    source: "bounce" | "complaint" | "unsubscribe" | string;
+    source: "bounce" | "complaint" | "unsubscribe" | "manual" | "import" | string;
     expires_at?: string | null;
     created_at: string;
 }

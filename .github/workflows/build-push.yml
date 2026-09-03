@@ -132,6 +132,10 @@ jobs:
           context: .
           file: deploy/docker/${{ matrix.service }}.Dockerfile
           push: true
+          build-args: |
+            VERSION=dev-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            BUILT_AT=${{ github.event.head_commit.timestamp }}
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:dev

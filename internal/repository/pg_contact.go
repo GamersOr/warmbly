@@ -75,6 +75,10 @@ type ContactRepository interface {
 	ExportAll(ctx context.Context, orgID string, filters *models.SearchContacts, contactIDs []string, max int) ([]models.Contact, *errx.Error)
 	BulkUpdate(ctx context.Context, userID string, orgID uuid.UUID, data *models.BulkEditContactsData) ([]models.Contact, *errx.Error)
 	Update(ctx context.Context, userID, contactID string, orgID uuid.UUID, data *models.UpdateContact) (*models.Contact, *errx.Error)
+	// SetSubscribedByEmail flips the subscription flag on every contact in the
+	// organization with that address; a recipient's own opt-out or
+	// resubscribe is recorded on the contact as well as the suppression list.
+	SetSubscribedByEmail(ctx context.Context, orgID uuid.UUID, email string, subscribed bool) error
 	BulkDelete(ctx context.Context, userID string, orgID uuid.UUID, contactIDs []string) *errx.Error
 	Delete(ctx context.Context, userID string, orgID uuid.UUID, contactID string) *errx.Error
 	GetContactCount(ctx context.Context, userID string) (int, *errx.Error)
@@ -605,6 +609,14 @@ func (r *contactRepository) SetContactESP(ctx context.Context, contactID uuid.UU
 // UpdateContactVerification stores the outcome of a verification pass on the
 // contact. It is keyed only by contact id (the verifier runs in the control
 // plane, not in a user request) and is a no-op-safe single UPDATE.
+func (r *contactRepository) SetSubscribedByEmail(ctx context.Context, orgID uuid.UUID, email string, subscribed bool) error {
+	_, err := r.DB.Exec(ctx,
+		`UPDATE contacts SET subscribed = $3, updated_at = NOW()
+		 WHERE organization_id = $1 AND LOWER(email) = LOWER($2) AND subscribed IS DISTINCT FROM $3`,
+		orgID, email, subscribed)
+	return err
+}
+
 func (r *contactRepository) UpdateContactVerification(ctx context.Context, contactID uuid.UUID, res emailverify.Result) *errx.Error {
 	status := string(res.Status)
 	if status == "" {
@@ -2830,16 +2842,21 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 			return nil, errx.InternalError()
 		}
 
-		// Suppression — there's at most one row per (org, email)
-		// thanks to the unique constraint.
+		// Suppression: the contact's own address row wins over a row for its
+		// whole domain, so the card names the entry that actually blocks mail.
 		suppQuery := `
-			SELECT reason, source, expires_at, created_at
+			SELECT id, kind, email, reason, source, expires_at, created_at
 			FROM suppressed_recipients
-			WHERE organization_id = $1 AND LOWER(email) = LOWER($2)
+			WHERE organization_id = $1
+			  AND (expires_at IS NULL OR expires_at > NOW())
+			  AND ((kind = 'email' AND email = LOWER($2))
+			    OR (kind = 'domain' AND email = split_part(LOWER($2), '@', 2)))
+			ORDER BY (kind = 'email') DESC
+			LIMIT 1
 		`
 		var s models.ContactSuppression
 		err := r.DB.QueryRow(ctx, suppQuery, *orgID, detail.Email).Scan(
-			&s.Reason, &s.Source, &s.ExpiresAt, &s.CreatedAt,
+			&s.ID, &s.Kind, &s.Value, &s.Reason, &s.Source, &s.ExpiresAt, &s.CreatedAt,
 		)
 		switch {
 		case err == nil:
@@ -3337,7 +3354,8 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			SELECT created_at, reason, source
 			FROM suppressed_recipients
 			WHERE organization_id = $1
-			  AND LOWER(email) = LOWER($2)
+			  AND ((kind = 'email' AND email = LOWER($2))
+			    OR (kind = 'domain' AND email = split_part(LOWER($2), '@', 2)))
 			  AND created_at < $3
 			ORDER BY created_at DESC
 			LIMIT 1

@@ -15,6 +15,21 @@ export PATH := $(GO_BIN):$(PATH)
 # fresh clones without any environment setup.
 COMPOSE := docker compose -p warmbly
 
+# Build identity stamped into the Go images (shown in the admin panel's top bar
+# and read by the update check). Empty outside a git checkout, which the
+# binaries report as "dev".
+export WARMBLY_BUILD_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
+export WARMBLY_BUILD_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
+export WARMBLY_BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# The updater sidecar (one-click "Update and restart" from the admin panel)
+# holds the docker socket, so it lives behind a compose profile. `make up`
+# turns it on; UPDATER=false leaves it off.
+UPDATER ?= true
+ifeq ($(UPDATER),true)
+UP_PROFILES := --profile updater
+endif
+
 GOLANGCI_LINT_VERSION ?= v1.64.8
 PROTOC_GEN_GO_VERSION ?= v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.1
@@ -23,7 +38,7 @@ PROTO_DIR := internal/tasks/proto
 PROTO_GEN_FILES := $(PROTO_DIR)/tasks.pb.go
 
 .PHONY: poollink-dev poollink-dev-down poollink-dev-reset setup-tools fmt lint check-migrations proto check-proto \
-        up claim doctor cli seed-demo seed seed-plan sandbox sandbox-seed sandbox-simulate reset logs status stop down test-seed \
+        up upgrade claim doctor cli seed-demo seed seed-plan sandbox sandbox-seed sandbox-simulate reset logs status stop down test-seed \
         restart restart-go restart-all infra infra-down app app-down app-logs \
         backend forms forms-web consumer worker run dev tracking realtime web \
         admin site docs grant-admin revoke-admin gen-key db-reset db-wipe migrate
@@ -79,7 +94,7 @@ ADMIN_URL = http://$(WEB_HOST):5174
 # everything detached. Dashboard :5173, admin :5174, API :8080.
 up:
 	@command -v docker >/dev/null || { echo "docker is required: https://docs.docker.com/get-docker/"; exit 1; }
-	$(COMPOSE) up -d --build
+	$(COMPOSE) $(UP_PROFILES) up -d --build
 	@echo ""
 	@echo "Warmbly is starting. The first run builds the images once."
 	@echo ""
@@ -87,6 +102,12 @@ up:
 	@echo "  Dashboard: $(DASHBOARD_URL)     Admin: $(ADMIN_URL)"
 	@echo "  Health:    make doctor               Logs:  make logs"
 	@echo "  Demo data: make seed-demo            Guide: https://docs.warmbly.com/development/first-run/"
+
+# The by-hand equivalent of "Update and restart" in the admin panel: move the
+# checkout forward, rebuild, recreate what changed. Migrations apply on boot.
+upgrade:
+	git pull --ff-only
+	@$(MAKE) --no-print-directory up
 
 # Report how to get into this instance, and end on a command that works.
 #

@@ -59,6 +59,8 @@ import (
 	"github.com/warmbly/warmbly/internal/app/twofa"
 	"github.com/warmbly/warmbly/internal/app/tz"
 	"github.com/warmbly/warmbly/internal/app/unibox"
+	"github.com/warmbly/warmbly/internal/app/unsublink"
+	"github.com/warmbly/warmbly/internal/app/updates"
 	"github.com/warmbly/warmbly/internal/app/user"
 	"github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
@@ -160,12 +162,17 @@ type Handler struct {
 	WorkerRepo         repository.WorkerRepository
 	CredentialsRepo    repository.CredentialsRepository
 	ReleasesService    *releases.Service
+	// UpdatesService backs the admin panel's update indicator and button.
+	UpdatesService *updates.Service
 
 	// Notifications
 	EmailNotificationService notify.EmailNotificationService
 
 	// Advanced outreach controls
 	AdvancedService advanced.Service
+	// UnsubscribeLinks verifies the signed tokens on recipient unsubscribe
+	// links. Nil when the instance has no public API URL to mint them on.
+	UnsubscribeLinks *unsublink.Signer
 
 	// Website tracking snippet: settings and the page-view ingest path.
 	WebsiteTrackingService websitetracking.Service

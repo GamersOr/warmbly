@@ -8,6 +8,14 @@ import type Campaign from "@/lib/api/models/app/campaigns/Campaign";
 import { Label, NumberInput, TextInput } from "@/components/ui/field";
 import SenderSelector from "./SenderSelector";
 import { SettingRow, Toggle } from "./components/CampaignPreferenceBoolBox";
+import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+
+const UNSUB_MODES: SelectOption[] = [
+    { value: "inherit", label: "Workspace default" },
+    { value: "text", label: "Reply to opt out (text line)" },
+    { value: "link", label: "Unsubscribe link" },
+    { value: "off", label: "Nothing" },
+];
 
 const DAILY_MIN = 3;
 const DAILY_MAX = 5000;
@@ -172,12 +180,28 @@ export function DeliverabilitySection({
             )}
             <SettingRow
                 title="Unsubscribe header"
-                description="Add a List-Unsubscribe header for compliance and better deliverability."
+                description="Add a List-Unsubscribe header so mail clients can show their own one-click unsubscribe."
                 control={
                     <Toggle
                         id="campaign-pref-unsub"
                         value={newCampaign.unsubscribe_header}
                         onChange={(v) => setNewCampaign((bef) => ({ ...bef, unsubscribe_header: v }))}
+                    />
+                }
+            />
+            <SettingRow
+                title="Opt-out line"
+                description="The opt-out appended after the signature of every email in this campaign. The workspace default is set under Settings > Sending."
+                control={
+                    <SelectMenu
+                        value={newCampaign.unsubscribe_mode ?? "inherit"}
+                        onChange={(v) =>
+                            setNewCampaign((bef) => ({ ...bef, unsubscribe_mode: v as Campaign["unsubscribe_mode"] }))
+                        }
+                        options={UNSUB_MODES}
+                        aria-label="Opt-out line"
+                        minWidth={240}
+                        align="end"
                     />
                 }
             />

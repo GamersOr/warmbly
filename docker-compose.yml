@@ -298,6 +298,10 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/backend.Dockerfile
+      args:
+        VERSION: ${WARMBLY_BUILD_VERSION:-}
+        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
+        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     ports: ["8080:8080"]
     environment:
       <<: *selfhost-env
@@ -340,6 +344,19 @@ services:
       WEBAUTHN_RP_ORIGINS: ${WEBAUTHN_RP_ORIGINS:-}
       # Worker image the orchestrator installs on remote machines.
       WORKER_IMAGE: ${WORKER_IMAGE:-}
+      # Update indicator: polls GitHub Releases and shows a newer version in the
+      # admin panel's top bar. Applying it goes through the updater service
+      # below. The address is always set because a profile cannot be tested
+      # here; with the profile off the host does not resolve and the backend
+      # reports the updater as not running (report-only), never as broken.
+      # UPDATER_URL=none in .env turns the button off explicitly.
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
+      UPDATE_CHECK_INTERVAL: ${UPDATE_CHECK_INTERVAL:-30m}
+      UPDATE_CHANNEL: ${UPDATE_CHANNEL:-stable}
+      RELEASES_GITHUB_REPO: ${RELEASES_GITHUB_REPO:-warmbly/warmbly}
+      RELEASES_GITHUB_TOKEN: ${RELEASES_GITHUB_TOKEN:-}
+      UPDATER_URL: ${UPDATER_URL:-http://updater:8095}
+      UPDATER_TOKEN: ${UPDATER_TOKEN:-${INTERNAL_API_TOKEN:-local-dev-internal-token}}
     volumes:
       - blobs:/data/blobs
     depends_on:
@@ -360,6 +377,10 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/forms.Dockerfile
+      args:
+        VERSION: ${WARMBLY_BUILD_VERSION:-}
+        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
+        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     ports: ["${FORMS_PORT:-8090}:8090"]
     environment:
       GIN_MODE: release
@@ -386,6 +407,10 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/consumer.Dockerfile
+      args:
+        VERSION: ${WARMBLY_BUILD_VERSION:-}
+        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
+        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     environment:
       <<: *selfhost-env
       ENCRYPTED_KEYS_PROVIDER: postgres
@@ -406,6 +431,10 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/worker.Dockerfile
+      args:
+        VERSION: ${WARMBLY_BUILD_VERSION:-}
+        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
+        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     environment:
       <<: *selfhost-env
       # Dovecot in the sandbox profile uses a self-signed cert. Set
@@ -529,6 +558,39 @@ services:
     depends_on:
       backend: { condition: service_healthy }
 
+  # One-click updates from the admin panel (the version pill in the top bar).
+  # Pulls this checkout, rebuilds the images and recreates the containers when
+  # the backend asks, then waits for the backend to answer again. It holds the
+  # docker socket, which is root on this host, so it only runs under the
+  # "updater" profile: `make up` enables it, and COMPOSE_PROFILES=updater in
+  # .env does the same for a plain `docker compose up`. Leave the profile off
+  # to update by hand with `git pull && make up`.
+  updater:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: deploy/docker/updater.Dockerfile
+      args:
+        VERSION: ${WARMBLY_BUILD_VERSION:-}
+        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
+        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
+    environment:
+      UPDATER_TOKEN: ${UPDATER_TOKEN:-${INTERNAL_API_TOKEN:-local-dev-internal-token}}
+      # The checkout is mounted at its host path so the compose file's relative
+      # paths resolve identically inside and outside the container.
+      UPDATER_REPO_DIR: ${WARMBLY_REPO_DIR:-${PWD}}
+      UPDATER_COMPOSE_PROJECT: warmbly
+      UPDATER_BACKEND_HEALTH_URL: http://backend:8080/health
+      UPDATER_FETCH_INTERVAL: ${UPDATER_FETCH_INTERVAL:-30m}
+      UPDATER_PRUNE: ${UPDATER_PRUNE:-true}
+      UPDATER_ALLOW_DIRTY: ${UPDATER_ALLOW_DIRTY:-false}
+    working_dir: ${WARMBLY_REPO_DIR:-${PWD}}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${WARMBLY_REPO_DIR:-${PWD}}:${WARMBLY_REPO_DIR:-${PWD}}
+      - updater_state:/var/lib/warmbly-updater
+    profiles: ["updater"]
+
   # ─── one-shots ────────────────────────────────────────────────────────
 
   # Optional demo seed. Run explicitly: docker compose --profile seed run --rm seed
@@ -536,6 +598,10 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/backend.Dockerfile
+      args:
+        VERSION: ${WARMBLY_BUILD_VERSION:-}
+        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
+        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     entrypoint: ["/app/seed"]
     environment:
       <<: *selfhost-env
@@ -553,3 +619,4 @@ volumes:
   nats_data:
   blobs:
   worker_state:
+  updater_state:

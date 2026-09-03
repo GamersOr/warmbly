@@ -161,21 +161,31 @@ func TemplateError(tmpl string) error {
 // intentionally left untouched here (single-brace {a|b} survives the template
 // pass) and expanded later in the pipeline where applicable.
 func RenderTemplate(tmpl string, contact models.Contact) string {
+	return RenderTemplateWith(tmpl, contact, nil)
+}
+
+// RenderTemplateWith is RenderTemplate with per-send values that are not
+// contact fields (today: the recipient's unsubscribe link). They win a name
+// collision with a custom field, like the standard fields do.
+func RenderTemplateWith(tmpl string, contact models.Contact, extra map[string]string) string {
 	if tmpl == "" {
 		return tmpl
 	}
 
 	data := buildTemplateData(contact)
+	for k, v := range extra {
+		data[k] = v
+	}
 	prepared := rewriteSpacedFieldRefs(tmpl)
 
 	t := compiledTemplate(prepared)
 	if t == nil {
-		return naiveRenderTemplate(tmpl, contact) // known-bad -> legacy path
+		return naiveRenderTemplate(tmpl, contact, extra) // known-bad -> legacy path
 	}
 
 	var b strings.Builder
 	if err := t.Execute(&b, data); err != nil {
-		return naiveRenderTemplate(tmpl, contact)
+		return naiveRenderTemplate(tmpl, contact, extra)
 	}
 	return b.String()
 }
@@ -184,8 +194,11 @@ func RenderTemplate(tmpl string, contact models.Contact) string {
 // substitution for the standard fields and every custom field. It is the
 // graceful fallback when text/template parsing or execution fails, so a body
 // always renders even for malformed conditional syntax.
-func naiveRenderTemplate(tmpl string, contact models.Contact) string {
+func naiveRenderTemplate(tmpl string, contact models.Contact, extra map[string]string) string {
 	result := tmpl
+	for k, v := range extra {
+		result = strings.ReplaceAll(result, fmt.Sprintf("{{.%s}}", k), v)
+	}
 	result = strings.ReplaceAll(result, "{{.FirstName}}", contact.FirstName)
 	result = strings.ReplaceAll(result, "{{.LastName}}", contact.LastName)
 	result = strings.ReplaceAll(result, "{{.Email}}", contact.Email)
@@ -209,6 +222,9 @@ type TemplatePreview struct {
 	Unresolved []string `json:"unresolved,omitempty"` // literal {{…}} tokens left after render
 }
 
+// PreviewUnsubscribeLink stands in for the per-recipient link in previews.
+const PreviewUnsubscribeLink = "https://example.com/unsubscribe/preview"
+
 // unresolvedToken matches a {{…}} token still present after rendering (i.e. one
 // that failed to parse and fell through to literal substitution).
 var unresolvedToken = regexp.MustCompile(`\{\{[^{}]*\}\}`)
@@ -217,10 +233,11 @@ var unresolvedToken = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 // send path does (template render + spintax), and reports parse errors plus any
 // tokens that did not resolve.
 func PreviewTemplates(subject, bodyHTML, bodyPlain string, contact models.Contact) TemplatePreview {
+	extra := map[string]string{UnsubscribeLinkVar: PreviewUnsubscribeLink}
 	p := TemplatePreview{
-		Subject:   expandSpintax(RenderTemplate(subject, contact)),
-		BodyHTML:  expandSpintax(RenderTemplate(bodyHTML, contact)),
-		BodyPlain: expandSpintax(RenderTemplate(bodyPlain, contact)),
+		Subject:   expandSpintax(RenderTemplateWith(subject, contact, extra)),
+		BodyHTML:  expandSpintax(RenderTemplateWith(bodyHTML, contact, extra)),
+		BodyPlain: expandSpintax(RenderTemplateWith(bodyPlain, contact, extra)),
 	}
 	for _, f := range []struct{ name, raw string }{{"subject", subject}, {"body", bodyHTML}, {"plain text", bodyPlain}} {
 		if err := TemplateError(f.raw); err != nil {

@@ -18151,6 +18151,258 @@
           }
         }
       }
+    },
+    "/suppressions": {
+      "get": {
+        "tags": [
+          "deliverability-ops"
+        ],
+        "operationId": "deliverability-ops_list_suppressions",
+        "summary": "List the suppression list",
+        "description": "Pages the workspace suppression list newest first: every address and domain no campaign will email. Scope `READ_CONTACTS`, org permission `view_contacts`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Substring filter on the address or domain.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque pagination cursor from the previous page's pagination.next_cursor.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of suppression entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuppressionListResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid limit or cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API key lacks READ_CONTACTS or the member lacks view_contacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "deliverability-ops"
+        ],
+        "operationId": "deliverability-ops_add_suppressions",
+        "summary": "Add to the suppression list",
+        "description": "Adds addresses and domains. Unparseable values are reported in `skipped`; existing entries are updated in place, so the call is safe to repeat. Scope `WRITE_CONTACTS`, org permission `manage_contacts`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddSuppressionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the request did.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddSuppressionsResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No entries, or more than 5000.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API key lacks WRITE_CONTACTS or the member lacks manage_contacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/suppressions/{id}": {
+      "delete": {
+        "tags": [
+          "deliverability-ops"
+        ],
+        "operationId": "deliverability-ops_remove_suppression",
+        "summary": "Remove from the suppression list",
+        "description": "Lifts one entry so campaigns can email the address (or every address at the domain) again. Recorded in the audit log. Scope `WRITE_CONTACTS`, org permission `manage_contacts`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Entry removed."
+          },
+          "400": {
+            "description": "Invalid suppression ID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API key lacks WRITE_CONTACTS or the member lacks manage_contacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such entry in this organization.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -20779,6 +21031,32 @@
               },
               "show_dlq_stats": {
                 "type": "boolean"
+              }
+            }
+          },
+          "unsubscribe": {
+            "type": "object",
+            "description": "Workspace default for the opt-out appended after the signature of every campaign email; a campaign's unsubscribe_mode overrides it.",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "text",
+                  "link",
+                  "off"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "link_intro": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "link_text": {
+                "type": "string",
+                "maxLength": 300
               }
             }
           }
@@ -28228,6 +28506,135 @@
             "items": {
               "$ref": "#/components/schemas/TemplateScoreIssue"
             }
+          }
+        }
+      },
+      "SuppressedRecipient": {
+        "type": "object",
+        "description": "One entry on the workspace suppression list. A domain entry keeps the bare host in `email` and matches every address at it.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "organization_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string",
+            "description": "The address, or the bare domain when kind is domain."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "email",
+              "domain"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "bounce",
+              "complaint",
+              "unsubscribe",
+              "manual",
+              "import"
+            ]
+          },
+          "campaign_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SuppressionListResult": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuppressedRecipient"
+            }
+          },
+          "pagination": {
+            "type": "object",
+            "properties": {
+              "next_cursor": {
+                "type": "string",
+                "nullable": true
+              },
+              "has_more": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "AddSuppressionsRequest": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "maxItems": 5000,
+            "items": {
+              "type": "object",
+              "required": [
+                "value"
+              ],
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "description": "An address, or a bare domain (with or without a leading @)."
+                },
+                "reason": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "reason": {
+            "type": "string",
+            "description": "Applied to every entry without its own reason."
+          }
+        }
+      },
+      "AddSuppressionsResult": {
+        "type": "object",
+        "properties": {
+          "added": {
+            "type": "integer"
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Values that were neither a valid address nor a valid domain."
           }
         }
       }

@@ -97,11 +97,12 @@ func Run(
 	// postMessages code+state to the SPA opener, which calls oauth/finish.
 	r.GET("/integrations/oauth/callback", h.IntegrationOAuthCallback)
 
-	// Public List-Unsubscribe endpoint (RFC 8058). GET = recipient clicks the
-	// link; POST = mailbox provider's one-click (body List-Unsubscribe=One-Click).
-	// Both suppress the recipient org-wide. Unauthenticated by design.
-	r.GET("/unsubscribe", h.Unsubscribe)
-	r.POST("/unsubscribe", h.Unsubscribe)
+	// Public recipient unsubscribe (RFC 8058 one-click and the link in the
+	// email). The path token is signed per recipient; GET only shows a
+	// confirm page, POST suppresses. Unauthenticated by design.
+	r.GET("/unsubscribe/:token", h.UnsubscribePage)
+	r.POST("/unsubscribe/:token", h.UnsubscribeSubmit)
+	r.POST("/unsubscribe/:token/resubscribe", h.UnsubscribeUndo)
 
 	// Public invitation preview for the /invite landing page. Unauthenticated:
 	// the secret token in the query is the capability.
@@ -315,6 +316,10 @@ func Run(
 		protectedAuth.DELETE("/sessions", h.SessionRevokeOthers)
 		protectedAuth.DELETE("/sessions/:id", h.SessionRevoke)
 
+		// The instance's version and whether an update exists, for the
+		// dashboard's version pill. Any member may read it; applying an update
+		// stays behind the admin permissions on /admin/instance/update.
+		protectedAuth.GET("/instance", h.InstanceVersion)
 		protectedAuth.GET("/me", h.GetUser)
 		protectedAuth.PATCH("/me", h.UpdateUserProfile)
 		protectedAuth.PATCH("/me/onboarding", h.CompleteOnboarding)
@@ -796,6 +801,17 @@ func Run(
 			{
 				outreach.GET("/settings", h.GetOutreachSettings)
 				outreach.PATCH("/settings", h.UpdateOutreachSettings)
+			}
+
+			// The workspace suppression list (org-scoped). Reading it is a
+			// contacts read; adding or lifting an entry changes who gets mail,
+			// so it needs the contacts write permission.
+			suppressions := protected.Group("/suppressions")
+			suppressions.Use(m.RequireOrganization())
+			{
+				suppressions.GET("", m.RateLimitMiddleware(models.RateLimitRead), m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListSuppressions)
+				suppressions.POST("", m.RateLimitMiddleware(models.RateLimitWrite), m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.AddSuppressions)
+				suppressions.DELETE("/:id", m.RateLimitMiddleware(models.RateLimitWrite), m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.RemoveSuppression)
 			}
 
 			// Deliverability event ingestion (org-scoped). API-key callable so
@@ -1441,6 +1457,11 @@ func Run(
 		adminRoutes.GET("/instance/limits", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminInstanceLimits)
 		adminRoutes.GET("/instance/settings", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminGetInstanceSettings)
 		adminRoutes.PUT("/instance/settings", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminPutInstanceSettings)
+		// Updates: the top-bar indicator polls the state; applying one goes
+		// through the host-side updater and restarts this process.
+		adminRoutes.GET("/instance/update", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminUpdateState)
+		adminRoutes.POST("/instance/update/check", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminUpdateCheck)
+		adminRoutes.POST("/instance/update/apply", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminUpdateApply)
 
 		// Analytics Dashboard
 		adminRoutes.GET("/analytics/overview", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminGetPlatformOverview)

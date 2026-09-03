@@ -25,6 +25,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/admin"
 	"github.com/warmbly/warmbly/internal/app/adminoutreach"
 	"github.com/warmbly/warmbly/internal/app/advanced"
+	"github.com/warmbly/warmbly/internal/app/unsublink"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/warmbly/warmbly/internal/app/advisor"
@@ -95,6 +96,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/twofa"
 	"github.com/warmbly/warmbly/internal/app/tz"
 	"github.com/warmbly/warmbly/internal/app/unibox"
+	"github.com/warmbly/warmbly/internal/app/updates"
 	"github.com/warmbly/warmbly/internal/app/user"
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
@@ -179,6 +181,7 @@ func main() {
 	var provisioningPolicyRepo repository.ProvisioningPolicyRepository
 	var tasksService tasks.TasksService
 	var advancedService advanced.Service
+	var unsubSigner *unsublink.Signer
 	var warmupContentRepo repository.WarmupContentRepository
 	var warmupContentService warmupcontent.Service
 	var creditRepository repository.CreditRepository
@@ -232,6 +235,7 @@ func main() {
 	var workerRepoForHandler repository.WorkerRepository
 	var credentialsRepository repository.CredentialsRepository
 	var releasesService *releases.Service
+	var updatesService *updates.Service
 
 	// Notifications
 	var emailNotificationService notify.EmailNotificationService
@@ -1122,12 +1126,31 @@ func main() {
 		)
 		releasesService.RunBootCheck(ctx)
 
+		// Update indicator and one-click update. The release check is on by
+		// default (one GitHub API read per interval); applying an update needs
+		// the host-side updater (UPDATER_URL), which the compose stack ships as
+		// the "updater" profile.
+		updateInterval, _ := time.ParseDuration(getenvDefault("UPDATE_CHECK_INTERVAL", "30m"))
+		updatesService = updates.New(updates.Config{
+			Enabled:      getenvDefault("UPDATE_CHECK_ENABLED", "true") != "false",
+			Interval:     updateInterval,
+			Channel:      getenvDefault("UPDATE_CHANNEL", "stable"),
+			GithubRepo:   getenvDefault("RELEASES_GITHUB_REPO", "warmbly/warmbly"),
+			GithubToken:  os.Getenv("RELEASES_GITHUB_TOKEN"),
+			UpdaterURL:   os.Getenv("UPDATER_URL"),
+			UpdaterToken: getenvDefault("UPDATER_TOKEN", os.Getenv("INTERNAL_API_TOKEN")),
+		})
+		updatesService.Start(ctx)
+
 		eventsPublisher := events.NewPublisher(bus, s3, codecImpl, cipherService)
 
 		// apiCfg.Hostname is the bind address, not a reachable base. Building
 		// the mailbox-connect redirect_uri from it sends the provider
 		// "0.0.0.0:8080/addresses/google/callback".
 		oauth2Cfg := config.LoadOauth2(oauthPublicBaseURL(apiCfg.Hostname))
+		// Recipient unsubscribe links live on the API origin, signed under the
+		// auth secret; the same base the OAuth callbacks are built on.
+		unsubSigner = unsublink.New(authCfg.AuthSecret, oauthPublicBaseURL(apiCfg.Hostname))
 		emailService = email.NewServiceWithWorker(
 			emailRepostory,
 			cipherService,
@@ -1521,6 +1544,7 @@ func main() {
 			trackedLinkRepository,
 			integrationServiceForHandler, // AutomationRunner for campaign run_automation steps
 		)
+		tasksService.SetUnsubscribeLinks(unsubSigner)
 		// Sequence action nodes that pin a contact into or out of a segment,
 		// both on the scheduled path (tasks) and the instant reply path (advanced).
 		if aware, ok := tasksService.(tasks.SegmentAware); ok {
@@ -1842,6 +1866,7 @@ func main() {
 		Policy:    authPolicy,
 		DB:        instanceChecksDB,
 		Cache:     authCache,
+		Updates:   updatesService,
 	})
 
 	h := &handler.Handler{
@@ -1922,12 +1947,14 @@ func main() {
 		WorkerRepo:         workerRepoForHandler,
 		CredentialsRepo:    credentialsRepository,
 		ReleasesService:    releasesService,
+		UpdatesService:     updatesService,
 
 		// Notifications
 		EmailNotificationService: emailNotificationService,
 
 		// Advanced outreach controls
-		AdvancedService: advancedService,
+		AdvancedService:  advancedService,
+		UnsubscribeLinks: unsubSigner,
 
 		// Warmup health
 		WarmupService:     warmupService,

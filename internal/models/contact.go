@@ -315,8 +315,13 @@ type ContactEngagement struct {
 // ContactSuppression mirrors a row from suppressed_recipients for the
 // contact's email. Null on the wire when the contact is not suppressed.
 type ContactSuppression struct {
+	ID uuid.UUID `json:"id"`
+	// Kind is "email" for the contact's own address or "domain" when the
+	// whole domain is suppressed; Value is the matching list entry.
+	Kind      string     `json:"kind"`
+	Value     string     `json:"value"`
 	Reason    string     `json:"reason"`
-	Source    string     `json:"source"` // bounce | complaint | unsubscribe
+	Source    string     `json:"source"` // bounce | complaint | unsubscribe | manual | import
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 }

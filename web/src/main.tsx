@@ -17,6 +17,7 @@ import FormBuilderPage from './app/app/forms/[id]/page';
 import ContactsLayout from './app/app/contacts/layout';
 import SegmentsPage from './app/app/contacts/segments/page';
 import CategoriesPage from './app/app/contacts/categories/page';
+import SuppressionsPage from './app/app/contacts/suppressions/page';
 import SegmentPage from './app/app/contacts/segments/[id]/page';
 import CampaignsPage from './app/app/campaigns/page';
 import CampaignLayout from './app/app/campaigns/[id]/layout';
@@ -253,6 +254,7 @@ const router = createBrowserRouter([
                 ],
               },
               { path: "categories", element: <CategoriesPage /> },
+              { path: "suppressions", element: <SuppressionsPage /> },
             ],
           },
           {
