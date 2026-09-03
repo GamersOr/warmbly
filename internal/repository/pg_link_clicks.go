@@ -89,28 +89,22 @@ func (r *linkClickRepository) Insert(ctx context.Context, c *LinkClick) error {
 }
 
 func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID uuid.UUID, ipHash string, linkID *uuid.UUID, destination string, since time.Time) (int, error) {
+	// A row is "another link" when both sides have a ticket and they differ;
+	// a row without a ticket (older tracking build) is compared by
+	// destination so a repeat click on one link never reads as a burst.
 	query := `
 		SELECT COUNT(*)
 		FROM email_link_clicks
 		WHERE task_id = $1
 		  AND ip_hash = $2
-		  AND destination <> $3
-		  AND clicked_at >= $4
+		  AND clicked_at >= $3
+		  AND CASE
+		        WHEN tracked_link_id IS NOT NULL AND $4::uuid IS NOT NULL THEN tracked_link_id <> $4::uuid
+		        ELSE destination <> $5
+		      END
 	`
-	args := []any{taskID, ipHash, destination, since}
-	if linkID != nil {
-		query = `
-			SELECT COUNT(*)
-			FROM email_link_clicks
-			WHERE task_id = $1
-			  AND ip_hash = $2
-			  AND tracked_link_id IS DISTINCT FROM $3
-			  AND clicked_at >= $4
-		`
-		args = []any{taskID, ipHash, *linkID, since}
-	}
 	var n int
-	err := r.db.QueryRow(ctx, query, args...).Scan(&n)
+	err := r.db.QueryRow(ctx, query, taskID, ipHash, since, linkID, destination).Scan(&n)
 	return n, err
 }
 
