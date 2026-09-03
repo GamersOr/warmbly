@@ -3145,7 +3145,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		ORDER BY lc.clicked_at DESC
 		LIMIT $4
 	`
-	crows, err := r.DB.Query(ctx, clickQuery, contactID, userID, bound, limit)
+	crows, err := r.DB.Query(ctx, clickQuery, contactID, userID, bound, limit+1)
 	if err != nil {
 		db.CaptureError(err, clickQuery, []any{contactID, userID, bound, limit}, "ListTimeline link clicks")
 		return nil, errx.InternalError()
@@ -3228,7 +3228,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		ORDER BY o.opened_at DESC
 		LIMIT $4
 	`
-	orows, err := r.DB.Query(ctx, openQuery, contactID, userID, bound, limit)
+	orows, err := r.DB.Query(ctx, openQuery, contactID, userID, bound, limit+1)
 	if err != nil {
 		db.CaptureError(err, openQuery, []any{contactID, userID, bound, limit}, "ListTimeline opens")
 		return nil, errx.InternalError()
