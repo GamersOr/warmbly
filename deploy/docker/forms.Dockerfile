@@ -9,6 +9,8 @@
 # $TARGETARCH (no QEMU).
 FROM --platform=$BUILDPLATFORM node:22-alpine AS appbuilder
 WORKDIR /app
+# No TTY in a build: CI=true makes pnpm reinstall instead of prompting.
+ENV CI=true
 RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
 COPY forms/package.json forms/pnpm-lock.yaml forms/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
