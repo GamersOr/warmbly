@@ -747,8 +747,12 @@ To move a worker fleet onto a new release, update `WORKER_IMAGE` and use "Pull l
 
 ## Upgrading and backups
 
+The admin panel tells you when a newer version exists: the version pill in its top bar turns amber, and **Update and restart** in it pulls the checkout, rebuilds, restarts what changed and reconnects once the backend is back. `make up` starts the updater that makes the button work. The whole flow, what it does and how to run it without Docker, is on [Updates](/development/updates/).
+
+By hand it is the same two steps:
+
 ```bash
-git pull && make up          # migrations apply on backend boot
+make upgrade                 # git pull --ff-only, then make up; migrations apply on backend boot
 ```
 
 Upgrading is safe with data in place: migrations are forward-only and apply on backend boot.

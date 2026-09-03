@@ -96,6 +96,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/twofa"
 	"github.com/warmbly/warmbly/internal/app/tz"
 	"github.com/warmbly/warmbly/internal/app/unibox"
+	"github.com/warmbly/warmbly/internal/app/updates"
 	"github.com/warmbly/warmbly/internal/app/user"
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
@@ -234,6 +235,7 @@ func main() {
 	var workerRepoForHandler repository.WorkerRepository
 	var credentialsRepository repository.CredentialsRepository
 	var releasesService *releases.Service
+	var updatesService *updates.Service
 
 	// Notifications
 	var emailNotificationService notify.EmailNotificationService
@@ -1124,6 +1126,22 @@ func main() {
 		)
 		releasesService.RunBootCheck(ctx)
 
+		// Update indicator and one-click update. The release check is on by
+		// default (one GitHub API read per interval); applying an update needs
+		// the host-side updater (UPDATER_URL), which the compose stack ships as
+		// the "updater" profile.
+		updateInterval, _ := time.ParseDuration(getenvDefault("UPDATE_CHECK_INTERVAL", "30m"))
+		updatesService = updates.New(updates.Config{
+			Enabled:      getenvDefault("UPDATE_CHECK_ENABLED", "true") != "false",
+			Interval:     updateInterval,
+			Channel:      getenvDefault("UPDATE_CHANNEL", "stable"),
+			GithubRepo:   getenvDefault("RELEASES_GITHUB_REPO", "warmbly/warmbly"),
+			GithubToken:  os.Getenv("RELEASES_GITHUB_TOKEN"),
+			UpdaterURL:   os.Getenv("UPDATER_URL"),
+			UpdaterToken: getenvDefault("UPDATER_TOKEN", os.Getenv("INTERNAL_API_TOKEN")),
+		})
+		updatesService.Start(ctx)
+
 		eventsPublisher := events.NewPublisher(bus, s3, codecImpl, cipherService)
 
 		// apiCfg.Hostname is the bind address, not a reachable base. Building
@@ -1848,6 +1866,7 @@ func main() {
 		Policy:    authPolicy,
 		DB:        instanceChecksDB,
 		Cache:     authCache,
+		Updates:   updatesService,
 	})
 
 	h := &handler.Handler{
@@ -1928,6 +1947,7 @@ func main() {
 		WorkerRepo:         workerRepoForHandler,
 		CredentialsRepo:    credentialsRepository,
 		ReleasesService:    releasesService,
+		UpdatesService:     updatesService,
 
 		// Notifications
 		EmailNotificationService: emailNotificationService,

@@ -562,16 +562,20 @@ Because the worker is not in a container, the admin panel's SSH-driven day-two a
 
 ## Upgrading
 
-Rebuild the artifacts that changed, then restart. Migrations are forward-only and apply on backend boot, so bring the backend up before the rest:
+`scripts/upgrade-bare-metal.sh` is the build steps above in order: build every artifact this host runs as the checkout's owner, then run the root-owned installer `warmbly-install-release` through sudo, which installs them, restarts the backend first (migrations are forward-only and apply on its boot), then the rest, keeping each frontend's `config.js` across the copy. Install that one script root-owned once, then run the upgrade as the user who owns the checkout:
 
 ```bash
-cd /opt/warmbly/src && sudo git pull                     # or checkout a newer tag
-# repeat the build steps for the services that changed, then:
-sudo systemctl restart warmbly-backend
-sudo systemctl restart warmbly-forms warmbly-consumer warmbly-tracking warmbly-realtime warmbly-worker
+sudo install -o root -g root -m 0755 /opt/warmbly/src/deploy/systemd/warmbly-install-release.sh /usr/local/sbin/warmbly-install-release
+echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/warmbly-install-release" | sudo tee /etc/sudoers.d/warmbly-upgrade >/dev/null
+sudo chmod 0440 /etc/sudoers.d/warmbly-upgrade
+cd /opt/warmbly/src && scripts/upgrade-bare-metal.sh --pull    # git pull --ff-only, build, install, restart
 ```
 
-Frontend rebuilds overwrite `config.js` when you copy `dist/` over, so rewrite it afterwards (or keep the two files somewhere and copy them back). A build script that does all of it in order is worth writing the second time you upgrade.
+The sudoers line is what lets the script call the installer without a password prompt; it allows that one root-owned command and nothing else.
+
+To pin a release instead of following the branch, check the tag out first (`git checkout vX.Y.Z`) and run it without `--pull`.
+
+The admin panel can run the same script for you. The version pill in its top bar shows when a newer release exists, and with the updater unit installed, **Update and restart** in it pulls, runs the script and reports back. [Updates](/development/updates/#without-docker) has the unit, the sudoers line it needs and the backend variable that points at it.
 
 ## Backups
 

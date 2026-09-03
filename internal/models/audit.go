@@ -65,6 +65,8 @@ const (
 	AuditEntityAWSCredentials AuditEntityType = "aws_credentials"
 	AuditEntityWorkerProfile  AuditEntityType = "worker_profile"
 	AuditEntityRelease        AuditEntityType = "release"
+	// AuditEntityInstance is the deployment itself: settings and updates.
+	AuditEntityInstance AuditEntityType = "instance"
 
 	// Org-scoped configuration & governance entities
 	AuditEntityOrganizationMember AuditEntityType = "organization_member"

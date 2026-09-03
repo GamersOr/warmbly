@@ -60,6 +60,10 @@ jobs:
           context: .
           file: deploy/docker/${{ matrix.service }}.Dockerfile
           push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILT_AT=${{ github.event.head_commit.timestamp }}
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.ref_name }}
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:v${{ needs.validate-tag.outputs.minor }}

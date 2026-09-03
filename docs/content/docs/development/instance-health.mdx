@@ -61,6 +61,7 @@ Two neighbouring endpoints round out the surface, both under **Instance** in the
 |---|---|---|
 | `GET /admin/instance/config` | `manage_settings` | Every configuration entry with its resolved value, source and restart requirement. Sensitive keys return a fingerprint, never a value |
 | `GET /admin/instance/limits` | `view_analytics` | The effective sending, warmup and rate limits this build compiles in |
+| `GET /admin/instance/update` | `view_analytics` | The running build, the newest release, and the updater's state. Backs the version pill in the top bar; see [Updates](/development/updates/) |
 
 ## Security and secrets
 
@@ -163,6 +164,16 @@ Platform mail is sent from a domain that differs from the dashboard's. Mailbox p
 ### login_code_demoted
 
 `AUTH_LOGIN_CODE=always` was demoted to `new_device` at boot because the transport does not deliver. Otherwise nobody could ever complete a login. See [login codes](/development/accounts-and-access/#login-codes).
+
+## Updates
+
+### update_available
+
+A newer Warmbly exists: a release on the configured channel is newer than the running build, or the checkout is behind its branch. The message names both versions and how to apply it. With the updater running, the version pill in the top bar has an **Update and restart** button; without it, `git pull && make up`. See [Updates](/development/updates/).
+
+### updater_unreachable
+
+`UPDATER_URL` is set but nothing answers there, so the update button cannot work. Start the updater (the `updater` compose profile, or the systemd unit on a bare-metal host), fix the address, or remove the variable to update by hand. See [enabling the updater](/development/updates/#enabling-the-updater).
 
 ## Accounts and access
 

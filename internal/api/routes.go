@@ -316,6 +316,10 @@ func Run(
 		protectedAuth.DELETE("/sessions", h.SessionRevokeOthers)
 		protectedAuth.DELETE("/sessions/:id", h.SessionRevoke)
 
+		// The instance's version and whether an update exists, for the
+		// dashboard's version pill. Any member may read it; applying an update
+		// stays behind the admin permissions on /admin/instance/update.
+		protectedAuth.GET("/instance", h.InstanceVersion)
 		protectedAuth.GET("/me", h.GetUser)
 		protectedAuth.PATCH("/me", h.UpdateUserProfile)
 		protectedAuth.PATCH("/me/onboarding", h.CompleteOnboarding)
@@ -1453,6 +1457,11 @@ func Run(
 		adminRoutes.GET("/instance/limits", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminInstanceLimits)
 		adminRoutes.GET("/instance/settings", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminGetInstanceSettings)
 		adminRoutes.PUT("/instance/settings", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminPutInstanceSettings)
+		// Updates: the top-bar indicator polls the state; applying one goes
+		// through the host-side updater and restarts this process.
+		adminRoutes.GET("/instance/update", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminUpdateState)
+		adminRoutes.POST("/instance/update/check", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminUpdateCheck)
+		adminRoutes.POST("/instance/update/apply", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminUpdateApply)
 
 		// Analytics Dashboard
 		adminRoutes.GET("/analytics/overview", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminGetPlatformOverview)
