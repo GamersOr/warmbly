@@ -86,6 +86,19 @@ func (w *ScheduleWindows) Scan(src any) error {
 	return nil
 }
 
+// Campaign kinds. A sequence is the multi-step default; a one-time email is
+// one message to an audience with no follow-ups. Both send through the same
+// pacer and caps; the kind is fixed at creation.
+const (
+	CampaignKindSequence = "sequence"
+	CampaignKindOneTime  = "one_time"
+)
+
+// ValidCampaignKind reports whether k is a known campaign kind.
+func ValidCampaignKind(k string) bool {
+	return k == CampaignKindSequence || k == CampaignKindOneTime
+}
+
 type Campaign struct {
 	ID             uuid.UUID  `json:"id"`
 	UserID         string     `json:"user_id"`
@@ -94,6 +107,7 @@ type Campaign struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
+	Kind        string `json:"kind"`
 
 	StopOnReply       bool `json:"stop_on_reply"`
 	OpenTracking      bool `json:"open_tracking"`
@@ -213,7 +227,34 @@ type CampaignsOverview struct {
 	Paused    int64                 `json:"paused"`
 	Draft     int64                 `json:"draft"`
 	Completed int64                 `json:"completed"`
+	OneTime   int64                 `json:"one_time"`
 	Folders   []CampaignFolderCount `json:"folders"`
+}
+
+// CampaignEstimate is the request for POST /campaigns-estimate: how many
+// contacts a set of segments resolves to and how long a sender pool needs
+// to reach them under the per-mailbox caps. Nothing is written.
+type CampaignEstimate struct {
+	SegmentIDs  []string   `json:"segment_ids"`
+	EmailTagIDs []string   `json:"email_tag_ids,omitempty"`
+	DailyLimit  *int       `json:"daily_limit,omitempty"`
+	Days        *uint8     `json:"days,omitempty"`
+	Timezone    *string    `json:"timezone,omitempty"`
+	StartDate   *time.Time `json:"start_date,omitempty"`
+}
+
+// CampaignEstimateResult is the projection. DailyCapacity is the pool's
+// per-day ceiling under the campaign limit; RemainingToday subtracts what the
+// mailboxes already sent today. SendingDays is how many sending days the
+// audience needs and EstimatedFinishAt the calendar day the last send lands
+// on, both nil when the pool has no capacity.
+type CampaignEstimateResult struct {
+	Recipients        int        `json:"recipients"`
+	Mailboxes         int        `json:"mailboxes"`
+	DailyCapacity     int        `json:"daily_capacity"`
+	RemainingToday    int        `json:"remaining_today"`
+	SendingDays       *int       `json:"sending_days"`
+	EstimatedFinishAt *time.Time `json:"estimated_finish_at"`
 }
 
 type CampaignFolderCount struct {
@@ -297,6 +338,9 @@ func (u *UpdateCampaign) TouchesSchedule() bool {
 type CreateCampaign struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// Kind defaults to "sequence". A "one_time" campaign accepts a single
+	// email step here and refuses further ones later.
+	Kind *string `json:"kind,omitempty"`
 
 	// Sending rules / tracking
 	StopOnReply       *bool   `json:"stop_on_reply,omitempty"`

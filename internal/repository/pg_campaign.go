@@ -36,7 +36,7 @@ type CampaignRepository interface {
 	// Search filters by name substring, folder id, and status bucket
 	// ("draft" | "active" | "paused" | "completed"; paused matches every
 	// paused_* variant; empty means all).
-	Search(ctx context.Context, userID, query string, cursor, folder *string, status string, limit int32) (*models.CampaignsResult, error)
+	Search(ctx context.Context, userID, query string, cursor, folder *string, status, kind string, limit int32) (*models.CampaignsResult, error)
 	// Overview returns status-bucket counts plus per-folder totals for the
 	// campaigns browser sidebar.
 	Overview(ctx context.Context, orgID string) (*models.CampaignsOverview, error)
@@ -145,6 +145,7 @@ const CAMPAIGN_SELECT = `id, name, description, status,
 		  guardrail_enabled, guardrail_bounce_rate_max, guardrail_complaint_rate_max,
 		  guardrail_reply_rate_min, guardrail_min_sample, guardrail_window_days,
 		  guardrail_tripped_at, guardrail_reason,
+		  kind,
 		  unsubscribe_mode`
 
 func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) error {
@@ -164,6 +165,7 @@ func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) err
 		&campaign.GuardrailEnabled, &campaign.GuardrailBounceRateMax, &campaign.GuardrailComplaintRateMax,
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
+		&campaign.Kind,
 		&campaign.UnsubscribeMode,
 	}
 	dest = append(dest, extra...)
@@ -188,6 +190,7 @@ const CAMPAIGN_SELECT_FULL = `
 	c.guardrail_enabled, c.guardrail_bounce_rate_max, c.guardrail_complaint_rate_max,
 	c.guardrail_reply_rate_min, c.guardrail_min_sample, c.guardrail_window_days,
 	c.guardrail_tripped_at, c.guardrail_reason,
+	c.kind,
 	c.unsubscribe_mode,
 	COALESCE(array_agg(cet.tag_id) FILTER (WHERE cet.tag_id IS NOT NULL), '{}') AS email_tag_ids,
 	COALESCE(array_agg(cec.folder_id) FILTER (WHERE cec.folder_id IS NOT NULL), '{}') AS email_folder_ids
@@ -280,6 +283,18 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		if len(v.BodyPlain) > config.SequenceBodyLimit || len(v.BodyHTML) > config.SequenceBodyLimit {
 			return nil, errx.ErrSequenceBody
 		}
+	}
+
+	kind := models.CampaignKindSequence
+	if data.Kind != nil && *data.Kind != "" {
+		if !models.ValidCampaignKind(*data.Kind) {
+			return nil, errx.New(errx.BadRequest, "kind must be sequence or one_time")
+		}
+		kind = *data.Kind
+	}
+	// A one-time email is one message; follow-ups belong in a sequence.
+	if kind == models.CampaignKindOneTime && len(data.Sequences) > 1 {
+		return nil, errx.New(errx.BadRequest, "a one-time email has a single step; create a sequence campaign for follow-ups")
 	}
 
 	cc := data.CC
@@ -420,7 +435,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			sender_strategy, rotation_mode,
 			ramp_enabled, ramp_start, ramp_increment, ramp_ceiling,
 			esp_match_mode, max_new_leads_per_day, prioritize_new_leads,
-			tracking_domain, unsubscribe_mode,
+			tracking_domain, kind, unsubscribe_mode,
 			created_at, updated_at
 		) VALUES (
 			gen_random_uuid(), $1, $2, $3, $4,
@@ -431,7 +446,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			$20, $21,
 			$22, $23, $24, $25,
 			$26, $27, $28,
-			$29, $30,
+			$29, $30, $31,
 			NOW(), NOW()
 		)
 		RETURNING %s
@@ -467,7 +482,8 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		maxNewLeads,        // $27
 		prioritizeNewLeads, // $28
 		trackingDomain,     // $29
-		unsubMode,          // $30
+		kind,               // $30
+		unsubMode,          // $31
 	}
 
 	row := tx.QueryRow(ctx, insertSQL, params...)
@@ -661,7 +677,7 @@ func (r *campaignRepository) Get(ctx context.Context, orgID, id string) (*models
 	return &campaign, nil
 }
 
-func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cursor, folder *string, status string, limit int32) (*models.CampaignsResult, error) {
+func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cursor, folder *string, status, kind string, limit int32) (*models.CampaignsResult, error) {
 	tx, err := r.DB.Begin(ctx)
 	if err != nil {
 		db.CaptureError(err, "", nil, "begin")
@@ -686,6 +702,7 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 		  SELECT 1 FROM campaign_folders cf WHERE cf.campaign_id = c.id AND cf.folder_id = $4
 		 ))
 		 AND ($5 = '' OR CASE WHEN $5 = 'paused' THEN c.status::text LIKE 'paused%%' ELSE c.status::text = $5 END)
+		 AND ($6 = '' OR c.kind = $6)
 		GROUP BY c.id
 		ORDER BY created_at DESC
 		LIMIT %d`,
@@ -704,6 +721,7 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 				SELECT 1 FROM campaign_folders cf WHERE cf.campaign_id = c.id AND cf.folder_id = $3
 			  ))
 			  AND ($4 = '' OR CASE WHEN $4 = 'paused' THEN c.status::text LIKE 'paused%' ELSE c.status::text = $4 END)
+			  AND ($5 = '' OR c.kind = $5)
 		`
 	}
 
@@ -713,6 +731,7 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 		query,
 		folder,
 		status,
+		kind,
 	}
 
 	rows, err := tx.Query(
@@ -755,9 +774,10 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 			query,
 			folder,
 			status,
+			kind,
 		}
 		var tmp int64
-		err = tx.QueryRow(ctx, countSQL, orgID, query, folder, status).Scan(&tmp)
+		err = tx.QueryRow(ctx, countSQL, params...).Scan(&tmp)
 		if err != nil {
 			db.CaptureError(err, countSQL, params, "queryrow")
 			return nil, err
@@ -784,7 +804,8 @@ func (r *campaignRepository) Overview(ctx context.Context, orgID string) (*model
 			COUNT(*) FILTER (WHERE status = 'active'),
 			COUNT(*) FILTER (WHERE status::text LIKE 'paused%'),
 			COUNT(*) FILTER (WHERE status = 'draft'),
-			COUNT(*) FILTER (WHERE status = 'completed')
+			COUNT(*) FILTER (WHERE status = 'completed'),
+			COUNT(*) FILTER (WHERE kind = 'one_time')
 		FROM campaigns
 		WHERE organization_id = $1`
 	err := r.DB.QueryRow(ctx, countsSQL, orgID).Scan(
@@ -793,6 +814,7 @@ func (r *campaignRepository) Overview(ctx context.Context, orgID string) (*model
 		&overview.Paused,
 		&overview.Draft,
 		&overview.Completed,
+		&overview.OneTime,
 	)
 	if err != nil {
 		db.CaptureError(err, countsSQL, []any{orgID}, "queryrow")
@@ -1270,6 +1292,7 @@ func (r *campaignRepository) GetByID(ctx context.Context, campaignID uuid.UUID) 
 		&campaign.GuardrailEnabled, &campaign.GuardrailBounceRateMax, &campaign.GuardrailComplaintRateMax,
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
+		&campaign.Kind,
 		&campaign.UnsubscribeMode,
 		&campaign.EmailTags, &campaign.Folders,
 	)

@@ -59,13 +59,22 @@ func (s *tasksService) SendTestEmail(ctx context.Context, userID string, account
 	if bodyPlain == "" && bodyHTML != "" {
 		bodyPlain = ExtractPlainTextFromHTML(bodyHTML)
 	}
+	// The test shows what the campaign will send: plain-text campaigns get
+	// no HTML part here either.
+	if campaign.TextOnly {
+		bodyHTML = ""
+	}
 
 	// Prepend [TEST] to subject
 	subject = "[TEST] " + subject
 
 	// Add signature if enabled
+	// Same guard as the campaign send path: a plain-text test must not grow
+	// an HTML part back through the signature.
 	if account.SignatureSync {
-		bodyHTML = AddSignature(bodyHTML, account.SignatureHTML, true)
+		if bodyHTML != "" {
+			bodyHTML = AddSignature(bodyHTML, account.SignatureHTML, true)
+		}
 		bodyPlain = AddSignature(bodyPlain, account.SignaturePlain, false)
 	}
 	bodyHTML, bodyPlain = appendOptOut(bodyHTML, bodyPlain, optOut, unsubscribeURL)

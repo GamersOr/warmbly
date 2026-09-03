@@ -18,6 +18,7 @@ Search and page through the organization's campaigns. **Scope** `READ_CAMPAIGNS`
 | `q` | query | string | Free-text filter on campaign name. Optional. |
 | `folder` | query | string | Restrict to a single folder id. Optional. |
 | `status` | query | string | Status bucket filter: `draft`, `active`, `paused` (matches every paused variant), or `completed`. Any other value returns `400`. Optional. |
+| `kind` | query | string | `sequence` or `one_time`. Any other value returns `400`. Optional. |
 | `cursor` | query | string | Opaque cursor from the previous page's `pagination.next_cursor`. Optional. |
 | `limit` | query | string | Page size. Optional. |
 
@@ -35,6 +36,7 @@ A `data` plus `pagination` envelope. `next_cursor` is the campaign id to resume 
       "name": "Q3 outbound",
       "description": "",
       "status": "active",
+      "kind": "sequence",
       "stop_on_reply": true,
       "open_tracking": true,
       "link_tracking": true,
@@ -83,7 +85,7 @@ A `data` plus `pagination` envelope. `next_cursor` is the campaign id to resume 
 
 `GET /campaigns-overview`
 
-Status-bucket counts plus per-folder totals for the organization, used to drive campaign browsing UIs. `paused` sums every paused variant (`paused`, `paused_no_accounts`, `paused_trial_expired`). The path has no campaign id, so it lives beside `/campaigns` rather than under it. **Scope** `READ_CAMPAIGNS` · **Org permission** `view_campaigns`.
+Status-bucket counts plus per-folder totals for the organization, used to drive campaign browsing UIs. `paused` sums every paused variant (`paused`, `paused_no_accounts`, `paused_trial_expired`); `one_time` counts campaigns of that kind whatever their status. The path has no campaign id, so it lives beside `/campaigns` rather than under it. **Scope** `READ_CAMPAIGNS` · **Org permission** `view_campaigns`.
 
 ### Response
 
@@ -94,9 +96,42 @@ Status-bucket counts plus per-folder totals for the organization, used to drive 
   "paused": 2,
   "draft": 4,
   "completed": 3,
+  "one_time": 2,
   "folders": [
     { "folder_id": "6b9c1c8e-1f2a-4d3b-8c7e-9a0b1c2d3e4f", "total": 5 }
   ]
+}
+```
+
+## Estimate a send
+
+`POST /campaigns-estimate`
+
+Project an audience against a sender pool before a campaign exists: how many contacts the segments resolve to, how many mailboxes would send, the pool's daily ceiling under the campaign limit, and the day the last send is expected to land. Nothing is written, so it needs no `Idempotency-Key`. The dashboard's one-time email wizard shows this on its last step. **Scope** `READ_CAMPAIGNS` · **Org permission** `view_campaigns`.
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `segment_ids` | string[] | yes | Segments making up the audience (at most 20). A contact in several of them is counted once. |
+| `email_tag_ids` | string[] | no | Mailbox tags that resolve the pool. Omit or send `[]` for every active mailbox in the workspace. |
+| `daily_limit` | integer | no | Per-mailbox campaign cap to apply (defaults to `50`). Each mailbox counts the smaller of this and its own cap. |
+| `days` | integer (0-127) | no | Weekday bitmask of sending days, bit 0 = Monday. Defaults to weekdays. |
+| `timezone` | string | no | IANA timezone the days are counted in. Defaults to UTC. |
+| `start_date` | string (RFC 3339) | no | When sending begins. Omit for now. |
+
+### Response
+
+`sending_days` and `estimated_finish_at` are `null` when the audience is empty, the pool has no capacity, or the send would take longer than two years. Today only contributes what the pool has not already sent (`remaining_today`).
+
+```json
+{
+  "recipients": 1000,
+  "mailboxes": 4,
+  "daily_capacity": 200,
+  "remaining_today": 140,
+  "sending_days": 5,
+  "estimated_finish_at": "2026-09-09T00:00:00+02:00"
 }
 ```
 
@@ -112,10 +147,11 @@ Create a campaign. Only `name` is required, every other field is optional and ap
 | --- | --- | --- | --- |
 | `name` | string | yes | Campaign name. |
 | `description` | string | no | Free-text description. |
+| `kind` | string | no | `sequence` (default) or `one_time`. A one-time email accepts at most one entry in `steps` here and refuses further email steps later; it is otherwise a normal campaign. Fixed at creation. |
 | `stop_on_reply` | boolean | no | Stop sending to a contact once they reply. |
 | `open_tracking` | boolean | no | Insert the open pixel. |
 | `link_tracking` | boolean | no | Rewrite links through the tracking ticket service. |
-| `text_only` | boolean | no | Send plain text only. |
+| `text_only` | boolean | no | Send plain text only: no HTML part, and open and click tracking are off regardless of their flags. |
 | `daily_limit` | integer | no | Per-campaign daily send cap. |
 | `unsubscribe_header` | boolean | no | Add the RFC 8058 one-click unsubscribe header. |
 | `risky_emails` | boolean | no | Allow sending to risky/unverified addresses. |

@@ -134,9 +134,36 @@ func (h *Handler) SearchCampaigns(c *gin.Context) {
 	cursor := c.Query("cursor")
 	folder := c.Query("folder")
 	status := c.Query("status")
+	kind := c.Query("kind")
 	limit := c.Query("limit")
 
-	resp, err := h.CampaignService.Search(c.Request.Context(), orgID.String(), query, cursor, folder, status, limit)
+	resp, err := h.CampaignService.Search(c.Request.Context(), orgID.String(), query, cursor, folder, status, kind, limit)
+	if err != nil {
+		errx.JSON(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// EstimateCampaign projects an audience against a sender pool before a
+// campaign exists: recipients, daily capacity and the day the last send
+// lands. Read-only.
+// POST /campaigns-estimate
+func (h *Handler) EstimateCampaign(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.ErrNoOrganization)
+		return
+	}
+
+	var data models.CampaignEstimate
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.JSON(c, errx.ErrInvalid)
+		return
+	}
+
+	resp, err := h.CampaignService.Estimate(c.Request.Context(), *orgID, &data)
 	if err != nil {
 		errx.JSON(c, err)
 		return
