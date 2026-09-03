@@ -129,9 +129,12 @@ func (r *sequenceRepository) Create(ctx context.Context, userID string, campaign
 	}
 	defer tx.Rollback(ctx)
 
+	// FOR UPDATE serialises step creation per campaign, so two concurrent
+	// inserts on a one-time campaign cannot both see zero email steps.
 	query := `
 		SELECT user_id, organization_id, kind
 		FROM campaigns WHERE id = $1
+		FOR UPDATE
 	`
 
 	params := []any{

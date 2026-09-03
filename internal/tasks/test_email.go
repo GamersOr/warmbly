@@ -54,8 +54,12 @@ func (s *tasksService) SendTestEmail(ctx context.Context, userID string, account
 	subject = "[TEST] " + subject
 
 	// Add signature if enabled
+	// Same guard as the campaign send path: a plain-text test must not grow
+	// an HTML part back through the signature.
 	if account.SignatureSync {
-		bodyHTML = AddSignature(bodyHTML, account.SignatureHTML, true)
+		if bodyHTML != "" {
+			bodyHTML = AddSignature(bodyHTML, account.SignatureHTML, true)
+		}
 		bodyPlain = AddSignature(bodyPlain, account.SignaturePlain, false)
 	}
 

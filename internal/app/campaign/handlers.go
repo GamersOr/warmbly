@@ -932,9 +932,10 @@ func (s *campaignService) Estimate(ctx context.Context, orgID uuid.UUID, in *mod
 		out.DailyCapacity += lim
 		sent, err := s.taskRepo.CountCampaignEmailsSentToday(ctx, acct.ID)
 		if err != nil {
-			// A counter blip must not blank the whole estimate; today then
-			// reads as untouched, which is the optimistic side.
-			sent = 0
+			// A counter blip must not blank the whole estimate, but it must
+			// not flatter it either: a mailbox whose sends today are unknown
+			// contributes nothing to today and only counts from tomorrow.
+			continue
 		}
 		out.RemainingToday += max(0, lim-sent)
 	}

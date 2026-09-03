@@ -1377,16 +1377,27 @@ function EstimatePanel({
             </>
         );
         tone = "warn";
+    } else if (sendingDays === null || finish === null) {
+        // The backend leaves both null when the audience is not covered
+        // inside its two-year horizon, which must not read as "one day".
+        headline = "Longer than this estimate can project";
+        detail = (
+            <>
+                {recipients.toLocaleString()} recipients at up to {dailyCapacity.toLocaleString()} a day would take
+                years.{" "}
+                <button type="button" onClick={onEditPool} className="underline underline-offset-2 hover:text-slate-900">
+                    Add mailboxes or raise the daily limit
+                </button>
+                , or narrow the audience.
+            </>
+        );
+        tone = "warn";
     } else {
-        const days = sendingDays ?? 0;
+        const days = sendingDays;
         headline =
             days <= 1
-                ? finish
-                    ? `Finishes ${startsAt ? "on" : "today,"} ${fmtDate(finish)}`
-                    : "Finishes in one sending day"
-                : finish
-                  ? `About ${days} sending days, finishing around ${fmtDate(finish)}`
-                  : `More than ${days} sending days`;
+                ? `Finishes ${startsAt ? "on" : "today,"} ${fmtDate(finish)}`
+                : `About ${days} sending days, finishing around ${fmtDate(finish)}`;
         detail = (
             <>
                 {recipients.toLocaleString()} recipient{recipients === 1 ? "" : "s"} across {mailboxes} mailbox

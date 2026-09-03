@@ -462,7 +462,7 @@ func Run(
 
 			// Audience-versus-pool projection for the campaign wizard (no
 			// campaign id yet). Read-level: it writes nothing.
-			protected.POST("/campaigns-estimate", m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.EstimateCampaign)
+			protected.POST("/campaigns-estimate", m.RateLimitMiddleware(models.RateLimitRead), m.RequireOrganization(), m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.EstimateCampaign)
 
 			campaigns := protected.Group("/campaigns")
 			campaigns.Use(m.RateLimitMiddleware(models.RateLimitWrite))
