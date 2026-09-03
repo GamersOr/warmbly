@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -195,17 +196,19 @@ func (s *Service) Apply(ctx context.Context, target string) (*updater.Job, error
 	if s.cfg.UpdaterURL == "" {
 		return nil, ErrUpdaterNotConfigured
 	}
+	// Every target goes through the same availability check, so a missing
+	// updater is one clear answer rather than a transport error.
+	view := s.updaterStatus(ctx, http.MethodGet, "/status")
+	s.storeView(view)
+	if view.Status != "ok" {
+		if view.Error == "" {
+			return nil, ErrUpdaterNotConfigured
+		}
+		return nil, errors.New(view.Error)
+	}
 	req := updater.UpdateRequest{}
 	switch strings.TrimSpace(target) {
 	case "", "latest", "branch":
-		view := s.updaterStatus(ctx, http.MethodGet, "/status")
-		s.storeView(view)
-		if view.Status != "ok" {
-			if view.Error == "" {
-				return nil, ErrUpdaterNotConfigured
-			}
-			return nil, errors.New(view.Error)
-		}
 		if view.Checkout != nil && view.Checkout.Detached {
 			s.mu.Lock()
 			latest := s.latest
@@ -325,10 +328,11 @@ func (s *Service) updaterStatus(ctx context.Context, method, path string) Update
 	resp, err := s.call(cctx, method, path, nil)
 	if err != nil {
 		// Under compose the backend always gets UPDATER_URL=http://updater:8095,
-		// profile or not. A host that does not resolve is the profile being
-		// off, which is report-only by choice, not a broken updater.
+		// profile or not. The compose service name not resolving is the
+		// profile being off, which is report-only by choice, not a broken
+		// updater. Any other host that fails is reported as unreachable.
 		var dns *net.DNSError
-		if errors.As(err, &dns) {
+		if errors.As(err, &dns) && s.composeServiceHost() {
 			view.Status = "off"
 			view.Error = "the updater is not running; enable the updater compose profile (make up does) to update from here"
 			return view
@@ -370,9 +374,22 @@ func (s *Service) call(ctx context.Context, method, path string, body io.Reader)
 	return s.http.Do(req)
 }
 
+// composeServiceHost reports whether UPDATER_URL names the compose service.
+func (s *Service) composeServiceHost() bool {
+	u, err := url.Parse(s.cfg.UpdaterURL)
+	return err == nil && u.Hostname() == composeUpdaterHost
+}
+
+// composeUpdaterHost is the updater service's name in docker-compose.yml.
+const composeUpdaterHost = "updater"
+
 // describeDialError turns the usual "not running" failures into the sentence
 // the panel shows, instead of a raw dial string.
 func describeDialError(err error) string {
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return "the updater host does not resolve; check UPDATER_URL"
+	}
 	if strings.Contains(err.Error(), "connection refused") {
 		return "the updater is not accepting connections; it is not running or UPDATER_URL points at the wrong port"
 	}

@@ -15,6 +15,8 @@ func TestNewer(t *testing.T) {
 		{"v1.5.0", "v1.5.0-rc.1", true, true},
 		{"v1.5.0-rc.2", "v1.5.0-rc.1", true, true},
 		{"v1.5.0", "v1.5.0-rc.1-2-gabc1234", true, true},
+		{"v1.5.0-rc.1-3-gabc1234", "v1.5.0-rc.1-2-gabc1234", true, true},
+		{"v1.5.0-rc.1", "v1.5.0-rc.1-2-gabc1234", false, true},
 		{"v2.0.0", "1.9.9", true, true},
 		{"v1.5.0", "dev", false, false},
 		{"v1.5.0", "abc1234", false, false},

@@ -566,8 +566,12 @@ Because the worker is not in a container, the admin panel's SSH-driven day-two a
 
 ```bash
 sudo install -o root -g root -m 0755 /opt/warmbly/src/deploy/systemd/warmbly-install-release.sh /usr/local/sbin/warmbly-install-release
+echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/warmbly-install-release" | sudo tee /etc/sudoers.d/warmbly-upgrade >/dev/null
+sudo chmod 0440 /etc/sudoers.d/warmbly-upgrade
 cd /opt/warmbly/src && scripts/upgrade-bare-metal.sh --pull    # git pull --ff-only, build, install, restart
 ```
+
+The sudoers line is what lets the script call the installer without a password prompt; it allows that one root-owned command and nothing else.
 
 To pin a release instead of following the branch, check the tag out first (`git checkout vX.Y.Z`) and run it without `--pull`.
 

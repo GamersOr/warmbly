@@ -15,7 +15,9 @@ type parsed struct {
 	ahead               int
 }
 
-var describeSuffix = regexp.MustCompile(`^(\d+)-g[0-9a-f]+(-dirty)?$`)
+// describeSuffix is git describe's "-<n>-g<sha>" tail, with whatever precedes
+// it (a prerelease such as rc.1, or nothing) captured first.
+var describeSuffix = regexp.MustCompile(`^(?:(.*)-)?(\d+)-g[0-9a-f]+$`)
 
 func parseVersion(raw string) (parsed, bool) {
 	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "v"))
@@ -39,11 +41,8 @@ func parseVersion(raw string) (parsed, bool) {
 	}
 	if rest != "" {
 		if m := describeSuffix.FindStringSubmatch(rest); m != nil {
-			p.ahead, _ = strconv.Atoi(m[1])
-		} else if i := strings.LastIndex(rest, "-"); i > 0 && describeSuffix.MatchString(rest[i+1:]) {
-			// prerelease plus describe suffix, e.g. rc.1-3-gabc1234
-			p.pre = rest[:i]
-			p.ahead, _ = strconv.Atoi(describeSuffix.FindStringSubmatch(rest[i+1:])[1])
+			p.pre = m[1]
+			p.ahead, _ = strconv.Atoi(m[2])
 		} else {
 			p.pre = rest
 		}

@@ -22,7 +22,15 @@ HEALTH=http://127.0.0.1:8080/health
 
 log() { printf '==> %s\n' "$*"; }
 regular() { [[ -f "$1" && ! -L "$1" ]]; }
-plain_dir() { [[ -d "$1" && ! -L "$1" ]]; }
+# A directory qualifies only when nothing inside it is a symlink either: the
+# checkout's owner must not be able to point root at a file elsewhere.
+plain_dir() {
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  if find "$1" -type l -print -quit | grep -q .; then
+    log "refusing $1: it contains a symlink"
+    return 1
+  fi
+}
 has_unit() { systemctl list-unit-files "warmbly-$1.service" --no-legend 2>/dev/null | grep -q .; }
 
 log "installing binaries"
@@ -54,7 +62,7 @@ for app in web admin; do
     [[ -f "$PREFIX/$app/config.js" ]] && cp "$PREFIX/$app/config.js" "$cfg"
     rm -rf "$PREFIX/$app"
     cp -r --no-dereference "$SRC/$app/dist" "$PREFIX/$app"
-    [[ -s "$cfg" ]] && cp "$cfg" "$PREFIX/$app/config.js"
+    [[ -s "$cfg" ]] && cp --remove-destination "$cfg" "$PREFIX/$app/config.js"
     rm -f "$cfg"
     chown -R root:root "$PREFIX/$app"
     chmod -R a+rX "$PREFIX/$app"
@@ -71,8 +79,9 @@ fi
 log "restarting backend"
 systemctl restart warmbly-backend
 healthy=0
-for _ in $(seq 1 60); do
-  if curl -fsS "$HEALTH" >/dev/null 2>&1; then healthy=1; break; fi
+deadline=$((SECONDS + 120))
+while [[ $SECONDS -lt $deadline ]]; do
+  if curl -fsS --connect-timeout 2 --max-time 5 "$HEALTH" >/dev/null 2>&1; then healthy=1; break; fi
   sleep 2
 done
 if [[ "$healthy" -ne 1 ]]; then

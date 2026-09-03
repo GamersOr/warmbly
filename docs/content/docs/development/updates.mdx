@@ -98,8 +98,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now warmbly-updater
 
 The unit runs as the user who owns the checkout (`deploy` as shipped; edit it). The only root step is the installer, so that user needs exactly one sudoers line, and nothing broader:
 
-```
-deploy ALL=(root) NOPASSWD: /usr/local/sbin/warmbly-install-release
+```bash
+echo "deploy ALL=(root) NOPASSWD: /usr/local/sbin/warmbly-install-release" | sudo tee /etc/sudoers.d/warmbly-upgrade >/dev/null
+sudo chmod 0440 /etc/sudoers.d/warmbly-upgrade
 ```
 
 The installer is root-owned and not writable by that user, takes no arguments, reads only from fixed paths under the checkout and refuses symlinks there, so owning the checkout does not become owning the host. The binaries it installs run as the unprivileged `warmbly` user either way.

@@ -91,11 +91,19 @@ export function UpdateDialog({ open, onOpenChange }: Props) {
         return "idle";
     }, [state, started, jobQ.isError, stateQ.isError]);
 
-    // Leaving the confirmation open across a phase change would let a stale
-    // click start a second update.
+    const canApply =
+        canManage &&
+        state?.updater.status === "ok" &&
+        !!state?.update_available &&
+        !state?.updater.checkout?.dirty &&
+        phase === "idle";
+
+    // Leaving the confirmation open once the update can no longer start
+    // (a phase change, or the checkout turning dirty) would let a stale
+    // click start a job that fails.
     useEffect(() => {
-        if (phase !== "idle") setConfirming(false);
-    }, [phase]);
+        if (!canApply) setConfirming(false);
+    }, [canApply]);
 
     const checkMut = useMutation({
         mutationFn: checkForUpdates,
@@ -110,7 +118,12 @@ export function UpdateDialog({ open, onOpenChange }: Props) {
     });
 
     const applyMut = useMutation({
-        mutationFn: () => applyUpdate("latest"),
+        mutationFn: () => {
+            // The state keeps refreshing while the confirmation is open; a
+            // checkout that turned dirty meanwhile must not start a job.
+            if (!canApply) return Promise.reject(new Error("The update can no longer start; check the status above."));
+            return applyUpdate("latest");
+        },
         onSuccess: (job: UpdateJob) => {
             markUpdateStarted(state?.running.version ?? "", state?.running.commit ?? job.from_commit);
             setConfirming(false);
@@ -124,12 +137,6 @@ export function UpdateDialog({ open, onOpenChange }: Props) {
     const updater = state?.updater;
     const checkout = updater?.checkout;
     const job = updater?.job ?? updater?.last_job;
-    const canApply =
-        canManage &&
-        updater?.status === "ok" &&
-        !!state?.update_available &&
-        !checkout?.dirty &&
-        phase === "idle";
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
