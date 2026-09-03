@@ -65,13 +65,17 @@ type LinkClickRepository interface {
 	// identity when known (two links may share a destination); the
 	// destination is the fallback for events from an older tracking build.
 	HasHumanClickOn(ctx context.Context, taskID uuid.UUID, linkID *uuid.UUID, destination string) (bool, error)
-	// ClaimAnnounce takes a pending click's announcement exactly once and
-	// reports the click's classification at that moment. claimed is false
-	// when it was already taken.
+	// ClaimAnnounce leases a pending click's announcement for one attempt
+	// and reports the click's classification at that moment. claimed is
+	// false when another attempt holds a live lease or the announcement is
+	// done. A lease that expires without CompleteAnnounce is offered again.
 	ClaimAnnounce(ctx context.Context, id uuid.UUID) (claimed bool, machine bool, err error)
+	// CompleteAnnounce records that the click's effects ran, so neither the
+	// timer nor the sweep offers it again.
+	CompleteAnnounce(ctx context.Context, id uuid.UUID) error
 	// ListPendingAnnouncements returns clicks whose announcement is still
-	// pending and whose burst window closed before `before`: what a consumer
-	// restart inside the window left behind.
+	// pending, not under a live lease, and whose burst window closed before
+	// `before`: what a consumer restart or a failed attempt left behind.
 	ListPendingAnnouncements(ctx context.Context, before time.Time, limit int) ([]LinkClick, error)
 	// Cleanup deletes clicks older than the retention window.
 	Cleanup(ctx context.Context, olderThanDays int) (int64, error)
@@ -112,11 +116,16 @@ func (r *linkClickRepository) Insert(ctx context.Context, c *LinkClick) error {
 	return err
 }
 
+// announceLease is how long one attempt at a click's effects may take before
+// the sweep is allowed to try again.
+const announceLease = "2 minutes"
+
 func (r *linkClickRepository) ClaimAnnounce(ctx context.Context, id uuid.UUID) (bool, bool, error) {
 	query := `
 		UPDATE email_link_clicks
-		SET announce_pending = false
+		SET announce_claimed_at = NOW()
 		WHERE id = $1 AND announce_pending
+		  AND (announce_claimed_at IS NULL OR announce_claimed_at < NOW() - INTERVAL '` + announceLease + `')
 		RETURNING machine
 	`
 	var machine bool
@@ -130,6 +139,11 @@ func (r *linkClickRepository) ClaimAnnounce(ctx context.Context, id uuid.UUID) (
 	return true, machine, nil
 }
 
+func (r *linkClickRepository) CompleteAnnounce(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE email_link_clicks SET announce_pending = false WHERE id = $1`, id)
+	return err
+}
+
 func (r *linkClickRepository) ListPendingAnnouncements(ctx context.Context, before time.Time, limit int) ([]LinkClick, error) {
 	query := `
 		SELECT id, tracked_link_id, task_id, campaign_id, contact_id, sequence_id,
@@ -137,6 +151,7 @@ func (r *linkClickRepository) ListPendingAnnouncements(ctx context.Context, befo
 		       client, device_type, os, browser, browser_version, country_code, region, city
 		FROM email_link_clicks
 		WHERE announce_pending AND clicked_at < $1
+		  AND (announce_claimed_at IS NULL OR announce_claimed_at < NOW() - INTERVAL '` + announceLease + `')
 		ORDER BY clicked_at ASC
 		LIMIT $2
 	`

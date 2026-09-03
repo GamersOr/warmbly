@@ -109,9 +109,10 @@ func (tc *TrackingConsumer) Start(ctx context.Context) error {
 }
 
 // sweepPendingClicks fires the effects of human clicks whose timer never
-// ran: the consumer restarted inside the burst window, or a claim failed.
-// Runs at start and every minute until ctx ends. The claim is exactly-once,
-// so a click the timer already handled is skipped.
+// ran or never finished: the consumer restarted inside the burst window, a
+// claim failed, or an attempt died mid-way and its lease expired. Runs at
+// start and every minute until ctx ends. A click the timer completed is not
+// offered, and one under a live lease is not offered twice.
 func (tc *TrackingConsumer) sweepPendingClicks(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -380,9 +381,13 @@ func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, even
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// The claim is the verdict and the once-only guard in one write: a burst
-	// that relabelled the click in the meantime shows up as machine, and a
-	// click already announced (by the timer or the sweep) is not claimed.
+	// The claim is the verdict and the lease in one write: a burst that
+	// relabelled the click in the meantime shows up as machine, and a click
+	// already announced, or under another attempt's live lease, is not
+	// claimed. The row is completed only after the effects ran, so a crash
+	// in between is retried by the sweep once the lease expires (at-least-
+	// once: the instant actions claim their own once-only fire, the rest
+	// may repeat after a crash).
 	var claimed, machine bool
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
@@ -403,15 +408,18 @@ func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, even
 	}
 	if machine {
 		tc.publishTrackingEvent(ctx, task, event, true, label, origin)
-		return
+	} else {
+		if tc.evidence != nil {
+			tc.evidence.RecordEvidence(ctx, *task.ContactID, "clicked", task.SequenceID.String(), "")
+		}
+		if tc.advancedService != nil {
+			tc.advancedService.FireInstantActions(ctx, *task.CampaignID, *task.ContactID, *task.SequenceID, "click")
+		}
+		tc.publishTrackingEvent(ctx, task, event, false, label, origin)
 	}
-	if tc.evidence != nil {
-		tc.evidence.RecordEvidence(ctx, *task.ContactID, "clicked", task.SequenceID.String(), "")
+	if err := tc.linkClicks.CompleteAnnounce(ctx, clickID); err != nil {
+		log.Warn().Err(err).Str("click_id", clickID.String()).Msg("could not mark click announcement complete; the sweep may repeat it after the lease")
 	}
-	if tc.advancedService != nil {
-		tc.advancedService.FireInstantActions(ctx, *task.CampaignID, *task.ContactID, *task.SequenceID, "click")
-	}
-	tc.publishTrackingEvent(ctx, task, event, false, label, origin)
 }
 
 // resolveLink names the clicked link: the minted ticket when the event

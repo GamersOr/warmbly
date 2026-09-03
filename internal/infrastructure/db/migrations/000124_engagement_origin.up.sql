@@ -15,10 +15,11 @@ ALTER TABLE email_link_clicks
     ADD COLUMN city text NOT NULL DEFAULT '',
     -- A person's click waits out the burst window before its effects fire;
     -- the row is the durable record of that pending work, so a consumer
-    -- restart inside the window loses nothing and a redelivery fires once.
-    ADD COLUMN announce_pending boolean NOT NULL DEFAULT false;
-
-CREATE INDEX idx_email_link_clicks_pending ON email_link_clicks (clicked_at) WHERE announce_pending;
+    -- restart inside the window loses nothing. The flag clears only once
+    -- the effects ran; a claim leases the row for the attempt, and a lease
+    -- that expires without completion is retried.
+    ADD COLUMN announce_pending boolean NOT NULL DEFAULT false,
+    ADD COLUMN announce_claimed_at timestamp with time zone;
 
 CREATE TABLE email_opens (
     id uuid PRIMARY KEY,
