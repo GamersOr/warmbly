@@ -19,6 +19,8 @@ export default interface Campaign {
     daily_limit: number;
     unsubscribe_header: boolean;
     risky_emails: boolean;
+    // In-body opt-out: "inherit" follows Settings > Sending.
+    unsubscribe_mode: 'inherit' | 'text' | 'link' | 'off';
 
     cc: string[];
     bcc: string[];

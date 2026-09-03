@@ -25,6 +25,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/admin"
 	"github.com/warmbly/warmbly/internal/app/adminoutreach"
 	"github.com/warmbly/warmbly/internal/app/advanced"
+	"github.com/warmbly/warmbly/internal/app/unsublink"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/warmbly/warmbly/internal/app/advisor"
@@ -179,6 +180,7 @@ func main() {
 	var provisioningPolicyRepo repository.ProvisioningPolicyRepository
 	var tasksService tasks.TasksService
 	var advancedService advanced.Service
+	var unsubSigner *unsublink.Signer
 	var warmupContentRepo repository.WarmupContentRepository
 	var warmupContentService warmupcontent.Service
 	var creditRepository repository.CreditRepository
@@ -1128,6 +1130,9 @@ func main() {
 		// the mailbox-connect redirect_uri from it sends the provider
 		// "0.0.0.0:8080/addresses/google/callback".
 		oauth2Cfg := config.LoadOauth2(oauthPublicBaseURL(apiCfg.Hostname))
+		// Recipient unsubscribe links live on the API origin, signed under the
+		// auth secret; the same base the OAuth callbacks are built on.
+		unsubSigner = unsublink.New(authCfg.AuthSecret, oauthPublicBaseURL(apiCfg.Hostname))
 		emailService = email.NewServiceWithWorker(
 			emailRepostory,
 			cipherService,
@@ -1521,6 +1526,7 @@ func main() {
 			trackedLinkRepository,
 			integrationServiceForHandler, // AutomationRunner for campaign run_automation steps
 		)
+		tasksService.SetUnsubscribeLinks(unsubSigner)
 		// Sequence action nodes that pin a contact into or out of a segment,
 		// both on the scheduled path (tasks) and the instant reply path (advanced).
 		if aware, ok := tasksService.(tasks.SegmentAware); ok {
@@ -1927,7 +1933,8 @@ func main() {
 		EmailNotificationService: emailNotificationService,
 
 		// Advanced outreach controls
-		AdvancedService: advancedService,
+		AdvancedService:  advancedService,
+		UnsubscribeLinks: unsubSigner,
 
 		// Warmup health
 		WarmupService:     warmupService,

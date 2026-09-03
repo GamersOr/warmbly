@@ -209,6 +209,9 @@ export default function CampaignPreferences() {
             ...(newData.unsubscribe_header !== campaign.unsubscribe_header && {
                 unsubscribe_header: newData.unsubscribe_header,
             }),
+            ...(newData.unsubscribe_mode !== campaign.unsubscribe_mode && {
+                unsubscribe_mode: newData.unsubscribe_mode,
+            }),
 
             // Rotation
             ...(newData.rotation_mode !== campaign.rotation_mode && { rotation_mode: newData.rotation_mode }),

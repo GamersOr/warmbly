@@ -162,12 +162,19 @@ func trackableURL(dest, trackingDomain string) bool {
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		return false
 	}
+	// An unsubscribe link is never a click to count or a redirect to bounce
+	// through, and a UTM tag on it would only clutter the opt-out page URL.
+	if strings.Contains(lower, unsubscribePathMarker) {
+		return false
+	}
 	if trackingDomain == "" {
 		return true
 	}
+	// A destination the URL parser rejects cannot be redirected to, so it
+	// is left as written rather than turned into a dead ticket.
 	u, err := url.Parse(dest)
-	if err != nil {
-		return true
+	if err != nil || u.Hostname() == "" {
+		return false
 	}
 	return config.NormalizeTrackingHost(u.Host) != trackingDomain
 }

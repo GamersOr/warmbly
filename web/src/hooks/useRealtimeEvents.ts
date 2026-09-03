@@ -342,6 +342,9 @@ export function useRealtimeEvents() {
           // Segment membership is computed from contact data, so a contact
           // change moves segment counts too.
           contact: [['contacts'], ['segments']],
+          // A suppression entry changes who a campaign can reach, so the
+          // list, the contact drawers and the audience counts all move.
+          suppression: [['suppressions'], ['contacts'], ['analytics']],
           segment: [['segments'], ['contacts', 'list']],
           form: [['forms']],
           campaign: [['campaigns'], ['analytics']],

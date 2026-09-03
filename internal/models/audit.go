@@ -80,6 +80,7 @@ const (
 	AuditEntityForm               AuditEntityType = "form"
 	AuditEntitySubscription       AuditEntityType = "subscription"
 	AuditEntitySettings           AuditEntityType = "settings"
+	AuditEntitySuppression        AuditEntityType = "suppression"
 
 	// CRM entities
 	AuditEntityCRMPipeline AuditEntityType = "crm_pipeline"
