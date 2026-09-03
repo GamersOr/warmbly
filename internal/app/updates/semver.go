@@ -41,8 +41,12 @@ func parseVersion(raw string) (parsed, bool) {
 	}
 	if rest != "" {
 		if m := describeSuffix.FindStringSubmatch(rest); m != nil {
+			ahead, err := strconv.Atoi(m[2])
+			if err != nil {
+				return parsed{}, false
+			}
 			p.pre = m[1]
-			p.ahead, _ = strconv.Atoi(m[2])
+			p.ahead = ahead
 		} else {
 			p.pre = rest
 		}

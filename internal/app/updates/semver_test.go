@@ -22,6 +22,8 @@ func TestNewer(t *testing.T) {
 		{"v1.5.0", "abc1234", false, false},
 		{"", "v1.5.0", false, false},
 		{"v1.5.0", "v1.4.0-dirty", true, true},
+		// An overflowing commit distance is not a version at all.
+		{"v1.5.0", "v1.4.0-99999999999999999999-gabc1234", false, false},
 	}
 	for _, c := range cases {
 		got, ok := newer(c.latest, c.running)
