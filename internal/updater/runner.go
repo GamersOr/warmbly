@@ -191,10 +191,10 @@ func (r *Runner) execute(ctx context.Context, job *Job, req UpdateRequest) {
 	if err != nil {
 		job.Status = JobFailed
 		job.Error = err.Error()
-		r.logf(job, "update failed: %v", err)
+		r.appendLocked(job, fmt.Sprintf("update failed: %v", err))
 	} else {
 		job.Status = JobSucceeded
-		r.logf(job, "update finished")
+		r.appendLocked(job, "update finished")
 	}
 	r.lastJob = job
 	r.job = nil
@@ -356,13 +356,19 @@ func (r *Runner) step(job *Job, name string) {
 }
 
 func (r *Runner) logf(job *Job, format string, args ...any) {
-	line := time.Now().UTC().Format("15:04:05") + " " + fmt.Sprintf(format, args...)
 	r.mu.Lock()
+	r.appendLocked(job, fmt.Sprintf(format, args...))
+	r.mu.Unlock()
+}
+
+// appendLocked records one log line. The caller holds r.mu; the mutex is not
+// reentrant, so the completion path in execute must use this, never logf.
+func (r *Runner) appendLocked(job *Job, msg string) {
+	line := time.Now().UTC().Format("15:04:05") + " " + msg
 	job.Log = append(job.Log, line)
 	if len(job.Log) > maxLogLines {
 		job.Log = job.Log[len(job.Log)-maxLogLines:]
 	}
-	r.mu.Unlock()
 	log.Printf("updater: %s", line)
 }
 

@@ -84,24 +84,27 @@ To update by hand instead: `make upgrade` (a fast-forward pull, then `make up`).
 
 ### Without Docker
 
-On a [bare-metal install](/development/bare-metal/) the updater is a systemd unit that runs `scripts/upgrade-bare-metal.sh` after pulling. The script is the documented upgrade procedure as a script: build every artifact this host runs, install it, restart the backend first, then the rest, keeping each frontend's `config.js` across the copy.
+On a [bare-metal install](/development/bare-metal/) the updater is a systemd unit that runs `scripts/upgrade-bare-metal.sh` after pulling. The script builds every artifact this host runs as the checkout's owner, then hands off to one privileged installer, `warmbly-install-release`, which copies the artifacts into `/opt/warmbly`, keeps each frontend's `config.js`, restarts the backend first and the rest once it answers.
 
 ```bash
 cd /opt/warmbly/src
 go build -o out/updater ./cmd/updater && sudo install -m 0755 out/updater /opt/warmbly/bin/
+sudo install -o root -g root -m 0755 deploy/systemd/warmbly-install-release.sh /usr/local/sbin/warmbly-install-release
 sudo install -m 0644 deploy/systemd/warmbly-updater.service /etc/systemd/system/
 printf 'UPDATER_TOKEN=%s\n' "$(grep ^INTERNAL_API_TOKEN= /etc/warmbly/warmbly.env | cut -d= -f2-)" | sudo tee /etc/warmbly/updater.env >/dev/null
 sudo chmod 0600 /etc/warmbly/updater.env
 sudo systemctl daemon-reload && sudo systemctl enable --now warmbly-updater
 ```
 
-The unit runs as the user who owns the checkout (`deploy` as shipped; edit it), and the script uses `sudo` for the install and restart steps, so that user needs a sudoers line for exactly those commands:
+The unit runs as the user who owns the checkout (`deploy` as shipped; edit it). The only root step is the installer, so that user needs exactly one sudoers line, and nothing broader:
 
 ```
-deploy ALL=(root) NOPASSWD: /usr/bin/install, /bin/cp, /bin/rm, /bin/chown, /bin/chmod, /bin/systemctl, /bin/ln
+deploy ALL=(root) NOPASSWD: /usr/local/sbin/warmbly-install-release
 ```
 
-Then point the backend at it in `warmbly.env` and restart it:
+The installer is root-owned and not writable by that user, takes no arguments, reads only from fixed paths under the checkout and refuses symlinks there, so owning the checkout does not become owning the host. The binaries it installs run as the unprivileged `warmbly` user either way.
+
+Then point the backend at the updater in `warmbly.env` and restart it:
 
 ```bash
 UPDATER_URL=http://127.0.0.1:8095

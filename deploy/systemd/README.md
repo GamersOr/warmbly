@@ -25,6 +25,10 @@ file is what `POST /api/v1/workers/enroll` returns for an enrollment token.
 
 `warmbly-updater.service` is the exception to the unprivileged rule: it runs as
 the user who owns the checkout (`deploy` in the unit; change it) and drives
-`scripts/upgrade-bare-metal.sh`, which uses sudo for the install and restart
-steps. `updater.env` holds only `UPDATER_TOKEN` (the backend's
-`INTERNAL_API_TOKEN`). See [Updates](https://docs.warmbly.com/development/updates/).
+`scripts/upgrade-bare-metal.sh`, which builds unprivileged and then runs
+`warmbly-install-release.sh` (installed root-owned at
+`/usr/local/sbin/warmbly-install-release`) through sudo. That installer takes no
+arguments, touches only fixed paths and refuses symlinks, and is the single
+command to allow in sudoers. `updater.env` holds only `UPDATER_TOKEN` (the
+backend's `INTERNAL_API_TOKEN`). See
+[Updates](https://docs.warmbly.com/development/updates/).

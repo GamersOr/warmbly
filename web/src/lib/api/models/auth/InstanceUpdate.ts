@@ -1,7 +1,8 @@
 /**
  * The platform admin's view of updates, served by GET /admin/instance/update.
  * Mirrors internal/app/updates.State. Only a platform admin can read it; the
- * member-facing summary is InstanceVersion.
+ * member-facing summary is InstanceVersion. Timestamps are Date objects:
+ * Request revives ISO strings on every response.
  */
 export interface InstanceCheckout {
     branch: string;
@@ -11,7 +12,7 @@ export interface InstanceCheckout {
     remote_commit: string;
     behind: number;
     dirty: boolean;
-    fetched_at: string;
+    fetched_at: Date;
     fetch_error?: string;
 }
 
@@ -22,8 +23,8 @@ export interface UpdateJob {
     status: UpdateJobStatus;
     target: string;
     step: string;
-    started_at: string;
-    finished_at?: string;
+    started_at: Date;
+    finished_at?: Date;
     error?: string;
     from_commit: string;
     to_commit?: string;
@@ -43,11 +44,11 @@ export interface InstanceUpdater {
 }
 
 export default interface InstanceUpdate {
-    running: { version: string; commit?: string; built_at?: string };
-    latest?: { tag: string; name?: string; html_url?: string; published_at?: string; channel: string };
+    running: { version: string; commit?: string; built_at?: Date };
+    latest?: { tag: string; name?: string; html_url?: string; published_at?: Date; channel: string };
     update_available: boolean;
     reason?: "release" | "commits";
-    checked_at?: string;
+    checked_at?: Date;
     check_error?: string;
     enabled: boolean;
     interval: string;

@@ -94,7 +94,21 @@ type Service struct {
 	latest    *Latest
 	checkedAt time.Time
 	checkErr  string
+
+	// The updater view is cached briefly so the member-facing version pill,
+	// the health checks and the admin poll share one read instead of each
+	// dialling the updater, and a stalled updater cannot slow every caller.
+	viewMu    sync.Mutex
+	view      UpdaterView
+	viewUntil time.Time
 }
+
+// viewTTL is how long a good updater read is served from cache; viewFailTTL
+// how long a failed one is, so an absent updater is dialled rarely.
+const (
+	viewTTL     = 2 * time.Second
+	viewFailTTL = 30 * time.Second
+)
 
 func New(cfg Config) *Service {
 	if cfg.HTTPClient == nil {
@@ -141,14 +155,38 @@ func (s *Service) Start(ctx context.Context) {
 func (s *Service) Check(ctx context.Context) State {
 	s.checkGitHub(ctx)
 	view := s.updaterStatus(ctx, http.MethodPost, "/check")
+	s.storeView(view)
 	return s.compose(view, false)
 }
 
-// State returns the cached release check plus a live read of the updater.
-// withLog keeps job logs; the top-bar poll drops them to stay small.
+// State returns the cached release check plus the updater's state, read live
+// at most every viewTTL. withLog keeps job logs; the top-bar poll drops them.
 func (s *Service) State(ctx context.Context, withLog bool) State {
+	return s.compose(s.cachedView(ctx), !withLog)
+}
+
+func (s *Service) cachedView(ctx context.Context) UpdaterView {
+	s.viewMu.Lock()
+	if time.Now().Before(s.viewUntil) {
+		v := s.view
+		s.viewMu.Unlock()
+		return v
+	}
+	s.viewMu.Unlock()
 	view := s.updaterStatus(ctx, http.MethodGet, "/status")
-	return s.compose(view, !withLog)
+	s.storeView(view)
+	return view
+}
+
+func (s *Service) storeView(view UpdaterView) {
+	ttl := viewTTL
+	if view.Status == "unreachable" || (view.Status == "off" && view.Configured) {
+		ttl = viewFailTTL
+	}
+	s.viewMu.Lock()
+	s.view = view
+	s.viewUntil = time.Now().Add(ttl)
+	s.viewMu.Unlock()
 }
 
 // Apply asks the updater to move to target: "latest" picks the tracked branch
@@ -161,8 +199,12 @@ func (s *Service) Apply(ctx context.Context, target string) (*updater.Job, error
 	switch strings.TrimSpace(target) {
 	case "", "latest", "branch":
 		view := s.updaterStatus(ctx, http.MethodGet, "/status")
+		s.storeView(view)
 		if view.Status != "ok" {
-			return nil, fmt.Errorf("updater is %s: %s", view.Status, view.Error)
+			if view.Error == "" {
+				return nil, ErrUpdaterNotConfigured
+			}
+			return nil, errors.New(view.Error)
 		}
 		if view.Checkout != nil && view.Checkout.Detached {
 			s.mu.Lock()
@@ -278,10 +320,19 @@ func (s *Service) updaterStatus(ctx context.Context, method, path string) Update
 		return UpdaterView{Status: "off"}
 	}
 	view := UpdaterView{Configured: true}
-	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	resp, err := s.call(cctx, method, path, nil)
 	if err != nil {
+		// Under compose the backend always gets UPDATER_URL=http://updater:8095,
+		// profile or not. A host that does not resolve is the profile being
+		// off, which is report-only by choice, not a broken updater.
+		var dns *net.DNSError
+		if errors.As(err, &dns) {
+			view.Status = "off"
+			view.Error = "the updater is not running; enable the updater compose profile (make up does) to update from here"
+			return view
+		}
 		view.Status = "unreachable"
 		view.Error = describeDialError(err)
 		return view
@@ -322,10 +373,6 @@ func (s *Service) call(ctx context.Context, method, path string, body io.Reader)
 // describeDialError turns the usual "not running" failures into the sentence
 // the panel shows, instead of a raw dial string.
 func describeDialError(err error) string {
-	var dns *net.DNSError
-	if errors.As(err, &dns) {
-		return "the updater host does not resolve; it is not running (enable the updater compose profile) or UPDATER_URL is wrong"
-	}
 	if strings.Contains(err.Error(), "connection refused") {
 		return "the updater is not accepting connections; it is not running or UPDATER_URL points at the wrong port"
 	}

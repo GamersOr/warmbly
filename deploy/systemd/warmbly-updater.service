@@ -7,8 +7,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Runs as the user who owns the checkout, so git writes stay theirs. The
-# upgrade script escalates for the install and restart steps through sudo;
-# grant that user the sudoers line from the docs.
+# upgrade script builds unprivileged and then runs the fixed-path installer
+# (/usr/local/sbin/warmbly-install-release, root-owned) through sudo; that
+# installer is the only command to allow in sudoers. See the docs.
 User=deploy
 Group=deploy
 EnvironmentFile=/etc/warmbly/updater.env

@@ -125,7 +125,11 @@ export function UpdateDialog({ open, onOpenChange }: Props) {
     const checkout = updater?.checkout;
     const job = updater?.job ?? updater?.last_job;
     const canApply =
-        canManage && updater?.status === "ok" && !!state?.update_available && phase === "idle";
+        canManage &&
+        updater?.status === "ok" &&
+        !!state?.update_available &&
+        !checkout?.dirty &&
+        phase === "idle";
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>

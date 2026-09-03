@@ -562,9 +562,10 @@ Because the worker is not in a container, the admin panel's SSH-driven day-two a
 
 ## Upgrading
 
-`scripts/upgrade-bare-metal.sh` is the build steps above in order: build every artifact this host runs, install it, restart the backend first (migrations are forward-only and apply on its boot), then the rest, keeping each frontend's `config.js` across the copy. Run it as the user who owns the checkout:
+`scripts/upgrade-bare-metal.sh` is the build steps above in order: build every artifact this host runs as the checkout's owner, then run the root-owned installer `warmbly-install-release` through sudo, which installs them, restarts the backend first (migrations are forward-only and apply on its boot), then the rest, keeping each frontend's `config.js` across the copy. Install that one script root-owned once, then run the upgrade as the user who owns the checkout:
 
 ```bash
+sudo install -o root -g root -m 0755 /opt/warmbly/src/deploy/systemd/warmbly-install-release.sh /usr/local/sbin/warmbly-install-release
 cd /opt/warmbly/src && scripts/upgrade-bare-metal.sh --pull    # git pull --ff-only, build, install, restart
 ```
 

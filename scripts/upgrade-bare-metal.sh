@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
 #
-# Rebuild and restart a Docker-free Warmbly install after the checkout moved.
-# This is what the updater runs in UPDATER_MODE=command (deploy/systemd/
-# warmbly-updater.service), and what you run by hand after `git pull`. It is
-# the "Upgrading" section of docs/content/docs/development/bare-metal.mdx as a
-# script: build every artifact that exists on this host, install it, restart
-# the backend first (migrations apply on its boot), then the rest.
+# Rebuild a Docker-free Warmbly install after the checkout moved, then hand the
+# artifacts to the privileged installer. This is what the updater runs in
+# UPDATER_MODE=command (deploy/systemd/warmbly-updater.service), and what you
+# run by hand after `git pull`. It is the "Upgrading" section of
+# docs/content/docs/development/bare-metal.mdx as a script.
 #
-#   scripts/upgrade-bare-metal.sh            # build + install + restart
+#   scripts/upgrade-bare-metal.sh            # build, then install + restart
 #   scripts/upgrade-bare-metal.sh --pull     # git pull --ff-only first
 #
-# Run it as the user who owns the checkout. Install and restart steps use sudo;
-# give that user this sudoers line (visudo) so the updater can run unattended:
-#
-#   deploy ALL=(root) NOPASSWD: /usr/bin/install, /bin/cp, /bin/rm, /bin/chown, /bin/chmod, /bin/systemctl, /bin/ln
-#
+# Run it as the user who owns the checkout. Everything here runs unprivileged;
+# the only root step is the fixed-path installer, which is the single command
+# that user may run through sudo (see deploy/systemd/warmbly-install-release.sh).
 set -euo pipefail
 
 SRC="${WARMBLY_SRC:-/opt/warmbly/src}"
 PREFIX="${WARMBLY_PREFIX:-/opt/warmbly}"
-SUDO="sudo"
-if [[ "$(id -u)" -eq 0 ]]; then SUDO=""; fi
+INSTALLER="${WARMBLY_INSTALLER:-/usr/local/sbin/warmbly-install-release}"
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -28,6 +24,12 @@ if [[ "${1:-}" == "--pull" ]]; then
   log "pulling"
   git -C "$SRC" pull --ff-only
 fi
+
+[[ -x "$INSTALLER" ]] || {
+  echo "$INSTALLER is missing. Install it root-owned first:" >&2
+  echo "  sudo install -o root -g root -m 0755 $SRC/deploy/systemd/warmbly-install-release.sh $INSTALLER" >&2
+  exit 1
+}
 
 cd "$SRC"
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
@@ -65,52 +67,11 @@ if command -v pnpm >/dev/null 2>&1; then
   done
 fi
 
-log "installing binaries"
-$SUDO install -m 0755 out/backend out/forms out/consumer out/worker out/migrate out/warmblyctl out/updater "$PREFIX/bin/"
-$SUDO ln -sf "$PREFIX/bin/warmblyctl" /usr/local/bin/warmblyctl
-if [[ -f tracking/target/release/tracking ]] && has_unit tracking; then
-  $SUDO install -m 0755 tracking/target/release/tracking "$PREFIX/bin/tracking"
-fi
-if [[ -d realtime/_build/prod/rel/realtime ]] && has_unit realtime; then
-  $SUDO rm -rf "$PREFIX/realtime"
-  $SUDO cp -r realtime/_build/prod/rel/realtime "$PREFIX/realtime"
-  $SUDO chown -R warmbly:warmbly "$PREFIX/realtime"
-fi
-
-# Frontends: the runtime config.js is written by hand on a bare-metal install
-# and a rebuilt dist/ would drop it, so keep it across the copy.
-for app in web admin; do
-  if [[ -d "$app/dist" && -d "$PREFIX/$app" ]]; then
-    log "installing $app"
-    cfg="$(mktemp)"
-    [[ -f "$PREFIX/$app/config.js" ]] && cp "$PREFIX/$app/config.js" "$cfg"
-    $SUDO rm -rf "$PREFIX/$app"
-    $SUDO cp -r "$app/dist" "$PREFIX/$app"
-    [[ -s "$cfg" ]] && $SUDO cp "$cfg" "$PREFIX/$app/config.js"
-    rm -f "$cfg"
-    $SUDO chmod -R a+rX "$PREFIX/$app"
-  fi
-done
-if [[ -d forms/dist && -d "$PREFIX/forms" ]]; then
-  log "installing forms"
-  $SUDO rm -rf "$PREFIX/forms/dist"
-  $SUDO cp -r forms/dist "$PREFIX/forms/dist"
-fi
-
-log "restarting backend"
-$SUDO systemctl restart warmbly-backend
-for i in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then break; fi
-  sleep 2
-done
-
-rest=()
-for svc in forms consumer tracking realtime worker; do
-  has_unit "$svc" && rest+=("warmbly-$svc")
-done
-if [[ ${#rest[@]} -gt 0 ]]; then
-  log "restarting ${rest[*]}"
-  $SUDO systemctl restart "${rest[@]}"
+log "installing and restarting (sudo $INSTALLER)"
+if [[ "$(id -u)" -eq 0 ]]; then
+  "$INSTALLER"
+else
+  sudo -n "$INSTALLER"
 fi
 
 log "done: $VERSION"

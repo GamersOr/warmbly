@@ -346,7 +346,10 @@ services:
       WORKER_IMAGE: ${WORKER_IMAGE:-}
       # Update indicator: polls GitHub Releases and shows a newer version in the
       # admin panel's top bar. Applying it goes through the updater service
-      # below; unset UPDATER_URL to keep the panel report-only.
+      # below. The address is always set because a profile cannot be tested
+      # here; with the profile off the host does not resolve and the backend
+      # reports the updater as not running (report-only), never as broken.
+      # UPDATER_URL=none in .env turns the button off explicitly.
       UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
       UPDATE_CHECK_INTERVAL: ${UPDATE_CHECK_INTERVAL:-30m}
       UPDATE_CHANNEL: ${UPDATE_CHANNEL:-stable}
@@ -591,6 +594,10 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/backend.Dockerfile
+      args:
+        VERSION: ${WARMBLY_BUILD_VERSION:-}
+        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
+        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     entrypoint: ["/app/seed"]
     environment:
       <<: *selfhost-env

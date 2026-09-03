@@ -892,8 +892,8 @@ function PrimaryButton({
     );
 }
 
-function relative(iso: string): string {
-    const diff = Date.now() - new Date(iso).getTime();
+function relative(at: Date | string): string {
+    const diff = Date.now() - new Date(at).getTime();
     const min = Math.round(diff / 60_000);
     if (min < 1) return "just now";
     if (min < 60) return `${min} min ago`;
@@ -901,5 +901,5 @@ function relative(iso: string): string {
     if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
     const d = Math.round(h / 24);
     if (d < 30) return `${d} day${d === 1 ? "" : "s"} ago`;
-    return new Date(iso).toLocaleDateString();
+    return new Date(at).toLocaleDateString();
 }

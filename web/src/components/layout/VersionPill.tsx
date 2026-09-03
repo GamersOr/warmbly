@@ -18,14 +18,23 @@ import { clearUpdateStarted, readUpdateStarted } from "@/lib/updateSession";
 import { cn } from "@/lib/utils";
 import UpdateDialog from "./UpdateDialog";
 
+// Platform admin permission bits, mirroring internal/models/admin_permission.go.
+const ADMIN_VIEW_ANALYTICS = 1 << 11;
+const ADMIN_MANAGE_SETTINGS = 1 << 14;
+
 export function VersionPill() {
     const versionQ = useInstanceVersion();
     const { data: user } = useUser();
-    const isAdmin = user?.is_admin === true;
+    // Mirrors the backend gates: view_analytics reads the update state,
+    // manage_settings is what check and apply require. An admin without the
+    // latter sees the same read-only badge as a member.
+    const perms = user?.admin_permissions ?? 0;
+    const canView = (perms & ADMIN_VIEW_ANALYTICS) === ADMIN_VIEW_ANALYTICS;
+    const isAdmin = (perms & ADMIN_MANAGE_SETTINGS) === ADMIN_MANAGE_SETTINGS;
     const v = versionQ.data;
     const selfHosted = !!v?.self_hosted;
 
-    const adminQ = useInstanceUpdate(isAdmin && selfHosted);
+    const adminQ = useInstanceUpdate(canView && selfHosted);
     const admin = adminQ.data;
     const qc = useQueryClient();
     const [open, setOpen] = React.useState(false);

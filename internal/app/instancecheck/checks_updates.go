@@ -36,7 +36,7 @@ func checkUpdateAvailable(ctx context.Context, d Deps, _ Input) *Finding {
 	if st.Updater.Status == "ok" {
 		msg += "Open the version pill in the top bar and choose Update and restart; the stack rebuilds, restarts and resumes on its own."
 	} else {
-		msg += "Pull the repository and restart the stack, or enable the updater to do it from this panel."
+		msg += "Run make upgrade on the host, or enable the updater to do it from this panel."
 	}
 	return result(CategoryUpdates, SeverityInfo, "An update is available", msg, docsUpdates)
 }
@@ -48,7 +48,7 @@ func checkUpdaterUnreachable(ctx context.Context, d Deps, _ Input) *Finding {
 		return nil
 	}
 	st := d.Updates.State(ctx, false)
-	if !st.Updater.Configured || st.Updater.Status == "ok" {
+	if st.Updater.Status != "unreachable" {
 		return nil
 	}
 	return result(CategoryUpdates, SeverityWarning, "The updater is not answering",
