@@ -64,6 +64,7 @@ Newer builds return the invite-only refusal with its own machine code, `registra
 |---|---|
 | `no space left on device`, often from a random service mid-compile | Docker is out of disk. Free space with `docker builder prune -af` and `docker image prune -af`, check the host has about 10 GB free, then re-run `make up` |
 | `failed to authorize: ... EOF` while pulling a base image | A transient registry blip. Re-run `make up`; completed layers are cached |
+| `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` while building the `forms` image | A `forms/node_modules` from a native `make forms` or `make dev` was shipped into the Docker build context and overwrote the image's own install, and pnpm will not recreate it without a terminal. Current checkouts keep every `node_modules` out of the context and run pnpm in CI mode; on an older checkout, `rm -rf forms/node_modules` and re-run `make up` |
 | `failed to xattr /path/._something: operation not permitted` on macOS | The checkout is on a filesystem without native extended attributes (exFAT, NTFS or a network share), so macOS writes `._*` sidecar files that BuildKit cannot read. Run `dot_clean -m .` then `find . -name '._*' -delete` and re-run. Cloning to an APFS volume avoids it |
 
 ## The stack is up but something is wrong
