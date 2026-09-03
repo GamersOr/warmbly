@@ -1,4 +1,5 @@
 import type Campaign from "@/lib/api/models/app/campaigns/Campaign";
+import type { CampaignKind } from "@/lib/api/models/app/campaigns/Campaign";
 import Request from "../../Request";
 
 // Wire shape for POST /campaigns. Everything other than `name` is optional;
@@ -7,6 +8,8 @@ import Request from "../../Request";
 export interface CreateCampaignInput {
     name: string;
     description?: string;
+    // Defaults to "sequence". A "one_time" campaign takes at most one step.
+    kind?: CampaignKind;
 
     // Sending rules / tracking
     stop_on_reply?: boolean;

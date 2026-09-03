@@ -166,7 +166,7 @@ function SendingSettings() {
 
                                 <Row label="Delivery hours" align="start">
                                     <div className="w-full sm:w-[320px]">
-                                        <div className="grid grid-cols-6 gap-1">
+                                        <div className="grid grid-cols-4 sm:grid-cols-6 gap-1">
                                             {HOURS.map((h) => {
                                                 const on = hours.includes(h);
                                                 return (

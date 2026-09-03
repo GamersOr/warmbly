@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/dailythrottle"
 	"github.com/warmbly/warmbly/internal/app/listgate"
+	"github.com/warmbly/warmbly/internal/app/tz"
+	"github.com/warmbly/warmbly/internal/bitmask"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
@@ -86,7 +88,7 @@ func (s *campaignService) Get(ctx context.Context, orgID, id string) (*models.Ca
 	return resp, nil
 }
 
-func (s *campaignService) Search(ctx context.Context, orgID, query, cursor, folder, status, limit string) (*models.CampaignsResult, *errx.Error) {
+func (s *campaignService) Search(ctx context.Context, orgID, query, cursor, folder, status, kind, limit string) (*models.CampaignsResult, *errx.Error) {
 	cursorId, err := paging.DecodeCursor(cursor)
 	if err != nil {
 		return nil, err
@@ -104,8 +106,11 @@ func (s *campaignService) Search(ctx context.Context, orgID, query, cursor, fold
 	default:
 		return nil, errx.New(errx.BadRequest, "invalid status filter: must be draft, active, paused, or completed")
 	}
+	if kind != "" && !models.ValidCampaignKind(kind) {
+		return nil, errx.New(errx.BadRequest, "invalid kind filter: must be sequence or one_time")
+	}
 
-	resp, xerr := s.campaignRepository.Search(ctx, orgID, query, cursorId, folderId, status, limitN)
+	resp, xerr := s.campaignRepository.Search(ctx, orgID, query, cursorId, folderId, status, kind, limitN)
 	if xerr != nil {
 		return nil, errx.InternalError()
 	}
@@ -856,4 +861,131 @@ func modelOrgID(orgID *uuid.UUID) string {
 		return ""
 	}
 	return orgID.String()
+}
+
+// estimateHorizonDays bounds the finish-date walk; an audience that needs
+// longer than this reports no finish date rather than a meaningless one.
+const estimateHorizonDays = 2 * 366
+
+// Estimate projects an audience against a sender pool. It applies the same
+// cap rule as the scheduler (the smaller of the mailbox cap and the campaign
+// limit, per mailbox, per day) but none of its pacing, so the result is the
+// earliest the last send can land, not a promise.
+func (s *campaignService) Estimate(ctx context.Context, orgID uuid.UUID, in *models.CampaignEstimate) (*models.CampaignEstimateResult, *errx.Error) {
+	out := &models.CampaignEstimateResult{}
+
+	if len(in.SegmentIDs) > models.CampaignSegmentsMax {
+		return nil, errx.New(errx.BadRequest, fmt.Sprintf("a campaign can link at most %d segments", models.CampaignSegmentsMax))
+	}
+	seen := map[string]bool{}
+	segmentIDs := make([]string, 0, len(in.SegmentIDs))
+	for _, raw := range in.SegmentIDs {
+		if _, err := uuid.Parse(raw); err != nil {
+			return nil, errx.New(errx.BadRequest, "invalid segment id")
+		}
+		if seen[raw] {
+			continue
+		}
+		seen[raw] = true
+		segmentIDs = append(segmentIDs, raw)
+	}
+	// One preview over "in any of these segments" counts each contact once
+	// however many of the segments they belong to.
+	if len(segmentIDs) > 0 && s.segments != nil {
+		n, xerr := s.segments.Preview(ctx, orgID, &models.SegmentPreview{
+			Match:      models.SegmentMatchAny,
+			Conditions: []models.SegmentCondition{{Field: "segment", Operator: models.SegOpIn, Values: segmentIDs}},
+		})
+		if xerr != nil {
+			return nil, xerr
+		}
+		out.Recipients = n
+	}
+
+	dailyLimit := config.CampaignLimitDefault
+	if in.DailyLimit != nil {
+		if xerr := validate.CampaignDailyLimit(*in.DailyLimit); xerr != nil {
+			return nil, xerr
+		}
+		dailyLimit = *in.DailyLimit
+	}
+
+	// Same pool resolution as the scheduler: tags when given, otherwise
+	// every active mailbox in the workspace.
+	scope := repository.NewAccountScope(&orgID)
+	var accounts []models.Email
+	var xerr *errx.Error
+	if len(in.EmailTagIDs) > 0 {
+		accounts, xerr = s.emailRepo.GetByTags(ctx, scope, in.EmailTagIDs)
+	} else {
+		accounts, xerr = s.emailRepo.GetAllActiveInScope(ctx, scope)
+	}
+	if xerr != nil {
+		return nil, xerr
+	}
+	out.Mailboxes = len(accounts)
+	for _, acct := range accounts {
+		lim := min(acct.CampaignLimit, dailyLimit)
+		if lim < 0 {
+			lim = 0
+		}
+		out.DailyCapacity += lim
+		sent, err := s.taskRepo.CountCampaignEmailsSentToday(ctx, acct.ID)
+		if err != nil {
+			// A counter blip must not blank the whole estimate, but it must
+			// not flatter it either: a mailbox whose sends today are unknown
+			// contributes nothing to today and only counts from tomorrow.
+			continue
+		}
+		out.RemainingToday += max(0, lim-sent)
+	}
+	if out.Recipients == 0 || out.DailyCapacity == 0 {
+		return out, nil
+	}
+
+	// Walk calendar days from the start, spending each sending day's
+	// capacity, until the audience is covered. Today only has what the pool
+	// has not already sent.
+	days := bitmask.DefaultDays()
+	if in.Days != nil && *in.Days != 0 {
+		days = *in.Days
+	}
+	loc := time.UTC
+	if in.Timezone != nil && tz.Valid(*in.Timezone) {
+		if l, err := time.LoadLocation(*in.Timezone); err == nil {
+			loc = l
+		}
+	}
+	now := time.Now().In(loc)
+	start := now
+	if in.StartDate != nil && in.StartDate.After(now) {
+		start = in.StartDate.In(loc)
+	}
+	startDay := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
+	startsToday := startDay.Equal(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc))
+	remaining := out.Recipients
+	sendingDays := 0
+	for i := 0; i < estimateHorizonDays; i++ {
+		d := startDay.AddDate(0, 0, i)
+		// Mask bit 0 is Monday; time.Weekday starts at Sunday.
+		if days&(1<<((int(d.Weekday())+6)%7)) == 0 {
+			continue
+		}
+		capacity := out.DailyCapacity
+		if i == 0 && startsToday {
+			capacity = out.RemainingToday
+		}
+		if capacity <= 0 {
+			continue
+		}
+		sendingDays++
+		remaining -= capacity
+		if remaining <= 0 {
+			finish := d
+			out.SendingDays = &sendingDays
+			out.EstimatedFinishAt = &finish
+			break
+		}
+	}
+	return out, nil
 }
