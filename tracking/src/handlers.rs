@@ -46,6 +46,8 @@ pub struct AppState {
     /// Proxies whose forwarded-IP header is believed, and which header
     pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     pub client_ip_header: Arc<String>,
+    /// Key for the source-address token (see `hash_ip`)
+    pub ip_hash_key: Arc<String>,
 }
 
 impl AppState {
@@ -75,6 +77,7 @@ impl AppState {
             hit_rate_limiter: Arc::new(RateLimiter::new(config.pagehit_rate_limit_per_min)),
             trusted_proxies: Arc::new(config.trusted_proxies.clone()),
             client_ip_header: Arc::new(config.client_ip_header.clone()),
+            ip_hash_key: Arc::new(config.ip_hash_key.clone()),
         }
     }
 
@@ -132,7 +135,7 @@ pub async fn track_open(
         &state.trusted_proxies,
         &state.client_ip_header,
     );
-    let ip_hash = Some(hash_ip(&ip));
+    let ip_hash = Some(hash_ip(&state.ip_hash_key, &ip));
 
     // Anti-flood: over-budget sources still get the pixel (real mail clients
     // must never see a broken image), but nothing is published.
@@ -203,7 +206,7 @@ pub async fn track_click(
         &state.trusted_proxies,
         &state.client_ip_header,
     );
-    let ip_hash = Some(hash_ip(&ip));
+    let ip_hash = Some(hash_ip(&state.ip_hash_key, &ip));
     let source = ip_hash.clone().unwrap_or_else(|| "unknown".to_string());
     if !state.rate_limiter.allow(&source).await {
         return (StatusCode::TOO_MANY_REQUESTS, "Slow down").into_response();
@@ -326,7 +329,7 @@ pub async fn track_page_hit(
         &state.trusted_proxies,
         &state.client_ip_header,
     );
-    let source = hash_ip(&ip);
+    let source = hash_ip(&state.ip_hash_key, &ip);
 
     // Anti-flood: page views have their own, tighter budget on top of the
     // shared one, and the shared one counts too so a flood here also
@@ -491,9 +494,14 @@ fn anonymize_ip(ip: &str) -> String {
     }
 }
 
-fn hash_ip(ip: &str) -> String {
-    // Hash the IP for privacy
+/// A stable, keyed token for a source address: the same source gets the same
+/// token (dedupe, rate limits, the burst rule), and nobody holding the token
+/// can enumerate IPv4 space to get the address back, because the key is
+/// secret. The key goes in first so the digest is not one of a public value.
+fn hash_ip(key: &str, ip: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    hasher.update([0u8]);
     hasher.update(ip.as_bytes());
     let result = hasher.finalize();
     format!("{:x}", result)[..16].to_string() // Take first 16 chars
@@ -558,6 +566,13 @@ mod tests {
             client_ip(peer, &hdr(&[]), &trusted, "x-forwarded-for"),
             "10.1.2.3"
         );
+    }
+
+    #[test]
+    fn hash_ip_is_keyed_and_stable() {
+        assert_eq!(hash_ip("k", "203.0.113.9"), hash_ip("k", "203.0.113.9"));
+        assert_ne!(hash_ip("k", "203.0.113.9"), hash_ip("other", "203.0.113.9"));
+        assert_eq!(hash_ip("k", "203.0.113.9").len(), 16);
     }
 
     #[test]

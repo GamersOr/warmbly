@@ -1,6 +1,7 @@
 DROP TABLE email_opens;
-DROP INDEX idx_email_link_clicks_campaign;
+DROP INDEX idx_email_link_clicks_pending;
 ALTER TABLE email_link_clicks
+    DROP COLUMN announce_pending,
     DROP COLUMN client,
     DROP COLUMN device_type,
     DROP COLUMN os,

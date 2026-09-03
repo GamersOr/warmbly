@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/warmbly/warmbly/internal/models"
 )
@@ -28,6 +30,9 @@ type LinkClick struct {
 	ClickedAt     time.Time
 	// Origin is what the click said about where it came from.
 	Origin models.EngagementOrigin
+	// AnnouncePending marks a person's click whose effects wait for the
+	// burst window; the row is the durable record of that work.
+	AnnouncePending bool
 }
 
 // Machine-click reasons stored in email_link_clicks.machine_reason.
@@ -60,6 +65,14 @@ type LinkClickRepository interface {
 	// identity when known (two links may share a destination); the
 	// destination is the fallback for events from an older tracking build.
 	HasHumanClickOn(ctx context.Context, taskID uuid.UUID, linkID *uuid.UUID, destination string) (bool, error)
+	// ClaimAnnounce takes a pending click's announcement exactly once and
+	// reports the click's classification at that moment. claimed is false
+	// when it was already taken.
+	ClaimAnnounce(ctx context.Context, id uuid.UUID) (claimed bool, machine bool, err error)
+	// ListPendingAnnouncements returns clicks whose announcement is still
+	// pending and whose burst window closed before `before`: what a consumer
+	// restart inside the window left behind.
+	ListPendingAnnouncements(ctx context.Context, before time.Time, limit int) ([]LinkClick, error)
 	// Cleanup deletes clicks older than the retention window.
 	Cleanup(ctx context.Context, olderThanDays int) (int64, error)
 }
@@ -84,17 +97,67 @@ func (r *linkClickRepository) Insert(ctx context.Context, c *LinkClick) error {
 		INSERT INTO email_link_clicks
 			(id, tracked_link_id, task_id, campaign_id, contact_id, sequence_id,
 			 destination, label, user_agent, ip_hash, machine, machine_reason, clicked_at,
-			 client, device_type, os, browser, browser_version, country_code, region, city)
+			 client, device_type, os, browser, browser_version, country_code, region, city,
+			 announce_pending)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-		        $14, $15, $16, $17, $18, $19, $20, $21)
+		        $14, $15, $16, $17, $18, $19, $20, $21, $22)
 	`
 	_, err := r.db.Exec(ctx, query,
 		c.ID, c.TrackedLinkID, c.TaskID, c.CampaignID, c.ContactID, c.SequenceID,
 		c.Destination, c.Label, c.UserAgent, c.IPHash, c.Machine, c.MachineReason, c.ClickedAt,
 		c.Origin.Client, c.Origin.DeviceType, c.Origin.OS, c.Origin.Browser, c.Origin.BrowserVersion,
 		c.Origin.CountryCode, c.Origin.Region, c.Origin.City,
+		c.AnnouncePending,
 	)
 	return err
+}
+
+func (r *linkClickRepository) ClaimAnnounce(ctx context.Context, id uuid.UUID) (bool, bool, error) {
+	query := `
+		UPDATE email_link_clicks
+		SET announce_pending = false
+		WHERE id = $1 AND announce_pending
+		RETURNING machine
+	`
+	var machine bool
+	err := r.db.QueryRow(ctx, query, id).Scan(&machine)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return true, machine, nil
+}
+
+func (r *linkClickRepository) ListPendingAnnouncements(ctx context.Context, before time.Time, limit int) ([]LinkClick, error) {
+	query := `
+		SELECT id, tracked_link_id, task_id, campaign_id, contact_id, sequence_id,
+		       destination, label, machine, machine_reason, clicked_at,
+		       client, device_type, os, browser, browser_version, country_code, region, city
+		FROM email_link_clicks
+		WHERE announce_pending AND clicked_at < $1
+		ORDER BY clicked_at ASC
+		LIMIT $2
+	`
+	rows, err := r.db.Query(ctx, query, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LinkClick
+	for rows.Next() {
+		var c LinkClick
+		if err := rows.Scan(&c.ID, &c.TrackedLinkID, &c.TaskID, &c.CampaignID, &c.ContactID, &c.SequenceID,
+			&c.Destination, &c.Label, &c.Machine, &c.MachineReason, &c.ClickedAt,
+			&c.Origin.Client, &c.Origin.DeviceType, &c.Origin.OS, &c.Origin.Browser, &c.Origin.BrowserVersion,
+			&c.Origin.CountryCode, &c.Origin.Region, &c.Origin.City); err != nil {
+			return nil, err
+		}
+		c.AnnouncePending = true
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (r *linkClickRepository) Cleanup(ctx context.Context, olderThanDays int) (int64, error) {
@@ -130,7 +193,7 @@ func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID 
 func (r *linkClickRepository) MarkBurst(ctx context.Context, taskID uuid.UUID, ipHash string, since time.Time) (int64, error) {
 	query := `
 		UPDATE email_link_clicks
-		SET machine = true, machine_reason = $4
+		SET machine = true, machine_reason = $4, announce_pending = false
 		WHERE task_id = $1
 		  AND ip_hash = $2
 		  AND clicked_at >= $3

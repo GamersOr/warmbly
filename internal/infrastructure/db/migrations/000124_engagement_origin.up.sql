@@ -12,9 +12,13 @@ ALTER TABLE email_link_clicks
     ADD COLUMN browser_version text NOT NULL DEFAULT '',
     ADD COLUMN country_code text NOT NULL DEFAULT '',
     ADD COLUMN region text NOT NULL DEFAULT '',
-    ADD COLUMN city text NOT NULL DEFAULT '';
+    ADD COLUMN city text NOT NULL DEFAULT '',
+    -- A person's click waits out the burst window before its effects fire;
+    -- the row is the durable record of that pending work, so a consumer
+    -- restart inside the window loses nothing and a redelivery fires once.
+    ADD COLUMN announce_pending boolean NOT NULL DEFAULT false;
 
-CREATE INDEX idx_email_link_clicks_campaign ON email_link_clicks (campaign_id, clicked_at DESC);
+CREATE INDEX idx_email_link_clicks_pending ON email_link_clicks (clicked_at) WHERE announce_pending;
 
 CREATE TABLE email_opens (
     id uuid PRIMARY KEY,

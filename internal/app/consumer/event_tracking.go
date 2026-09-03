@@ -102,7 +102,47 @@ func (tc *TrackingConsumer) Start(ctx context.Context) error {
 	if tc.opens != nil || tc.linkClicks != nil {
 		go tc.pruneEngagementLogs(ctx)
 	}
+	if tc.linkClicks != nil {
+		go tc.sweepPendingClicks(ctx)
+	}
 	return tc.bus.Subscribe(ctx, []string{tc.topic}, tc.group, tc.receive)
+}
+
+// sweepPendingClicks fires the effects of human clicks whose timer never
+// ran: the consumer restarted inside the burst window, or a claim failed.
+// Runs at start and every minute until ctx ends. The claim is exactly-once,
+// so a click the timer already handled is skipped.
+func (tc *TrackingConsumer) sweepPendingClicks(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		before := time.Now().Add(-time.Duration(config.TrackingClickBurstSeconds+1) * time.Second)
+		pending, err := tc.linkClicks.ListPendingAnnouncements(ctx, before, 200)
+		if err != nil {
+			log.Warn().Err(err).Msg("could not list pending click announcements")
+		}
+		for i := range pending {
+			c := &pending[i]
+			task := &repository.CampaignTask{TaskID: c.TaskID, CampaignID: &c.CampaignID, ContactID: &c.ContactID, SequenceID: &c.SequenceID}
+			destination := c.Destination
+			event := events.TrackingEvent{
+				EventType:   events.EventTypeEmailClicked,
+				TaskID:      c.TaskID.String(),
+				OriginalURL: &destination,
+				Timestamp:   c.ClickedAt.Format(time.RFC3339Nano),
+			}
+			if c.TrackedLinkID != nil {
+				id := c.TrackedLinkID.String()
+				event.LinkID = &id
+			}
+			tc.finishHumanClick(task, event, c.ID, c.Label, c.Origin)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // pruneEngagementLogs deletes opens and clicks older than the retention
@@ -329,21 +369,24 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 
 // finishHumanClick runs the effects of a click that looked human when it
 // landed, once the burst window has passed: if a burst relabelled it in the
-// meantime it is announced as automated and nothing else fires. The stamp,
-// the click log and the dedupe mark were written up front, so a consumer
-// restart inside the window loses only these effects, and the scheduler
-// still routes the clicked branch at the next step boundary. The verdict is
-// re-read with retries and, when it cannot be read at all, nothing fires:
-// an automation for a scanner's click is worse than a missed one, and the
-// step boundary still routes on the stored stamp.
+// meantime it is announced as automated and nothing else fires. The click
+// row carries the pending flag, written before the event was marked
+// processed, so a consumer restart inside the window hands the click to
+// sweepPendingClicks instead of losing it, and a redelivery cannot fire it
+// twice. When the claim cannot be made at all, nothing fires here and the
+// sweep retries: an automation for a scanner's click is worse than a late
+// one, and the step boundary still routes on the stored stamp.
 func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, event events.TrackingEvent, clickID uuid.UUID, label string, origin models.EngagementOrigin) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	var machine bool
+	// The claim is the verdict and the once-only guard in one write: a burst
+	// that relabelled the click in the meantime shows up as machine, and a
+	// click already announced (by the timer or the sweep) is not claimed.
+	var claimed, machine bool
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
-		if machine, err = tc.linkClicks.IsMachine(ctx, clickID); err == nil {
+		if claimed, machine, err = tc.linkClicks.ClaimAnnounce(ctx, clickID); err == nil {
 			break
 		}
 		select {
@@ -352,7 +395,10 @@ func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, even
 		}
 	}
 	if err != nil {
-		log.Error().Err(err).Str("click_id", clickID.String()).Msg("could not re-read click classification; click effects skipped")
+		log.Error().Err(err).Str("click_id", clickID.String()).Msg("could not claim click announcement; left for the sweep")
+		return
+	}
+	if !claimed {
 		return
 	}
 	if machine {
@@ -441,6 +487,10 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 		MachineReason: reason,
 		ClickedAt:     at,
 		Origin:        origin,
+		// A person's click waits out the burst window; the flag is the
+		// durable record of that, written before the event is marked
+		// processed, so a restart or a redelivery fires it exactly once.
+		AnnouncePending: !machine && tc.afterBurstWindow != nil,
 	}
 	if err := tc.linkClicks.Insert(ctx, click); err != nil {
 		return machine, reason, click, err

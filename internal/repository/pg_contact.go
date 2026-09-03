@@ -3105,7 +3105,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	// 9. Per-link clicks: which link, where it went, and whether a person or
 	//    a scanner clicked it. Same campaign scope as the progress feed.
 	clickQuery := `
-		SELECT lc.id, lc.clicked_at, lc.destination, lc.label, lc.user_agent, lc.machine, lc.machine_reason,
+		SELECT lc.id, lc.task_id, lc.clicked_at, lc.destination, lc.label, lc.user_agent, lc.machine, lc.machine_reason,
 		       lc.client, lc.device_type, lc.os, lc.browser, lc.browser_version, lc.country_code, lc.region, lc.city,
 		       cam.id, cam.name,
 		       seq.id, seq.name, seq.subject,
@@ -3133,13 +3133,14 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	for crows.Next() {
 		var link models.ContactLinkClick
 		var origin models.EngagementOrigin
+		var taskID uuid.UUID
 		var at time.Time
 		var machine bool
 		var reason string
 		var campID, seqID, eaID *uuid.UUID
 		var campName, seqName, seqSubject, eaEmail, eaName *string
 		if err := crows.Scan(
-			&link.ID, &at, &link.URL, &link.Label, &link.UserAgent, &machine, &reason,
+			&link.ID, &taskID, &at, &link.URL, &link.Label, &link.UserAgent, &machine, &reason,
 			&origin.Client, &origin.DeviceType, &origin.OS, &origin.Browser, &origin.BrowserVersion,
 			&origin.CountryCode, &origin.Region, &origin.City,
 			&campID, &campName,
@@ -3163,6 +3164,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			SequenceName:      seqName,
 			Machine:           &machine,
 			Link:              &link,
+			TaskID:            &taskID,
 		}
 		if !origin.Empty() {
 			o := origin
@@ -3186,7 +3188,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	// 10. Per-event opens: each one with what it came from, machine ones
 	//     labelled. Same campaign scope as the progress feed.
 	openQuery := `
-		SELECT o.id, o.opened_at, o.user_agent, o.machine, o.machine_reason,
+		SELECT o.id, o.task_id, o.opened_at, o.user_agent, o.machine, o.machine_reason,
 		       o.client, o.device_type, o.os, o.browser, o.browser_version, o.country_code, o.region, o.city,
 		       cam.id, cam.name,
 		       seq.id, seq.name, seq.subject,
@@ -3212,7 +3214,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		return nil, errx.InternalError()
 	}
 	for orows.Next() {
-		var id uuid.UUID
+		var id, taskID uuid.UUID
 		var origin models.EngagementOrigin
 		var at time.Time
 		var machine bool
@@ -3220,7 +3222,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		var campID, seqID, eaID *uuid.UUID
 		var campName, seqName, seqSubject, eaEmail, eaName *string
 		if err := orows.Scan(
-			&id, &at, &userAgent, &machine, &reason,
+			&id, &taskID, &at, &userAgent, &machine, &reason,
 			&origin.Client, &origin.DeviceType, &origin.OS, &origin.Browser, &origin.BrowserVersion,
 			&origin.CountryCode, &origin.Region, &origin.City,
 			&campID, &campName,
@@ -3242,6 +3244,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			SequenceID:        seqID,
 			SequenceName:      seqName,
 			Machine:           &machine,
+			TaskID:            &taskID,
 		}
 		if !origin.Empty() {
 			o := origin
