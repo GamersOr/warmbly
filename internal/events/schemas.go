@@ -57,4 +57,10 @@ type TrackingEvent struct {
 	Timestamp   string  `json:"timestamp" avro:"timestamp"`       // ISO8601 timestamp
 	UserAgent   *string `json:"user_agent" avro:"user_agent"`     // Browser user agent (nullable)
 	IPHash      *string `json:"ip_hash" avro:"ip_hash"`           // Hashed IP for privacy (nullable)
+	// ClientIP is the source network, not the address: the edge zeroes the
+	// last IPv4 octet (or everything past the first 48 IPv6 bits) before
+	// publishing, so what the bus retains cannot single out a host. The
+	// consumer resolves it to a location and does not store it. Nullable and
+	// absent from events written before the field existed.
+	ClientIP *string `json:"client_ip" avro:"client_ip"`
 }

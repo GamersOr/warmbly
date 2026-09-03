@@ -2798,15 +2798,16 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 	// 2. Engagement aggregates. campaign_contact_progress is the canonical
 	//    sent/opened/clicked/replied/bounced ledger keyed by (campaign,
 	//    contact, sequence). Counts come from non-null timestamp columns,
-	//    "last X" comes from MAX() of each.
+	//    "last X" comes from MAX() of each. Opens count people only: a machine
+	//    open is a delivery signal, not engagement, here as in analytics.
 	engQuery := `
 		SELECT
 			COUNT(*) FILTER (WHERE sent_at    IS NOT NULL) AS sent,
-			COUNT(*) FILTER (WHERE opened_at  IS NOT NULL) AS opened,
+			COUNT(*) FILTER (WHERE opened_at  IS NOT NULL AND NOT opened_machine) AS opened,
 			COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS clicked,
 			COUNT(*) FILTER (WHERE replied_at IS NOT NULL) AS replied,
 			COUNT(*) FILTER (WHERE bounced_at IS NOT NULL) AS bounced,
-			MAX(sent_at), MAX(opened_at), MAX(clicked_at), MAX(replied_at), MAX(bounced_at)
+			MAX(sent_at), MAX(opened_at) FILTER (WHERE NOT opened_machine), MAX(clicked_at), MAX(replied_at), MAX(bounced_at)
 		FROM campaign_contact_progress
 		WHERE contact_id = $1
 	`
@@ -3020,6 +3021,11 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		SELECT
 			ccp.sent_at, ccp.opened_at, ccp.clicked_at, ccp.replied_at, ccp.bounced_at,
 			ccp.opened_machine,
+			(ccp.opened_at IS NOT NULL AND EXISTS (
+				SELECT 1 FROM email_opens o
+				WHERE o.campaign_id = ccp.campaign_id AND o.contact_id = ccp.contact_id AND o.sequence_id = ccp.sequence_id
+				  AND o.opened_at BETWEEN ccp.opened_at - INTERVAL '1 minute' AND ccp.opened_at + INTERVAL '1 minute'
+			)) AS has_open_log,
 			(ccp.clicked_at IS NOT NULL AND EXISTS (
 				SELECT 1 FROM email_link_clicks lc
 				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
@@ -3061,12 +3067,12 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	}
 	for prows.Next() {
 		var sentAt, openedAt, clickedAt, repliedAt, bouncedAt *time.Time
-		var openedMachine, hasLinkClicks bool
+		var openedMachine, hasOpenLog, hasLinkClicks bool
 		var campID, seqID, eaID *uuid.UUID
 		var campName, seqName, seqSubject, eaEmail, eaName *string
 		if err := prows.Scan(
 			&sentAt, &openedAt, &clickedAt, &repliedAt, &bouncedAt,
-			&openedMachine, &hasLinkClicks,
+			&openedMachine, &hasOpenLog, &hasLinkClicks,
 			&campID, &campName,
 			&seqID, &seqName, &seqSubject,
 			&eaID, &eaEmail, &eaName,
@@ -3101,7 +3107,13 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		makeEvent(sentAt, models.TimelineEmailSent)
-		makeEvent(openedAt, models.TimelineEmailOpened)
+		// A step whose first open is in the log hands its opens to source 10,
+		// one row per open with its origin; the summary column only stands in
+		// for a first open the log never saw (a step tracked before the log
+		// existed), even when later opens were logged.
+		if !hasOpenLog {
+			makeEvent(openedAt, models.TimelineEmailOpened)
+		}
 		if !hasLinkClicks {
 			makeEvent(clickedAt, models.TimelineEmailClicked)
 		}
@@ -3113,7 +3125,8 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	// 9. Per-link clicks: which link, where it went, and whether a person or
 	//    a scanner clicked it. Same campaign scope as the progress feed.
 	clickQuery := `
-		SELECT lc.id, lc.clicked_at, lc.destination, lc.label, lc.user_agent, lc.machine, lc.machine_reason,
+		SELECT lc.id, lc.task_id, lc.clicked_at, lc.destination, lc.label, lc.user_agent, lc.machine, lc.machine_reason,
+		       lc.client, lc.device_type, lc.os, lc.browser, lc.browser_version, lc.country_code, lc.region, lc.city,
 		       cam.id, cam.name,
 		       seq.id, seq.name, seq.subject,
 		       ea.id, ea.email, ea.name
@@ -3132,20 +3145,24 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		ORDER BY lc.clicked_at DESC
 		LIMIT $4
 	`
-	crows, err := r.DB.Query(ctx, clickQuery, contactID, userID, bound, limit)
+	crows, err := r.DB.Query(ctx, clickQuery, contactID, userID, bound, limit+1)
 	if err != nil {
 		db.CaptureError(err, clickQuery, []any{contactID, userID, bound, limit}, "ListTimeline link clicks")
 		return nil, errx.InternalError()
 	}
 	for crows.Next() {
 		var link models.ContactLinkClick
+		var origin models.EngagementOrigin
+		var taskID uuid.UUID
 		var at time.Time
 		var machine bool
 		var reason string
 		var campID, seqID, eaID *uuid.UUID
 		var campName, seqName, seqSubject, eaEmail, eaName *string
 		if err := crows.Scan(
-			&link.ID, &at, &link.URL, &link.Label, &link.UserAgent, &machine, &reason,
+			&link.ID, &taskID, &at, &link.URL, &link.Label, &link.UserAgent, &machine, &reason,
+			&origin.Client, &origin.DeviceType, &origin.OS, &origin.Browser, &origin.BrowserVersion,
+			&origin.CountryCode, &origin.Region, &origin.City,
 			&campID, &campName,
 			&seqID, &seqName, &seqSubject,
 			&eaID, &eaEmail, &eaName,
@@ -3167,6 +3184,11 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			SequenceName:      seqName,
 			Machine:           &machine,
 			Link:              &link,
+			TaskID:            &taskID,
+		}
+		if !origin.Empty() {
+			o := origin
+			ev.Origin = &o
 		}
 		if seqSubject != nil && *seqSubject != "" {
 			ev.Subject = seqSubject
@@ -3178,6 +3200,90 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		events = append(events, ev)
 	}
 	crows.Close()
+	if err := crows.Err(); err != nil {
+		db.CaptureError(err, clickQuery, nil, "ListTimeline link clicks rows")
+		return nil, errx.InternalError()
+	}
+
+	// 10. Per-event opens: each one with what it came from, machine ones
+	//     labelled. Same campaign scope as the progress feed.
+	openQuery := `
+		SELECT o.id, o.task_id, o.opened_at, o.user_agent, o.machine, o.machine_reason,
+		       o.client, o.device_type, o.os, o.browser, o.browser_version, o.country_code, o.region, o.city,
+		       cam.id, cam.name,
+		       seq.id, seq.name, seq.subject,
+		       ea.id, ea.email, ea.name
+		FROM email_opens o
+		JOIN campaigns cam ON cam.id = o.campaign_id
+		JOIN sequences seq ON seq.id = o.sequence_id
+		LEFT JOIN LATERAL (
+			SELECT ea.id, ea.email, ea.name
+			FROM   tasks t
+			JOIN   email_accounts ea ON ea.id = t.email_account_id
+			WHERE  t.id = o.task_id
+		) ea ON TRUE
+		WHERE o.contact_id = $1
+		  AND cam.user_id  = $2
+		  AND o.opened_at  < $3
+		ORDER BY o.opened_at DESC
+		LIMIT $4
+	`
+	orows, err := r.DB.Query(ctx, openQuery, contactID, userID, bound, limit+1)
+	if err != nil {
+		db.CaptureError(err, openQuery, []any{contactID, userID, bound, limit}, "ListTimeline opens")
+		return nil, errx.InternalError()
+	}
+	for orows.Next() {
+		var id, taskID uuid.UUID
+		var origin models.EngagementOrigin
+		var at time.Time
+		var machine bool
+		var reason, userAgent string
+		var campID, seqID, eaID *uuid.UUID
+		var campName, seqName, seqSubject, eaEmail, eaName *string
+		if err := orows.Scan(
+			&id, &taskID, &at, &userAgent, &machine, &reason,
+			&origin.Client, &origin.DeviceType, &origin.OS, &origin.Browser, &origin.BrowserVersion,
+			&origin.CountryCode, &origin.Region, &origin.City,
+			&campID, &campName,
+			&seqID, &seqName, &seqSubject,
+			&eaID, &eaEmail, &eaName,
+		); err != nil {
+			orows.Close()
+			db.CaptureError(err, "", nil, "ListTimeline opens scan")
+			return nil, errx.InternalError()
+		}
+		ev := models.ContactTimelineEvent{
+			Type:              models.TimelineEmailOpened,
+			At:                at,
+			EmailAccountID:    eaID,
+			EmailAccountEmail: eaEmail,
+			EmailAccountName:  eaName,
+			CampaignID:        campID,
+			CampaignName:      campName,
+			SequenceID:        seqID,
+			SequenceName:      seqName,
+			Machine:           &machine,
+			TaskID:            &taskID,
+		}
+		if !origin.Empty() {
+			o := origin
+			ev.Origin = &o
+		}
+		if seqSubject != nil && *seqSubject != "" {
+			ev.Subject = seqSubject
+		}
+		if reason != "" {
+			r := reason
+			ev.MachineReason = &r
+		}
+		events = append(events, ev)
+	}
+	orows.Close()
+	if err := orows.Err(); err != nil {
+		db.CaptureError(err, openQuery, nil, "ListTimeline opens rows")
+		return nil, errx.InternalError()
+	}
 
 	if orgID != nil {
 		// 2. Reply intents (inbound replies with classification).

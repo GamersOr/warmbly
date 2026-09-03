@@ -47,6 +47,27 @@ type CampaignAnalytics struct {
 	Summary    CampaignSummary      `json:"summary"`
 	Sequences  []SequenceStats      `json:"steps"`
 	DailyStats []CampaignDailyStats `json:"daily_stats,omitempty"`
+	// Engagement is where and on what people opened and clicked, from the
+	// per-event logs. Human events only.
+	Engagement *CampaignEngagementBreakdown `json:"engagement,omitempty"`
+}
+
+// EngagementBucket is one slice of a breakdown: how many distinct contacts
+// opened and clicked from that country, client, or device.
+type EngagementBucket struct {
+	Key    string `json:"key"`
+	Opens  int    `json:"opens"`
+	Clicks int    `json:"clicks"`
+}
+
+// CampaignEngagementBreakdown is the "where from, on what" view of a
+// campaign's human opens and clicks. Buckets are ordered by activity, capped,
+// and keyed by ISO country code, client or browser name, and device type.
+// Unknown is the empty key.
+type CampaignEngagementBreakdown struct {
+	Countries []EngagementBucket `json:"countries"`
+	Clients   []EngagementBucket `json:"clients"`
+	Devices   []EngagementBucket `json:"devices"`
 }
 
 type CampaignSummary struct {

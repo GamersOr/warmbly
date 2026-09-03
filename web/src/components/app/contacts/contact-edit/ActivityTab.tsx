@@ -50,7 +50,10 @@ import {
 import useContactTimeline from "@/lib/api/hooks/app/contacts/useContactTimeline";
 import useContactCampaignStates from "@/lib/api/hooks/app/contacts/useContactCampaignStates";
 import type ContactTimelineEvent from "@/lib/api/models/app/contacts/ContactTimelineEvent";
-import type { ContactTimelineEventType } from "@/lib/api/models/app/contacts/ContactTimelineEvent";
+import type {
+    ContactTimelineEventType,
+    EngagementOrigin,
+} from "@/lib/api/models/app/contacts/ContactTimelineEvent";
 import type ContactCampaignState from "@/lib/api/models/app/contacts/ContactCampaignState";
 import type {
     ContactCampaignStep,
@@ -662,6 +665,9 @@ function applyFilters(
                 e.link?.label,
                 e.link?.utm_content,
                 e.link?.utm_campaign,
+                e.origin?.client,
+                e.origin?.city,
+                e.origin?.country_code,
             ]
                 .filter(Boolean)
                 .join(" ")
@@ -1112,6 +1118,14 @@ function detailsFor(e: ContactTimelineEvent): [string, React.ReactNode][] {
         add("UTM content", l.utm_content);
         add("Browser", l.user_agent);
     }
+    if (e.origin) {
+        const o = e.origin;
+        add("Client", o.client);
+        add("Device", cap(o.device_type ?? ""));
+        add("Operating system", o.os);
+        add("Browser", [o.browser, o.browser_version].filter(Boolean).join(" "));
+        add("Location", [o.city, o.region, o.country_code].filter(Boolean).join(", "));
+    }
     if (e.type === "email_opened" || e.type === "email_clicked") {
         add("Classified as", e.machine ? machineLabel(e.machine_reason) : "A person");
     }
@@ -1157,6 +1171,17 @@ function MachineBadge({ reason }: { reason?: string | null }) {
 function cap(s: string): string {
     if (!s || s === "unknown") return "";
     return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// "Gmail", or "Chrome on Windows", or "Mobile" when the user agent said
+// little; empty when it said nothing.
+function originLabel(o: EngagementOrigin): string {
+    if (o.client) return o.client;
+    const browser = [o.browser, o.browser_version ? o.browser_version.split(".")[0] : ""].filter(Boolean).join(" ");
+    if (browser && o.os) return `${browser} on ${o.os}`;
+    if (browser) return browser;
+    if (o.os) return o.os;
+    return cap(o.device_type ?? "");
 }
 
 function EventMeta({
@@ -1310,6 +1335,18 @@ function EventMeta({
                     utm <Highlight text={event.link.utm_content} q={highlight} />
                 </span>,
             );
+        }
+        if (event.origin) {
+            const on = originLabel(event.origin);
+            if (on) parts.push(<span key="origin">{on}</span>);
+            const where = [event.origin.city, event.origin.country_code].filter(Boolean).join(", ");
+            if (where) {
+                parts.push(
+                    <span key="where">
+                        <Highlight text={where} q={highlight} />
+                    </span>,
+                );
+            }
         }
         if (event.intent) {
             parts.push(<span key="intent">intent: {event.intent}</span>);

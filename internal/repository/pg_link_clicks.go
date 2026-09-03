@@ -2,10 +2,13 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/warmbly/warmbly/internal/models"
 )
 
 // LinkClick is one recorded click on one tracked link. Machine clicks (a
@@ -25,6 +28,11 @@ type LinkClick struct {
 	Machine       bool
 	MachineReason string
 	ClickedAt     time.Time
+	// Origin is what the click said about where it came from.
+	Origin models.EngagementOrigin
+	// AnnouncePending marks a person's click whose effects wait for the
+	// burst window; the row is the durable record of that work.
+	AnnouncePending bool
 }
 
 // Machine-click reasons stored in email_link_clicks.machine_reason.
@@ -57,6 +65,20 @@ type LinkClickRepository interface {
 	// identity when known (two links may share a destination); the
 	// destination is the fallback for events from an older tracking build.
 	HasHumanClickOn(ctx context.Context, taskID uuid.UUID, linkID *uuid.UUID, destination string) (bool, error)
+	// ClaimAnnounce leases a pending click's announcement for one attempt
+	// and reports the click's classification at that moment. claimed is
+	// false when another attempt holds a live lease or the announcement is
+	// done. A lease that expires without CompleteAnnounce is offered again.
+	ClaimAnnounce(ctx context.Context, id uuid.UUID) (claimed bool, machine bool, err error)
+	// CompleteAnnounce records that the click's effects ran, so neither the
+	// timer nor the sweep offers it again.
+	CompleteAnnounce(ctx context.Context, id uuid.UUID) error
+	// ListPendingAnnouncements returns clicks whose announcement is still
+	// pending, not under a live lease, and whose burst window closed before
+	// `before`: what a consumer restart or a failed attempt left behind.
+	ListPendingAnnouncements(ctx context.Context, before time.Time, limit int) ([]LinkClick, error)
+	// Cleanup deletes clicks older than the retention window.
+	Cleanup(ctx context.Context, olderThanDays int) (int64, error)
 }
 
 type linkClickRepository struct {
@@ -78,14 +100,89 @@ func (r *linkClickRepository) Insert(ctx context.Context, c *LinkClick) error {
 	query := `
 		INSERT INTO email_link_clicks
 			(id, tracked_link_id, task_id, campaign_id, contact_id, sequence_id,
-			 destination, label, user_agent, ip_hash, machine, machine_reason, clicked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			 destination, label, user_agent, ip_hash, machine, machine_reason, clicked_at,
+			 client, device_type, os, browser, browser_version, country_code, region, city,
+			 announce_pending)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+		        $14, $15, $16, $17, $18, $19, $20, $21, $22)
 	`
 	_, err := r.db.Exec(ctx, query,
 		c.ID, c.TrackedLinkID, c.TaskID, c.CampaignID, c.ContactID, c.SequenceID,
 		c.Destination, c.Label, c.UserAgent, c.IPHash, c.Machine, c.MachineReason, c.ClickedAt,
+		c.Origin.Client, c.Origin.DeviceType, c.Origin.OS, c.Origin.Browser, c.Origin.BrowserVersion,
+		c.Origin.CountryCode, c.Origin.Region, c.Origin.City,
+		c.AnnouncePending,
 	)
 	return err
+}
+
+// announceLease is how long one attempt at a click's effects may take before
+// the sweep is allowed to try again.
+const announceLease = "2 minutes"
+
+func (r *linkClickRepository) ClaimAnnounce(ctx context.Context, id uuid.UUID) (bool, bool, error) {
+	query := `
+		UPDATE email_link_clicks
+		SET announce_claimed_at = NOW()
+		WHERE id = $1 AND announce_pending
+		  AND (announce_claimed_at IS NULL OR announce_claimed_at < NOW() - INTERVAL '` + announceLease + `')
+		RETURNING machine
+	`
+	var machine bool
+	err := r.db.QueryRow(ctx, query, id).Scan(&machine)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return true, machine, nil
+}
+
+func (r *linkClickRepository) CompleteAnnounce(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `UPDATE email_link_clicks SET announce_pending = false WHERE id = $1`, id)
+	return err
+}
+
+func (r *linkClickRepository) ListPendingAnnouncements(ctx context.Context, before time.Time, limit int) ([]LinkClick, error) {
+	query := `
+		SELECT id, tracked_link_id, task_id, campaign_id, contact_id, sequence_id,
+		       destination, label, machine, machine_reason, clicked_at,
+		       client, device_type, os, browser, browser_version, country_code, region, city
+		FROM email_link_clicks
+		WHERE announce_pending AND clicked_at < $1
+		  AND (announce_claimed_at IS NULL OR announce_claimed_at < NOW() - INTERVAL '` + announceLease + `')
+		ORDER BY clicked_at ASC
+		LIMIT $2
+	`
+	rows, err := r.db.Query(ctx, query, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LinkClick
+	for rows.Next() {
+		var c LinkClick
+		if err := rows.Scan(&c.ID, &c.TrackedLinkID, &c.TaskID, &c.CampaignID, &c.ContactID, &c.SequenceID,
+			&c.Destination, &c.Label, &c.Machine, &c.MachineReason, &c.ClickedAt,
+			&c.Origin.Client, &c.Origin.DeviceType, &c.Origin.OS, &c.Origin.Browser, &c.Origin.BrowserVersion,
+			&c.Origin.CountryCode, &c.Origin.Region, &c.Origin.City); err != nil {
+			return nil, err
+		}
+		c.AnnouncePending = true
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (r *linkClickRepository) Cleanup(ctx context.Context, olderThanDays int) (int64, error) {
+	tag, err := r.db.Exec(ctx,
+		`DELETE FROM email_link_clicks WHERE clicked_at < NOW() - $1 * INTERVAL '1 day'`,
+		olderThanDays)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID uuid.UUID, ipHash string, linkID *uuid.UUID, destination string, since time.Time) (int, error) {
@@ -111,7 +208,7 @@ func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID 
 func (r *linkClickRepository) MarkBurst(ctx context.Context, taskID uuid.UUID, ipHash string, since time.Time) (int64, error) {
 	query := `
 		UPDATE email_link_clicks
-		SET machine = true, machine_reason = $4
+		SET machine = true, machine_reason = $4, announce_pending = false
 		WHERE task_id = $1
 		  AND ip_hash = $2
 		  AND clicked_at >= $3

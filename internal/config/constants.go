@@ -145,6 +145,11 @@ const (
 	// a scanner walking the message. A person follows one link at a time.
 	TrackingClickBurstSeconds = 5
 
+	// EngagementEventRetentionDays is how long the per-event open and click
+	// logs (client, device, location) are kept. The summary on the progress
+	// row outlives them, so counts and routing never change.
+	EngagementEventRetentionDays = 365
+
 	// CampaignSendStampAttempts is how many times the control plane retries the
 	// sent_at stamp after a send is already on the bus. The reservation is what
 	// keeps the step from being re-sent, so a lost stamp is a pacing problem,

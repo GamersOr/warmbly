@@ -661,6 +661,13 @@ var Tables = []Table{
 		Name: "email_link_clicks", Group: models.OrgDataGroupCampaigns,
 		Scope: `campaign_id IN ` + orgCampaigns,
 	},
+	{
+		// The per-event open log beside the click log: same keys, same
+		// scope, no ticket reference. task_id is an opaque id from the source
+		// instance, used only to group a step's opens.
+		Name: "email_opens", Group: models.OrgDataGroupCampaigns,
+		Scope: `campaign_id IN ` + orgCampaigns,
+	},
 
 	// ---------- delivery events ----------
 	{

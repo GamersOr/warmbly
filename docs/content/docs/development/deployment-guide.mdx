@@ -226,7 +226,7 @@ These are the ones that break things quietly when they drift, because each servi
 | realtime | `JWT_SECRET`, `SECRET_KEY_BASE`, `DATABASE_URL`, `REDIS_URL`, `PHX_HOST` |
 | web / admin | Only `WARMBLY_*` URLs, read at container start and written into `/config.js`. The same image runs anywhere |
 
-`APP_ENV` accepts `dev` or `prod`. No other value turns on production behavior. `prod` needs no cloud account: `SENTRY_DSN` stays optional in every environment, and `GEODB_PATH` must be *set* on the backend everywhere while the file it points at is optional.
+`APP_ENV` accepts `dev` or `prod`. No other value turns on production behavior. `prod` needs no cloud account: `SENTRY_DSN` stays optional in every environment, and `GEODB_PATH` must be *set* on the backend everywhere while the file it points at is optional (the consumer reads it too, optionally, for the location on opens and clicks).
 
 The complete list of variables, with defaults and whether a change needs a restart, is the [configuration reference](/development/configuration/).
 

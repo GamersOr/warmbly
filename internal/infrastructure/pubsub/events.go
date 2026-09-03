@@ -222,6 +222,14 @@ type TrackingEventPayload struct {
 	// fetcher, a security gateway walking the links) so live views can badge
 	// it instead of presenting it as a person's.
 	Machine bool `json:"machine,omitempty"`
+	// OccurredAt is when the tracking service saw the open or click; the
+	// base timestamp is when this event was published.
+	OccurredAt time.Time `json:"occurred_at,omitempty"`
+	// Where and on what, from the engagement logs, for live feeds.
+	Client      string `json:"client,omitempty"`
+	DeviceType  string `json:"device_type,omitempty"`
+	CountryCode string `json:"country_code,omitempty"`
+	City        string `json:"city,omitempty"`
 }
 
 // PageHitEvent is a website page view tied to a contact.

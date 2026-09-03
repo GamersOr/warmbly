@@ -67,6 +67,20 @@ export interface ContactLinkClick {
     user_agent?: string;
 }
 
+// Where an open or click came from, when it was logged per event: the mail
+// client or image proxy when the user agent names one, otherwise browser,
+// OS and device; the location resolved from the source network.
+export interface EngagementOrigin {
+    client?: string;
+    device_type?: string;
+    os?: string;
+    browser?: string;
+    browser_version?: string;
+    country_code?: string;
+    region?: string;
+    city?: string;
+}
+
 export default interface ContactTimelineEvent {
     type: ContactTimelineEventType;
     at: string;
@@ -79,6 +93,9 @@ export default interface ContactTimelineEvent {
 
     // Per-link detail behind an email_clicked event.
     link?: ContactLinkClick | null;
+
+    // Where an email_opened / email_clicked event came from.
+    origin?: EngagementOrigin | null;
 
     email_account_id?: string | null;
     email_account_email?: string | null;
