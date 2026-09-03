@@ -581,7 +581,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			// than tickets that would 404 at the tracking service. UTM tags
 			// need no ticket, so they still go on.
 			log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to store tracked links; sending untracked")
-			bodyHTML, _ = TrackLinks(bodyHTML, LinkTracking{UTM: linkOpts.UTM})
+			bodyHTML, _ = TrackLinks(bodyHTML, LinkTracking{TrackingDomain: linkOpts.TrackingDomain, UTM: linkOpts.UTM})
 		} else {
 			bodyHTML = tracked
 		}

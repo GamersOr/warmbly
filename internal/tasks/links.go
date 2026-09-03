@@ -170,9 +170,11 @@ func trackableURL(dest, trackingDomain string) bool {
 	if trackingDomain == "" {
 		return true
 	}
+	// A destination the URL parser rejects cannot be redirected to, so it
+	// is left as written rather than turned into a dead ticket.
 	u, err := url.Parse(dest)
 	if err != nil {
-		return true
+		return false
 	}
 	return config.NormalizeTrackingHost(u.Host) != trackingDomain
 }
