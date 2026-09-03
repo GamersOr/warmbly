@@ -33,6 +33,9 @@ type TrackingConsumer struct {
 	dedupeRepo           repository.TrackingDedupeRepository
 	trackedLinks         repository.TrackedLinkRepository
 	linkClicks           repository.LinkClickRepository
+	// afterBurstWindow runs fn once the click burst window has passed, so a
+	// human click's side effects wait for the burst rule's verdict.
+	afterBurstWindow func(fn func())
 	// advancedService fires INSTANT open/click action chains the moment a
 	// tracking event lands (the open/click analog of the reply path in
 	// ProcessIncomingReply). Best-effort and nil-safe: when unset, opens/clicks
@@ -69,10 +72,15 @@ func NewTrackingConsumer(
 		dedupeRepo:           dedupeRepo,
 		trackedLinks:         trackedLinks,
 		linkClicks:           linkClicks,
-		advancedService:      advancedService,
-		evidence:             evidence,
-		topic:                topic,
-		group:                group,
+		afterBurstWindow: func(fn func()) {
+			// One second past the window covers event-time skew between the
+			// tracking service and the consumer.
+			time.AfterFunc(time.Duration(config.TrackingClickBurstSeconds+1)*time.Second, fn)
+		},
+		advancedService: advancedService,
+		evidence:        evidence,
+		topic:           topic,
+		group:           group,
 	}, nil
 }
 
@@ -105,7 +113,9 @@ func (tc *TrackingConsumer) receive(_ context.Context, msg eventbus.Message) err
 // A machine open is still recorded, labelled, because it proves delivery. A
 // machine click is logged per link with its reason but never stamps the step
 // as clicked, fires no automation, and sends no webhook: "clicked" keeps
-// meaning a person.
+// meaning a person. Because a burst is only recognisable from its second
+// click, a human click's side effects wait out the burst window before
+// firing, on the classification the click has by then.
 func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *events.TrackingEvent) error {
 	// Parse and validate task ID
 	taskID, err := uuid.Parse(event.TaskID)
@@ -191,6 +201,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 	// matcher reads the just-stamped opened_at / clicked_at off the progress row.
 	var instantKind string
 	var linkLabel string
+	var deferred bool
 	switch event.EventType {
 	case events.EventTypeEmailOpened:
 		err = tc.campaignProgressRepo.RecordEmailOpened(ctx, campaignID, contactID, sequenceID, machine)
@@ -203,12 +214,24 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 			}
 		}
 	case events.EventTypeEmailClicked:
-		machine, reason, linkLabel, err = tc.recordClick(ctx, campaignTask, event, at, machine, reason)
+		var click *repository.LinkClick
+		machine, reason, click, err = tc.recordClick(ctx, campaignTask, event, at, machine, reason)
+		if click != nil {
+			linkLabel = click.Label
+		}
 		if err == nil && !machine {
+			// The stamp is stored state a burst can walk back; the effects
+			// cannot be recalled, so they wait for the window to close.
 			err = tc.campaignProgressRepo.RecordEmailClicked(ctx, campaignID, contactID, sequenceID)
-			instantKind = "click"
-			if tc.evidence != nil {
-				tc.evidence.RecordEvidence(ctx, contactID, "clicked", sequenceID.String(), "")
+			if err == nil && click != nil && tc.afterBurstWindow != nil {
+				deferred = true
+				task, ev, clickID, label := campaignTask, *event, click.ID, linkLabel
+				tc.afterBurstWindow(func() { tc.finishHumanClick(task, ev, clickID, label) })
+			} else if err == nil {
+				instantKind = "click"
+				if tc.evidence != nil {
+					tc.evidence.RecordEvidence(ctx, contactID, "clicked", sequenceID.String(), "")
+				}
 			}
 		}
 	}
@@ -238,10 +261,41 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 		log.Debug().Str("task_id", event.TaskID).Str("event_type", string(event.EventType)).Str("reason", reason).Msg("tracking event classified as machine")
 	}
 
-	// Publish to Pub/Sub for realtime updates
-	tc.publishTrackingEvent(ctx, campaignTask, *event, machine, linkLabel)
+	// Publish to Pub/Sub for realtime updates (a deferred human click
+	// publishes once its verdict is final)
+	if !deferred {
+		tc.publishTrackingEvent(ctx, campaignTask, *event, machine, linkLabel)
+	}
 
 	return nil
+}
+
+// finishHumanClick runs the effects of a click that looked human when it
+// landed, once the burst window has passed: if a burst relabelled it in the
+// meantime it is announced as automated and nothing else fires. The stamp,
+// the click log and the dedupe mark were written up front, so a consumer
+// restart inside the window loses only these effects, and the scheduler
+// still routes the clicked branch at the next step boundary.
+func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, event events.TrackingEvent, clickID uuid.UUID, label string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	machine, err := tc.linkClicks.IsMachine(ctx, clickID)
+	if err != nil {
+		log.Warn().Err(err).Str("click_id", clickID.String()).Msg("could not re-read click classification; acting on the original verdict")
+		machine = false
+	}
+	if machine {
+		tc.publishTrackingEvent(ctx, task, event, true, label)
+		return
+	}
+	if tc.evidence != nil {
+		tc.evidence.RecordEvidence(ctx, *task.ContactID, "clicked", task.SequenceID.String(), "")
+	}
+	if tc.advancedService != nil {
+		tc.advancedService.FireInstantActions(ctx, *task.CampaignID, *task.ContactID, *task.SequenceID, "click")
+	}
+	tc.publishTrackingEvent(ctx, task, event, false, label)
 }
 
 // resolveLink names the clicked link: the minted ticket when the event
@@ -274,14 +328,14 @@ func (tc *TrackingConsumer) resolveLink(ctx context.Context, event *events.Track
 // window turns this click AND the earlier ones into machine clicks. When
 // that leaves the step with no human click, the clicked stamp the first
 // click already wrote is walked back. Returns the final classification and
-// the link's label.
-func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, machine bool, reason string) (bool, string, string, error) {
+// the logged row (nil when nothing could be logged).
+func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, machine bool, reason string) (bool, string, *repository.LinkClick, error) {
 	if tc.linkClicks == nil {
-		return machine, reason, "", nil
+		return machine, reason, nil, nil
 	}
 	linkID, destination, label := tc.resolveLink(ctx, event)
 	if destination == "" {
-		return machine, reason, label, nil
+		return machine, reason, nil, nil
 	}
 	ipHash := ""
 	if event.IPHash != nil {
@@ -303,7 +357,7 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 		}
 	}
 
-	if err := tc.linkClicks.Insert(ctx, &repository.LinkClick{
+	click := &repository.LinkClick{
 		TrackedLinkID: linkID,
 		TaskID:        task.TaskID,
 		CampaignID:    *task.CampaignID,
@@ -316,8 +370,9 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 		Machine:       machine,
 		MachineReason: reason,
 		ClickedAt:     at,
-	}); err != nil {
-		return machine, reason, label, err
+	}
+	if err := tc.linkClicks.Insert(ctx, click); err != nil {
+		return machine, reason, click, err
 	}
 
 	if burst {
@@ -328,7 +383,7 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 			log.Warn().Err(err).Str("task_id", task.TaskID.String()).Msg("failed to walk back the click stamp after a burst")
 		}
 	}
-	return machine, reason, label, nil
+	return machine, reason, click, nil
 }
 
 // upgradeClick handles a human click on a link this email was already

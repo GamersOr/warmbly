@@ -47,6 +47,9 @@ type LinkClickRepository interface {
 	// HasHumanClick reports whether any click on the step is still labelled
 	// as a person's.
 	HasHumanClick(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (bool, error)
+	// IsMachine reads a logged click's current classification, which a burst
+	// recognised after the fact may have changed.
+	IsMachine(ctx context.Context, id uuid.UUID) (bool, error)
 	// HasHumanClickOn reports whether a person already clicked this exact
 	// link of the email, so a repeat is not logged twice. The ticket is the
 	// identity when known (two links may share a destination); the
@@ -123,6 +126,12 @@ func (r *linkClickRepository) HasHumanClick(ctx context.Context, campaignID, con
 	var ok bool
 	err := r.db.QueryRow(ctx, query, campaignID, contactID, sequenceID).Scan(&ok)
 	return ok, err
+}
+
+func (r *linkClickRepository) IsMachine(ctx context.Context, id uuid.UUID) (bool, error) {
+	var machine bool
+	err := r.db.QueryRow(ctx, `SELECT machine FROM email_link_clicks WHERE id = $1`, id).Scan(&machine)
+	return machine, err
 }
 
 func (r *linkClickRepository) HasHumanClickOn(ctx context.Context, taskID uuid.UUID, linkID *uuid.UUID, destination string) (bool, error) {
