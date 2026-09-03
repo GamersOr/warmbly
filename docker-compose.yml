@@ -214,7 +214,7 @@ services:
       POSTGRES_USER: warmbly
       POSTGRES_PASSWORD: warmbly
       POSTGRES_DB: warmbly_dev
-    ports: ["15432:5432"]
+    # ports: ["15432:5432"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -226,7 +226,7 @@ services:
   redis:
     restart: unless-stopped
     image: redis:7-alpine
-    ports: ["16379:6379"]
+    # ports: ["16379:6379"]
     volumes:
       - redis_data:/data
     healthcheck:
@@ -240,7 +240,7 @@ services:
     image: nats:2.10-alpine
     # -js: JetStream (durable streams). -m 8222: HTTP monitoring for healthcheck.
     command: ["-js", "-sd", "/data", "-m", "8222"]
-    ports: ["4222:4222", "8222:8222"]
+    # ports: ["4222:4222", "8222:8222"]
     volumes:
       - nats_data:/data
     healthcheck:
@@ -302,7 +302,7 @@ services:
         VERSION: ${WARMBLY_BUILD_VERSION:-}
         COMMIT: ${WARMBLY_BUILD_COMMIT:-}
         BUILT_AT: ${WARMBLY_BUILD_TIME:-}
-    ports: ["8080:8080"]
+    # ports: ["8080:8080"]
     environment:
       <<: *selfhost-env
       API_HOST: "0.0.0.0:8080"
@@ -381,7 +381,7 @@ services:
         VERSION: ${WARMBLY_BUILD_VERSION:-}
         COMMIT: ${WARMBLY_BUILD_COMMIT:-}
         BUILT_AT: ${WARMBLY_BUILD_TIME:-}
-    ports: ["${FORMS_PORT:-8090}:8090"]
+    # ports: ["${FORMS_PORT:-8090}:8090"]
     environment:
       GIN_MODE: release
       FORMS_PORT: "8090"
@@ -469,7 +469,7 @@ services:
     # 3000 is a very common default for other self-hosted tools. Remap the host
     # side with TRACKING_PORT when it is already taken; the container port and
     # everything derived from TRACKING_DOMAIN stay as they are.
-    ports: ["${TRACKING_PORT:-3000}:3000"]
+    # ports: ["${TRACKING_PORT:-3000}:3000"]
     environment:
       APP_ENV: ${APP_ENV:-dev}
       AWS_CONFIG_ENABLED: ${AWS_CONFIG_ENABLED:-false}
@@ -499,7 +499,7 @@ services:
     build:
       context: .
       dockerfile: deploy/docker/realtime.Dockerfile
-    ports: ["4000:4000"]
+    # ports: ["4000:4000"]
     environment:
       PHX_HOST: ${PHX_HOST:-${PUBLIC_HOST:-localhost}}
       PORT: 4000
@@ -533,7 +533,7 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
-    ports: ["5173:80"]
+    # ports: ["5173:80"]
     environment:
       WARMBLY_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
       WARMBLY_APP_URL: ${APP_URL:-http://${PUBLIC_HOST:-localhost}:5173}
@@ -549,7 +549,7 @@ services:
     build:
       context: ./admin
       dockerfile: Dockerfile
-    ports: ["5174:80"]
+    # ports: ["5174:80"]
     environment:
       WARMBLY_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
       WARMBLY_DASHBOARD_URL: ${APP_URL:-http://${PUBLIC_HOST:-localhost}:5173}
@@ -620,3 +620,8 @@ volumes:
   blobs:
   worker_state:
   updater_state:
+
+networks:
+  default:
+    name: dokploy-network
+    external: true
