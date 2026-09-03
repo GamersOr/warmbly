@@ -2798,15 +2798,16 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 	// 2. Engagement aggregates. campaign_contact_progress is the canonical
 	//    sent/opened/clicked/replied/bounced ledger keyed by (campaign,
 	//    contact, sequence). Counts come from non-null timestamp columns,
-	//    "last X" comes from MAX() of each.
+	//    "last X" comes from MAX() of each. Opens count people only: a machine
+	//    open is a delivery signal, not engagement, here as in analytics.
 	engQuery := `
 		SELECT
 			COUNT(*) FILTER (WHERE sent_at    IS NOT NULL) AS sent,
-			COUNT(*) FILTER (WHERE opened_at  IS NOT NULL) AS opened,
+			COUNT(*) FILTER (WHERE opened_at  IS NOT NULL AND NOT opened_machine) AS opened,
 			COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS clicked,
 			COUNT(*) FILTER (WHERE replied_at IS NOT NULL) AS replied,
 			COUNT(*) FILTER (WHERE bounced_at IS NOT NULL) AS bounced,
-			MAX(sent_at), MAX(opened_at), MAX(clicked_at), MAX(replied_at), MAX(bounced_at)
+			MAX(sent_at), MAX(opened_at) FILTER (WHERE NOT opened_machine), MAX(clicked_at), MAX(replied_at), MAX(bounced_at)
 		FROM campaign_contact_progress
 		WHERE contact_id = $1
 	`
@@ -3020,10 +3021,11 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		SELECT
 			ccp.sent_at, ccp.opened_at, ccp.clicked_at, ccp.replied_at, ccp.bounced_at,
 			ccp.opened_machine,
-			EXISTS (
+			(ccp.opened_at IS NOT NULL AND EXISTS (
 				SELECT 1 FROM email_opens o
 				WHERE o.campaign_id = ccp.campaign_id AND o.contact_id = ccp.contact_id AND o.sequence_id = ccp.sequence_id
-			) AS has_open_log,
+				  AND o.opened_at <= ccp.opened_at + INTERVAL '1 minute'
+			)) AS has_open_log,
 			(ccp.clicked_at IS NOT NULL AND EXISTS (
 				SELECT 1 FROM email_link_clicks lc
 				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
@@ -3105,9 +3107,10 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		makeEvent(sentAt, models.TimelineEmailSent)
-		// A step with logged opens hands them to source 10, one row per
-		// open with its origin; the summary column only stands in for steps
-		// tracked before the log existed.
+		// A step whose first open is in the log hands its opens to source 10,
+		// one row per open with its origin; the summary column only stands in
+		// for a first open the log never saw (a step tracked before the log
+		// existed), even when later opens were logged.
 		if !hasOpenLog {
 			makeEvent(openedAt, models.TimelineEmailOpened)
 		}
