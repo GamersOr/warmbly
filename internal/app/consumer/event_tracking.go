@@ -275,15 +275,28 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 // meantime it is announced as automated and nothing else fires. The stamp,
 // the click log and the dedupe mark were written up front, so a consumer
 // restart inside the window loses only these effects, and the scheduler
-// still routes the clicked branch at the next step boundary.
+// still routes the clicked branch at the next step boundary. The verdict is
+// re-read with retries and, when it cannot be read at all, nothing fires:
+// an automation for a scanner's click is worse than a missed one, and the
+// step boundary still routes on the stored stamp.
 func (tc *TrackingConsumer) finishHumanClick(task *repository.CampaignTask, event events.TrackingEvent, clickID uuid.UUID, label string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	machine, err := tc.linkClicks.IsMachine(ctx, clickID)
+	var machine bool
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if machine, err = tc.linkClicks.IsMachine(ctx, clickID); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Duration(attempt+1) * 2 * time.Second):
+		}
+	}
 	if err != nil {
-		log.Warn().Err(err).Str("click_id", clickID.String()).Msg("could not re-read click classification; acting on the original verdict")
-		machine = false
+		log.Error().Err(err).Str("click_id", clickID.String()).Msg("could not re-read click classification; click effects skipped")
+		return
 	}
 	if machine {
 		tc.publishTrackingEvent(ctx, task, event, true, label)
@@ -349,7 +362,7 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 	burstSince := at.Add(-time.Duration(config.TrackingClickBurstSeconds) * time.Second)
 	burst := false
 	if !machine && ipHash != "" {
-		n, err := tc.linkClicks.CountRecentOtherLinks(ctx, task.TaskID, ipHash, destination, burstSince)
+		n, err := tc.linkClicks.CountRecentOtherLinks(ctx, task.TaskID, ipHash, linkID, destination, burstSince)
 		if err != nil {
 			log.Warn().Err(err).Str("task_id", task.TaskID.String()).Msg("burst check failed; treating click as a person's")
 		} else if n > 0 {

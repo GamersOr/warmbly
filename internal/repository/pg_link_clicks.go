@@ -39,8 +39,10 @@ const (
 type LinkClickRepository interface {
 	Insert(ctx context.Context, click *LinkClick) error
 	// CountRecentOtherLinks counts clicks from the same source on OTHER links
-	// of the same email since the given time: the burst signal.
-	CountRecentOtherLinks(ctx context.Context, taskID uuid.UUID, ipHash, destination string, since time.Time) (int, error)
+	// of the same email since the given time: the burst signal. A link is
+	// identified by its ticket when known, else by destination (events from
+	// an older tracking build).
+	CountRecentOtherLinks(ctx context.Context, taskID uuid.UUID, ipHash string, linkID *uuid.UUID, destination string, since time.Time) (int, error)
 	// MarkBurst flags the source's earlier human-labelled clicks on the email
 	// since the given time as machine, once a burst is recognised.
 	MarkBurst(ctx context.Context, taskID uuid.UUID, ipHash string, since time.Time) (int64, error)
@@ -86,7 +88,7 @@ func (r *linkClickRepository) Insert(ctx context.Context, c *LinkClick) error {
 	return err
 }
 
-func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID uuid.UUID, ipHash, destination string, since time.Time) (int, error) {
+func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID uuid.UUID, ipHash string, linkID *uuid.UUID, destination string, since time.Time) (int, error) {
 	query := `
 		SELECT COUNT(*)
 		FROM email_link_clicks
@@ -95,8 +97,20 @@ func (r *linkClickRepository) CountRecentOtherLinks(ctx context.Context, taskID 
 		  AND destination <> $3
 		  AND clicked_at >= $4
 	`
+	args := []any{taskID, ipHash, destination, since}
+	if linkID != nil {
+		query = `
+			SELECT COUNT(*)
+			FROM email_link_clicks
+			WHERE task_id = $1
+			  AND ip_hash = $2
+			  AND tracked_link_id IS DISTINCT FROM $3
+			  AND clicked_at >= $4
+		`
+		args = []any{taskID, ipHash, *linkID, since}
+	}
 	var n int
-	err := r.db.QueryRow(ctx, query, taskID, ipHash, destination, since).Scan(&n)
+	err := r.db.QueryRow(ctx, query, args...).Scan(&n)
 	return n, err
 }
 
