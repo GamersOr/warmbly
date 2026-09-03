@@ -558,6 +558,9 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			bodyHTML = tracked
 		}
 	}
+	if campaign.UTMTracking && bodyPlain != "" {
+		bodyPlain = TagPlainTextLinks(bodyPlain, CampaignUTM(campaign), trackingDomain)
+	}
 
 	// STEP 12: Add signature
 	if account.SignatureSync {

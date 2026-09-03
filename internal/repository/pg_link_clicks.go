@@ -48,8 +48,10 @@ type LinkClickRepository interface {
 	// as a person's.
 	HasHumanClick(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (bool, error)
 	// HasHumanClickOn reports whether a person already clicked this exact
-	// destination of the email, so a repeat is not logged twice.
-	HasHumanClickOn(ctx context.Context, taskID uuid.UUID, destination string) (bool, error)
+	// link of the email, so a repeat is not logged twice. The ticket is the
+	// identity when known (two links may share a destination); the
+	// destination is the fallback for events from an older tracking build.
+	HasHumanClickOn(ctx context.Context, taskID uuid.UUID, linkID *uuid.UUID, destination string) (bool, error)
 }
 
 type linkClickRepository struct {
@@ -123,14 +125,24 @@ func (r *linkClickRepository) HasHumanClick(ctx context.Context, campaignID, con
 	return ok, err
 }
 
-func (r *linkClickRepository) HasHumanClickOn(ctx context.Context, taskID uuid.UUID, destination string) (bool, error) {
+func (r *linkClickRepository) HasHumanClickOn(ctx context.Context, taskID uuid.UUID, linkID *uuid.UUID, destination string) (bool, error) {
 	query := `
 		SELECT EXISTS (
 			SELECT 1 FROM email_link_clicks
 			WHERE task_id = $1 AND destination = $2 AND machine = false
 		)
 	`
+	args := []any{taskID, destination}
+	if linkID != nil {
+		query = `
+			SELECT EXISTS (
+				SELECT 1 FROM email_link_clicks
+				WHERE task_id = $1 AND tracked_link_id = $2 AND machine = false
+			)
+		`
+		args = []any{taskID, *linkID}
+	}
 	var ok bool
-	err := r.db.QueryRow(ctx, query, taskID, destination).Scan(&ok)
+	err := r.db.QueryRow(ctx, query, args...).Scan(&ok)
 	return ok, err
 }

@@ -2995,16 +2995,19 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 
 	// 1. Engagement events from campaign_contact_progress. One progress
 	//    row can emit up to 5 events (sent/opened/clicked/replied/bounced).
-	//    The coarse clicked stamp is emitted only for steps whose clicks
-	//    predate the per-link log; otherwise source 9 names each link.
+	//    The coarse clicked stamp is emitted only when no logged click stands
+	//    for it (a stamp written before per-link logging); otherwise source 9
+	//    names the link. A logged click represents the stamp when it landed
+	//    within a minute of it, the stamp being written as the click is logged.
 	progressQuery := `
 		SELECT
 			ccp.sent_at, ccp.opened_at, ccp.clicked_at, ccp.replied_at, ccp.bounced_at,
 			ccp.opened_machine,
-			EXISTS (
+			(ccp.clicked_at IS NOT NULL AND EXISTS (
 				SELECT 1 FROM email_link_clicks lc
 				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
-			) AS has_link_clicks,
+				  AND lc.clicked_at BETWEEN ccp.clicked_at - INTERVAL '1 minute' AND ccp.clicked_at + INTERVAL '1 minute'
+			)) AS has_link_clicks,
 			cam.id, cam.name,
 			seq.id, seq.name, seq.subject,
 			ea.id, ea.email, ea.name

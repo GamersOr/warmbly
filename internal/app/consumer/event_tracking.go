@@ -114,10 +114,16 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 		return nil
 	}
 
-	// Calculate URL hash for click event deduplication
+	// Click dedupe identity: the ticket, so two links sharing a destination
+	// are two clicks; the URL only for events from an older tracking build.
 	urlHash := ""
-	if event.EventType == events.EventTypeEmailClicked && event.OriginalURL != nil && *event.OriginalURL != "" {
-		urlHash = hashURL(*event.OriginalURL)
+	if event.EventType == events.EventTypeEmailClicked {
+		switch {
+		case event.LinkID != nil && *event.LinkID != "":
+			urlHash = hashURL("link:" + *event.LinkID)
+		case event.OriginalURL != nil && *event.OriginalURL != "":
+			urlHash = hashURL(*event.OriginalURL)
+		}
 	}
 
 	// Get campaign task to find campaign/contact/sequence IDs
@@ -184,6 +190,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 	// to the matcher's eventKind. Firing happens AFTER the Record* write so the
 	// matcher reads the just-stamped opened_at / clicked_at off the progress row.
 	var instantKind string
+	var linkLabel string
 	switch event.EventType {
 	case events.EventTypeEmailOpened:
 		err = tc.campaignProgressRepo.RecordEmailOpened(ctx, campaignID, contactID, sequenceID, machine)
@@ -196,7 +203,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 			}
 		}
 	case events.EventTypeEmailClicked:
-		machine, reason, err = tc.recordClick(ctx, campaignTask, event, at, machine, reason)
+		machine, reason, linkLabel, err = tc.recordClick(ctx, campaignTask, event, at, machine, reason)
 		if err == nil && !machine {
 			err = tc.campaignProgressRepo.RecordEmailClicked(ctx, campaignID, contactID, sequenceID)
 			instantKind = "click"
@@ -232,7 +239,7 @@ func (tc *TrackingConsumer) HandleTrackingEvent(ctx context.Context, event *even
 	}
 
 	// Publish to Pub/Sub for realtime updates
-	tc.publishTrackingEvent(ctx, campaignTask, *event, machine)
+	tc.publishTrackingEvent(ctx, campaignTask, *event, machine, linkLabel)
 
 	return nil
 }
@@ -266,14 +273,15 @@ func (tc *TrackingConsumer) resolveLink(ctx context.Context, event *events.Track
 // a second link of the same email from the same source inside the burst
 // window turns this click AND the earlier ones into machine clicks. When
 // that leaves the step with no human click, the clicked stamp the first
-// click already wrote is walked back. Returns the final classification.
-func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, machine bool, reason string) (bool, string, error) {
+// click already wrote is walked back. Returns the final classification and
+// the link's label.
+func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.CampaignTask, event *events.TrackingEvent, at time.Time, machine bool, reason string) (bool, string, string, error) {
 	if tc.linkClicks == nil {
-		return machine, reason, nil
+		return machine, reason, "", nil
 	}
 	linkID, destination, label := tc.resolveLink(ctx, event)
 	if destination == "" {
-		return machine, reason, nil
+		return machine, reason, label, nil
 	}
 	ipHash := ""
 	if event.IPHash != nil {
@@ -309,7 +317,7 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 		MachineReason: reason,
 		ClickedAt:     at,
 	}); err != nil {
-		return machine, reason, err
+		return machine, reason, label, err
 	}
 
 	if burst {
@@ -320,7 +328,7 @@ func (tc *TrackingConsumer) recordClick(ctx context.Context, task *repository.Ca
 			log.Warn().Err(err).Str("task_id", task.TaskID.String()).Msg("failed to walk back the click stamp after a burst")
 		}
 	}
-	return machine, reason, nil
+	return machine, reason, label, nil
 }
 
 // upgradeClick handles a human click on a link this email was already
@@ -335,7 +343,7 @@ func (tc *TrackingConsumer) upgradeClick(ctx context.Context, task *repository.C
 	if destination == "" {
 		return
 	}
-	if seen, err := tc.linkClicks.HasHumanClickOn(ctx, task.TaskID, destination); err != nil || seen {
+	if seen, err := tc.linkClicks.HasHumanClickOn(ctx, task.TaskID, linkID, destination); err != nil || seen {
 		return
 	}
 	ipHash, userAgent := "", ""
@@ -361,7 +369,7 @@ func (tc *TrackingConsumer) upgradeClick(ctx context.Context, task *repository.C
 
 // publishTrackingEvent publishes the tracking event to Pub/Sub for realtime UI
 // updates AND fans an opt-in firehose webhook (campaign.email_opened/clicked).
-func (tc *TrackingConsumer) publishTrackingEvent(ctx context.Context, task *repository.CampaignTask, event events.TrackingEvent, machine bool) {
+func (tc *TrackingConsumer) publishTrackingEvent(ctx context.Context, task *repository.CampaignTask, event events.TrackingEvent, machine bool, linkLabel string) {
 	// Get campaign to find user ID + org
 	campaign, err := tc.campaignRepo.GetByID(ctx, *task.CampaignID)
 	if err != nil || campaign == nil {
@@ -375,11 +383,6 @@ func (tc *TrackingConsumer) publishTrackingEvent(ctx context.Context, task *repo
 		if xerr == nil && contact != nil {
 			contactEmail = contact.Email
 		}
-	}
-
-	var linkLabel string
-	if event.EventType == events.EventTypeEmailClicked {
-		_, _, linkLabel = tc.resolveLink(ctx, &event)
 	}
 
 	// Fan an opt-in firehose webhook for the open/click (org-scoped). People

@@ -160,3 +160,35 @@ func TestCampaignUTMDefaults(t *testing.T) {
 		t.Fatal("utm tagging off must yield nil")
 	}
 }
+
+func TestTrackLinksReadsBareHrefAndIgnoresDataHref(t *testing.T) {
+	html := `<a data-href="https://tracker.example/x" href=https://example.com/bare target="_blank">Bare</a>`
+	out, links := WrapLinksForTracking(html, uuid.New(), uuid.New(), "t.acme.com")
+	if len(links) != 1 || links[0].Destination != "https://example.com/bare" || links[0].Label != "Bare" {
+		t.Fatalf("expected the bare href wrapped: %+v", links)
+	}
+	if !strings.Contains(out, `data-href="https://tracker.example/x"`) || !strings.Contains(out, `target="_blank"`) {
+		t.Fatalf("other attributes must survive: %s", out)
+	}
+}
+
+func TestTrackableURLComparesTheHost(t *testing.T) {
+	if trackableURL("https://t.acme.com/c/abc", "t.acme.com") {
+		t.Fatal("a link already on the tracking host must be left alone")
+	}
+	if !trackableURL("https://example.com/?next=t.acme.com", "t.acme.com") {
+		t.Fatal("a URL merely mentioning the host is a normal link")
+	}
+	if !trackableURL("https://not-t.acme.com/", "t.acme.com") {
+		t.Fatal("a different host that ends with the tracking host is a normal link")
+	}
+}
+
+func TestTagPlainTextLinks(t *testing.T) {
+	body := "See https://example.com/pricing. Docs: https://example.com/docs?x=1\nSkip https://t.acme.com/c/abc"
+	out := TagPlainTextLinks(body, &UTMParams{Source: "s", Medium: "m", Campaign: "c"}, "t.acme.com")
+	want := "See https://example.com/pricing?utm_source=s&utm_medium=m&utm_campaign=c&utm_content=link_1. Docs: https://example.com/docs?x=1&utm_source=s&utm_medium=m&utm_campaign=c&utm_content=link_2\nSkip https://t.acme.com/c/abc"
+	if out != want {
+		t.Fatalf("got  %s\nwant %s", out, want)
+	}
+}

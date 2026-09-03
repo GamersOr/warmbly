@@ -119,7 +119,7 @@ With **Link tracking** on, every link in the email body becomes its own tracked 
 | `utm_campaign` | The campaign name as a slug (`q3_outbound`), or the value you set |
 | `utm_content` | The link's own text as a slug (`pricing_page`); a link with no text, such as an image, is numbered `link_1`, `link_2` in order |
 
-A link that already carries one of these keeps the hand-written value; only the missing parameters are added. Existing query strings and fragments are left exactly as written, and the tags go on the real destination, so they survive the tracking redirect. Anchors, `mailto:` and `tel:` links, and anything that is not `http(s)` are never touched. UTM tagging works with link tracking off too: the tags are added and the link is otherwise left as written. Change the source, medium and campaign values under **Settings** > **Deliverability**; leave a field empty to use the default.
+A link that already carries one of these keeps the hand-written value; only the missing parameters are added. Existing query strings and fragments are left exactly as written, and the tags go on the real destination, so they survive the tracking redirect. Anchors, `mailto:` and `tel:` links, and anything that is not `http(s)` are never touched. UTM tagging works with link tracking off too: the tags are added and the link is otherwise left as written. Bare URLs in the plain-text part are tagged as well, numbered `link_1`, `link_2` since they have no text. Change the source, medium and campaign values under **Settings** > **Deliverability**; leave a field empty to use the default.
 
 ## Scheduling
 

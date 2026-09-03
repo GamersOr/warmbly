@@ -72,10 +72,11 @@ func CampaignUTM(c *models.Campaign) *UTMParams {
 }
 
 // anchorTag matches one <a ...href=...>...</a>, capturing the href value
-// (double- or single-quoted) and the inner HTML the label is read from.
-// Only anchors are touched: a <link href> in the head is a stylesheet, and
-// redirecting it through a click ticket breaks it.
-var anchorTag = regexp.MustCompile(`(?is)<a\b([^>]*?)\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')([^>]*)>(.*?)</a>`)
+// (double-quoted, single-quoted or bare) and the inner HTML the label is
+// read from. The attribute must follow whitespace so data-href and the like
+// never pass for it. Only anchors are touched: a <link href> in the head is
+// a stylesheet, and redirecting it through a click ticket breaks it.
+var anchorTag = regexp.MustCompile(`(?is)<a\b([^>]*?)\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>` + "`" + `]+))([^>]*)>(.*?)</a>`)
 
 var (
 	htmlTag    = regexp.MustCompile(`(?s)<[^>]*>`)
@@ -105,10 +106,13 @@ func TrackLinks(htmlBody string, opts LinkTracking) (string, []repository.Tracke
 
 	result := anchorTag.ReplaceAllStringFunc(htmlBody, func(match string) string {
 		m := anchorTag.FindStringSubmatch(match)
-		before, quoted, single, after, inner := m[1], m[2], m[3], m[4], m[5]
+		before, quoted, single, bare, after, inner := m[1], m[2], m[3], m[4], m[5], m[6]
 		rawHref := quoted
 		if rawHref == "" {
 			rawHref = single
+		}
+		if rawHref == "" {
+			rawHref = bare
 		}
 		dest := strings.TrimSpace(html.UnescapeString(rawHref))
 		if !trackableURL(dest, trackingDomain) {
@@ -133,7 +137,7 @@ func TrackLinks(htmlBody string, opts LinkTracking) (string, []repository.Tracke
 			})
 			href = config.TrackingURL(trackingDomain, "/c/"+id.String())
 		}
-		return `<a` + before + `href="` + href + `"` + after + `>` + inner + `</a>`
+		return `<a` + before + ` href="` + href + `"` + after + `>` + inner + `</a>`
 	})
 
 	return result, links
@@ -151,16 +155,45 @@ func WrapLinksForTracking(htmlBody string, taskID, campaignID uuid.UUID, trackin
 }
 
 // trackableURL reports whether a destination is one a click ticket can
-// redirect to and a UTM tag makes sense on.
+// redirect to and a UTM tag makes sense on. A link already pointing at the
+// tracking host (its host, not merely a URL mentioning it) is left alone.
 func trackableURL(dest, trackingDomain string) bool {
 	lower := strings.ToLower(dest)
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		return false
 	}
-	if trackingDomain != "" && strings.Contains(lower, trackingDomain) {
-		return false
+	if trackingDomain == "" {
+		return true
 	}
-	return true
+	u, err := url.Parse(dest)
+	if err != nil {
+		return true
+	}
+	return config.NormalizeTrackingHost(u.Host) != trackingDomain
+}
+
+// bareURL matches an http(s) URL in plain text, stopping at whitespace and
+// the characters that close it in prose.
+var bareURL = regexp.MustCompile(`(?i)https?://[^\s<>"'` + "`" + `]+`)
+
+// TagPlainTextLinks appends UTM parameters to every bare URL of a plain-text
+// body. There is no anchor text, so utm_content numbers the links in order.
+// Trailing punctuation that belongs to the sentence stays outside the URL.
+func TagPlainTextLinks(body string, utm *UTMParams, trackingDomain string) string {
+	if utm == nil || body == "" {
+		return body
+	}
+	trackingDomain = config.NormalizeTrackingHost(trackingDomain)
+	position := 0
+	return bareURL.ReplaceAllStringFunc(body, func(match string) string {
+		dest := strings.TrimRight(match, ".,;:!?)]}")
+		trail := match[len(dest):]
+		if !trackableURL(dest, trackingDomain) {
+			return match
+		}
+		position++
+		return withUTM(dest, utm, utmContent("", position)) + trail
+	})
 }
 
 // linkLabel is the anchor's visible text: tags stripped, entities decoded,

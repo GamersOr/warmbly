@@ -213,6 +213,11 @@ export function NewCampaignDialog({ open, onClose }: Props) {
         draft.name.trim() !== "" ||
         draft.description.trim() !== "" ||
         draft.emailTagIds.length > 0 ||
+        !draft.stopOnReply ||
+        !draft.openTracking ||
+        !draft.linkTracking ||
+        !draft.utmTracking ||
+        !draft.unsubHeader ||
         draft.sequences.some((s) => s.subject.trim() !== "" || s.body_plain.trim() !== "");
 
     const requestClose = React.useCallback(() => {

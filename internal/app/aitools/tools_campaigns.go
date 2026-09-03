@@ -105,6 +105,9 @@ func (d Deps) registerCampaignTools(r *Registry) {
 			"open_tracking":      boolProp("Track opens."),
 			"link_tracking":      boolProp("Track link clicks."),
 			"utm_tracking":       boolProp("Tag every link with UTM parameters automatically."),
+			"utm_source":         strProp("utm_source override (empty means the default, warmbly)."),
+			"utm_medium":         strProp("utm_medium override (empty means the default, email)."),
+			"utm_campaign":       strProp("utm_campaign override (empty means the campaign name as a slug)."),
 			"text_only":          boolProp("Send plain text only."),
 			"unsubscribe_header": boolProp("Send the List-Unsubscribe header (one-click unsubscribe)."),
 			"ramp_enabled":       boolProp("Gradually ramp daily volume."),
@@ -213,6 +216,9 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		OpenTracking      *bool   `json:"open_tracking"`
 		LinkTracking      *bool   `json:"link_tracking"`
 		UTMTracking       *bool   `json:"utm_tracking"`
+		UTMSource         *string `json:"utm_source"`
+		UTMMedium         *string `json:"utm_medium"`
+		UTMCampaign       *string `json:"utm_campaign"`
 		TextOnly          *bool   `json:"text_only"`
 		UnsubscribeHeader *bool   `json:"unsubscribe_header"`
 		RampEnabled       *bool   `json:"ramp_enabled"`
@@ -235,6 +241,9 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		OpenTracking:      in.OpenTracking,
 		LinkTracking:      in.LinkTracking,
 		UTMTracking:       in.UTMTracking,
+		UTMSource:         in.UTMSource,
+		UTMMedium:         in.UTMMedium,
+		UTMCampaign:       in.UTMCampaign,
 		TextOnly:          in.TextOnly,
 		UnsubscribeHeader: in.UnsubscribeHeader,
 		RampEnabled:       in.RampEnabled,

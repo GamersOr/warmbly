@@ -451,7 +451,9 @@ func (r *campaignProgressRepository) RecordEmailClicked(ctx context.Context, cam
 
 // UnrecordEmailClicked walks a click stamp back once no human click remains
 // on the step. Guarded by the click log so a concurrent human click is never
-// erased.
+// erased, and only a stamp written alongside a logged click is touched: a
+// stamp older than the step's earliest logged click predates per-link
+// logging, so it came from a person the log never saw.
 func (r *campaignProgressRepository) UnrecordEmailClicked(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
 	query := `
 		UPDATE campaign_contact_progress ccp
@@ -460,6 +462,10 @@ func (r *campaignProgressRepository) UnrecordEmailClicked(ctx context.Context, c
 		  AND ccp.contact_id = $2
 		  AND ccp.sequence_id = $3
 		  AND ccp.clicked_at IS NOT NULL
+		  AND ccp.clicked_at >= (
+			SELECT MIN(lc.clicked_at) - INTERVAL '1 minute' FROM email_link_clicks lc
+			WHERE lc.campaign_id = $1 AND lc.contact_id = $2 AND lc.sequence_id = $3
+		  )
 		  AND NOT EXISTS (
 			SELECT 1 FROM email_link_clicks lc
 			WHERE lc.campaign_id = $1 AND lc.contact_id = $2 AND lc.sequence_id = $3 AND lc.machine = false
