@@ -114,6 +114,7 @@ type Draft = {
     stopOnReply: boolean;
     openTracking: boolean;
     linkTracking: boolean;
+    utmTracking: boolean;
     unsubHeader: boolean;
     sequences: SequenceDraft[];
     // One-time only.
@@ -136,6 +137,7 @@ const initialDraft = (timezone: string): Draft => ({
     stopOnReply: true,
     openTracking: true,
     linkTracking: true,
+    utmTracking: true,
     unsubHeader: true,
     sequences: [newSequence(0)],
     segmentIds: [],
@@ -316,6 +318,11 @@ export function NewCampaignDialog({ open, onClose }: Props) {
         draft.description.trim() !== "" ||
         draft.emailTagIds.length > 0 ||
         draft.segmentIds.length > 0 ||
+        !draft.stopOnReply ||
+        !draft.openTracking ||
+        !draft.linkTracking ||
+        !draft.utmTracking ||
+        !draft.unsubHeader ||
         draft.sequences.some((s) => s.subject.trim() !== "" || s.body_plain.trim() !== "");
 
     const isPending = create.isPending || submitting;
@@ -374,6 +381,7 @@ export function NewCampaignDialog({ open, onClose }: Props) {
             daily_limit: draft.dailyLimit,
             open_tracking: draft.openTracking,
             link_tracking: draft.linkTracking,
+            utm_tracking: draft.utmTracking,
             unsubscribe_header: draft.unsubHeader,
             email_tag_ids: draft.emailTagIds,
             steps: buildSteps(),
@@ -1002,9 +1010,15 @@ function SendingStep({ draft, patch }: { draft: Draft; patch: (p: Partial<Draft>
                     />
                     <SwitchRow
                         label="Track clicks"
-                        description="Wrap links so click activity appears in your live feed."
+                        description="Wrap links so each click, and which link it was, appears in your live feed and the contact's activity."
                         value={draft.linkTracking}
                         onChange={(v) => patch({ linkTracking: v })}
+                    />
+                    <SwitchRow
+                        label="Add UTM parameters"
+                        description="Tag every link with utm_source, utm_medium, utm_campaign and a per-link utm_content for your web analytics. Editable later in settings."
+                        value={draft.utmTracking}
+                        onChange={(v) => patch({ utmTracking: v })}
                     />
                     <SwitchRow
                         label="Unsubscribe header"

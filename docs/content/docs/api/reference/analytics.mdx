@@ -29,6 +29,7 @@ Returns the main dashboard overview for the active organization: aggregate stats
     "total_opens": 612,
     "machine_opens": 88,
     "total_clicks": 143,
+    "machine_clicks": 6,
     "total_replies": 57,
     "total_bounces": 9,
     "open_rate": 49.35,
@@ -239,6 +240,7 @@ Returns a single campaign's performance summary plus per-sequence-step stats. Th
     "unique_opens": 410,
     "machine_opens": 52,
     "unique_clicks": 99,
+    "machine_clicks": 4,
     "replies": 41,
     "bounces": 5,
     "unsubscribes": 3,
@@ -262,7 +264,7 @@ Returns a single campaign's performance summary plus per-sequence-step stats. Th
 }
 ```
 
-`machine_opens` is the subset of `unique_opens` from automated fetchers (Apple MPP prefetch, UA-less clients); human opens are `unique_opens` minus `machine_opens`.
+`machine_opens` is the subset of `unique_opens` from automated fetchers (Apple MPP prefetch, UA-less clients, opens inside ten seconds of the send); human opens are `unique_opens` minus `machine_opens`. `machine_clicks` counts steps whose only clicks were automated (a security gateway walking the links); those are not part of `unique_clicks` or `total_clicks`, which only ever count a person's click.
 
 ## Get campaign daily stats
 

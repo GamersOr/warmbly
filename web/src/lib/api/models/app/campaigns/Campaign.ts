@@ -84,6 +84,14 @@ export default interface Campaign {
     tracking_domain_verified: boolean;
     tracking_domain_verified_at?: string | null;
 
+    // Automatic UTM tagging of every link. Empty source/medium/campaign keep
+    // the defaults (warmbly / email / the campaign name); utm_content is
+    // always the link's own text.
+    utm_tracking: boolean;
+    utm_source: string;
+    utm_medium: string;
+    utm_campaign: string;
+
     updated_at: Date;
     created_at: Date;
 

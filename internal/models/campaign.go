@@ -185,6 +185,14 @@ type Campaign struct {
 	TrackingDomainVerified   bool       `json:"tracking_domain_verified"`
 	TrackingDomainVerifiedAt *time.Time `json:"tracking_domain_verified_at,omitempty"`
 
+	// Automatic UTM tagging of every link in the email body. Empty source,
+	// medium and campaign values mean the defaults ("warmbly", "email", the
+	// campaign name); utm_content is always the link's own text.
+	UTMTracking bool   `json:"utm_tracking"`
+	UTMSource   string `json:"utm_source"`
+	UTMMedium   string `json:"utm_medium"`
+	UTMCampaign string `json:"utm_campaign"`
+
 	LastStatusChangeAt *time.Time `json:"last_status_change_at,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
@@ -310,6 +318,11 @@ type UpdateCampaign struct {
 	PrioritizeNewLeads *bool   `json:"prioritize_new_leads,omitempty"`
 	TrackingDomain     *string `json:"tracking_domain,omitempty"`
 
+	UTMTracking *bool   `json:"utm_tracking,omitempty"`
+	UTMSource   *string `json:"utm_source,omitempty"`
+	UTMMedium   *string `json:"utm_medium,omitempty"`
+	UTMCampaign *string `json:"utm_campaign,omitempty"`
+
 	// Auto-pause guardrails. GuardrailTrippedAt/Reason are server-owned and
 	// are cleared when the campaign is started again, so they are not settable
 	// here.
@@ -380,6 +393,12 @@ type CreateCampaign struct {
 	MaxNewLeadsPerDay  *int    `json:"max_new_leads_per_day,omitempty"`
 	PrioritizeNewLeads *bool   `json:"prioritize_new_leads,omitempty"`
 	TrackingDomain     *string `json:"tracking_domain,omitempty"`
+
+	// Automatic UTM tagging (off unless sent). Empty values keep the defaults.
+	UTMTracking *bool   `json:"utm_tracking,omitempty"`
+	UTMSource   *string `json:"utm_source,omitempty"`
+	UTMMedium   *string `json:"utm_medium,omitempty"`
+	UTMCampaign *string `json:"utm_campaign,omitempty"`
 
 	// Initial sequences (in order) — caller can also create them after.
 	Sequences []CreateSequenceInput `json:"steps,omitempty"`

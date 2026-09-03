@@ -145,7 +145,8 @@ const CAMPAIGN_SELECT = `id, name, description, status,
 		  guardrail_enabled, guardrail_bounce_rate_max, guardrail_complaint_rate_max,
 		  guardrail_reply_rate_min, guardrail_min_sample, guardrail_window_days,
 		  guardrail_tripped_at, guardrail_reason,
-		  kind`
+		  kind,
+		  utm_tracking, utm_source, utm_medium, utm_campaign`
 
 func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) error {
 	var dest []any = []any{
@@ -165,6 +166,7 @@ func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) err
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
 		&campaign.Kind,
+		&campaign.UTMTracking, &campaign.UTMSource, &campaign.UTMMedium, &campaign.UTMCampaign,
 	}
 	dest = append(dest, extra...)
 	return rows.Scan(
@@ -189,6 +191,7 @@ const CAMPAIGN_SELECT_FULL = `
 	c.guardrail_reply_rate_min, c.guardrail_min_sample, c.guardrail_window_days,
 	c.guardrail_tripped_at, c.guardrail_reason,
 	c.kind,
+	c.utm_tracking, c.utm_source, c.utm_medium, c.utm_campaign,
 	COALESCE(array_agg(cet.tag_id) FILTER (WHERE cet.tag_id IS NOT NULL), '{}') AS email_tag_ids,
 	COALESCE(array_agg(cec.folder_id) FILTER (WHERE cec.folder_id IS NOT NULL), '{}') AS email_folder_ids
 `
@@ -331,6 +334,26 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		riskyEmails = *data.RiskyEmails
 	}
 
+	utmTracking := false
+	if data.UTMTracking != nil {
+		utmTracking = *data.UTMTracking
+	}
+	utmSource, utmMedium, utmCampaign := "", "", ""
+	if data.UTMSource != nil {
+		utmSource = strings.TrimSpace(*data.UTMSource)
+	}
+	if data.UTMMedium != nil {
+		utmMedium = strings.TrimSpace(*data.UTMMedium)
+	}
+	if data.UTMCampaign != nil {
+		utmCampaign = strings.TrimSpace(*data.UTMCampaign)
+	}
+	for _, v := range []string{utmSource, utmMedium, utmCampaign} {
+		if err := validate.CampaignUTMValue(v); err != nil {
+			return nil, err
+		}
+	}
+
 	// ── Net-new send controls. Defaults reproduce today's behavior exactly. ──
 	senderStrategy := "tags"
 	if data.SenderStrategy != nil {
@@ -426,6 +449,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			ramp_enabled, ramp_start, ramp_increment, ramp_ceiling,
 			esp_match_mode, max_new_leads_per_day, prioritize_new_leads,
 			tracking_domain, kind,
+			utm_tracking, utm_source, utm_medium, utm_campaign,
 			created_at, updated_at
 		) VALUES (
 			gen_random_uuid(), $1, $2, $3, $4,
@@ -437,6 +461,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			$22, $23, $24, $25,
 			$26, $27, $28,
 			$29, $30,
+			$31, $32, $33, $34,
 			NOW(), NOW()
 		)
 		RETURNING %s
@@ -473,6 +498,10 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		prioritizeNewLeads, // $28
 		trackingDomain,     // $29
 		kind,               // $30
+		utmTracking,        // $31
+		utmSource,          // $32
+		utmMedium,          // $33
+		utmCampaign,        // $34
 	}
 
 	row := tx.QueryRow(ctx, insertSQL, params...)
@@ -1117,6 +1146,27 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		// the CNAME is re-resolved (only a verified override is honored).
 		setClauses = append(setClauses, "tracking_domain_verified = false", "tracking_domain_verified_at = NULL")
 	}
+	if data.UTMTracking != nil {
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "utm_tracking", argPos))
+		args = append(args, *data.UTMTracking)
+		argPos++
+	}
+	for col, val := range map[string]*string{
+		"utm_source":   data.UTMSource,
+		"utm_medium":   data.UTMMedium,
+		"utm_campaign": data.UTMCampaign,
+	} {
+		if val == nil {
+			continue
+		}
+		v := strings.TrimSpace(*val)
+		if err := validate.CampaignUTMValue(v); err != nil {
+			return nil, err
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, argPos))
+		args = append(args, v)
+		argPos++
+	}
 
 	// Auto-pause guardrails. Each rate is a percentage in [0,100] where 0 means
 	// "this rule is off"; the DB CHECK mirrors these bounds, but rejecting here
@@ -1274,6 +1324,7 @@ func (r *campaignRepository) GetByID(ctx context.Context, campaignID uuid.UUID) 
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
 		&campaign.Kind,
+		&campaign.UTMTracking, &campaign.UTMSource, &campaign.UTMMedium, &campaign.UTMCampaign,
 		&campaign.EmailTags, &campaign.Folders,
 	)
 	if err != nil {
