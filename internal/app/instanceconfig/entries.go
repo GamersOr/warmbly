@@ -26,6 +26,7 @@ const (
 	docsCaptcha    = "/development/configuration/#captcha"
 	docsSSO        = "/development/accounts-and-access/#single-sign-on"
 	docsFirstOwner = "/development/accounts-and-access/#first-owner"
+	docsUpdates    = "/development/updates/"
 )
 
 // table is the static inventory. Declaration order is display order.
@@ -772,6 +773,49 @@ var table = []Entry{
 		Effect:     "Error reporting. Optional in every environment; unset simply logs instead.",
 		DocsAnchor: docsDeployment,
 		Resolve:    envValue("SENTRY_DSN"),
+	},
+
+	// Updates.
+	{
+		Key: "UPDATE_CHECK_ENABLED", Group: GroupUpdates, RuntimeChangeable: ChangeBootOnly,
+		Effect:     "Polls GitHub Releases for a newer Warmbly and shows it in the admin panel's top bar and on Setup and health.",
+		DocsAnchor: docsUpdates,
+		Resolve:    boolOr("UPDATE_CHECK_ENABLED", true),
+	},
+	{
+		Key: "UPDATE_CHECK_INTERVAL", Group: GroupUpdates, RuntimeChangeable: ChangeBootOnly,
+		Effect:     "How often the release check runs. Minimum 5m.",
+		DocsAnchor: docsUpdates,
+		Resolve:    envOr("UPDATE_CHECK_INTERVAL", "30m"),
+	},
+	{
+		Key: "UPDATE_CHANNEL", Group: GroupUpdates, RuntimeChangeable: ChangeBootOnly,
+		Effect:     "stable follows releases; dev also offers prereleases.",
+		DocsAnchor: docsUpdates,
+		Resolve:    envOr("UPDATE_CHANNEL", "stable"),
+	},
+	{
+		Key: "RELEASES_GITHUB_REPO", Group: GroupUpdates, RuntimeChangeable: ChangeBootOnly,
+		Effect:     "The owner/repo whose releases count as Warmbly versions. Point a fork's instance at the fork.",
+		DocsAnchor: docsUpdates,
+		Resolve:    envOr("RELEASES_GITHUB_REPO", "warmbly/warmbly"),
+	},
+	{
+		Key: "UPDATER_URL", Group: GroupUpdates, RuntimeChangeable: ChangeBootOnly,
+		Effect:     "The host-side updater that applies an update (pull, rebuild, restart). Unset leaves the panel report-only.",
+		DocsAnchor: docsUpdates,
+		Resolve:    envValue("UPDATER_URL"),
+	},
+	{
+		Key: "UPDATER_TOKEN", Group: GroupUpdates, RuntimeChangeable: ChangeBootOnly,
+		Effect:     "The bearer token the backend presents to the updater. Falls back to INTERNAL_API_TOKEN.",
+		DocsAnchor: docsUpdates, WhenUnset: SourceDerived,
+		Resolve: func(*Runtime) string {
+			if v := trimmed("UPDATER_TOKEN"); v != "" {
+				return v
+			}
+			return trimmed("INTERNAL_API_TOKEN")
+		},
 	},
 }
 

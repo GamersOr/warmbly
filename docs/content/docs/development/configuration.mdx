@@ -381,6 +381,20 @@ Delayed sends run through the local poller, so the backend must be running for s
 | `SENTRY_DSN` | Error reporting. Optional in every environment, including `prod` | unset |
 | `APNS_KEY` or `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC` | Mobile push on backend and consumer. Partial configuration disables push with a warning, never a crash | unset |
 
+## Updates
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `UPDATE_CHECK_ENABLED` | Polls GitHub Releases for a newer Warmbly and shows it in the admin panel's top bar and on Setup and health | `true` | yes |
+| `UPDATE_CHECK_INTERVAL` | How often the release check runs. Minimum `5m` | `30m` | yes |
+| `UPDATE_CHANNEL` | `stable` follows releases; `dev` also offers prereleases | `stable` | yes |
+| `RELEASES_GITHUB_REPO` | The `owner/repo` whose releases count as Warmbly versions. Point a fork's instance at the fork | `warmbly/warmbly` | yes |
+| `RELEASES_GITHUB_TOKEN` | Optional GitHub token; only raises the API rate limit | unset | yes |
+| `UPDATER_URL` | The host-side updater that applies an update (pull, rebuild, restart). Unset, or `none`, leaves the panel report-only | `http://updater:8095` under compose | yes |
+| `UPDATER_TOKEN` | The bearer token the backend presents to the updater | `INTERNAL_API_TOKEN` | yes |
+
+The updater's own variables (`UPDATER_MODE`, `UPDATER_COMMAND`, `UPDATER_REPO_DIR` and the rest) are on [Updates](/development/updates/#configuration); it is a separate process and its environment is not on the configuration page.
+
 ## Forms service
 
 The public face of hosted forms (`cmd/forms`): it serves the React (TanStack) form app built from `forms/`, the per-form page shells, the embed loader and public submissions, on its own port so form traffic never touches the API origin. It reads its own environment; none of these appear in the admin panel except `FORM_IP_RATE_LIMIT`.

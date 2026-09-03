@@ -60,6 +60,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/tz"
 	"github.com/warmbly/warmbly/internal/app/unibox"
 	"github.com/warmbly/warmbly/internal/app/unsublink"
+	"github.com/warmbly/warmbly/internal/app/updates"
 	"github.com/warmbly/warmbly/internal/app/user"
 	"github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
@@ -161,6 +162,8 @@ type Handler struct {
 	WorkerRepo         repository.WorkerRepository
 	CredentialsRepo    repository.CredentialsRepository
 	ReleasesService    *releases.Service
+	// UpdatesService backs the admin panel's update indicator and button.
+	UpdatesService *updates.Service
 
 	// Notifications
 	EmailNotificationService notify.EmailNotificationService
