@@ -82,6 +82,11 @@ var apiSpecs = []apiSpec{
 	{name: "contact import-commit", summary: "Commit a previewed bulk import", method: "POST", path: "/contacts/import/commit", body: bodyRequired},
 	{name: "contact export", summary: "Export contacts", method: "POST", path: "/contacts/export", body: bodyOptional},
 
+	// Suppression list.
+	{name: "suppression list", summary: "The workspace suppression list: addresses and domains that get no campaign mail", method: "GET", path: "/suppressions", query: []string{"limit", "cursor", "q"}},
+	{name: "suppression add", summary: "Add addresses or domains to the suppression list", method: "POST", path: "/suppressions", body: bodyRequired},
+	{name: "suppression remove", summary: "Lift a suppression entry so the address can be emailed again", method: "DELETE", path: "/suppressions/{id}"},
+
 	// Mailboxes (email accounts).
 	{name: "mailbox list", summary: "List connected mailboxes", method: "GET", path: "/emails", query: []string{"limit", "cursor", "q"}},
 	{name: "mailbox get", summary: "Get one mailbox", method: "GET", path: "/emails/{id}"},

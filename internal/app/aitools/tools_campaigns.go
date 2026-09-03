@@ -106,6 +106,7 @@ func (d Deps) registerCampaignTools(r *Registry) {
 			"link_tracking":      boolProp("Track link clicks."),
 			"text_only":          boolProp("Send plain text only."),
 			"unsubscribe_header": boolProp("Send the List-Unsubscribe header (one-click unsubscribe)."),
+			"unsubscribe_mode":   strProp("In-body opt-out: inherit (workspace default), text (reply-to-opt-out line), link (unsubscribe link), off."),
 			"ramp_enabled":       boolProp("Gradually ramp daily volume."),
 			"ramp_start":         intProp("Ramp starting volume."),
 			"ramp_increment":     intProp("Ramp daily increment."),
@@ -213,6 +214,7 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		LinkTracking      *bool   `json:"link_tracking"`
 		TextOnly          *bool   `json:"text_only"`
 		UnsubscribeHeader *bool   `json:"unsubscribe_header"`
+		UnsubscribeMode   *string `json:"unsubscribe_mode"`
 		RampEnabled       *bool   `json:"ramp_enabled"`
 		RampStart         *int    `json:"ramp_start"`
 		RampIncrement     *int    `json:"ramp_increment"`
@@ -234,6 +236,7 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		LinkTracking:      in.LinkTracking,
 		TextOnly:          in.TextOnly,
 		UnsubscribeHeader: in.UnsubscribeHeader,
+		UnsubscribeMode:   in.UnsubscribeMode,
 		RampEnabled:       in.RampEnabled,
 		RampStart:         in.RampStart,
 		RampIncrement:     in.RampIncrement,

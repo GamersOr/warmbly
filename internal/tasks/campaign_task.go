@@ -457,12 +457,23 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	rawSubject, rawBodyHTML, rawBodyPlain := sequence.Subject, sequence.BodyHTML, sequence.BodyPlain
 	s.resolveFormLinks(ctx, orgID, campaign, contact, &rawSubject, &rawBodyHTML, &rawBodyPlain)
 
+	// STEP 9.75: The recipient's opt-out. The signed link (when the instance
+	// can mint one) backs the List-Unsubscribe header, the link-mode footer
+	// and any {{.UnsubscribeLink}} the step places by hand; the footer mode
+	// comes from Settings > Sending unless the campaign overrides it.
+	optOut := s.resolveOptOut(ctx, orgID, campaign)
+	var unsubscribeURL string
+	if s.unsubLinks != nil && s.unsubLinks.Enabled() {
+		unsubscribeURL = s.unsubLinks.URL(orgID, campaign.ID, contact.ID, time.Now())
+	}
+	extra := map[string]string{UnsubscribeLinkVar: unsubscribeURL}
+
 	// STEP 10: Render email template with contact variables, then expand any
 	// {a|b|c} spintax per-recipient (only real |-groups; literal braces/CSS are
 	// left intact) so each send varies for deliverability.
-	subject := expandSpintax(RenderTemplate(rawSubject, *contact))
-	bodyHTML := expandSpintax(RenderTemplate(rawBodyHTML, *contact))
-	bodyPlain := expandSpintax(RenderTemplate(rawBodyPlain, *contact))
+	subject := expandSpintax(RenderTemplateWith(rawSubject, *contact, extra))
+	bodyHTML := expandSpintax(RenderTemplateWith(rawBodyHTML, *contact, extra))
+	bodyPlain := expandSpintax(RenderTemplateWith(rawBodyPlain, *contact, extra))
 
 	// If no plain text provided, extract from HTML
 	if bodyPlain == "" && bodyHTML != "" {
@@ -560,6 +571,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 	}
 
+	// STEP 12.5: Opt-out footer, after the signature and after click tracking
+	// so the link is never rewritten into a tracked ticket.
+	bodyHTML, bodyPlain = appendOptOut(bodyHTML, bodyPlain, optOut, unsubscribeURL)
+
 	// STEP 13: Warm the organization DEK so the publisher's encrypt pass (the
 	// one whose ciphertext is actually sent) fails fast here if KMS is down.
 	if account.OrganizationID == nil {
@@ -584,11 +599,12 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 	}
 
-	// STEP 15.5: Generate List-Unsubscribe URL if enabled
-	var unsubscribeURL string
+	// STEP 15.5: The List-Unsubscribe header carries the same signed link.
+	// Off when the campaign disabled it, or when no link could be minted: a
+	// header pointing nowhere is worse than none.
+	headerURL := ""
 	if campaign.UnsubscribeHeader {
-		unsubscribeURL = fmt.Sprintf("https://%s/unsubscribe?cid=%s&rid=%s",
-			config.Domain, campaign.ID.String(), contact.ID.String())
+		headerURL = unsubscribeURL
 	}
 
 	// STEP 15.9: Reserve the send BEFORE it goes on the bus. Once the command is
@@ -637,7 +653,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		MessageID:      messageID,
 		IsWarmup:       false,
 		Tracking:       tracking,
-		UnsubscribeURL: unsubscribeURL,
+		UnsubscribeURL: headerURL,
 		Attachments:    attachmentRefs,
 	}
 
@@ -1282,4 +1298,17 @@ func (s *tasksService) recordSchedulerFailure(ctx context.Context, campaignID uu
 		Message:    message,
 		Metadata:   meta,
 	})
+}
+
+// resolveOptOut is the effective in-body opt-out for a campaign: the
+// workspace setting with the campaign's own mode applied. A settings read
+// failure falls back to the defaults rather than sending without an opt-out.
+func (s *tasksService) resolveOptOut(ctx context.Context, orgID uuid.UUID, campaign *models.Campaign) models.UnsubscribeSettings {
+	base := models.DefaultAdvancedOutreachSettings().Unsubscribe
+	if s.advanced != nil {
+		if settings, xerr := s.advanced.GetOrganizationSettings(ctx, orgID); xerr == nil && settings != nil {
+			base = settings.Unsubscribe
+		}
+	}
+	return base.Effective(campaign.UnsubscribeMode)
 }

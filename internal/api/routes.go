@@ -97,11 +97,12 @@ func Run(
 	// postMessages code+state to the SPA opener, which calls oauth/finish.
 	r.GET("/integrations/oauth/callback", h.IntegrationOAuthCallback)
 
-	// Public List-Unsubscribe endpoint (RFC 8058). GET = recipient clicks the
-	// link; POST = mailbox provider's one-click (body List-Unsubscribe=One-Click).
-	// Both suppress the recipient org-wide. Unauthenticated by design.
-	r.GET("/unsubscribe", h.Unsubscribe)
-	r.POST("/unsubscribe", h.Unsubscribe)
+	// Public recipient unsubscribe (RFC 8058 one-click and the link in the
+	// email). The path token is signed per recipient; GET only shows a
+	// confirm page, POST suppresses. Unauthenticated by design.
+	r.GET("/unsubscribe/:token", h.UnsubscribePage)
+	r.POST("/unsubscribe/:token", h.UnsubscribeSubmit)
+	r.POST("/unsubscribe/:token/resubscribe", h.UnsubscribeUndo)
 
 	// Public invitation preview for the /invite landing page. Unauthenticated:
 	// the secret token in the query is the capability.
@@ -792,6 +793,17 @@ func Run(
 			{
 				outreach.GET("/settings", h.GetOutreachSettings)
 				outreach.PATCH("/settings", h.UpdateOutreachSettings)
+			}
+
+			// The workspace suppression list (org-scoped). Reading it is a
+			// contacts read; adding or lifting an entry changes who gets mail,
+			// so it needs the contacts write permission.
+			suppressions := protected.Group("/suppressions")
+			suppressions.Use(m.RequireOrganization())
+			{
+				suppressions.GET("", m.RateLimitMiddleware(models.RateLimitRead), m.RequireAccess(models.PermViewContacts, models.APIPermReadContacts), h.ListSuppressions)
+				suppressions.POST("", m.RateLimitMiddleware(models.RateLimitWrite), m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.AddSuppressions)
+				suppressions.DELETE("/:id", m.RateLimitMiddleware(models.RateLimitWrite), m.RequireAccess(models.PermManageContacts, models.APIPermWriteContacts), h.RemoveSuppression)
 			}
 
 			// Deliverability event ingestion (org-scoped). API-key callable so

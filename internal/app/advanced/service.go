@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/warmbly/warmbly/internal/pkg/emailverify"
 	"hash/fnv"
 	"math/rand"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/pkg/emailverify"
+	"github.com/warmbly/warmbly/internal/utils/validate"
 
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/listgate"
@@ -56,6 +60,19 @@ type Service interface {
 	// (one-click POST or the manual link). Always suppresses — it's an explicit
 	// recipient request, independent of the auto-suppress settings.
 	Unsubscribe(ctx context.Context, campaignID, contactID uuid.UUID) *errx.Error
+	// UnsubscribeFromLink is Unsubscribe for a verified link token: the
+	// organization in the token must own the campaign, and via names the
+	// mechanism ("one_click" for the RFC 8058 POST, "link" for a click).
+	UnsubscribeFromLink(ctx context.Context, organizationID, campaignID, contactID uuid.UUID, via string) *errx.Error
+	// Resubscribe undoes a recipient's own unsubscribe from the hosted page.
+	// Only an entry the recipient made (source "unsubscribe") is removed; a
+	// bounce, complaint or manual entry stays.
+	Resubscribe(ctx context.Context, organizationID, contactID uuid.UUID) *errx.Error
+
+	// The workspace suppression list.
+	ListSuppressions(ctx context.Context, organizationID uuid.UUID, q string, beforeAt *time.Time, beforeID *uuid.UUID, limit int) ([]models.SuppressedRecipient, *errx.Error)
+	AddSuppressions(ctx context.Context, organizationID, actorID uuid.UUID, req *models.AddSuppressionsRequest) (*models.AddSuppressionsResult, *errx.Error)
+	RemoveSuppression(ctx context.Context, organizationID, id uuid.UUID) (*models.SuppressedRecipient, *errx.Error)
 	SelectVariant(ctx context.Context, organizationID, campaignID, contactID, sequenceID uuid.UUID, subject, bodyHTML, bodyPlain string) (*models.VariantSelection, *errx.Error)
 	OptimizeSendTime(ctx context.Context, organizationID uuid.UUID, contact *models.Contact, base time.Time) (time.Time, *errx.Error)
 
@@ -513,8 +530,25 @@ func (s *service) ListPipelines(ctx context.Context, orgID uuid.UUID) ([]models.
 }
 
 func (s *service) Unsubscribe(ctx context.Context, campaignID, contactID uuid.UUID) *errx.Error {
+	return s.unsubscribe(ctx, nil, campaignID, contactID, "action")
+}
+
+func (s *service) UnsubscribeFromLink(ctx context.Context, organizationID, campaignID, contactID uuid.UUID, via string) *errx.Error {
+	if via != "one_click" {
+		via = "link"
+	}
+	return s.unsubscribe(ctx, &organizationID, campaignID, contactID, via)
+}
+
+// unsubscribe records an explicit opt-out: the address goes on the workspace
+// suppression list and the contact's own subscription flag is cleared, so the
+// CRM and the send gate tell the same story.
+func (s *service) unsubscribe(ctx context.Context, expectOrg *uuid.UUID, campaignID, contactID uuid.UUID, via string) *errx.Error {
 	campaign, err := s.campaignRepo.GetByID(ctx, campaignID)
 	if err != nil || campaign == nil || campaign.OrganizationID == nil {
+		return errx.New(errx.BadRequest, "invalid unsubscribe link")
+	}
+	if expectOrg != nil && *expectOrg != *campaign.OrganizationID {
 		return errx.New(errx.BadRequest, "invalid unsubscribe link")
 	}
 	contact, cerr := s.contactRepo.GetByID(ctx, contactID)
@@ -522,23 +556,150 @@ func (s *service) Unsubscribe(ctx context.Context, campaignID, contactID uuid.UU
 		return errx.New(errx.BadRequest, "invalid unsubscribe link")
 	}
 
+	reason := map[string]string{
+		"one_click": "one-click unsubscribe (mail client)",
+		"link":      "clicked the unsubscribe link",
+		"action":    "unsubscribed by a sequence action",
+	}[via]
 	if err := s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
 		OrganizationID: *campaign.OrganizationID,
 		Email:          contact.Email,
-		Reason:         "one-click unsubscribe",
+		Kind:           models.SuppressionKindEmail,
+		Reason:         reason,
 		Source:         models.DeliverabilityEventUnsubscribe,
 		CampaignID:     &campaignID,
+		Metadata:       map[string]interface{}{"via": via},
 	}); err != nil {
 		return toErrx(err)
+	}
+	if err := s.contactRepo.SetSubscribedByEmail(ctx, *campaign.OrganizationID, contact.Email, false); err != nil {
+		log.Warn().Err(err).Str("contact_id", contactID.String()).Msg("unsubscribe: could not clear the contact's subscription flag")
 	}
 
 	s.emit(ctx, *campaign.OrganizationID, models.WebhookEventCampaignUnsubscribed, map[string]any{
 		"campaign_id":   campaignID.String(),
 		"contact_id":    contactID.String(),
 		"contact_email": contact.Email,
-		"source":        "one_click",
+		"source":        via,
 	})
 	return nil
+}
+
+func (s *service) Resubscribe(ctx context.Context, organizationID, contactID uuid.UUID) *errx.Error {
+	contact, cerr := s.contactRepo.GetByID(ctx, contactID)
+	if cerr != nil || contact == nil || contact.Email == "" {
+		return errx.New(errx.BadRequest, "invalid unsubscribe link")
+	}
+	// The contact must belong to the organization in the token.
+	if owned, oerr := s.contactRepo.GetByEmailAndOrganization(ctx, organizationID, contact.Email); oerr != nil || owned == nil {
+		return errx.New(errx.BadRequest, "invalid unsubscribe link")
+	}
+	if _, err := s.repo.DeleteSuppressionByEmail(ctx, organizationID, contact.Email, models.DeliverabilityEventUnsubscribe); err != nil {
+		return toErrx(err)
+	}
+	if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, contact.Email, true); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+func (s *service) ListSuppressions(ctx context.Context, organizationID uuid.UUID, q string, beforeAt *time.Time, beforeID *uuid.UUID, limit int) ([]models.SuppressedRecipient, *errx.Error) {
+	out, err := s.repo.ListSuppressedRecipients(ctx, organizationID, q, beforeAt, beforeID, limit)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return out, nil
+}
+
+// suppressionDomain matches a bare host ("acme.com", "mail.acme.co.uk").
+var suppressionDomain = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
+// AddSuppressions adds each value as an address, or as a domain when it has
+// no local part ("acme.com" or "@acme.com"). Unparseable values are reported
+// back rather than failing the whole batch, because the batch is usually a
+// pasted list with a stray header or blank line in it.
+func (s *service) AddSuppressions(ctx context.Context, organizationID, actorID uuid.UUID, req *models.AddSuppressionsRequest) (*models.AddSuppressionsResult, *errx.Error) {
+	if req == nil || len(req.Entries) == 0 {
+		return nil, errx.New(errx.BadRequest, "entries are required")
+	}
+	if len(req.Entries) > 5000 {
+		return nil, errx.New(errx.BadRequest, "at most 5000 entries per request")
+	}
+	source := models.SuppressionSourceManual
+	if len(req.Entries) > 1 {
+		source = models.SuppressionSourceImport
+	}
+	res := &models.AddSuppressionsResult{Skipped: []string{}}
+	seen := map[string]bool{}
+	for _, e := range req.Entries {
+		raw := strings.TrimSpace(e.Value)
+		value := strings.ToLower(strings.TrimPrefix(raw, "@"))
+		if value == "" || seen[value] {
+			continue
+		}
+		kind := models.SuppressionKindEmail
+		if strings.Contains(value, "@") {
+			if !validate.Email(value) {
+				res.Skipped = append(res.Skipped, raw)
+				continue
+			}
+		} else if suppressionDomain.MatchString(value) {
+			kind = models.SuppressionKindDomain
+		} else {
+			res.Skipped = append(res.Skipped, raw)
+			continue
+		}
+		seen[value] = true
+		reason := strings.TrimSpace(e.Reason)
+		if reason == "" {
+			reason = strings.TrimSpace(req.Reason)
+		}
+		if reason == "" {
+			reason = "added to the suppression list"
+		}
+		if len(reason) > 300 {
+			reason = reason[:300]
+		}
+		if err := s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
+			OrganizationID: organizationID,
+			Email:          value,
+			Kind:           kind,
+			Reason:         reason,
+			Source:         source,
+			Metadata:       map[string]interface{}{"added_by": actorID.String()},
+		}); err != nil {
+			return nil, toErrx(err)
+		}
+		if kind == models.SuppressionKindEmail {
+			if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, value, false); err != nil {
+				log.Warn().Err(err).Msg("suppression: could not clear the contact's subscription flag")
+			}
+		}
+		res.Added++
+	}
+	return res, nil
+}
+
+func (s *service) RemoveSuppression(ctx context.Context, organizationID, id uuid.UUID) (*models.SuppressedRecipient, *errx.Error) {
+	entry, err := s.repo.GetSuppressedRecipient(ctx, organizationID, id)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	if entry == nil {
+		return nil, errx.New(errx.NotFound, "suppression entry not found")
+	}
+	if _, err := s.repo.DeleteSuppressedRecipient(ctx, organizationID, id); err != nil {
+		return nil, toErrx(err)
+	}
+	// Lifting an address's suppression restores the contact too; otherwise
+	// the send gate still refuses it on the subscription flag and the list
+	// says one thing while the contact says another.
+	if entry.Kind == models.SuppressionKindEmail {
+		if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, entry.Email, true); err != nil {
+			log.Warn().Err(err).Msg("suppression: could not restore the contact's subscription flag")
+		}
+	}
+	return entry, nil
 }
 
 // pickVariantWeightedRandom does a weighted random draw over active variants.
@@ -740,6 +901,22 @@ func buildReplyHeaders(msg *models.EmailMessageStoreData) map[string][]string {
 		}
 	}
 	return h
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func uuidString(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
 }
 
 func containsAnyKeyword(text string, keywords []string) bool {
@@ -984,17 +1161,30 @@ func (s *service) ProcessIncomingReply(ctx context.Context, emailAccountID uuid.
 		actionTaken = "paused_campaign"
 	}
 
+	// Reply-based opt-out is what makes the plain "just reply and I'll stop"
+	// line a real mechanism. The check ignores the quoted history (which
+	// carries our own opt-out wording) and matches whole phrases only.
 	if settings.ReplyIntent.AutoSuppressOnUnsubWord &&
-		containsAnyKeyword(text, []string{"unsubscribe", "remove me", "stop"}) {
+		replyclassify.IsOptOut(msg.Subject, firstNonEmpty(msg.BodyText, msg.Snippet)) {
 		_ = s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
 			OrganizationID: *account.OrganizationID,
 			Email:          sender,
-			Reason:         "reply intent unsubscribe detected",
+			Kind:           models.SuppressionKindEmail,
+			Reason:         "asked to stop in a reply",
 			Source:         models.DeliverabilityEventUnsubscribe,
 			CampaignID:     campaignID,
 			Metadata: map[string]interface{}{
-				"via": "reply_intent",
+				"via": "reply",
 			},
+		})
+		if err := s.contactRepo.SetSubscribedByEmail(ctx, *account.OrganizationID, sender, false); err != nil {
+			log.Warn().Err(err).Msg("reply opt-out: could not clear the contact's subscription flag")
+		}
+		s.emit(ctx, *account.OrganizationID, models.WebhookEventCampaignUnsubscribed, map[string]any{
+			"campaign_id":   uuidString(campaignID),
+			"contact_id":    uuidString(contactID),
+			"contact_email": sender,
+			"source":        "reply",
 		})
 		if actionTaken == "" {
 			actionTaken = "suppressed_recipient"
@@ -1535,17 +1725,24 @@ func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID u
 	}
 
 	if settings.Preflight.CheckUnsubscribeHeader {
-		pass := campaign.UnsubscribeHeader
+		optOut := settings.Unsubscribe.Effective(campaign.UnsubscribeMode)
+		bodyOptOut := optOut.Mode != models.UnsubscribeModeOff
+		pass := campaign.UnsubscribeHeader || bodyOptOut
 		check := models.PreflightCheckResult{
 			Key:      "unsubscribe_header",
 			Passed:   pass,
 			Severity: "warning",
-			Message:  "Unsubscribe header is enabled.",
+			Message:  "Recipients have a way to opt out.",
 		}
-		if !pass {
-			check.Message = "Unsubscribe header is disabled."
-			check.Remediation = "Enable unsubscribe_header for compliance and deliverability."
-			recommendations = append(recommendations, "Enable unsubscribe header.")
+		switch {
+		case !pass:
+			check.Message = "Recipients have no way to opt out: the unsubscribe header and the opt-out line are both off."
+			check.Remediation = "Turn the opt-out line back on in Settings > Sending or on the campaign, or enable the unsubscribe header."
+			recommendations = append(recommendations, "Give recipients a way to opt out.")
+		case !campaign.UnsubscribeHeader:
+			check.Message = "Opt-out line is on; the List-Unsubscribe header is off."
+		case !bodyOptOut:
+			check.Message = "List-Unsubscribe header is on; no opt-out line in the body."
 		}
 		checks = append(checks, check)
 	}

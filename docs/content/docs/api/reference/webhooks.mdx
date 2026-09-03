@@ -462,7 +462,7 @@ The full catalog is available at `GET /webhooks/event-types`. Below is the compl
 | `campaign.email_clicked` | A tracked link click is recorded. | yes |
 | `campaign.email_bounced` | A campaign email bounces. | |
 | `campaign.reply_received` | A human reply lands for a campaign thread. | |
-| `campaign.unsubscribed` | A recipient clicks the unsubscribe link or requests removal. | |
+| `campaign.unsubscribed` | A recipient opts out. `source` is `one_click` (the mail client's button), `link` (the link in the email), `reply` (a reply asking to stop) or `action` (a sequence's unsubscribe step). | |
 | `campaign.deliverability_warning` | The campaign's rolling bounce or complaint rate enters the early-warning band. | |
 | `campaign.action` | A sequence flow `notify` action node fires. | |
 

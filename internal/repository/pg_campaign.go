@@ -144,7 +144,8 @@ const CAMPAIGN_SELECT = `id, name, description, status,
 		  schedule_windows,
 		  guardrail_enabled, guardrail_bounce_rate_max, guardrail_complaint_rate_max,
 		  guardrail_reply_rate_min, guardrail_min_sample, guardrail_window_days,
-		  guardrail_tripped_at, guardrail_reason`
+		  guardrail_tripped_at, guardrail_reason,
+		  unsubscribe_mode`
 
 func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) error {
 	var dest []any = []any{
@@ -163,6 +164,7 @@ func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) err
 		&campaign.GuardrailEnabled, &campaign.GuardrailBounceRateMax, &campaign.GuardrailComplaintRateMax,
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
+		&campaign.UnsubscribeMode,
 	}
 	dest = append(dest, extra...)
 	return rows.Scan(
@@ -186,6 +188,7 @@ const CAMPAIGN_SELECT_FULL = `
 	c.guardrail_enabled, c.guardrail_bounce_rate_max, c.guardrail_complaint_rate_max,
 	c.guardrail_reply_rate_min, c.guardrail_min_sample, c.guardrail_window_days,
 	c.guardrail_tripped_at, c.guardrail_reason,
+	c.unsubscribe_mode,
 	COALESCE(array_agg(cet.tag_id) FILTER (WHERE cet.tag_id IS NOT NULL), '{}') AS email_tag_ids,
 	COALESCE(array_agg(cec.folder_id) FILTER (WHERE cec.folder_id IS NOT NULL), '{}') AS email_folder_ids
 `
@@ -315,6 +318,13 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 	if data.RiskyEmails != nil {
 		riskyEmails = *data.RiskyEmails
 	}
+	unsubMode := string(models.UnsubscribeModeInherit)
+	if data.UnsubscribeMode != nil {
+		if !models.ValidUnsubscribeMode(*data.UnsubscribeMode) {
+			return nil, errx.New(errx.BadRequest, "unsubscribe_mode must be inherit, text, link or off")
+		}
+		unsubMode = *data.UnsubscribeMode
+	}
 
 	// ── Net-new send controls. Defaults reproduce today's behavior exactly. ──
 	senderStrategy := "tags"
@@ -410,7 +420,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			sender_strategy, rotation_mode,
 			ramp_enabled, ramp_start, ramp_increment, ramp_ceiling,
 			esp_match_mode, max_new_leads_per_day, prioritize_new_leads,
-			tracking_domain,
+			tracking_domain, unsubscribe_mode,
 			created_at, updated_at
 		) VALUES (
 			gen_random_uuid(), $1, $2, $3, $4,
@@ -421,7 +431,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			$20, $21,
 			$22, $23, $24, $25,
 			$26, $27, $28,
-			$29,
+			$29, $30,
 			NOW(), NOW()
 		)
 		RETURNING %s
@@ -457,6 +467,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		maxNewLeads,        // $27
 		prioritizeNewLeads, // $28
 		trackingDomain,     // $29
+		unsubMode,          // $30
 	}
 
 	row := tx.QueryRow(ctx, insertSQL, params...)
@@ -888,6 +899,14 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		args = append(args, *data.RiskyEmails)
 		argPos++
 	}
+	if data.UnsubscribeMode != nil {
+		if !models.ValidUnsubscribeMode(*data.UnsubscribeMode) {
+			return nil, errx.New(errx.BadRequest, "unsubscribe_mode must be inherit, text, link or off")
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "unsubscribe_mode", argPos))
+		args = append(args, *data.UnsubscribeMode)
+		argPos++
+	}
 	if data.CC != nil {
 		if !validate.EmailBulk(data.CC) {
 			return nil, errx.ErrEmail
@@ -1251,6 +1270,7 @@ func (r *campaignRepository) GetByID(ctx context.Context, campaignID uuid.UUID) 
 		&campaign.GuardrailEnabled, &campaign.GuardrailBounceRateMax, &campaign.GuardrailComplaintRateMax,
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
+		&campaign.UnsubscribeMode,
 		&campaign.EmailTags, &campaign.Folders,
 	)
 	if err != nil {

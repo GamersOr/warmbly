@@ -283,6 +283,9 @@ Registering and managing the OAuth apps your workspace owns. The flow itself (au
 |--------|------|----------------|
 | GET/PATCH | `/outreach/settings` | `WRITE_CAMPAIGNS` |
 | POST | `/deliverability/events` | `WRITE_CAMPAIGNS` |
+| GET | `/suppressions` | `READ_CONTACTS` |
+| POST | `/suppressions` | `WRITE_CONTACTS` |
+| DELETE | `/suppressions/:id` | `WRITE_CONTACTS` |
 | GET | `/tasks/dlq` | `SEND_CAMPAIGNS` |
 | POST | `/tasks/dlq/:id/replay` | `SEND_CAMPAIGNS` |
 | GET/POST/PATCH/DELETE | `/webhooks[/:id]` | `WEBHOOKS` |

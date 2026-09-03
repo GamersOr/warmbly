@@ -31,6 +31,7 @@ import { useConfirm } from "@/hooks/context/confirm";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 import { VARIABLES, SAMPLE, htmlToPlain, promptToHtml, renderPreview, templateIssue } from "./emailPreview";
+import { LINK_VARIABLES } from "@/lib/templateVars";
 
 export default function EmailContentEditor({
     subject,
@@ -180,6 +181,7 @@ export default function EmailContentEditor({
                         html={bodyHtml}
                         onChange={(html) => onBodyChange(html, htmlToPlain(html))}
                         variables={VARIABLES}
+                        links={LINK_VARIABLES}
                         placeholder={bodyPlaceholder}
                     />
                 ) : (

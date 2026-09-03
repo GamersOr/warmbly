@@ -906,13 +906,11 @@ func (r *campaignProgressRepository) FindNextRoutedPair(ctx context.Context, cam
 		      AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
 		      AND f.send_attempts >= $2
 		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM suppressed_recipients sr
-		    JOIN campaigns camp ON camp.organization_id = sr.organization_id
-		    WHERE camp.id = $1
-		      AND LOWER(sr.email) = LOWER(c.email)
-		      AND (sr.expires_at IS NULL OR sr.expires_at > NOW())
-		  )
+		  -- The workspace suppression list (addresses and domains) and the
+		  -- contact's own subscription flag are both send gates; the audience
+		  -- count applies the same two, so the number shown is the number sent.
+		  AND NOT recipient_suppressed((SELECT organization_id FROM campaigns WHERE id = $1), c.email)
+		  AND c.subscribed IS NOT FALSE
 		  -- Addresses the pre-send gates in the campaign task would refuse.
 		  -- Without this the finder keeps handing back the same undeliverable
 		  -- contact, the task skips it, and the campaign never reaches the
@@ -1019,13 +1017,8 @@ func (r *campaignProgressRepository) RouteContact(ctx context.Context, campaignI
 		           AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
 		           AND f.send_attempts >= $2
 		       ) AS failed,
-		       EXISTS (
-		         SELECT 1 FROM suppressed_recipients sr
-		         JOIN campaigns camp ON camp.organization_id = sr.organization_id
-		         WHERE camp.id = $1
-		           AND LOWER(sr.email) = LOWER(c.email)
-		           AND (sr.expires_at IS NULL OR sr.expires_at > NOW())
-		       ) AS suppressed,
+		       (recipient_suppressed((SELECT organization_id FROM campaigns WHERE id = $1), c.email)
+		        OR c.subscribed IS FALSE) AS suppressed,
 		       ` + undeliverableClause("$1") + ` AS undeliverable
 		FROM campaign_leads cl
 		JOIN contacts c ON c.id = cl.contact_id
@@ -1415,13 +1408,11 @@ func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context
 		      AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
 		      AND f.send_attempts >= $2
 		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM suppressed_recipients sr
-		    JOIN campaigns camp ON camp.organization_id = sr.organization_id
-		    WHERE camp.id = $1
-		      AND LOWER(sr.email) = LOWER(c.email)
-		      AND (sr.expires_at IS NULL OR sr.expires_at > NOW())
-		  )
+		  -- The workspace suppression list (addresses and domains) and the
+		  -- contact's own subscription flag are both send gates; the audience
+		  -- count applies the same two, so the number shown is the number sent.
+		  AND NOT recipient_suppressed((SELECT organization_id FROM campaigns WHERE id = $1), c.email)
+		  AND c.subscribed IS NOT FALSE
 		  AND ` + undeliverableClause("$1") + `
 	`
 	rows, err := r.db.Query(ctx, query, campaignID, config.CampaignSendMaxAttempts)

@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/errx"
@@ -36,10 +37,24 @@ func (s *tasksService) SendTestEmail(ctx context.Context, userID string, account
 		Company:   "Test Company",
 	}
 
+	// A test send carries the real opt-out footer and header so the sender
+	// sees exactly what a recipient will, but its link names no contact
+	// (uuid.Nil), so clicking it can never suppress anyone.
+	var orgID uuid.UUID
+	if account.OrganizationID != nil {
+		orgID = *account.OrganizationID
+	}
+	optOut := s.resolveOptOut(ctx, orgID, campaign)
+	var unsubscribeURL string
+	if s.unsubLinks != nil && s.unsubLinks.Enabled() {
+		unsubscribeURL = s.unsubLinks.URL(orgID, campaign.ID, uuid.Nil, time.Now())
+	}
+	extra := map[string]string{UnsubscribeLinkVar: unsubscribeURL}
+
 	// Render templates with the test contact
-	subject := RenderTemplate(sequence.Subject, testContact)
-	bodyHTML := RenderTemplate(sequence.BodyHTML, testContact)
-	bodyPlain := RenderTemplate(sequence.BodyPlain, testContact)
+	subject := RenderTemplateWith(sequence.Subject, testContact, extra)
+	bodyHTML := RenderTemplateWith(sequence.BodyHTML, testContact, extra)
+	bodyPlain := RenderTemplateWith(sequence.BodyPlain, testContact, extra)
 
 	if bodyPlain == "" && bodyHTML != "" {
 		bodyPlain = ExtractPlainTextFromHTML(bodyHTML)
@@ -53,19 +68,26 @@ func (s *tasksService) SendTestEmail(ctx context.Context, userID string, account
 		bodyHTML = AddSignature(bodyHTML, account.SignatureHTML, true)
 		bodyPlain = AddSignature(bodyPlain, account.SignaturePlain, false)
 	}
+	bodyHTML, bodyPlain = appendOptOut(bodyHTML, bodyPlain, optOut, unsubscribeURL)
 
 	// Generate message ID
 	messageID := generateMessageID(account.Email)
 
+	headerURL := ""
+	if campaign.UnsubscribeHeader {
+		headerURL = unsubscribeURL
+	}
+
 	// Build tracking info (disabled for test emails)
 	emailMsg := EmailMessage{
-		From:      account.Email,
-		To:        []string{recipient},
-		Subject:   subject,
-		BodyHTML:  bodyHTML,
-		BodyPlain: bodyPlain,
-		MessageID: messageID,
-		IsWarmup:  false,
+		From:           account.Email,
+		To:             []string{recipient},
+		Subject:        subject,
+		BodyHTML:       bodyHTML,
+		BodyPlain:      bodyPlain,
+		MessageID:      messageID,
+		IsWarmup:       false,
+		UnsubscribeURL: headerURL,
 	}
 
 	taskID := uuid.New()

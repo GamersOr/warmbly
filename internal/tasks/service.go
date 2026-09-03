@@ -10,6 +10,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/cipher"
 	"github.com/warmbly/warmbly/internal/app/credits"
 	"github.com/warmbly/warmbly/internal/app/feature"
+	"github.com/warmbly/warmbly/internal/app/unsublink"
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/events"
@@ -79,6 +80,9 @@ type TasksService interface {
 	// stops warmup sends from a domain that has been failing SPF/DMARC past
 	// the operator's grace window. Nil leaves the state observe-only.
 	SetDomainAuthPolicy(p DomainAuthPolicy)
+	// SetUnsubscribeLinks wires the signer behind per-recipient unsubscribe
+	// links (the List-Unsubscribe header and the link-mode footer).
+	SetUnsubscribeLinks(signer *unsublink.Signer)
 	// SetCloudLink wires the self-hosted side of the warmup pool link: a
 	// mailbox the cloud warms gets no local warmup chain.
 	SetCloudLink(r CloudLinkReader)
@@ -165,6 +169,16 @@ type tasksService struct {
 	domainAuth DomainAuthPolicy
 	// cloudLink is nil on instances that are not linked to Warmbly Cloud.
 	cloudLink CloudLinkReader
+
+	// unsubLinks mints the signed per-recipient unsubscribe links. Nil or
+	// disabled means no link can be minted: the List-Unsubscribe header is
+	// left off and link-mode footers fall back to the text line.
+	unsubLinks *unsublink.Signer
+}
+
+// SetUnsubscribeLinks wires the unsubscribe link signer.
+func (s *tasksService) SetUnsubscribeLinks(signer *unsublink.Signer) {
+	s.unsubLinks = signer
 }
 
 // DomainAuthPolicy resolves whether the sending-domain authentication gate is
