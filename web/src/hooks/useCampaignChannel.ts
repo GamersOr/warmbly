@@ -129,14 +129,23 @@ export function useCampaignChannel(campaignId: string): CampaignChannelState {
                 break;
             }
             case 'EMAIL_CLICKED': {
-                const data = payload as { contact_email?: string; original_url?: string };
+                const data = payload as {
+                    contact_email?: string;
+                    original_url?: string;
+                    link_label?: string;
+                    machine?: boolean;
+                };
+                const who = data.contact_email || 'Unknown';
+                const target = data.link_label || data.original_url;
                 addActivity({
                     id: nextId('click'),
                     type: 'clicked',
-                    contactEmail: data.contact_email || 'Unknown',
-                    message: data.original_url
-                        ? `Click from ${data.contact_email || 'Unknown'} → ${data.original_url}`
-                        : `Click from ${data.contact_email || 'Unknown'}`,
+                    contactEmail: who,
+                    message: data.machine
+                        ? `Automated click on ${target ?? 'a link'} for ${who} (not counted)`
+                        : target
+                          ? `Click from ${who} → ${target}`
+                          : `Click from ${who}`,
                     timestamp: new Date(),
                 });
                 break;

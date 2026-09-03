@@ -125,6 +125,14 @@ type CampaignProgressRepository interface {
 	HasSentSteps(ctx context.Context, campaignID, contactID uuid.UUID) (bool, error)
 	RecordEmailOpened(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, machine bool) error
 	RecordEmailClicked(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
+	// UnrecordEmailClicked clears clicked_at when every logged click on the
+	// step turned out to be automated (a burst recognised after the first
+	// click already stamped it). clicked_at keeps meaning "a person clicked".
+	UnrecordEmailClicked(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
+	// GetStepSentAt returns when the step was dispatched (nil when it was not),
+	// the reference point for telling an instant machine open or click from a
+	// person's.
+	GetStepSentAt(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (*time.Time, error)
 	RecordEmailReplied(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
 	RecordEmailBounced(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
 	RecordEmailComplained(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
@@ -439,6 +447,46 @@ func (r *campaignProgressRepository) RecordEmailClicked(ctx context.Context, cam
 
 	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
+}
+
+// UnrecordEmailClicked walks a click stamp back once no human click remains
+// on the step. Guarded by the click log so a concurrent human click is never
+// erased.
+func (r *campaignProgressRepository) UnrecordEmailClicked(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
+	query := `
+		UPDATE campaign_contact_progress ccp
+		SET clicked_at = NULL
+		WHERE ccp.campaign_id = $1
+		  AND ccp.contact_id = $2
+		  AND ccp.sequence_id = $3
+		  AND ccp.clicked_at IS NOT NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM email_link_clicks lc
+			WHERE lc.campaign_id = $1 AND lc.contact_id = $2 AND lc.sequence_id = $3 AND lc.machine = false
+		  )
+	`
+
+	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
+	return err
+}
+
+// GetStepSentAt returns the step's dispatch time, or nil when unsent/unknown.
+func (r *campaignProgressRepository) GetStepSentAt(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (*time.Time, error) {
+	query := `
+		SELECT LEAST(dispatched_at, sent_at)
+		FROM campaign_contact_progress
+		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
+	`
+
+	var sentAt *time.Time
+	err := r.db.QueryRow(ctx, query, campaignID, contactID, sequenceID).Scan(&sentAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return sentAt, nil
 }
 
 // RecordEmailReplied records that a contact replied

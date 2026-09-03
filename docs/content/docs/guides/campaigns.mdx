@@ -11,7 +11,7 @@ You need at least one active mailbox and a contact list. Warm new mailboxes befo
 
 ## Create a campaign
 
-**Campaigns** > **New campaign** opens a four-step wizard: **Basics** (name, description), **Schedule** (timezone, sending days, hours), **Sending** (mailbox tags, daily limit per mailbox, stop on reply, open and click tracking, unsubscribe header), and **First email** (subject, body, optional follow-ups). Follow-ups added here are connected in order, each waiting the number of days you set after the previous step; open the Steps tab to rearrange, branch, or change the waits. Only a name is required; the first email can be skipped and written in the full editor on the Steps tab, and everything else can be changed later from settings. Closing a wizard with unsaved edits asks before discarding them.
+**Campaigns** > **New campaign** opens a four-step wizard: **Basics** (name, description), **Schedule** (timezone, sending days, hours), **Sending** (mailbox tags, daily limit per mailbox, stop on reply, open and click tracking, UTM parameters, unsubscribe header), and **First email** (subject, body, optional follow-ups). Follow-ups added here are connected in order, each waiting the number of days you set after the previous step; open the Steps tab to rearrange, branch, or change the waits. Only a name is required; the first email can be skipped and written in the full editor on the Steps tab, and everything else can be changed later from settings. Closing a wizard with unsaved edits asks before discarding them.
 
 The campaign starts as a **draft**. Nothing sends until you start it.
 
@@ -81,7 +81,7 @@ A lead is **Processing** only while steps remain, so a finished campaign reads a
 
 ### Who opened, clicked and replied
 
-Next to each lead's status, the Leads list shows three engagement columns: **Opened**, **Clicked** and **Replied**, each with the number of emails in the sequence the person engaged with. A dash means the lead was emailed and has not engaged; the cell is blank for a lead not emailed yet. An open counts only when a person opened the email. Mail clients that fetch every image automatically (Apple Mail Privacy Protection, for example) show as **auto** instead, the same opens the campaign overview reports as automatic, so they never pass for engagement.
+Next to each lead's status, the Leads list shows three engagement columns: **Opened**, **Clicked** and **Replied**, each with the number of emails in the sequence the person engaged with. A dash means the lead was emailed and has not engaged; the cell is blank for a lead not emailed yet. An open counts only when a person opened the email. Mail clients that fetch every image automatically (Apple Mail Privacy Protection, for example) show as **auto** instead, the same opens the campaign overview reports as automatic, so they never pass for engagement. Clicks are held to the same standard: a link followed within ten seconds of the send, or several links of one email followed within a few seconds of each other, is a security gateway scanning the message, not the recipient. Those clicks are kept on the contact's activity marked **auto**, counted apart on the campaign overview, and never make a lead **Clicked**, never fire a clicked branch or automation, and never send a webhook. See [Link tracking and UTM parameters](#link-tracking-and-utm-parameters).
 
 The chips above the list are filters. Click a status chip (**Processing**, **Done**, **Replied**, **Queued**, **Bounced**, **Unsub**) or an engagement chip (**Opened**, **Not opened**, **Clicked**, **Not clicked**, **Replied**, **Not replied**) to show only those leads; click it again to clear. One status and one engagement chip can be active at once and both must match. The numbers on the chips are campaign-wide totals, and filtering happens on the server, so a scope shows every matching lead however long the list is. **Not opened**, **Not clicked** and **Not replied** only cover leads that have been sent at least one email: a queued lead has not had the chance. The same filters live in the **Filters** sheet under **Lead status** and **Engagement**.
 
@@ -105,6 +105,21 @@ When a step's branches are still undecided (`if they open within 3 days`), the p
 A step counts as sent only once the sending worker has handed it to the mailbox provider. If the worker cannot send (the mailbox was still loading, the provider refused the message, a storage hiccup), the step goes back to the queue, the failure appears in **Needs attention** with the reason, and the next pass retries it. After five failed attempts the lead is marked **Failed** and dropped from the campaign, so a mailbox that can never send does not loop forever. A recipient the mail server refuses outright is not retried: it is recorded as a **Bounced** lead straight away and goes through the same bounce handling (suppression, guardrails, webhooks) as a bounce notice. A campaign that finished while a send was still in flight reopens to retry it.
 
 No contact is emailed the same step twice. Each step is recorded as attempted before the send is handed to a worker, so a crash, a restart, or a database hiccup in the moment between the two cannot make the step look unsent and send it again. The trade-off is a step whose outcome is genuinely unknown, when the worker stops responding mid-send: after 30 minutes with no answer the step is treated as a failed attempt, appears in **Needs attention**, and is retried like any other failure.
+
+## Link tracking and UTM parameters
+
+With **Link tracking** on, every link in the email body becomes its own tracked link, so Warmbly records which link was clicked, not only that one was. Open a contact's **Activity** tab and a click reads **Clicked Pricing**, with the campaign, step and sending mailbox on the row and, expanded, the link's text, its full URL, every UTM parameter it carried, the browser, and whether a person or a scanner followed it. The campaign's live feed names the link the same way, and the `campaign.email_clicked` webhook carries the URL and the link text.
+
+**UTM parameters** (on by default for campaigns created in the dashboard, off for campaigns created through the API unless you send `utm_tracking`) tag every link when the email is sent, so nobody has to add them by hand and clicks show up attributed in your web analytics:
+
+| Parameter | Value |
+|-----------|-------|
+| `utm_source` | `warmbly`, or the value you set on the campaign |
+| `utm_medium` | `email`, or the value you set |
+| `utm_campaign` | The campaign name as a slug (`q3_outbound`), or the value you set |
+| `utm_content` | The link's own text as a slug (`pricing_page`); a link with no text, such as an image, is numbered `link_1`, `link_2` in order |
+
+A link that already carries one of these keeps the hand-written value; only the missing parameters are added. Existing query strings and fragments are left exactly as written, and the tags go on the real destination, so they survive the tracking redirect. Anchors, `mailto:` and `tel:` links, and anything that is not `http(s)` are never touched. UTM tagging works with link tracking off too: the tags are added and the link is otherwise left as written. Change the source, medium and campaign values under **Settings** > **Deliverability**; leave a field empty to use the default.
 
 ## Scheduling
 

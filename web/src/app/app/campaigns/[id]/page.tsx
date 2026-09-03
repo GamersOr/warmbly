@@ -100,7 +100,7 @@ export default function CampaignOverview() {
     const breakdown = [
         { label: "Sent", value: summary?.emails_sent, icon: SendIcon, dot: "bg-slate-400" },
         { label: "Opens", value: summary?.unique_opens, icon: MailCheckIcon, dot: "bg-emerald-500", note: summary?.machine_opens ? `${summary.machine_opens} auto` : undefined },
-        { label: "Clicks", value: summary?.unique_clicks, icon: MousePointerClickIcon, dot: "bg-violet-500" },
+        { label: "Clicks", value: summary?.unique_clicks, icon: MousePointerClickIcon, dot: "bg-violet-500", note: summary?.machine_clicks ? `${summary.machine_clicks} auto` : undefined },
         { label: "Replies", value: summary?.replies, icon: ReplyIcon, dot: "bg-amber-500" },
         { label: "Bounces", value: summary?.bounces, icon: TriangleAlertIcon, dot: "bg-rose-500" },
     ];

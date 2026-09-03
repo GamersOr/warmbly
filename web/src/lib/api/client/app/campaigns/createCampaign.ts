@@ -12,6 +12,10 @@ export interface CreateCampaignInput {
     stop_on_reply?: boolean;
     open_tracking?: boolean;
     link_tracking?: boolean;
+    utm_tracking?: boolean;
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
     text_only?: boolean;
     daily_limit?: number;
     unsubscribe_header?: boolean;

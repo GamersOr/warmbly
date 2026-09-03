@@ -53,6 +53,7 @@ type TrackingEvent struct {
 	EventType   string  `json:"event_type" avro:"event_type"`     // EMAIL_OPENED or EMAIL_CLICKED
 	TaskID      string  `json:"task_id" avro:"task_id"`           // UUID string
 	OriginalURL *string `json:"original_url" avro:"original_url"` // For click events only (nullable)
+	LinkID      *string `json:"link_id" avro:"link_id"`           // Click ticket id (nullable; absent from older tracking builds)
 	Timestamp   string  `json:"timestamp" avro:"timestamp"`       // ISO8601 timestamp
 	UserAgent   *string `json:"user_agent" avro:"user_agent"`     // Browser user agent (nullable)
 	IPHash      *string `json:"ip_hash" avro:"ip_hash"`           // Hashed IP for privacy (nullable)

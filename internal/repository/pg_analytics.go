@@ -97,6 +97,10 @@ func (r *analyticsRepository) GetCampaignSummary(ctx context.Context, userID, ca
 			COUNT(CASE WHEN ccp.opened_at IS NOT NULL THEN 1 END) as unique_opens,
 			COUNT(CASE WHEN ccp.opened_at IS NOT NULL AND ccp.opened_machine THEN 1 END) as machine_opens,
 			COUNT(CASE WHEN ccp.clicked_at IS NOT NULL THEN 1 END) as unique_clicks,
+			COUNT(CASE WHEN ccp.clicked_at IS NULL AND EXISTS (
+				SELECT 1 FROM email_link_clicks lc
+				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
+			) THEN 1 END) as machine_clicks,
 			COUNT(CASE WHEN ccp.replied_at IS NOT NULL THEN 1 END) as replies,
 			COUNT(CASE WHEN ccp.bounced_at IS NOT NULL THEN 1 END) as bounces
 		FROM campaign_contact_progress ccp
@@ -114,6 +118,7 @@ func (r *analyticsRepository) GetCampaignSummary(ctx context.Context, userID, ca
 		&summary.UniqueOpens,
 		&summary.MachineOpens,
 		&summary.UniqueClicks,
+		&summary.MachineClicks,
 		&summary.Replies,
 		&summary.Bounces,
 	)
@@ -345,6 +350,10 @@ func (r *analyticsRepository) GetDashboardOverallStats(ctx context.Context, orgI
 			COUNT(CASE WHEN ccp.opened_at IS NOT NULL AND ccp.sent_at >= $2 AND ccp.sent_at <= $3 THEN 1 END) as total_opens,
 			COUNT(CASE WHEN ccp.opened_at IS NOT NULL AND ccp.opened_machine AND ccp.sent_at >= $2 AND ccp.sent_at <= $3 THEN 1 END) as machine_opens,
 			COUNT(CASE WHEN ccp.clicked_at IS NOT NULL AND ccp.sent_at >= $2 AND ccp.sent_at <= $3 THEN 1 END) as total_clicks,
+			COUNT(CASE WHEN ccp.clicked_at IS NULL AND ccp.sent_at >= $2 AND ccp.sent_at <= $3 AND EXISTS (
+				SELECT 1 FROM email_link_clicks lc
+				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
+			) THEN 1 END) as machine_clicks,
 			COUNT(CASE WHEN ccp.replied_at IS NOT NULL AND ccp.sent_at >= $2 AND ccp.sent_at <= $3 THEN 1 END) as total_replies,
 			COUNT(CASE WHEN ccp.bounced_at IS NOT NULL AND ccp.sent_at >= $2 AND ccp.sent_at <= $3 THEN 1 END) as total_bounces,
 			(SELECT COUNT(*) FROM campaigns WHERE organization_id = $1 AND status = 'active') as active_campaigns,
@@ -362,6 +371,7 @@ func (r *analyticsRepository) GetDashboardOverallStats(ctx context.Context, orgI
 		&stats.TotalOpens,
 		&stats.MachineOpens,
 		&stats.TotalClicks,
+		&stats.MachineClicks,
 		&stats.TotalReplies,
 		&stats.TotalBounces,
 		&stats.ActiveCampaigns,
@@ -397,9 +407,13 @@ func (r *analyticsRepository) GetRecentActivity(ctx context.Context, orgID uuid.
 
 			UNION ALL
 
-			-- Clicks
+			-- Clicks (the first link a person clicked on the step, when logged per link)
 			SELECT 'clicked' as type, ccp.campaign_id, c.name as campaign_name,
-				   co.email as contact_email, ccp.contact_id, ccp.clicked_at as timestamp, NULL as link
+				   co.email as contact_email, ccp.contact_id, ccp.clicked_at as timestamp,
+				   (SELECT lc.destination FROM email_link_clicks lc
+				    WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id
+				      AND lc.sequence_id = ccp.sequence_id AND lc.machine = false
+				    ORDER BY lc.clicked_at LIMIT 1) as link
 			FROM campaign_contact_progress ccp
 			JOIN campaigns c ON c.id = ccp.campaign_id
 			JOIN contacts co ON co.id = ccp.contact_id

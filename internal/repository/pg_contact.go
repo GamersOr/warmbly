@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -2994,9 +2995,16 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 
 	// 1. Engagement events from campaign_contact_progress. One progress
 	//    row can emit up to 5 events (sent/opened/clicked/replied/bounced).
+	//    The coarse clicked stamp is emitted only for steps whose clicks
+	//    predate the per-link log; otherwise source 9 names each link.
 	progressQuery := `
 		SELECT
 			ccp.sent_at, ccp.opened_at, ccp.clicked_at, ccp.replied_at, ccp.bounced_at,
+			ccp.opened_machine,
+			EXISTS (
+				SELECT 1 FROM email_link_clicks lc
+				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
+			) AS has_link_clicks,
 			cam.id, cam.name,
 			seq.id, seq.name, seq.subject,
 			ea.id, ea.email, ea.name
@@ -3033,10 +3041,12 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	}
 	for prows.Next() {
 		var sentAt, openedAt, clickedAt, repliedAt, bouncedAt *time.Time
+		var openedMachine, hasLinkClicks bool
 		var campID, seqID, eaID *uuid.UUID
 		var campName, seqName, seqSubject, eaEmail, eaName *string
 		if err := prows.Scan(
 			&sentAt, &openedAt, &clickedAt, &repliedAt, &bouncedAt,
+			&openedMachine, &hasLinkClicks,
 			&campID, &campName,
 			&seqID, &seqName, &seqSubject,
 			&eaID, &eaEmail, &eaName,
@@ -3064,15 +3074,90 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			if baseSubject != nil && *baseSubject != "" {
 				ev.Subject = baseSubject
 			}
+			if ty == models.TimelineEmailOpened {
+				machine := openedMachine
+				ev.Machine = &machine
+			}
 			events = append(events, ev)
 		}
 		makeEvent(sentAt, models.TimelineEmailSent)
 		makeEvent(openedAt, models.TimelineEmailOpened)
-		makeEvent(clickedAt, models.TimelineEmailClicked)
+		if !hasLinkClicks {
+			makeEvent(clickedAt, models.TimelineEmailClicked)
+		}
 		makeEvent(repliedAt, models.TimelineEmailReplied)
 		makeEvent(bouncedAt, models.TimelineEmailBounced)
 	}
 	prows.Close()
+
+	// 9. Per-link clicks: which link, where it went, and whether a person or
+	//    a scanner clicked it. Same campaign scope as the progress feed.
+	clickQuery := `
+		SELECT lc.id, lc.clicked_at, lc.destination, lc.label, lc.user_agent, lc.machine, lc.machine_reason,
+		       cam.id, cam.name,
+		       seq.id, seq.name, seq.subject,
+		       ea.id, ea.email, ea.name
+		FROM email_link_clicks lc
+		JOIN campaigns cam ON cam.id = lc.campaign_id
+		JOIN sequences seq ON seq.id = lc.sequence_id
+		LEFT JOIN LATERAL (
+			SELECT ea.id, ea.email, ea.name
+			FROM   tasks t
+			JOIN   email_accounts ea ON ea.id = t.email_account_id
+			WHERE  t.id = lc.task_id
+		) ea ON TRUE
+		WHERE lc.contact_id = $1
+		  AND cam.user_id   = $2
+		  AND lc.clicked_at < $3
+		ORDER BY lc.clicked_at DESC
+		LIMIT $4
+	`
+	crows, err := r.DB.Query(ctx, clickQuery, contactID, userID, bound, limit)
+	if err != nil {
+		db.CaptureError(err, clickQuery, []any{contactID, userID, bound, limit}, "ListTimeline link clicks")
+		return nil, errx.InternalError()
+	}
+	for crows.Next() {
+		var link models.ContactLinkClick
+		var at time.Time
+		var machine bool
+		var reason string
+		var campID, seqID, eaID *uuid.UUID
+		var campName, seqName, seqSubject, eaEmail, eaName *string
+		if err := crows.Scan(
+			&link.ID, &at, &link.URL, &link.Label, &link.UserAgent, &machine, &reason,
+			&campID, &campName,
+			&seqID, &seqName, &seqSubject,
+			&eaID, &eaEmail, &eaName,
+		); err != nil {
+			crows.Close()
+			db.CaptureError(err, "", nil, "ListTimeline link clicks scan")
+			return nil, errx.InternalError()
+		}
+		fillUTM(&link)
+		ev := models.ContactTimelineEvent{
+			Type:              models.TimelineEmailClicked,
+			At:                at,
+			EmailAccountID:    eaID,
+			EmailAccountEmail: eaEmail,
+			EmailAccountName:  eaName,
+			CampaignID:        campID,
+			CampaignName:      campName,
+			SequenceID:        seqID,
+			SequenceName:      seqName,
+			Machine:           &machine,
+			Link:              &link,
+		}
+		if seqSubject != nil && *seqSubject != "" {
+			ev.Subject = seqSubject
+		}
+		if reason != "" {
+			r := reason
+			ev.MachineReason = &r
+		}
+		events = append(events, ev)
+	}
+	crows.Close()
 
 	if orgID != nil {
 		// 2. Reply intents (inbound replies with classification).
@@ -3373,6 +3458,21 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		Data:    events,
 		HasMore: hasMore,
 	}, nil
+}
+
+// fillUTM reads the UTM parameters off a clicked link's destination, whether
+// the send path stamped them or the author wrote them by hand.
+func fillUTM(link *models.ContactLinkClick) {
+	u, err := url.Parse(link.URL)
+	if err != nil {
+		return
+	}
+	q := u.Query()
+	link.UTMSource = q.Get("utm_source")
+	link.UTMMedium = q.Get("utm_medium")
+	link.UTMCampaign = q.Get("utm_campaign")
+	link.UTMTerm = q.Get("utm_term")
+	link.UTMContent = q.Get("utm_content")
 }
 
 // verificationFromRequest normalises a verdict a caller supplied with a

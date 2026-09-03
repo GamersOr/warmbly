@@ -104,6 +104,7 @@ func (d Deps) registerCampaignTools(r *Registry) {
 			"stop_on_reply":      boolProp("Stop sequencing a lead once they reply."),
 			"open_tracking":      boolProp("Track opens."),
 			"link_tracking":      boolProp("Track link clicks."),
+			"utm_tracking":       boolProp("Tag every link with UTM parameters automatically."),
 			"text_only":          boolProp("Send plain text only."),
 			"unsubscribe_header": boolProp("Send the List-Unsubscribe header (one-click unsubscribe)."),
 			"ramp_enabled":       boolProp("Gradually ramp daily volume."),
@@ -211,6 +212,7 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		StopOnReply       *bool   `json:"stop_on_reply"`
 		OpenTracking      *bool   `json:"open_tracking"`
 		LinkTracking      *bool   `json:"link_tracking"`
+		UTMTracking       *bool   `json:"utm_tracking"`
 		TextOnly          *bool   `json:"text_only"`
 		UnsubscribeHeader *bool   `json:"unsubscribe_header"`
 		RampEnabled       *bool   `json:"ramp_enabled"`
@@ -232,6 +234,7 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		StopOnReply:       in.StopOnReply,
 		OpenTracking:      in.OpenTracking,
 		LinkTracking:      in.LinkTracking,
+		UTMTracking:       in.UTMTracking,
 		TextOnly:          in.TextOnly,
 		UnsubscribeHeader: in.UnsubscribeHeader,
 		RampEnabled:       in.RampEnabled,

@@ -157,3 +157,18 @@ func CampaignTrackingDomain(host string) *errx.Error {
 	}
 	return nil
 }
+
+// CampaignUTMValue validates one of the campaign's UTM overrides. Empty means
+// "use the default". Values are query-string parameters, so they must be
+// short, single-line and printable; encoding is the send path's job.
+func CampaignUTMValue(v string) *errx.Error {
+	if len(v) > 128 {
+		return errx.New(errx.BadRequest, "utm values must be 128 characters or fewer")
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return errx.New(errx.BadRequest, "utm values cannot contain control characters")
+		}
+	}
+	return nil
+}

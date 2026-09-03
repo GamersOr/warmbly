@@ -83,7 +83,7 @@ export default function AnalyticsPage() {
     const breakdown = [
         { label: "Sent", value: os?.total_emails_sent, icon: SendIcon, dot: "bg-slate-400" },
         { label: "Opens", value: os?.total_opens, icon: MailCheckIcon, dot: "bg-emerald-500", note: os?.machine_opens ? `${num(os.machine_opens)} auto` : undefined },
-        { label: "Clicks", value: os?.total_clicks, icon: MousePointerClickIcon, dot: "bg-violet-500" },
+        { label: "Clicks", value: os?.total_clicks, icon: MousePointerClickIcon, dot: "bg-violet-500", note: os?.machine_clicks ? `${num(os.machine_clicks)} auto` : undefined },
         { label: "Replies", value: os?.total_replies, icon: ReplyIcon, dot: "bg-amber-500" },
         { label: "Bounces", value: os?.total_bounces, icon: TriangleAlertIcon, dot: "bg-rose-500" },
     ];

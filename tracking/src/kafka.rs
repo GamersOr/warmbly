@@ -25,6 +25,7 @@ pub const TRACKING_EVENT_SCHEMA: &str = r#"
         {"name": "event_type", "type": "string", "avro.java.string": "String"},
         {"name": "task_id", "type": "string", "avro.java.string": "String"},
         {"name": "original_url", "type": ["null", "string"], "default": null},
+        {"name": "link_id", "type": ["null", "string"], "default": null},
         {"name": "timestamp", "type": "string", "avro.java.string": "String"},
         {"name": "user_agent", "type": ["null", "string"], "default": null},
         {"name": "ip_hash", "type": ["null", "string"], "default": null}
@@ -55,6 +56,13 @@ impl ToAvroValue for TrackingEvent {
                 "original_url",
                 match &self.original_url {
                     Some(url) => Value::Union(1, Box::new(Value::String(url.clone()))),
+                    None => Value::Union(0, Box::new(Value::Null)),
+                },
+            ),
+            (
+                "link_id",
+                match &self.link_id {
+                    Some(id) => Value::Union(1, Box::new(Value::String(id.clone()))),
                     None => Value::Union(0, Box::new(Value::Null)),
                 },
             ),

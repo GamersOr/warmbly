@@ -145,7 +145,7 @@ export function DeliverabilitySection({
             />
             <SettingRow
                 title="Link tracking"
-                description="Track clicks on links to measure engagement (click-through rate)."
+                description="Track clicks on links to measure engagement (click-through rate). Each link is tracked on its own, so a contact's activity shows exactly which link was clicked."
                 control={
                     <Toggle
                         id="campaign-pref-link-tracking"
@@ -155,6 +155,21 @@ export function DeliverabilitySection({
                     />
                 }
             />
+            <SettingRow
+                title="UTM parameters"
+                description="Tag every link with utm_source, utm_medium, utm_campaign and utm_content (the link's own text) so clicks show up attributed in your web analytics. Links that already carry a UTM value keep it."
+                control={
+                    <Toggle
+                        id="campaign-pref-utm-tracking"
+                        value={newCampaign.utm_tracking}
+                        disabled={newCampaign.text_only}
+                        onChange={(v) => setNewCampaign((bef) => ({ ...bef, utm_tracking: v }))}
+                    />
+                }
+            />
+            {newCampaign.utm_tracking && !newCampaign.text_only && (
+                <UTMFields campaign={newCampaign} setNewCampaign={setNewCampaign} />
+            )}
             <SettingRow
                 title="Unsubscribe header"
                 description="Add a List-Unsubscribe header for compliance and better deliverability."
@@ -168,4 +183,60 @@ export function DeliverabilitySection({
             />
         </div>
     );
+}
+
+/** The three campaign-level UTM values; utm_content is per link and not editable. */
+export function UTMFields({
+    campaign,
+    setNewCampaign,
+}: {
+    campaign: Campaign;
+    setNewCampaign: SetCampaign;
+}) {
+    return (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pl-0 sm:pl-4 sm:border-l-2 sm:border-slate-100">
+            <div>
+                <Label>utm_source</Label>
+                <TextInput
+                    value={campaign.utm_source}
+                    placeholder="warmbly"
+                    onChange={(v) => setNewCampaign((bef) => ({ ...bef, utm_source: v }))}
+                    className="w-full"
+                />
+            </div>
+            <div>
+                <Label>utm_medium</Label>
+                <TextInput
+                    value={campaign.utm_medium}
+                    placeholder="email"
+                    onChange={(v) => setNewCampaign((bef) => ({ ...bef, utm_medium: v }))}
+                    className="w-full"
+                />
+            </div>
+            <div>
+                <Label>utm_campaign</Label>
+                <TextInput
+                    value={campaign.utm_campaign}
+                    placeholder={utmSlug(campaign.name) || "campaign"}
+                    onChange={(v) => setNewCampaign((bef) => ({ ...bef, utm_campaign: v }))}
+                    className="w-full"
+                />
+            </div>
+            <p className="sm:col-span-3 text-[11px] text-slate-400 -mt-1">
+                Leave a field empty to use the placeholder default. utm_content is set per link from its text
+                (for example <span className="font-mono">pricing</span>), so each link is attributed on its own.
+            </p>
+        </div>
+    );
+}
+
+// Mirrors the backend's slug: lowercase words joined with underscores.
+function utmSlug(s: string): string {
+    return s
+        .toLowerCase()
+        .trim()
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter(Boolean)
+        .join("_")
+        .slice(0, 64);
 }

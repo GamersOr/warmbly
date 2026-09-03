@@ -458,8 +458,34 @@ type ContactTimelineEvent struct {
 	// Website page view (page_hit): URL, referrer, device, UTM, location.
 	PageHit *WebsitePageHit `json:"page_hit,omitempty"`
 
+	// Engagement classification (email_opened / email_clicked). Machine is
+	// true when the open or click came from an automated fetcher (a mail
+	// privacy proxy, a security gateway walking the links) rather than a
+	// person; MachineReason says which rule caught it.
+	Machine       *bool   `json:"machine,omitempty"`
+	MachineReason *string `json:"machine_reason,omitempty"`
+
+	// The exact link behind an email_clicked event, when the click was
+	// logged per link (every click since link attribution shipped).
+	Link *ContactLinkClick `json:"link,omitempty"`
+
 	// Author (notes, lifecycle events).
 	UserID *uuid.UUID `json:"user_id,omitempty"`
+}
+
+// ContactLinkClick names the link a contact clicked: where it went, the
+// anchor text it was minted from, and the UTM parameters the destination
+// carried (automatic or hand-written).
+type ContactLinkClick struct {
+	ID          uuid.UUID `json:"id"`
+	URL         string    `json:"url"`
+	Label       string    `json:"label,omitempty"`
+	UTMSource   string    `json:"utm_source,omitempty"`
+	UTMMedium   string    `json:"utm_medium,omitempty"`
+	UTMCampaign string    `json:"utm_campaign,omitempty"`
+	UTMTerm     string    `json:"utm_term,omitempty"`
+	UTMContent  string    `json:"utm_content,omitempty"`
+	UserAgent   string    `json:"user_agent,omitempty"`
 }
 
 type ContactTimelineResult struct {
