@@ -9,7 +9,7 @@
 //
 //   - max size: 2 MiB. Anything larger gets a 400.
 //   - accepted MIME: image/png, image/jpeg (see allowedAvatarMIME).
-//   - object key: avatars/{kind}/{id}-{epoch_ms}.{ext}
+//   - object key: avatars/{kind}/{id}-{epoch_ms}-{nonce}.{ext}
 //
 // The epoch suffix forces cache busting on replacement so the
 // browser doesn't keep showing the old avatar at the same URL (the
@@ -86,7 +86,7 @@ func (h *Handler) UploadUserAvatar(c *gin.Context) {
 	ctx := c.Request.Context()
 	previous := h.currentUserAvatarURL(ctx, userID)
 
-	key := fmt.Sprintf("%s%s-%d%s", userAvatarKeyPrefix, userID.String(), time.Now().UnixMilli(), ext)
+	key := avatarObjectKey(userAvatarKeyPrefix, userID, ext)
 	url, xerr := putPublicObject(ctx, h.Storage, key, bytesRead, mime)
 	if xerr != nil {
 		errx.Handle(c, xerr)
@@ -159,7 +159,7 @@ func (h *Handler) UploadOrganizationAvatar(c *gin.Context) {
 	ctx := c.Request.Context()
 	previous := h.currentOrgAvatarURL(ctx, *orgID)
 
-	key := fmt.Sprintf("%s%s-%d%s", orgAvatarKeyPrefix, orgID.String(), time.Now().UnixMilli(), ext)
+	key := avatarObjectKey(orgAvatarKeyPrefix, *orgID, ext)
 	url, xerr := putPublicObject(ctx, h.Storage, key, bytesRead, mime)
 	if xerr != nil {
 		errx.Handle(c, xerr)
@@ -208,6 +208,14 @@ func (h *Handler) DeleteOrganizationAvatar(c *gin.Context) {
 	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityOrganization, orgID, nil, map[string]string{"field": "avatar_url", "value": "cleared"})
 
 	c.Status(http.StatusNoContent)
+}
+
+// avatarObjectKey builds a key that is unique per upload: the epoch keeps keys
+// sortable, the random nonce keeps two uploads in the same millisecond from
+// sharing an immutably cached URL.
+func avatarObjectKey(prefix string, id uuid.UUID, ext string) string {
+	nonce := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	return fmt.Sprintf("%s%s-%d-%s%s", prefix, id.String(), time.Now().UnixMilli(), nonce, ext)
 }
 
 // currentUserAvatarURL returns the avatar URL stored on the user row, or ""
