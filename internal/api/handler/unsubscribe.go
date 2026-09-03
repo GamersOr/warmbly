@@ -43,8 +43,15 @@ func (h *Handler) UnsubscribePage(c *gin.Context) {
 	})
 }
 
+// unsubscribeBodyLimit caps the public POST bodies. The engine-wide limit is
+// registered after these routes, so it does not cover them; a one-click or
+// confirm body is a few bytes.
+const unsubscribeBodyLimit = 16 << 10
+
 func (h *Handler) UnsubscribeSubmit(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, unsubscribeBodyLimit)
 	oneClick := strings.EqualFold(strings.TrimSpace(c.PostForm("List-Unsubscribe")), "One-Click")
+	confirmed := c.PostForm("confirm") == "1"
 
 	claims, err := h.verifyUnsubscribeToken(c.Param("token"))
 	if err != nil {
@@ -63,6 +70,17 @@ func (h *Handler) UnsubscribeSubmit(c *gin.Context) {
 			return
 		}
 		renderUnsubPage(c, http.StatusOK, unsubView{Title: "This was a test email", Body: "Test sends carry a link that is not tied to anyone, so there is nothing to unsubscribe."})
+		return
+	}
+
+	// A browser POST without the confirm field is not the button: show the
+	// confirm page again rather than act on it.
+	if !oneClick && !confirmed {
+		renderUnsubPage(c, http.StatusOK, unsubView{
+			Title:   "Unsubscribe from these emails?",
+			Body:    "Confirm and you will not receive further emails from this sender.",
+			Confirm: c.Request.URL.Path,
+		})
 		return
 	}
 
@@ -92,6 +110,7 @@ func (h *Handler) UnsubscribeSubmit(c *gin.Context) {
 }
 
 func (h *Handler) UnsubscribeUndo(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, unsubscribeBodyLimit)
 	claims, ok := h.unsubscribeClaims(c)
 	if !ok {
 		return

@@ -16,7 +16,7 @@ import (
 //  2. Clear interest phrases => positive.
 //  3. Clear rejection phrases => negative.
 func classifyLexicon(in Input) (Result, bool) {
-	text := strings.ToLower(strings.TrimSpace(in.Subject + "\n" + StripQuoted(in.BodyText)))
+	text := quoteFolder.Replace(strings.ToLower(strings.TrimSpace(in.Subject + "\n" + StripQuoted(in.BodyText))))
 	if text == "" {
 		return Result{}, false
 	}
@@ -83,7 +83,12 @@ func compileWordPatterns(phrases []string) []*regexp.Regexp {
 	return out
 }
 
+// quoteFolder folds the typographic apostrophes mail clients substitute while
+// typing, so "don’t email me" matches the straight-quote phrase.
+var quoteFolder = strings.NewReplacer("\u2019", "'", "\u2018", "'", "\u02bc", "'", "\u00b4", "'", "`", "'")
+
 func matchesOptOut(lowerText string) bool {
+	lowerText = quoteFolder.Replace(lowerText)
 	for _, re := range optOutPatterns {
 		if re.MatchString(lowerText) {
 			return true

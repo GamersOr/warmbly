@@ -631,6 +631,7 @@ func (s *service) AddSuppressions(ctx context.Context, organizationID, actorID u
 	}
 	res := &models.AddSuppressionsResult{Skipped: []string{}}
 	seen := map[string]bool{}
+	entries := make([]models.SuppressedRecipient, 0, len(req.Entries))
 	for _, e := range req.Entries {
 		raw := strings.TrimSpace(e.Value)
 		value := strings.ToLower(strings.TrimPrefix(raw, "@"))
@@ -657,26 +658,32 @@ func (s *service) AddSuppressions(ctx context.Context, organizationID, actorID u
 		if reason == "" {
 			reason = "added to the suppression list"
 		}
-		if len(reason) > 300 {
-			reason = reason[:300]
+		if r := []rune(reason); len(r) > models.UnsubscribeCopyMaxLen {
+			reason = string(r[:models.UnsubscribeCopyMaxLen])
 		}
-		if err := s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
+		entries = append(entries, models.SuppressedRecipient{
 			OrganizationID: organizationID,
 			Email:          value,
 			Kind:           kind,
 			Reason:         reason,
 			Source:         source,
 			Metadata:       map[string]interface{}{"added_by": actorID.String()},
-		}); err != nil {
-			return nil, toErrx(err)
-		}
-		if kind == models.SuppressionKindEmail {
-			if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, value, false); err != nil {
-				log.Warn().Err(err).Msg("suppression: could not clear the contact's subscription flag")
-			}
-		}
-		res.Added++
+		})
 	}
+	// One transaction: a pasted list lands whole or not at all, so a failure
+	// part-way never leaves the caller guessing which half got in.
+	if err := s.repo.UpsertSuppressedRecipients(ctx, entries); err != nil {
+		return nil, toErrx(err)
+	}
+	for _, e := range entries {
+		if e.Kind != models.SuppressionKindEmail {
+			continue
+		}
+		if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, e.Email, false); err != nil {
+			log.Warn().Err(err).Msg("suppression: could not clear the contact's subscription flag")
+		}
+	}
+	res.Added = len(entries)
 	return res, nil
 }
 

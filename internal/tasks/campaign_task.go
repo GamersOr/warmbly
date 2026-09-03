@@ -486,9 +486,12 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			return sxerr
 		}
 		if selection != nil {
-			subject = selection.Subject
-			bodyHTML = selection.BodyHTML
-			bodyPlain = selection.BodyPlain
+			// A chosen variant is stored template text, so it goes through the
+			// same render as the step's own copy; the control arm comes back
+			// already rendered, for which this pass is a no-op.
+			subject = expandSpintax(RenderTemplateWith(selection.Subject, *contact, extra))
+			bodyHTML = expandSpintax(RenderTemplateWith(selection.BodyHTML, *contact, extra))
+			bodyPlain = expandSpintax(RenderTemplateWith(selection.BodyPlain, *contact, extra))
 		}
 	}
 

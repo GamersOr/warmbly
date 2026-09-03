@@ -95,7 +95,10 @@ const HELPERS: Item[] = [
     },
 ];
 
-export default function EditorSuggest({ editor }: { editor: Editor }) {
+// links are the per-send link tokens this editor may offer (the recipient's
+// unsubscribe link); only campaign email bodies resolve them at send time, so
+// an AI prompt editor passes none.
+export default function EditorSuggest({ editor, links = [] }: { editor: Editor; links?: string[] }) {
     const { data: customKeys = [] } = useCustomFieldKeys();
     const { data: forms = [] } = useForms();
     const [trigger, setTrigger] = React.useState<{ from: number; query: string } | null>(null);
@@ -134,7 +137,7 @@ export default function EditorSuggest({ editor }: { editor: Editor }) {
                 search: `form link ${f.name}`.toLowerCase(),
                 insert: { type: "formLink" as const, publicId: f.public_id },
             }));
-        const links: Item[] = LINK_VARS.map((v) => ({
+        const linkItems: Item[] = LINK_VARS.filter((v) => links.includes(v.token)).map((v) => ({
             id: `l:${v.key}`,
             group: "Links" as const,
             label: v.label,
@@ -142,8 +145,8 @@ export default function EditorSuggest({ editor }: { editor: Editor }) {
             search: `${v.key} ${v.label} unsubscribe opt out`.toLowerCase(),
             insert: { type: "chip" as const, token: v.token },
         }));
-        return [...fields, ...links, ...formLinks, ...HELPERS];
-    }, [customKeys, forms]);
+        return [...fields, ...linkItems, ...formLinks, ...HELPERS];
+    }, [customKeys, forms, links]);
 
     const items = React.useMemo<Item[]>(() => {
         if (!trigger) return [];

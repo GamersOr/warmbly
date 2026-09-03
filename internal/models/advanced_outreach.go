@@ -90,8 +90,8 @@ func (s *AdvancedOutreachSettings) Normalize() {
 // the place for a paragraph or for line breaks.
 func clampLine(v string) string {
 	v = strings.Join(strings.Fields(v), " ")
-	if len(v) > UnsubscribeCopyMaxLen {
-		v = v[:UnsubscribeCopyMaxLen]
+	if r := []rune(v); len(r) > UnsubscribeCopyMaxLen {
+		v = string(r[:UnsubscribeCopyMaxLen])
 	}
 	return v
 }

@@ -174,24 +174,25 @@ var apiSpecs = []apiSpec{
 
 // apiFamilyOrder keeps the top-level help stable; maps iterate randomly.
 var apiFamilyOrder = []string{
-	"me", "campaign", "contact", "mailbox", "inbox", "analytics",
+	"me", "campaign", "contact", "suppression", "mailbox", "inbox", "analytics",
 	"settings", "webhook", "apikey", "template", "crm", "tool",
 }
 
 // apiFamilies drives top-level dispatch and help for the typed commands.
 var apiFamilies = map[string]string{
-	"me":        "Who the API key is",
-	"campaign":  "Campaigns and their sequences",
-	"contact":   "Contacts, notes, and imports",
-	"mailbox":   "Connected mailboxes and warmup",
-	"inbox":     "The unified inbox",
-	"analytics": "Analytics and the audit trail",
-	"settings":  "Organization outreach settings",
-	"webhook":   "Webhook endpoints",
-	"apikey":    "API keys",
-	"template":  "Reply templates",
-	"crm":       "Pipelines, deals, and CRM tasks",
-	"tool":      "AI agent tools (list and call the registry)",
+	"me":          "Who the API key is",
+	"campaign":    "Campaigns and their sequences",
+	"contact":     "Contacts, notes, and imports",
+	"suppression": "The suppression list: addresses and domains that get no campaign mail",
+	"mailbox":     "Connected mailboxes and warmup",
+	"inbox":       "The unified inbox",
+	"analytics":   "Analytics and the audit trail",
+	"settings":    "Organization outreach settings",
+	"webhook":     "Webhook endpoints",
+	"apikey":      "API keys",
+	"template":    "Reply templates",
+	"crm":         "Pipelines, deals, and CRM tasks",
+	"tool":        "AI agent tools (list and call the registry)",
 }
 
 // runAPIResource runs one typed command: `warmblyctl campaign start --id ...`.

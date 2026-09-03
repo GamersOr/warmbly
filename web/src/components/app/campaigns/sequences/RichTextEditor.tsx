@@ -147,7 +147,7 @@ export default function RichTextEditor({
                     )}
                 </div>
                 {/* Type `{{` → variable type-ahead at the caret. */}
-                <EditorSuggest editor={editor} />
+                <EditorSuggest editor={editor} links={links} />
             </div>
         );
     }
@@ -168,7 +168,7 @@ export default function RichTextEditor({
             {/* Collapsed caret → sparkle companion + ⌘J to write with AI. */}
             <RichTextAICaret editor={editor} />
             {/* Type `{{` → variable type-ahead at the caret. */}
-            <EditorSuggest editor={editor} />
+            <EditorSuggest editor={editor} links={links} />
         </div>
     );
 }

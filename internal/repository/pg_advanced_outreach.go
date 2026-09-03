@@ -31,6 +31,9 @@ type AdvancedOutreachRepository interface {
 
 	IsRecipientSuppressed(ctx context.Context, organizationID uuid.UUID, email string) (*models.SuppressedRecipient, error)
 	UpsertSuppressedRecipient(ctx context.Context, entry *models.SuppressedRecipient) error
+	// UpsertSuppressedRecipients writes a batch in one transaction, so a
+	// pasted list lands whole or not at all.
+	UpsertSuppressedRecipients(ctx context.Context, entries []models.SuppressedRecipient) error
 	// ListSuppressedRecipients pages the active list newest first. q filters by
 	// address or domain substring; before is the keyset (created_at, id).
 	ListSuppressedRecipients(ctx context.Context, organizationID uuid.UUID, q string, beforeAt *time.Time, beforeID *uuid.UUID, limit int) ([]models.SuppressedRecipient, error)
@@ -449,6 +452,55 @@ func (r *advancedOutreachRepository) UpsertSuppressedRecipient(ctx context.Conte
 	`
 	_, err = r.db.Exec(ctx, query, entry.OrganizationID, strings.ToLower(strings.TrimSpace(entry.Email)), kind, entry.Reason, entry.Source, entry.CampaignID, entry.ExpiresAt, metadata)
 	return err
+}
+
+const upsertSuppressedRecipientSQL = `
+		INSERT INTO suppressed_recipients (organization_id, email, kind, reason, source, campaign_id, expires_at, metadata, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		ON CONFLICT (organization_id, email)
+		DO UPDATE SET
+			kind = EXCLUDED.kind,
+			reason = EXCLUDED.reason,
+			source = EXCLUDED.source,
+			campaign_id = EXCLUDED.campaign_id,
+			expires_at = EXCLUDED.expires_at,
+			metadata = EXCLUDED.metadata,
+			updated_at = NOW()
+	`
+
+func (r *advancedOutreachRepository) UpsertSuppressedRecipients(ctx context.Context, entries []models.SuppressedRecipient) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	batch := &pgx.Batch{}
+	for i := range entries {
+		e := &entries[i]
+		metadata, err := marshalJSON(e.Metadata)
+		if err != nil {
+			return err
+		}
+		kind := e.Kind
+		if kind == "" {
+			kind = models.SuppressionKindEmail
+		}
+		batch.Queue(upsertSuppressedRecipientSQL, e.OrganizationID, strings.ToLower(strings.TrimSpace(e.Email)), kind, e.Reason, e.Source, e.CampaignID, e.ExpiresAt, metadata)
+	}
+	res := tx.SendBatch(ctx, batch)
+	for range entries {
+		if _, err := res.Exec(); err != nil {
+			_ = res.Close()
+			return err
+		}
+	}
+	if err := res.Close(); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *advancedOutreachRepository) ListSuppressedRecipients(ctx context.Context, organizationID uuid.UUID, q string, beforeAt *time.Time, beforeID *uuid.UUID, limit int) ([]models.SuppressedRecipient, error) {

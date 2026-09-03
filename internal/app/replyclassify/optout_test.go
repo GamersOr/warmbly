@@ -19,6 +19,7 @@ func TestIsOptOut(t *testing.T) {
 		{"quote lines only", "", "Yes please\n> unsubscribe here", false},
 		{"before quote", "", "Please remove me\n\nOn Mon Jane wrote:\n> hello", true},
 		{"outlook header", "", "not interested\r\nFrom: Jane\r\nSent: Monday\r\nunsubscribe", false},
+		{"curly apostrophe", "", "Please don\u2019t email me again.", true},
 		{"empty", "", "", false},
 	}
 	for _, c := range cases {

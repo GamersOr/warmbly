@@ -63,7 +63,7 @@ Suppression entries travel with a [workspace export](/guides/workspace-export-im
 
 An opt-out fires the `campaign.unsubscribed` [webhook](/guides/webhooks/) with a `source` of `one_click` (the mail client's button), `link` (the link in the email), `reply` (a reply asking to stop) or `action` (a sequence's **Unsubscribe** step).
 
-The suppression list is available over the API as `GET`, `POST` and `DELETE /suppressions`. See [deliverability and ops](/api/reference/deliverability-ops/#list-the-suppression-list).
+The suppression list is available over the API as `GET /suppressions`, `POST /suppressions` and `DELETE /suppressions/:id`. See [deliverability and ops](/api/reference/deliverability-ops/#list-the-suppression-list).
 
 ## Self-hosting
 
