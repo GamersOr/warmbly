@@ -492,6 +492,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			subject = expandSpintax(RenderTemplateWith(selection.Subject, *contact, extra))
 			bodyHTML = expandSpintax(RenderTemplateWith(selection.BodyHTML, *contact, extra))
 			bodyPlain = expandSpintax(RenderTemplateWith(selection.BodyPlain, *contact, extra))
+			// A variant may carry HTML only; keep the plain-text alternative.
+			if bodyPlain == "" && bodyHTML != "" {
+				bodyPlain = ExtractPlainTextFromHTML(bodyHTML)
+			}
 		}
 	}
 

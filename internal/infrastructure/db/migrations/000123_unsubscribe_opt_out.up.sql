@@ -14,10 +14,17 @@ ALTER TABLE suppressed_recipients ADD COLUMN kind text NOT NULL DEFAULT 'email';
 ALTER TABLE suppressed_recipients ADD CONSTRAINT suppressed_recipients_kind_check
     CHECK (kind IN ('email', 'domain')) NOT VALID;
 
--- The address branch below compares lower(email); the existing
--- (organization_id, email) index cannot serve that expression.
-CREATE INDEX IF NOT EXISTS idx_suppressed_recipients_org_lower_email
-    ON suppressed_recipients (organization_id, lower(email));
+-- Every write lowercases the value, so the stored email is the identity and
+-- the existing (organization_id, email) unique key and index serve every
+-- lookup as an equality. Rows written before that rule was strict are folded
+-- here: of two entries that differ only by case, the newer one stays.
+DELETE FROM suppressed_recipients a
+USING suppressed_recipients b
+WHERE a.organization_id = b.organization_id
+  AND lower(a.email) = lower(b.email)
+  AND a.id <> b.id
+  AND (a.updated_at, a.id) < (b.updated_at, b.id);
+UPDATE suppressed_recipients SET email = lower(email) WHERE email <> lower(email);
 
 -- One predicate for every send gate, count and filter, so a domain entry is
 -- honoured everywhere an address entry is. Written as a single SELECT so the
@@ -29,7 +36,7 @@ LANGUAGE sql STABLE AS $$
         WHERE sr.organization_id = org
           AND (sr.expires_at IS NULL OR sr.expires_at > now())
           AND (
-                (sr.kind = 'email' AND lower(sr.email) = lower(addr))
+                (sr.kind = 'email' AND sr.email = lower(addr))
              OR (sr.kind = 'domain' AND sr.email = split_part(lower(addr), '@', 2))
           )
     )

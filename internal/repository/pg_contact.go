@@ -2848,7 +2848,7 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 			FROM suppressed_recipients
 			WHERE organization_id = $1
 			  AND (expires_at IS NULL OR expires_at > NOW())
-			  AND ((kind = 'email' AND LOWER(email) = LOWER($2))
+			  AND ((kind = 'email' AND email = LOWER($2))
 			    OR (kind = 'domain' AND email = split_part(LOWER($2), '@', 2)))
 			ORDER BY (kind = 'email') DESC
 			LIMIT 1
@@ -3163,7 +3163,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			SELECT created_at, reason, source
 			FROM suppressed_recipients
 			WHERE organization_id = $1
-			  AND ((kind = 'email' AND LOWER(email) = LOWER($2))
+			  AND ((kind = 'email' AND email = LOWER($2))
 			    OR (kind = 'domain' AND email = split_part(LOWER($2), '@', 2)))
 			  AND created_at < $3
 			ORDER BY created_at DESC

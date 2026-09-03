@@ -404,7 +404,9 @@ func scanSuppressedRecipient(row pgx.Row) (*models.SuppressedRecipient, error) {
 // IsRecipientSuppressed returns the entry that blocks email: its own address
 // row first, else a row for its domain. Same predicate as the SQL function
 // recipient_suppressed() the send gates use, spelled out here because the
-// caller wants the row, not a boolean.
+// caller wants the row, not a boolean. Stored values are lowercase (every
+// write folds them; migration 000123 folded the rest), so the comparison is
+// an equality the unique index serves.
 func (r *advancedOutreachRepository) IsRecipientSuppressed(ctx context.Context, organizationID uuid.UUID, email string) (*models.SuppressedRecipient, error) {
 	query := `
 		SELECT ` + suppressedRecipientColumns + `
@@ -412,7 +414,7 @@ func (r *advancedOutreachRepository) IsRecipientSuppressed(ctx context.Context, 
 		WHERE organization_id = $1
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		  AND (
-		        (kind = 'email' AND LOWER(email) = LOWER($2))
+		        (kind = 'email' AND email = LOWER($2))
 		     OR (kind = 'domain' AND email = split_part(LOWER($2), '@', 2))
 		  )
 		ORDER BY (kind = 'email') DESC
@@ -550,7 +552,7 @@ func (r *advancedOutreachRepository) DeleteSuppressedRecipient(ctx context.Conte
 }
 
 func (r *advancedOutreachRepository) DeleteSuppressionByEmail(ctx context.Context, organizationID uuid.UUID, email string, source models.DeliverabilityEventType) (bool, error) {
-	tag, err := r.db.Exec(ctx, `DELETE FROM suppressed_recipients WHERE organization_id = $1 AND kind = 'email' AND LOWER(email) = LOWER($2) AND source = $3`, organizationID, strings.TrimSpace(email), source)
+	tag, err := r.db.Exec(ctx, `DELETE FROM suppressed_recipients WHERE organization_id = $1 AND kind = 'email' AND email = LOWER($2) AND source = $3`, organizationID, strings.TrimSpace(email), source)
 	if err != nil {
 		return false, err
 	}
