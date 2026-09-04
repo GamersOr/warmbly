@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/models"
 )
 
 // syncBackoffMax is the longest a mailbox waits between passes: while fair
@@ -74,9 +75,37 @@ func (w *WMail) syncOnce(ctx context.Context) (result *errx.MailError) {
 		}
 	}()
 	if err := w.SyncMail(ctx); err != nil {
+		w.syncHealthy = false
 		w.CaptureError(err)
 		log.Warn().Err(err).Str("email_id", w.ID.String()).Msg("mail sync error")
 		return err
 	}
+	w.reportSyncHealthy()
 	return nil
+}
+
+// reportSyncHealthy tells the control plane the mailbox is syncing again, so
+// the sync errors an earlier pass recorded stop being shown as outstanding.
+// Nothing else clears them: they describe a moment that has passed, and a
+// mailbox would otherwise carry one transient failure until somebody edited
+// the database. Only the transition reports, so a healthy mailbox costs no
+// messages.
+func (w *WMail) reportSyncHealthy() {
+	if w.syncHealthy {
+		return
+	}
+	w.syncHealthy = true
+	if w.onEvent == nil {
+		return
+	}
+	if err := w.onEvent(models.JobEventTypeEmailSyncOK, models.EmailSyncOKEvent{
+		EmailAccountID: w.ID.String(),
+		UserID:         w.UserID.String(),
+		Timestamp:      time.Now().Unix(),
+	}); err != nil {
+		// Losing this only leaves a stale banner, so the pass still counts as
+		// a success and the next recovery will report again.
+		w.syncHealthy = false
+		log.Warn().Err(err).Str("email_id", w.ID.String()).Msg("could not report sync recovery")
+	}
 }

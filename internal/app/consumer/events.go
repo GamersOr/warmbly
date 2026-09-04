@@ -50,6 +50,7 @@ func (w *JobsService) InitEvents() {
 	Register(w, models.JobEventTypeEmailDisabled, w.HandleEmailDisabled)
 	Register(w, models.JobEventTypeEmailRateLimited, w.HandleEmailRateLimited)
 	Register(w, models.JobEventTypeEmailServerError, w.HandleEmailServerError)
+	Register(w, models.JobEventTypeEmailSyncOK, w.HandleEmailSyncOK)
 
 	// Per-worker telemetry. Driver for worker_capacity_view.
 	Register(w, models.JobEventTypeWorkerHealth, w.HandleWorkerHealth)

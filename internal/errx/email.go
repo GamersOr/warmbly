@@ -69,6 +69,17 @@ const (
 
 // CredentialMailErrorCodes are the credential-class errors a successful
 // mailbox re-authorization or SMTP/IMAP credential update fixes.
+// SyncMailErrorCodes are the transient, server-side errors a sync pass can
+// record. They describe a moment, not a state of the mailbox, so a later pass
+// that succeeds clears them; keep this in step with the codes the worker maps
+// to JobEventTypeEmailServerError.
+var SyncMailErrorCodes = []MailErrorCode{
+	MailErrorCodeServerUnreachable,
+	MailErrorCodeConnectionLost,
+	MailErrorCodeNotFound,
+	MailErrorCodeImapUnknown,
+}
+
 var CredentialMailErrorCodes = []MailErrorCode{
 	MailErrorCodeGoogleAuth,
 	MailErrorCodeAuthenticationFailed,

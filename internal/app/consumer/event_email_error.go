@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 )
@@ -205,6 +206,35 @@ func (s *JobsService) HandleEmailRateLimited(ctx context.Context, event models.E
 		)
 	}
 
+	return nil
+}
+
+// HandleEmailSyncOK clears the sync errors an earlier pass recorded, now that
+// the mailbox has completed one. Sync errors describe a moment rather than a
+// state of the mailbox, but nothing else resolves them: the reconnect flow
+// only clears the credential codes, so a single transient failure would show
+// as outstanding forever. Credential, rate-limit and abuse errors are left
+// alone, because a working sync is not evidence that any of those are fixed.
+func (s *JobsService) HandleEmailSyncOK(ctx context.Context, event models.EmailSyncOKEvent) error {
+	if s.EmailAccountErrorRepository == nil {
+		return nil
+	}
+
+	emailAccountID, err := uuid.Parse(event.EmailAccountID)
+	if err != nil {
+		log.Error().Err(err).Str("email_account_id", event.EmailAccountID).Msg("Invalid email account ID")
+		return err
+	}
+
+	codes := make([]string, 0, len(errx.SyncMailErrorCodes))
+	for _, c := range errx.SyncMailErrorCodes {
+		codes = append(codes, string(c))
+	}
+
+	if xerr := s.EmailAccountErrorRepository.ResolveByCodes(ctx, emailAccountID, codes, "sync recovered"); xerr != nil {
+		log.Warn().Str("email_account_id", event.EmailAccountID).Str("error", xerr.Message).Msg("could not resolve sync errors after recovery")
+		return nil
+	}
 	return nil
 }
 

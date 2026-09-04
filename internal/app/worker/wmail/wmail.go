@@ -87,6 +87,13 @@ type WMail struct {
 	googleTick *tickStats
 	graphTick  *tickStats
 
+	// syncHealthy is whether the last sync pass succeeded, so recovery is
+	// reported on the transition into health rather than on every pass. It
+	// starts false so the first success after a (re)start also reports,
+	// clearing whatever a previous process left behind. Only the sync loop
+	// goroutine touches it.
+	syncHealthy bool
+
 	Ctx           context.Context
 	Cancel        context.CancelFunc
 	TerminateFunc func()

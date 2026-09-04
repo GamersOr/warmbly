@@ -44,6 +44,10 @@ const (
 	JobEventTypeEmailDisabled    JobEventType = "EMAIL_DISABLED"     // Account disabled
 	JobEventTypeEmailRateLimited JobEventType = "EMAIL_RATE_LIMITED" // Rate limit hit
 	JobEventTypeEmailServerError JobEventType = "EMAIL_SERVER_ERROR" // Temporary server error
+	// EMAIL_SYNC_OK is the counterpart to EMAIL_SERVER_ERROR: the mailbox is
+	// syncing again. Published on the transition into health, not on every
+	// pass, so it costs one message per recovery rather than one per tick.
+	JobEventTypeEmailSyncOK JobEventType = "EMAIL_SYNC_OK" // Sync recovered
 
 	// Per-worker health telemetry. Emitted every 30s by every worker;
 	// consumer writes it into worker_health_samples for the capacity view.
@@ -56,6 +60,14 @@ type JobEvent struct {
 }
 
 // EmailErrorEvent represents an email error event sent from worker to jobsService
+// EmailSyncOKEvent reports that a mailbox completed a sync pass, so the sync
+// errors an earlier pass recorded no longer describe it.
+type EmailSyncOKEvent struct {
+	EmailAccountID string `json:"email_account_id" avro:"email_account_id"`
+	UserID         string `json:"user_id" avro:"user_id"`
+	Timestamp      int64  `json:"timestamp" avro:"timestamp"`
+}
+
 type EmailErrorEvent struct {
 	TaskID         string `json:"task_id" avro:"task_id"`
 	EmailAccountID string `json:"email_account_id" avro:"email_account_id"`
