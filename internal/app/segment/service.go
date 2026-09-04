@@ -358,21 +358,11 @@ func (s *service) SetCampaignSegments(ctx context.Context, orgID, campaignID uui
 	}
 	// Links and enrolment commit together: the user is waiting on this one,
 	// and a failed enrolment must not answer 200 with "added 0".
-	added, xerr := s.repo.ReplaceForCampaign(ctx, orgID, campaignID, ids)
+	added, status, xerr := s.repo.ReplaceForCampaign(ctx, orgID, campaignID, ids)
 	if xerr != nil {
 		return nil, 0, xerr
 	}
-	if added > 0 {
-		links, xerr := s.repo.LinkedCampaignsForSegments(ctx, orgID, ids)
-		if xerr != nil {
-			return nil, 0, xerr
-		}
-		for _, lc := range links {
-			if lc.CampaignID == campaignID {
-				s.reactToEnrolment(ctx, lc, added)
-			}
-		}
-	}
+	s.reactToEnrolment(ctx, models.LinkedCampaign{CampaignID: campaignID, OrganizationID: orgID, Status: status}, added)
 	out, xerr := s.repo.ListForCampaign(ctx, orgID, campaignID)
 	if xerr != nil {
 		return nil, 0, xerr

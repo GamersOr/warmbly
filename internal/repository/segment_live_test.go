@@ -271,9 +271,9 @@ func TestLiveSegmentCampaignLinks(t *testing.T) {
 
 	// Replacing the set enrols current members in the same transaction; a
 	// second pass adds nothing.
-	added, xerr := repo.ReplaceForCampaign(ctx, f.org, f.other, []uuid.UUID{acme.ID})
-	if xerr != nil || added != 2 {
-		t.Fatalf("replace = %d, %v", added, xerr)
+	added, status, xerr := repo.ReplaceForCampaign(ctx, f.org, f.other, []uuid.UUID{acme.ID})
+	if xerr != nil || added != 2 || status == "" {
+		t.Fatalf("replace = %d, %q, %v", added, status, xerr)
 	}
 	if links, _ = repo.ListForCampaign(ctx, f.org, f.other); len(links) != 1 || links[0].LeadCount != 2 || links[0].HeldOutCount != 0 {
 		t.Fatalf("links after replace = %+v", links)
