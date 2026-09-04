@@ -2,6 +2,7 @@ package errx
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -151,11 +152,17 @@ var (
 		"This account lacks permission to access certain required resources.",
 		MailErrorResolveMethodReload,
 	)
+	// errStatus is empty when the mail server gave neither a response code nor
+	// any text, so the reason is appended only when there is one to show.
 	ErrMailUnknownImapError = func(errStatus string) *MailError {
+		message := "The mail server rejected the request and gave no reason."
+		if errStatus = strings.TrimSpace(errStatus); errStatus != "" {
+			message = fmt.Sprintf("Something went wrong: %s", errStatus)
+		}
 		return MError(
 			MailErrorCritical,
 			MailErrorCodeImapUnknown,
-			fmt.Sprintf("Something went wrong: %s", errStatus),
+			message,
 			MailErrorResolveMethodReload,
 		)
 	}
