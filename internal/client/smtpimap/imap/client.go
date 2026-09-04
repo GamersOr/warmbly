@@ -164,43 +164,69 @@ func (c *Client) oauth2Auth() *errx.MailError {
 	return nil
 }
 
+// folderStatus is what the sync loop needs from every folder: UIDVALIDITY to
+// notice a rebuilt mailbox and HIGHESTMODSEQ to arm ChangedSince.
+var folderStatus = imap.StatusOptions{
+	UIDValidity:   true,
+	HighestModSeq: true,
+}
+
 func (c *Client) Folders() ([]models.Mailbox, *errx.MailError) {
-	var resp []models.Mailbox
+	// LIST-STATUS folds every folder's STATUS into the LIST reply in one round
+	// trip, but it is an extension (RFC 5819) that CONDSTORE does not imply.
+	// A server without it rejects the RETURN clause outright rather than
+	// ignoring it, which cost the account its whole sync, so ask for it only
+	// when it is advertised and pay for a STATUS per folder otherwise.
+	listStatus := c.client.Caps().Has(imap.CapListStatus)
 
-	// LIST-STATUS: without requesting these, f.Status is nil for every
-	// folder and the sync loop sees an empty account.
-	cmd := c.client.List("", "%", &imap.ListOptions{
-		ReturnStatus: &imap.StatusOptions{
-			UIDValidity:   true,
-			HighestModSeq: true,
-		},
-	})
+	var opts *imap.ListOptions
+	if listStatus {
+		opts = &imap.ListOptions{ReturnStatus: &folderStatus}
+	}
 
-	for f := cmd.Next(); f != nil; f = cmd.Next() {
+	entries, err := c.client.List("", "%", opts).Collect()
+	if err != nil {
+		return nil, c.handleError(err)
+	}
+
+	resp := make([]models.Mailbox, 0, len(entries))
+	for _, f := range entries {
 		if len(resp) >= config.MaxEmailFolders {
 			return nil, errx.ErrMailFoldersMax
 		}
 
 		var attrs []string = make([]string, len(f.Attrs))
+		selectable := true
 
 		for i := range f.Attrs {
 			attrs[i] = string(f.Attrs[i])
+			if f.Attrs[i] == imap.MailboxAttrNoSelect || f.Attrs[i] == imap.MailboxAttrNonExistent {
+				selectable = false
+			}
 		}
 
-		if f.Status == nil {
-			continue
+		status := f.Status
+		if status == nil {
+			// With LIST-STATUS the server already answered for every folder it
+			// means to report, and a folder that cannot be selected has no
+			// UIDVALIDITY to ask for: STATUS on one is an error.
+			if listStatus || !selectable {
+				continue
+			}
+
+			data, serr := c.client.Status(f.Mailbox, &folderStatus).Wait()
+			if serr != nil {
+				return nil, c.handleError(serr)
+			}
+			status = data
 		}
 
 		resp = append(resp, models.Mailbox{
 			Name:          f.Mailbox,
 			Attrs:         attrs,
-			UIDValidity:   f.Status.UIDValidity,
-			HighestModSeq: f.Status.HighestModSeq,
+			UIDValidity:   status.UIDValidity,
+			HighestModSeq: status.HighestModSeq,
 		})
-	}
-
-	if err := cmd.Close(); err != nil {
-		return nil, c.handleError(err)
 	}
 
 	return resp, nil
