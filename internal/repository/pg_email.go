@@ -791,7 +791,7 @@ func (r *emailRepository) Update(ctx context.Context, userID, emailAccountID str
 	}
 	if udata.SignaturePlain != nil {
 		l := len(*udata.SignaturePlain)
-		if l > 1000 {
+		if l > config.MaxSignatureSize {
 			return nil, errx.ErrEmailSignaturePlain
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "signature_plain", argPos))
@@ -800,7 +800,7 @@ func (r *emailRepository) Update(ctx context.Context, userID, emailAccountID str
 	}
 	if udata.SignatureHTML != nil {
 		l := len(*udata.SignatureHTML)
-		if l > 1000 {
+		if l > config.MaxSignatureSize {
 			return nil, errx.ErrEmailSignatureHTML
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "signature_html", argPos))

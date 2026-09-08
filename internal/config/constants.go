@@ -27,6 +27,15 @@ const (
 	CampaignRampCeilingDefault   = 50
 	CampaignMaxNewLeadsMax       = 1000
 
+	// MaxSignatureSize bounds one mailbox's stored signature, plain or HTML.
+	// The old 1000-byte ceiling fit a few lines of text and nothing else: a
+	// designed signature sliced into per-link images spends ~700 bytes on the
+	// absolute URLs alone, so it was rejected however tightly it was written.
+	// The column is `text`, and a signature is appended to every send, so the
+	// bound is about keeping one mailbox's footer sane rather than protecting
+	// storage.
+	MaxSignatureSize = 20480 // 20 KB
+
 	MaxContactSize = 10240
 	// MaxEmailBodySize bounds a single stored message body. 200 KB cut real
 	// HTML newsletters mid-document; 512 KB clears the overwhelming majority
