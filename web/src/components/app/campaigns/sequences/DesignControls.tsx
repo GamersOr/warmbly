@@ -65,6 +65,17 @@ const FONT_SIZES = [12, 13, 14, 16, 18, 20, 24, 30, 36];
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 96;
 
+// Unitless line heights: a bare number multiplies whatever font size the text
+// ends up at, so a reader who bumps the size on their phone keeps the spacing
+// in proportion. A px line-height does not, and Outlook rounds it.
+const LINE_HEIGHTS: { label: string; value: string }[] = [
+    { label: "Tight", value: "1.2" },
+    { label: "Snug", value: "1.4" },
+    { label: "Normal", value: "1.6" },
+    { label: "Roomy", value: "1.8" },
+    { label: "Loose", value: "2" },
+];
+
 const ALIGNMENTS: { value: BlockAlign; label: string; Icon: typeof AlignLeftIcon }[] = [
     { value: "left", label: "Align left", Icon: AlignLeftIcon },
     { value: "center", label: "Centre", Icon: AlignCenterIcon },
@@ -211,7 +222,11 @@ function AlignCompact({
 // <span style>, which is the only place a mail client will read them from.
 export function TypeMenu({ editor }: { editor: Editor }) {
     const [open, setOpen] = React.useState(false);
-    const attrs = editor.getAttributes("textStyle") as { fontSize?: string; fontFamily?: string };
+    const attrs = editor.getAttributes("textStyle") as {
+        fontSize?: string;
+        fontFamily?: string;
+        lineHeight?: string;
+    };
     const currentSize = parseInt(attrs.fontSize ?? "", 10);
     const size = Number.isFinite(currentSize) ? currentSize : null;
     const family = FONT_STACKS.find((f) => f.value && f.value === attrs.fontFamily);
@@ -310,6 +325,42 @@ export function TypeMenu({ editor }: { editor: Editor }) {
                 </div>
                 <p className="mt-1.5 px-0.5 text-[10.5px] leading-relaxed text-slate-400">
                     Anything under 13px is hard to read on a phone, which is where most cold email is opened.
+                </p>
+            </div>
+            <div className="border-t border-slate-100 px-2 py-2">
+                <div className="px-0.5 pb-1.5 text-[10.5px] text-slate-400">Line spacing</div>
+                <div className="flex flex-wrap gap-1">
+                    <button
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => editor.chain().focus().unsetLineHeight().run()}
+                        className={`h-7 rounded border px-2 text-[11.5px] transition-colors ${
+                            !attrs.lineHeight
+                                ? "border-sky-300 bg-sky-50 text-sky-700"
+                                : "border-slate-200 text-slate-600 hover:border-sky-300 hover:bg-sky-50/50"
+                        }`}
+                    >
+                        Default
+                    </button>
+                    {LINE_HEIGHTS.map((lh) => (
+                        <button
+                            key={lh.value}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => editor.chain().focus().setLineHeight(lh.value).run()}
+                            className={`h-7 rounded border px-2 text-[11.5px] transition-colors ${
+                                attrs.lineHeight === lh.value
+                                    ? "border-sky-300 bg-sky-50 text-sky-700"
+                                    : "border-slate-200 text-slate-600 hover:border-sky-300 hover:bg-sky-50/50"
+                            }`}
+                        >
+                            {lh.label}
+                        </button>
+                    ))}
+                </div>
+                <p className="mt-1.5 px-0.5 text-[10.5px] leading-relaxed text-slate-400">
+                    Applies to the paragraphs the selection touches. Around 1.6 is what a normal typed email looks
+                    like.
                 </p>
             </div>
         </Panel>
