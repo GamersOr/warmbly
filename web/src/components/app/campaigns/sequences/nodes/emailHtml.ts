@@ -239,7 +239,16 @@ export const EmailParagraph = Paragraph.extend({
     },
     renderHTML({ node, HTMLAttributes }) {
         const tag = node.attrs.htmlTag === "div" ? "div" : "p";
-        return [tag, mergeAttributes(this.options.HTMLAttributes, HTMLAttributes), 0];
+        const attrs = mergeAttributes(this.options.HTMLAttributes, HTMLAttributes);
+        // A blank line the writer typed is an empty paragraph, and an empty
+        // block box has no content height: the editor only shows one because
+        // ProseMirror puts a trailing <br> in it for the caret. Serialized
+        // bare, that line exists while it is being written and is gone in
+        // Preview and in the recipient's client. Emit the <br> so the blank
+        // line is real everywhere. It parses back to a hard break inside the
+        // paragraph, so the next save round-trips to the same markup.
+        if (node.content.size === 0) return [tag, attrs, ["br"]];
+        return [tag, attrs, 0];
     },
 });
 

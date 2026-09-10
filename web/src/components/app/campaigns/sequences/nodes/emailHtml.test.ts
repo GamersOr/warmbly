@@ -122,3 +122,18 @@ describe("the email schema", () => {
         }
     });
 });
+
+describe("blank lines", () => {
+    // A blank line is an empty paragraph, and an empty block box has no content
+    // height. The editor shows one only because ProseMirror adds a trailing <br>
+    // for the caret, so a bare <p></p> was a line that existed while it was being
+    // written and was gone in Preview and in the recipient's client.
+    it("keeps a typed blank line as a real line", () => {
+        expect(roundTrip("<p>One</p><p></p><p>Two</p>")).toBe("<p>One</p><p><br></p><p>Two</p>");
+    });
+
+    it("re-saving does not add another break", () => {
+        const once = roundTrip("<p>One</p><p></p><p>Two</p>");
+        expect(roundTrip(once)).toBe(once);
+    });
+});
