@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
 	"github.com/warmbly/warmbly/internal/pkg/tmplfuncs"
 	"github.com/warmbly/warmbly/internal/pkg/warmpersona"
 )
@@ -220,6 +221,9 @@ type TemplatePreview struct {
 	BodyPlain  string   `json:"body_plain"`
 	Errors     []string `json:"errors,omitempty"`     // template parse errors (these block sending)
 	Unresolved []string `json:"unresolved,omitempty"` // literal {{…}} tokens left after render
+	// HTMLFindings is what mail clients will do to this body: what they strip,
+	// what CSS they ignore, and whether Gmail will clip it. Advisory only.
+	HTMLFindings []mailhtml.Finding `json:"html_findings,omitempty"`
 }
 
 // PreviewUnsubscribeLink stands in for the per-recipient link in previews.
@@ -233,7 +237,13 @@ var unresolvedToken = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 // send path does (template render + spintax), and reports parse errors plus any
 // tokens that did not resolve.
 func PreviewTemplates(subject, bodyHTML, bodyPlain string, contact models.Contact) TemplatePreview {
-	extra := map[string]string{UnsubscribeLinkVar: PreviewUnsubscribeLink}
+	return previewTemplatesWith(subject, bodyHTML, bodyPlain, contact, PreviewUnsubscribeLink)
+}
+
+// previewTemplatesWith is PreviewTemplates with the unsubscribe link the
+// {{unsubscribe_link}} variable resolves to.
+func previewTemplatesWith(subject, bodyHTML, bodyPlain string, contact models.Contact, unsubscribeURL string) TemplatePreview {
+	extra := map[string]string{UnsubscribeLinkVar: unsubscribeURL}
 	p := TemplatePreview{
 		Subject:   expandSpintax(RenderTemplateWith(subject, contact, extra)),
 		BodyHTML:  expandSpintax(RenderTemplateWith(bodyHTML, contact, extra)),
@@ -256,17 +266,21 @@ func PreviewTemplates(subject, bodyHTML, bodyPlain string, contact models.Contac
 	return p
 }
 
-// AddSignature adds signature to email body
+// AddSignature places the mailbox signature under the body. HTML gets its own
+// block with a top margin, not <br><br>: the breaks stacked against the body's
+// own trailing margin and showed as blank lines in Apple Mail and Outlook.
 func AddSignature(body string, signature string, isHTML bool) string {
 	if signature == "" {
 		return body
 	}
 
-	if isHTML {
-		return body + "<br><br>" + signature
+	if !isHTML {
+		return body + "\n\n" + signature
 	}
 
-	return body + "\n\n" + signature
+	block := `<div style="margin-top:16px">` + signature + `</div>`
+	// Trailing content belongs inside the document, as for the pixel and footer.
+	return mailhtml.InsertBeforeBodyEnd(body, block)
 }
 
 // AddOpenTrackingPixel adds an invisible tracking pixel to HTML email.
@@ -283,14 +297,7 @@ func AddOpenTrackingPixel(htmlBody string, taskID uuid.UUID, trackingDomain stri
 		return htmlBody
 	}
 	pixel := fmt.Sprintf(`<img src="%s" width="1" height="1" style="display:none;" alt="" />`, pixelURL)
-
-	// Try to insert before closing body tag
-	if strings.Contains(htmlBody, "</body>") {
-		return strings.Replace(htmlBody, "</body>", pixel+"</body>", 1)
-	}
-
-	// Otherwise append to end
-	return htmlBody + pixel
+	return mailhtml.InsertBeforeBodyEnd(htmlBody, pixel)
 }
 
 // personaPick chooses from a mailbox's preferred subset of phrasing options so
@@ -411,24 +418,13 @@ func generateConversationOpeningEmail(conversation Conversation, account models.
 	return sb.String()
 }
 
-// ExtractPlainTextFromHTML converts HTML to plain text (basic implementation)
-func ExtractPlainTextFromHTML(html string) string {
-	// Remove HTML tags
-	tagRegex := regexp.MustCompile(`<[^>]*>`)
-	text := tagRegex.ReplaceAllString(html, "")
-
-	// Decode common HTML entities
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&quot;", "\"")
-	text = strings.ReplaceAll(text, "&#39;", "'")
-
-	// Remove extra whitespace
-	text = strings.TrimSpace(text)
-	multiSpaceRegex := regexp.MustCompile(`\s+`)
-	text = multiSpaceRegex.ReplaceAllString(text, " ")
-
-	return text
+// ExtractPlainTextFromHTML derives the text/plain alternative that ships
+// beside an HTML body.
+//
+// It used to strip tags with a regex, which put a designed email's whole
+// stylesheet at the top of the text part and ran every paragraph into one
+// line (issue #393). mailhtml renders the document instead, so blocks, lists,
+// table rows and link destinations survive.
+func ExtractPlainTextFromHTML(body string) string {
+	return mailhtml.ToPlainText(body)
 }

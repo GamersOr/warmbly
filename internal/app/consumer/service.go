@@ -47,6 +47,7 @@ type JobsService struct {
 	WarmupEngagementRepo repository.WarmupEngagementRepository
 	WarmupService        warmupapp.Service
 	WorkerRepo           repository.WorkerRepository
+	FleetNodeRepo        repository.FleetNodeRepository
 	// LifecycleRepo moves mailboxes in and out of cold rotation. Nil disables
 	// the lifecycle rebalancer entirely.
 	LifecycleRepo repository.SendLifecycleRepository
@@ -73,6 +74,11 @@ type JobsService struct {
 	// Notifier tells affected orgs (members with manage_emails) when the
 	// dead-worker job moves or strands their mailboxes. Nil disables it.
 	Notifier OrgNotifier
+
+	// OpsNotifier raises instance-wide operator alerts, which are a different
+	// audience from Notifier: the operator hears about the fleet, the tenant
+	// hears about their mailboxes. Nil disables it.
+	OpsNotifier OperatorNotifier
 
 	// Send-outcome handling (EMAIL_SENT / EMAIL_FAILED from workers). The task
 	// and campaign progress the control plane stamped at hand-off are walked

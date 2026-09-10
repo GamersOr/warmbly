@@ -37,11 +37,12 @@ PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.1
 PROTO_DIR := internal/tasks/proto
 PROTO_GEN_FILES := $(PROTO_DIR)/tasks.pb.go
 
-.PHONY: poollink-dev poollink-dev-down poollink-dev-reset setup-tools fmt lint check-migrations proto check-proto \
+.PHONY: poollink-dev poollink-dev-down poollink-dev-reset setup-tools fmt lint check-migrations join-check proto check-proto \
         up upgrade claim doctor cli seed-demo seed seed-plan sandbox sandbox-seed sandbox-simulate reset logs status stop down test-seed \
         restart restart-go restart-all infra infra-down app app-down app-logs \
         backend forms forms-web consumer worker run dev tracking realtime web \
-        admin site docs grant-admin revoke-admin gen-key db-reset db-wipe migrate
+        admin site docs grant-admin revoke-admin gen-key installer-sha installer-check installer-demo \
+        db-reset db-wipe migrate warmbly warmbly-dist cli-sha cli-check images-check
 
 setup-tools:
 	@echo "Installing required Go tools into $(GO_BIN)"
@@ -49,12 +50,39 @@ setup-tools:
 	GOBIN=$(GO_BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	GOBIN=$(GO_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
 
+# Build the `warmbly` CLI into ./bin, stamped with this checkout's version so
+# `warmbly version` reports something meaningful. This is the customer CLI; the
+# operator one (warmblyctl) ships in the backend image and runs there.
+warmbly:
+	@mkdir -p bin
+	go build -ldflags="-s -w \
+	  -X github.com/warmbly/warmbly/internal/version.Version=$(WARMBLY_BUILD_VERSION) \
+	  -X github.com/warmbly/warmbly/internal/version.Commit=$(WARMBLY_BUILD_COMMIT) \
+	  -X github.com/warmbly/warmbly/internal/version.BuiltAt=$(WARMBLY_BUILD_TIME)" \
+	  -o bin/warmbly ./cmd/cli
+	@echo "built bin/warmbly ($(WARMBLY_BUILD_VERSION))"
+	@echo "put it on your PATH: sudo install -m 0755 bin/warmbly /usr/local/bin/warmbly"
+
+# Everything a release publishes for the CLI: an archive per platform, the
+# checksums, and the Homebrew and Scoop manifests. Same script the release
+# workflow runs, so an artifact can be reproduced locally.
+warmbly-dist:
+	./scripts/build-cli.sh dist
+
+# The published installer at https://warmbly.com/cli.sh. Regenerate the
+# checksum after any edit to it; CI fails when the two disagree.
+cli-sha:
+	@cd site/public && sha256sum cli.sh > cli.sh.sha256 && cat cli.sh.sha256
+
+cli-check:
+	@./scripts/check-cli-installer.sh
+
 # Format all Go code. CI's golangci-lint enforces gofmt, so this is the
 # formatting signal to run before committing, not `go build`.
 fmt:
 	gofmt -w ./cmd ./internal
 
-lint: check-migrations
+lint: check-migrations join-check check-dockerfiles
 	./scripts/check-forms-mirror.sh
 	$(GO_BIN)/golangci-lint run --timeout=5m
 
@@ -63,6 +91,13 @@ lint: check-migrations
 # documented ship signal covers it.
 check-migrations:
 	@./scripts/check-migrations.sh
+
+# A COPY naming a path no longer in the repo builds green everywhere until it
+# lands: nothing in `make lint` or the CI workflow builds an image, and
+# build-push.yml runs only on push to main. Runs in a second; part of `make
+# lint` for the same reason check-migrations is.
+check-dockerfiles:
+	@./scripts/check-dockerfiles.sh
 
 proto:
 	@command -v protoc >/dev/null || (echo "protoc not found in PATH"; exit 1)
@@ -639,7 +674,6 @@ consumer:
 worker:
 	$(WORKER_DEV_ENV) \
 	WORKER_ID=10c8f5e4-1c39-5b2a-9c8b-3d2f0a8b1a01 \
-	WORKER_TIER=shared \
 	ENCRYPTED_KEYS_PROVIDER=http \
 	ENCRYPTED_KEYS_BACKEND_URL=http://localhost:8080 \
 	ENCRYPTED_KEYS_WORKER_TOKEN=local-dev-internal-token \
@@ -663,6 +697,40 @@ run:
 # makes every stored mailbox credential unrecoverable).
 gen-key:
 	@openssl rand -base64 32
+
+# The one-command installer, served verbatim at https://warmbly.com/install.sh.
+# The published checksum is what makes "download, verify, read, run" a real
+# alternative to piping into a shell, so it is regenerated with the script and
+# CI fails when the two disagree.
+installer-sha:
+	@cd site/public && sha256sum install.sh > install.sh.sha256 && cat install.sh.sha256
+
+# Everything CI runs against the installer: POSIX parse, shellcheck, --help,
+# --print-env, a compose file per answer shape, and the checksum.
+installer-check:
+	@./scripts/check-installer.sh
+
+# The fleet join script is served verbatim from the backend at GET /join.sh and
+# is what a stranger pipes into a root shell to add a machine. Nothing covered
+# it, and a systemd unit that could never start shipped as a result. Part of
+# `make lint`, like check-migrations.
+join-check:
+	@./scripts/check-join-script.sh
+
+# Every published image has to be pullable by a stranger, and nothing else we
+# run proves it: a package on GHCR is created private, does not inherit the
+# repository's visibility, and no API can change that, so every check that
+# talks to the registry with a token passes while the world sees nothing
+# (#371). This one carries no credentials on purpose. No TAG means the newest
+# release, which is what a fresh install resolves to.
+images-check:
+	@./scripts/check-images-public.sh $(if $(TAG),--tag $(TAG),)
+
+# Walk the installer's wizard without installing anything: the real questions,
+# the real review, and a played pull and start. Writes no file, pulls no image,
+# needs no Docker. This is the "what does it look like" target.
+installer-demo:
+	@sh site/public/install.sh --demo
 
 # ─── one-command dev stack ───────────────────────────────────────────────
 #

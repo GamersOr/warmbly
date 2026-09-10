@@ -65,13 +65,13 @@ import NotFound from './app/not-found';
 
 import { Toaster } from '@/components/ui/toaster';
 
-import * as Sentry from "@sentry/react";
+import { initErrorReporting } from "@/lib/observability";
+import { initProductAnalytics } from "@/lib/productAnalytics";
 
-Sentry.init({
-  dsn: "https://412466daced4b1d85ee040eef66efc95@o4510248538472448.ingest.us.sentry.io/4510248563113984",
-  sendDefaultPii: true,
-  environment: import.meta.env.MODE
-})
+// Before the first render, so a boot failure is reported too.
+initErrorReporting();
+// Off unless the deployment configured a key; a self-host never loads it.
+initProductAnalytics();
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools"
@@ -89,6 +89,7 @@ import OnboardingPage from './app/onboarding/page';
 import SelectOrgPage from './app/select-org/page';
 import InviteAcceptPage from './app/invite/page';
 import ConnectPage from './app/connect/page';
+import CLIAuthPage from './app/cli/page';
 import CloudOAuthDonePage from './app/cloud-oauth/done/page';
 import WarmblyCloudSettingsPage from './app/app/settings/warmbly-cloud/page';
 import SetupPage from './app/setup/page';
@@ -208,6 +209,11 @@ const router = createBrowserRouter([
       {
         path: "connect",
         element: <ConnectPage />,
+      },
+      {
+        // Where `warmbly auth login` sends the browser to approve its code.
+        path: "cli",
+        element: <CLIAuthPage />,
       },
       {
         // Where Warmbly Cloud sends the Google/Microsoft popup back to on a linked instance.
@@ -395,8 +401,12 @@ const router = createBrowserRouter([
           {
             // Path-based, readable inbox URLs: /app/unibox/<scope>[/<threadId>].
             // Both segments optional, so /app/unibox is the default "all" view.
+            // Both are state inside one page, not different pages, so the shell
+            // keeps the page mounted across them and the conversation list holds
+            // its scroll offset when a thread opens (issue #396).
             path: "unibox/:scope?/:threadId?",
             element: <UniboxPage />,
+            handle: { stableParams: ["scope", "threadId"] },
           },
           {
             // Legacy /app/team entry points → the Members settings section.

@@ -22,6 +22,10 @@ type ContactService interface {
 	// CampaignLeadCounts returns per-status lead totals for one campaign.
 	CampaignLeadCounts(ctx context.Context, orgID, campaignID string) (*models.CampaignLeadCounts, *errx.Error)
 	BulkUpdate(ctx context.Context, userID string, orgID uuid.UUID, data *models.BulkEditContactsData) ([]models.Contact, *errx.Error)
+	// ResolveSelection turns a bulk action's selection into the contact ids it
+	// applies to: an explicit list as given, or everything matching the search
+	// the dashboard's "select all matching" sends, minus its exclusions.
+	ResolveSelection(ctx context.Context, orgID uuid.UUID, sel models.ContactSelection) ([]string, *errx.Error)
 	Update(ctx context.Context, userID, contactID string, orgID uuid.UUID, data *models.UpdateContact) (*models.Contact, *errx.Error)
 	BulkDelete(ctx context.Context, userID string, orgID uuid.UUID, contactIDs []string) *errx.Error
 	Delete(ctx context.Context, userID string, orgID uuid.UUID, contactID string) *errx.Error
@@ -40,6 +44,10 @@ type ContactService interface {
 	// that persist a mapping for later (the Google Sheets sync sources) use
 	// it so a bad mapping is caught when it is saved, not on the next sync.
 	ValidateImportMapping(mapping []models.ContactImportColumnMapping) *errx.Error
+	// ValidateSegmentTargets reports whether every id names a segment in the
+	// organization, so a saved source is refused when it is written rather
+	// than on its next run.
+	ValidateSegmentTargets(ctx context.Context, orgID uuid.UUID, ids []string) *errx.Error
 
 	// ImportCommit re-parses the uploaded file with the chosen mapping
 	// and performs the upsert / skip / dedup work. Returns per-row
@@ -67,7 +75,7 @@ type ContactService interface {
 
 	// ListTimeline returns a merged, reverse-chronological feed of all
 	// engagement + CRM events for the contact.
-	ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, before *time.Time) (*models.ContactTimelineResult, *errx.Error)
+	ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, cursor *models.ContactTimelineKey) (*models.ContactTimelineResult, *errx.Error)
 
 	// SetCampaignWaker wires the campaign service so attaching a lead to a
 	// running campaign wakes that campaign's parked send chain. Optional: with
@@ -109,6 +117,17 @@ type SegmentAware interface {
 	WireSegments(linker SegmentLinker, syncer SegmentCampaignSyncer)
 }
 
+// WebhookDispatcher delivers contact.created to customer webhooks and
+// automations. Satisfied structurally by webhook.Service.
+type WebhookDispatcher interface {
+	Dispatch(ctx context.Context, orgID uuid.UUID, eventType models.WebhookEventType, data any) (uuid.UUID, error)
+}
+
+// WebhookAware is the optional capability the caller uses to attach it.
+type WebhookAware interface {
+	WireWebhooks(w WebhookDispatcher)
+}
+
 type contactService struct {
 	contactRepository  repository.ContactRepository
 	subRepo            repository.SubscriptionRepository
@@ -123,6 +142,8 @@ type contactService struct {
 	orgRisk orgrisk.Service
 	// explainer builds the verification "why" for the contact drawer.
 	explainer VerificationExplainer
+	// webhooks fans contact.created out; nil-safe (no events).
+	webhooks WebhookDispatcher
 }
 
 // VerificationAware is implemented by the contact service so main can hand
@@ -141,6 +162,9 @@ func (s *contactService) WireVerification(e VerificationExplainer) { s.explainer
 
 // WireOrgRisk attaches the organization risk posture.
 func (s *contactService) WireOrgRisk(r orgrisk.Service) { s.orgRisk = r }
+
+// WireWebhooks attaches the event dispatcher behind contact.created.
+func (s *contactService) WireWebhooks(w WebhookDispatcher) { s.webhooks = w }
 
 // OrgRiskAware is the optional capability the caller uses to attach it.
 type OrgRiskAware interface {

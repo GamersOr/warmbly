@@ -14,7 +14,7 @@ import {
     Settings2Icon,
     UsersIcon,
 } from "lucide-react";
-import { campaignDisplayLabel, isOneTimeCampaign } from "@/components/app/campaigns/status";
+import { campaignDisplayLabel, isIdleCampaign, isOneTimeCampaign } from "@/components/app/campaigns/status";
 import useCampaign from "@/lib/api/hooks/app/campaigns/useCampaign";
 import useStartCampaign from "@/lib/api/hooks/app/campaigns/useStartCampaign";
 import useStopCampaign from "@/lib/api/hooks/app/campaigns/useStopCampaign";
@@ -43,6 +43,7 @@ const STATUS_PILL: Record<string, string> = {
     paused_undeliverable: "bg-amber-50 text-amber-700 border-amber-200",
     draft: "bg-slate-100 text-slate-600 border-slate-200",
     completed: "bg-slate-100 text-slate-600 border-slate-200",
+    idle: "bg-sky-50 text-sky-700 border-sky-200",
 };
 
 export default function CampaignLayout() {
@@ -108,7 +109,7 @@ export default function CampaignLayout() {
 
     const campaign = campaignData.data;
     const status = campaign.status;
-    const pill = STATUS_PILL[status] ?? STATUS_PILL.draft;
+    const pill = isIdleCampaign(campaign) ? STATUS_PILL.idle : (STATUS_PILL[status] ?? STATUS_PILL.draft);
 
     const isActive = status === "active";
     const canStart = canStartCampaign(status);

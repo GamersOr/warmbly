@@ -114,6 +114,21 @@ export default function SyncStatusCard({ mailboxId }: { mailboxId: string }) {
                     {state!.deferred.toLocaleString()} message{state!.deferred === 1 ? "" : "s"} waiting on the server.
                 </p>
             )}
+
+            {(state?.folders_skipped_cap ?? 0) > 0 && (
+                <p className="mt-1 text-[11.5px] text-amber-700">
+                    {state!.folders_skipped_cap!.toLocaleString()} folder{state!.folders_skipped_cap === 1 ? " is" : "s are"} not synced: this mailbox has more
+                    folders than Warmbly follows. Your inbox, sent, drafts, archive, spam and trash are always included.
+                </p>
+            )}
+
+            {(state?.folders_skipped_conflict ?? 0) > 0 && (
+                <p className="mt-1 text-[11.5px] text-amber-700">
+                    Your mail server listed {state!.folders_skipped_conflict!.toLocaleString()} folder
+                    {state!.folders_skipped_conflict === 1 ? " name" : " names"} more than once, so only the first of each is
+                    synced. Renaming one of them on your mail server clears this.
+                </p>
+            )}
         </div>
     );
 }

@@ -1,14 +1,26 @@
 // Rich email-body editor for campaign Steps, built on TipTap (no deprecated
 // execCommand). Controlled by an HTML string; emits HTML on change. Ships a
-// house-theme toolbar (headings, bold/italic/underline/strike, lists, link), a
-// one-click {{variable}} inserter, and a spintax `{a|b}` helper. Personalization
-// tokens are just text, so they survive serialization untouched.
+// house-theme toolbar (undo/redo, headings, bold/italic/underline/strike,
+// lists, link, images), a one-click {{variable}} inserter, a spintax `{a|b}`
+// helper, and an HTML source view. Personalization tokens are just text, so
+// they survive serialization untouched.
+//
+// Paste is normalised on the way in (pasteHtml.ts): a message copied out of
+// Gmail, Outlook or Word brings its own blank-line scaffolding, which our own
+// paragraph margins would then render a second time. A paste that is a whole
+// HTML email is not normalised at all: it switches the body to HTML mode and
+// is kept exactly as written (pastedEmail.ts), because no schema can hold a
+// document with its own <head> and <style>.
+//
+// HTML mode is persisted on the step (body_code), not local state. The visual
+// editor never parses a body that is in HTML mode, so reopening a step written
+// as markup shows the markup, instead of the gutted version the schema would
+// have made of it and then saved on the next keystroke (issue #393).
 
 import React from "react";
 import { createPortal } from "react-dom";
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import Document from "@tiptap/extension-document";
-import Paragraph from "@tiptap/extension-paragraph";
 import Text from "@tiptap/extension-text";
 import Bold from "@tiptap/extension-bold";
 import Italic from "@tiptap/extension-italic";
@@ -16,6 +28,8 @@ import Underline from "@tiptap/extension-underline";
 import Strike from "@tiptap/extension-strike";
 import Heading from "@tiptap/extension-heading";
 import Link from "@tiptap/extension-link";
+import HardBreak from "@tiptap/extension-hard-break";
+import { UndoRedo } from "@tiptap/extensions";
 import { BulletList, OrderedList, ListItem } from "@tiptap/extension-list";
 import {
     BoldIcon,
@@ -34,14 +48,26 @@ import {
     ChevronDownIcon,
     SparklesIcon,
     GitBranchIcon,
+    Undo2Icon,
+    Redo2Icon,
+    CodeIcon,
+    PencilLineIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
+import toast from "react-hot-toast";
 import useClickOutside from "@/hooks/useClickOutside";
 import { useAnchoredFloating } from "@/hooks/useAnchoredFloating";
+import { useConfirm } from "@/hooks/context/confirm";
 import RichTextAIEdit from "@/components/app/ai/RichTextAIEdit";
 import RichTextAICaret from "@/components/app/ai/RichTextAICaret";
 import { useForms } from "@/lib/api/hooks/app/forms";
-import { WEBSITE_URL } from "@/lib/information";
+import { EmailImage } from "./nodes/EmailImageNode";
+import { ImageBubble, ImageMenu } from "./ImageControls";
+import { AlignMenu, ColorMenu, TableMenu, TypeMenu } from "./DesignControls";
+import { insertImage, isSupportedImageFile, useImageUpload } from "./imageUpload";
+import { normalizePastedHTML } from "./pasteHtml";
+import { detectPastedEmail } from "@/lib/email/pastedEmail";
+import { emailDesignExtensions, EmailParagraph } from "./nodes/emailHtml";
 import { VariableNode } from "./nodes/VariableNode";
 import { AIVariableNode } from "./nodes/AIVariableNode";
 import { ConditionalNode } from "./nodes/ConditionalNode";
@@ -49,6 +75,7 @@ import { FormLinkNode } from "./nodes/FormLinkNode";
 import EditorSuggest from "./nodes/EditorSuggest";
 import {
     TOKEN_META,
+    UNSUBSCRIBE_TOKEN,
     cleanFieldName,
     parseToken,
     buildToken,
@@ -67,9 +94,22 @@ function insertToken(editor: Editor, token: string) {
     }
 }
 
+// Picking the unsubscribe link with text selected links that text instead of
+// dropping a chip, so the copy keeps its own wording. With no selection the
+// chip is inserted and the send path gives it an anchor of its own.
+function insertLinkToken(editor: Editor, token: string) {
+    if (token !== UNSUBSCRIBE_TOKEN || editor.state.selection.empty) {
+        insertToken(editor, token);
+        return;
+    }
+    editor.chain().focus().setLink({ href: token }).run();
+}
+
 export default function RichTextEditor({
     html,
     onChange,
+    code = false,
+    onCodeChange,
     variables,
     links = [],
     placeholder,
@@ -77,6 +117,11 @@ export default function RichTextEditor({
 }: {
     html: string;
     onChange: (html: string) => void;
+    // HTML mode, persisted on the step as body_code. While it is on the raw
+    // markup IS the body and the visual editor never parses it, so a designed
+    // email survives being reopened.
+    code?: boolean;
+    onCodeChange?: (code: boolean) => void;
     variables: string[];
     // Per-send link tokens offered in the variable menu (body editors only).
     links?: string[];
@@ -87,47 +132,161 @@ export default function RichTextEditor({
     // conditionals behave exactly as in the full editor.
     minimal?: boolean;
 }) {
+    const confirm = useConfirm();
+    // The editor is created once, so anything a ProseMirror handler needs at
+    // paste/drop time is reached through a ref rather than a closure over the
+    // render that created it.
+    const editorRef = React.useRef<Editor | null>(null);
+    const { run: uploadImage } = useImageUpload();
+    const uploadRef = React.useRef(uploadImage);
+    uploadRef.current = uploadImage;
+    const minimalRef = React.useRef(minimal);
+    minimalRef.current = minimal;
+    // Declared with the other paste-time refs, above the editor that closes
+    // over it: a const referenced before its declaration runs would throw, and
+    // only the fact that a paste happens after render keeps that hypothetical.
+    const adoptRef = React.useRef<((markup: string) => void) | null>(null);
+
+    // Uploads an image file dropped or pasted into the body and places it,
+    // optionally at a document position (where it was dropped).
+    const placeImageFiles = React.useCallback(async (files: File[], at?: number) => {
+        if (!editorRef.current) return;
+        for (const file of files) {
+            const created = await uploadRef.current(file);
+            if (!created || !editorRef.current) continue;
+            if (typeof at === "number") editorRef.current.commands.setTextSelection(at);
+            insertImage(editorRef.current, { url: created.url, alt: created.filename });
+        }
+    }, []);
+    const placeRef = React.useRef(placeImageFiles);
+    placeRef.current = placeImageFiles;
+
     const editor = useEditor({
         extensions: [
             Document,
-            Paragraph,
+            EmailParagraph,
             Text,
             Bold,
             Italic,
             Underline,
             Strike,
+            HardBreak,
             Heading.configure({ levels: [2, 3] }),
             BulletList,
             OrderedList,
             ListItem,
             Link.configure({ openOnClick: false, autolink: true }),
+            EmailImage,
+            // Real email markup: table layout, <div> containers, colours,
+            // fonts and alignment. Without these a pasted design keeps its
+            // words and loses everything that made it a design.
+            ...emailDesignExtensions,
+            // Without this there is no undo stack at all: Ctrl+Z fell through
+            // to the browser, which cannot undo a ProseMirror transaction.
+            UndoRedo,
             VariableNode,
             AIVariableNode,
             ConditionalNode,
             FormLinkNode,
         ],
         content: upgradeVariableTokens(html || ""),
+        // Toolbar state (active marks, undo availability, the selected image)
+        // is read from the editor during render, so it has to repaint on a
+        // caret move, not only on a keystroke.
+        shouldRerenderOnTransaction: true,
         editorProps: {
             attributes: {
                 class: `tiptap-body ${
                     minimal ? "min-h-[68px] text-[13px]" : "min-h-[260px] px-3 py-2.5 text-[13px]"
                 } leading-relaxed text-slate-800 focus:outline-none`,
             },
+            transformPastedHTML: (pasted) => normalizePastedHTML(pasted),
+            handlePaste: (_view, event) => {
+                if (minimalRef.current) return false;
+                const files = Array.from(event.clipboardData?.files ?? []).filter(isSupportedImageFile);
+                if (files.length > 0) {
+                    event.preventDefault();
+                    void placeRef.current(files);
+                    return true;
+                }
+                // A whole HTML email is kept byte for byte instead of being
+                // parsed into the schema, which would drop its <style> block
+                // and its <head> without saying so.
+                const document_ = detectPastedEmail(event.clipboardData);
+                if (document_ && adoptRef.current) {
+                    event.preventDefault();
+                    adoptRef.current(document_);
+                    return true;
+                }
+                return false;
+            },
+            handleDrop: (view, event, _slice, moved) => {
+                // `moved` is the editor's own content being dragged inside it.
+                if (minimalRef.current || moved) return false;
+                const dt = event instanceof DragEvent ? event.dataTransfer : null;
+                const files = Array.from(dt?.files ?? []).filter(isSupportedImageFile);
+                if (files.length === 0) return false;
+                event.preventDefault();
+                const at = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
+                void placeRef.current(files, at);
+                return true;
+            },
         },
         onUpdate: ({ editor }) => onChange(editor.getHTML()),
     });
+    editorRef.current = editor;
+
+    // HTML mode is the step's own persisted state, so a body written as markup
+    // is still markup when the step is reopened. While it is on, the textarea
+    // holds the body and the editor is not the source of truth.
+    adoptRef.current = onCodeChange
+        ? (markup: string) => {
+              onChange(prettyHTML(markup));
+              onCodeChange(true);
+              toast.success("Kept as HTML. Use the toolbar's Visual button to edit it as rich text.");
+          }
+        : null;
 
     // Keep the editor in sync when the value changes from outside (template
     // applied, step switched, reset) without clobbering the user's caret on
-    // their own edits.
+    // their own edits. In HTML mode there is nothing to sync: parsing the body
+    // is exactly what that mode exists to prevent.
     React.useEffect(() => {
-        if (!editor) return;
+        if (!editor || code) return;
         const current = editor.getHTML();
         const incoming = upgradeVariableTokens(html || "");
         if (incoming !== current) {
             editor.commands.setContent(incoming, { emitUpdate: false });
         }
-    }, [html, editor]);
+    }, [html, editor, code]);
+
+    // Switching modes. Into HTML is lossless; out of it hands the markup to
+    // the schema, which keeps only what it can represent, so anything it would
+    // drop is named while undoing the switch is still one click. The parsed
+    // result is committed rather than left to the next keystroke: what the
+    // editor shows after the switch has to be what the step will send.
+    const toggleCode = () => {
+        if (!editor || !onCodeChange) return;
+        if (!code) {
+            onChange(prettyHTML(editor.getHTML()));
+            onCodeChange(true);
+            return;
+        }
+        const apply = () => {
+            editor.commands.setContent(upgradeVariableTokens(html || ""), { emitUpdate: true });
+            onCodeChange(false);
+        };
+        const dropped = unsupportedTags(html || "");
+        if (dropped.length > 0) {
+            confirm.show(
+                `The visual editor cannot hold ${dropped.map((t) => `<${t}>`).join(", ")}. ` +
+                    "Switching removes those tags and keeps the text inside them. Stay in HTML to keep them.",
+                apply,
+            );
+            return;
+        }
+        apply();
+    };
 
     if (!editor) return null;
 
@@ -154,26 +313,111 @@ export default function RichTextEditor({
 
     return (
         <div className="rounded-md border border-slate-200 bg-white focus-within:border-sky-400 focus-within:ring-2 focus-within:ring-sky-100 transition-colors">
-            <Toolbar editor={editor} variables={variables} links={links} />
-            <div className="relative">
-                <EditorContent editor={editor} />
-                {placeholder && editor.isEmpty && (
-                    <p className="pointer-events-none absolute left-3 top-2.5 text-[13px] text-slate-300 select-none">
-                        {placeholder}
-                    </p>
-                )}
-            </div>
-            {/* Select text → floating "Edit with AI" pill over the selection. */}
-            <RichTextAIEdit editor={editor} />
-            {/* Collapsed caret → sparkle companion + ⌘J to write with AI. */}
-            <RichTextAICaret editor={editor} />
-            {/* Type `{{` → variable type-ahead at the caret. */}
-            <EditorSuggest editor={editor} links={links} />
+            <Toolbar
+                editor={editor}
+                variables={variables}
+                links={links}
+                sourceOpen={code}
+                onToggleSource={onCodeChange ? toggleCode : undefined}
+            />
+            {code ? (
+                <HTMLSource value={html} onChange={onChange} />
+            ) : (
+                <div className="relative">
+                    <EditorContent editor={editor} />
+                    {placeholder && editor.isEmpty && (
+                        <p className="pointer-events-none absolute left-3 top-2.5 text-[13px] text-slate-300 select-none">
+                            {placeholder}
+                        </p>
+                    )}
+                </div>
+            )}
+            {!code && (
+                <>
+                    {/* Select an image → size, alignment and alt text over it. */}
+                    <ImageBubble editor={editor} />
+                    {/* Select text → floating "Edit with AI" pill over the selection. */}
+                    <RichTextAIEdit editor={editor} />
+                    {/* Collapsed caret → sparkle companion + ⌘J to write with AI. */}
+                    <RichTextAICaret editor={editor} />
+                    {/* Type `{{` → variable type-ahead at the caret. */}
+                    <EditorSuggest editor={editor} links={links} />
+                </>
+            )}
         </div>
     );
 }
 
-function Toolbar({ editor, variables, links = [] }: { editor: Editor; variables: string[]; links?: string[] }) {
+// HTMLSource is the raw-markup view. It holds the body itself, not a copy, so
+// what the user types here is byte for byte what the step sends.
+function HTMLSource({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+    return (
+        <div>
+            <textarea
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                spellCheck={false}
+                placeholder="<p>Hi {{.FirstName}}, …</p>"
+                className="min-h-[260px] w-full resize-y bg-white px-3 py-2.5 font-mono text-[12px] leading-relaxed text-slate-800 outline-none"
+            />
+            <p className="border-t border-slate-200/70 px-3 py-1.5 text-[10.5px] text-slate-400">
+                This is what the step sends. Merge fields, conditions and spintax all still work here.
+            </p>
+        </div>
+    );
+}
+
+// prettyHTML puts each block on its own line so the source view is readable.
+// The break only ever goes BETWEEN blocks, never inside one: whitespace there
+// is not content, so the round trip back into the editor is lossless. Markup
+// that already has its own line structure is left exactly as it arrived.
+function prettyHTML(html: string): string {
+    if (html.includes("\n")) return html.trim();
+    return html
+        .replace(/(<\/(?:p|div|h[1-6]|ul|ol|li|blockquote|table|tr|td|th|thead|tbody)>|<img\b[^>]*>)(?=<)/gi, "$1\n")
+        .trim();
+}
+
+// The tags the visual editor's schema can hold. Anything else in HTML mode is
+// dropped the moment the editor parses it, so the user is told which ones
+// before that happens rather than after.
+//
+// This list has to match the extensions actually mounted above, or the warning
+// stays silent while the switch destroys something. Headings are configured to
+// levels 2 and 3, so h1 and h4-h6 become paragraphs. Nothing mounted parses
+// font or center. The table extensions know only table, tr, td and th: thead
+// and tfoot lose their section, colgroup and col are dropped, and a caption
+// comes back as an extra row.
+const SCHEMA_TAGS = new Set([
+    "p", "br", "strong", "b", "em", "i", "u", "s", "strike", "del",
+    "h2", "h3", "ul", "ol", "li", "a", "img", "span", "div",
+    "table", "tbody", "tr", "td", "th",
+]);
+
+function unsupportedTags(html: string): string[] {
+    const found = new Set<string>();
+    for (const m of html.matchAll(/<\s*([a-zA-Z][a-zA-Z0-9]*)\b/g)) {
+        const tag = m[1].toLowerCase();
+        if (!SCHEMA_TAGS.has(tag)) found.add(tag);
+    }
+    return [...found].sort();
+}
+
+function Toolbar({
+    editor,
+    variables,
+    links = [],
+    sourceOpen,
+    onToggleSource,
+}: {
+    editor: Editor;
+    variables: string[];
+    links?: string[];
+    sourceOpen: boolean;
+    // Absent where the step cannot persist a mode (the AI-block prompt), which
+    // is also where a raw-markup body would mean nothing.
+    onToggleSource?: () => void;
+}) {
     const [linkOpen, setLinkOpen] = React.useState(false);
     const [linkUrl, setLinkUrl] = React.useState("");
 
@@ -188,8 +432,45 @@ function Toolbar({ editor, variables, links = [] }: { editor: Editor; variables:
         setLinkUrl("");
     };
 
+    // Writing controls are the source view's business, not the toolbar's: the
+    // textarea holds markup, so a bold command there would be meaningless.
+    if (sourceOpen && onToggleSource) {
+        return (
+            <div className="relative flex flex-wrap items-center gap-0.5 border-b border-slate-200/70 px-1.5 py-1">
+                <span className="px-1.5 text-[10px] uppercase tracking-[0.14em] text-slate-400">HTML source</span>
+                <div className="ml-auto">
+                    <button
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={onToggleSource}
+                        title="Back to the visual editor"
+                        className="h-7 px-2 inline-flex items-center gap-1.5 rounded text-[11.5px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
+                    >
+                        <PencilLineIcon className="w-3.5 h-3.5" />
+                        Visual
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="relative flex flex-wrap items-center gap-0.5 border-b border-slate-200/70 px-1.5 py-1">
+            <Btn
+                onClick={() => editor.chain().focus().undo().run()}
+                disabled={!editor.can().undo()}
+                title="Undo (Ctrl+Z)"
+            >
+                <Undo2Icon className="w-3.5 h-3.5" />
+            </Btn>
+            <Btn
+                onClick={() => editor.chain().focus().redo().run()}
+                disabled={!editor.can().redo()}
+                title="Redo (Ctrl+Shift+Z)"
+            >
+                <Redo2Icon className="w-3.5 h-3.5" />
+            </Btn>
+            <Divider />
             <Btn active={editor.isActive("bold")} onClick={() => editor.chain().focus().toggleBold().run()} title="Bold">
                 <BoldIcon className="w-3.5 h-3.5" />
             </Btn>
@@ -226,8 +507,18 @@ function Toolbar({ editor, variables, links = [] }: { editor: Editor; variables:
             >
                 <Link2Icon className="w-3.5 h-3.5" />
             </Btn>
+            <ImageMenu editor={editor} />
             <Divider />
-            <VariableMenu onPick={(v) => insertToken(editor, v)} variables={variables} links={links} />
+            <TypeMenu editor={editor} />
+            <ColorMenu editor={editor} />
+            <AlignMenu editor={editor} />
+            <TableMenu editor={editor} />
+            <Divider />
+            <VariableMenu
+                onPick={(v) => (links.includes(v) ? insertLinkToken(editor, v) : insertToken(editor, v))}
+                variables={variables}
+                links={links}
+            />
             <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
@@ -251,6 +542,14 @@ function Toolbar({ editor, variables, links = [] }: { editor: Editor; variables:
                 <ShuffleIcon className="w-3.5 h-3.5" />
             </Btn>
             <FormMenu onPick={(publicId) => editor.chain().focus().insertFormLink(publicId).run()} />
+
+            {onToggleSource && (
+                <div className="ml-auto">
+                    <Btn onClick={onToggleSource} title="Edit the HTML source">
+                        <CodeIcon className="w-3.5 h-3.5" />
+                    </Btn>
+                </div>
+            )}
 
             <AnimatePresence>
                 {linkOpen && (
@@ -276,6 +575,17 @@ function Toolbar({ editor, variables, links = [] }: { editor: Editor; variables:
                             placeholder="https://…"
                             className="h-7 w-56 rounded border border-slate-200 px-2 text-[12px] text-slate-800 outline-none focus:border-sky-400"
                         />
+                        {links.includes(UNSUBSCRIBE_TOKEN) && (
+                            <button
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => setLinkUrl(UNSUBSCRIBE_TOKEN)}
+                                title="Point this link at the recipient's unsubscribe page"
+                                className="h-7 px-2 inline-flex items-center rounded text-[11.5px] font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                            >
+                                Unsubscribe
+                            </button>
+                        )}
                         <button
                             type="button"
                             onClick={applyLink}
@@ -303,11 +613,13 @@ function Btn({
     active,
     onClick,
     title,
+    disabled,
     children,
 }: {
     active?: boolean;
     onClick: () => void;
     title: string;
+    disabled?: boolean;
     children: React.ReactNode;
 }) {
     return (
@@ -315,9 +627,10 @@ function Btn({
             type="button"
             title={title}
             aria-pressed={active}
+            disabled={disabled}
             onMouseDown={(e) => e.preventDefault()}
             onClick={onClick}
-            className={`size-7 inline-flex items-center justify-center rounded transition-colors ${
+            className={`size-7 inline-flex items-center justify-center rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent ${
                 active ? "bg-sky-50 text-sky-700" : "text-slate-500 hover:text-slate-900 hover:bg-slate-100"
             }`}
         >
@@ -537,7 +850,7 @@ export function VariableMenu({
                         </div>
 
                         <a
-                            href={`${WEBSITE_URL}/learn/personalization`}
+                            href="https://docs.warmbly.com/learn/personalization/"
                             target="_blank"
                             rel="noreferrer"
                             onMouseDown={(e) => e.preventDefault()}

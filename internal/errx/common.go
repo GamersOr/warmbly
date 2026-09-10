@@ -119,8 +119,6 @@ var (
 	ErrEmailOnboardUserInfo      = New(BadRequest, "Could not read account details from the provider.")
 	ErrEmailOnboardAlreadyExists = New(Conflict, "This email account is already connected.")
 	ErrEmailOnboardNoWorker      = New(ServiceUnavailable, "No mailbox workers are available right now. Please try again shortly.")
-	ErrEmailOnboardInboxLimit    = New(Forbidden, "A free workspace holds up to 10 mailboxes. Subscribe to add more.")
-	ErrEmailOnboardTrialExpired  = New(Forbidden, "A free workspace holds up to 10 mailboxes. Subscribe to add more.")
 	ErrEmailReauthProvider       = New(BadRequest, "This mailbox connects with SMTP/IMAP credentials. Update its credentials instead of re-authorizing.")
 	ErrEmailReauthOAuthOnly      = New(BadRequest, "This mailbox signs in with OAuth. Re-authorize it instead of entering credentials.")
 	ErrEmailReauthWrongAccount   = New(Conflict, "The account you signed in with is not this mailbox's address. Sign in with the mailbox's own account and try again.")
@@ -128,8 +126,15 @@ var (
 	ErrEmailReauthNoRefreshToken = New(BadRequest, "The provider did not return a refresh token and none is stored. Please try re-authorizing again.")
 	ErrEmailSMTPHost             = New(BadRequest, "SMTP host is required.")
 	ErrEmailSMTPPort             = New(BadRequest, "SMTP port must be between 1 and 65535.")
-	ErrEmailSMTPSecurity         = New(BadRequest, "SMTP security must be tls or starttls.")
-	ErrEmailIMAPSecurity         = New(BadRequest, "IMAP security must be tls or starttls.")
+	ErrEmailSMTPSecurity         = New(BadRequest, "SMTP security must be tls, starttls or none.")
+	ErrEmailIMAPSecurity         = New(BadRequest, "IMAP security must be tls, starttls or none.")
+	// The "none" refusals are two different problems with two different ways
+	// out, so they do not share a message: one is a host that has to change,
+	// the other is a mode this deployment cannot offer at all.
+	ErrEmailSMTPSecurityNotLocal = New(BadRequest, "SMTP security \"none\" is only allowed for a mail server on this machine (localhost, 127.0.0.1 or ::1).")
+	ErrEmailIMAPSecurityNotLocal = New(BadRequest, "IMAP security \"none\" is only allowed for a mail server on this machine (localhost, 127.0.0.1 or ::1).")
+	ErrEmailSMTPSecurityHosted   = New(BadRequest, "SMTP security \"none\" needs a self-hosted instance, where the worker runs on the same machine as the mail server. Use tls or starttls.")
+	ErrEmailIMAPSecurityHosted   = New(BadRequest, "IMAP security \"none\" needs a self-hosted instance, where the worker runs on the same machine as the mail server. Use tls or starttls.")
 	ErrEmailIMAPHost             = New(BadRequest, "IMAP host is required.")
 	ErrEmailIMAPPort             = New(BadRequest, "IMAP port must be between 1 and 65535.")
 	ErrEmailCredentialsRequired  = New(BadRequest, "SMTP and IMAP credentials are required.")
@@ -193,3 +198,25 @@ var (
 	ErrAdvisorFixForbidden = New(Forbidden, "You can see this recommendation but don't have permission to apply the change it makes.")
 	ErrAdvisorNoAgentFix   = New(BadRequest, "This recommendation needs a person: there's no change an agent can safely make for it.")
 )
+
+// MailboxAllowanceReached is the refusal every connect path returns when the
+// workspace holds its whole allowance. The identifier is stable so the
+// dashboard can open the request-more flow instead of showing the text.
+func MailboxAllowanceReached(used, allowance int, paid bool) *Error {
+	if !paid {
+		return NewWithIdentifier(Forbidden, "mailbox_allowance_reached",
+			fmt.Sprintf("A free workspace holds up to %d mailboxes. Choose a plan to add more.", allowance))
+	}
+	return NewWithIdentifier(Forbidden, "mailbox_allowance_reached",
+		fmt.Sprintf("This workspace holds %d of its %d mailboxes. Request an increase, or move to a plan with more daily sends.", used, allowance))
+}
+
+// StorageLimitReached is the refusal for an upload or copy (an attachment, or
+// an image for an email body) that would take the workspace past its storage
+// quota.
+func StorageLimitReached(usedBytes, limitBytes, addingBytes int64) *Error {
+	const mb = 1024 * 1024
+	return NewWithIdentifier(BadRequest, "storage_limit_reached",
+		fmt.Sprintf("Storage limit reached: %d MB of %d MB used, %d MB to add. Remove attachments or images, or upgrade your plan.",
+			usedBytes/mb, limitBytes/mb, addingBytes/mb))
+}

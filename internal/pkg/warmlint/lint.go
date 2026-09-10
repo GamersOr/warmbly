@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
 )
 
 var (
@@ -15,7 +17,6 @@ var (
 	wordToken    = regexp.MustCompile(`[a-z0-9%]+`)
 	linkPattern  = regexp.MustCompile(`https?://[^\s"'<>)\]]*`)
 	hrefPattern  = regexp.MustCompile(`(?i)href\s*=\s*["']?\s*(https?://[^\s"'<>]*)`)
-	htmlTag      = regexp.MustCompile(`(?i)<[a-z!/][^>]*>`)
 	imgTag       = regexp.MustCompile(`(?i)<img\b[^>]*>`)
 )
 
@@ -59,7 +60,7 @@ func Check(subject, body string, isReply bool) error {
 	if stackedPunct.MatchString(combined) {
 		return fmt.Errorf("stacked punctuation")
 	}
-	if n := countTriggerTerms(combined); n >= 3 {
+	if n := countTriggerTerms(withoutURLs(combined)); n >= 3 {
 		return fmt.Errorf("content has %d spam-trigger terms", n)
 	}
 	return nil
@@ -105,7 +106,7 @@ func Score(subject, bodyHTML, bodyPlain string) ScoreResult {
 	if stackedPunct.MatchString(combined) {
 		deduct(10, "warn", "stacked_punctuation", "Stacked punctuation (e.g. !!! or ?!) reads as promotional.")
 	}
-	if n := countTriggerTerms(combined); n > 0 {
+	if n := countTriggerTerms(withoutURLs(combined)); n > 0 {
 		d := n * 8
 		if d > 40 {
 			d = 40
@@ -171,8 +172,21 @@ func ScoreWithAttachments(subject, bodyHTML, bodyPlain string, attachments int) 
 	return res
 }
 
+// stripTags reduces an HTML body to the words a reader sees, for scoring.
+//
+// It renders rather than strips tags: a regex left a <style> block's CSS
+// behind as body text, so a class named .free-trial-banner cost a designed
+// email eight points for a spam-trigger term nobody would ever read.
+// withoutURLs removes link destinations before the words are scored. The text
+// renderer keeps a link's target so the plain-text part stays usable, which
+// put URL slugs in front of the trigger-term list: a CTA pointing at
+// /free-trial cost eight points for a word no reader ever sees.
+func withoutURLs(s string) string {
+	return linkPattern.ReplaceAllString(s, " ")
+}
+
 func stripTags(s string) string {
-	return strings.TrimSpace(htmlTag.ReplaceAllString(s, " "))
+	return strings.TrimSpace(mailhtml.ToPlainText(s))
 }
 
 func isAllCaps(s string) bool {

@@ -303,7 +303,7 @@ export default function CampaignOverview() {
 
                 {/* Live panel */}
                 <aside className="space-y-5">
-                    <TaskPreview campaignId={campaign.id} campaignStatus={campaign.status} />
+                    <TaskPreview campaignId={campaign.id} campaignStatus={campaign.status} idle={!!campaign.idle_since} />
 
                     <div className="rounded-md border border-slate-200 overflow-hidden bg-white hidden lg:block">
                         <SectionBar label="Totals" />

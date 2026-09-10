@@ -160,14 +160,26 @@ export function ThreadView({ threadId, emailId }: ThreadViewProps) {
   const threadLabels = useThreadLabels(threadId);
   const [labelMenuOpen, setLabelMenuOpen] = React.useState(false);
 
-  // CRM context rail (right side). Open by default on wide screens (lg+),
-  // where it renders as a static rail. Below lg it renders as an overlay
-  // drawer, so it starts closed and is opened from the header toggle.
+  // CRM context rail (right side). Open by default on lg+, where it renders
+  // as a static rail beside the thread; below lg it is an overlay drawer, so
+  // it starts closed and is opened from the header toggle.
   const [crmOpen, setCrmOpen] = React.useState(
     () =>
       typeof window !== "undefined" &&
       window.matchMedia("(min-width: 1024px)").matches,
   );
+
+  // The initial state is read once, so narrowing past lg with the rail open
+  // turned it into an overlay sitting on top of the thread (a rotated tablet,
+  // a window dragged to half a screen). Close it on the way down.
+  React.useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!e.matches) setCrmOpen(false);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   // `c` opens the label menu while a thread is open — ignored while
   // typing into the composer / any input so it never eats keystrokes.
@@ -236,10 +248,11 @@ export function ThreadView({ threadId, emailId }: ThreadViewProps) {
     replyState ? "replying" : "viewing",
   );
 
-  // Opening a thread marks its unseen messages as read. The hook invalidates
-  // ["unibox"], so the unread badge, the collapsed list, and the overview all
-  // refresh. Once everything is seen the id list is empty and this no-ops, so
-  // it self-terminates after the post-mark refetch (no loop).
+  // Opening a thread marks its unseen messages as read. The hook writes the
+  // flip straight into the cached list and thread and refetches only the
+  // counters, so the conversation list the user came from does not re-order
+  // under them. Passing threadId is what lets it find the row. Once everything
+  // is seen the id list is empty and this no-ops, so it self-terminates.
   const markSeen = useMarkSeen();
   const markSeenMutate = markSeen.mutate;
   React.useEffect(() => {
@@ -247,7 +260,7 @@ export function ThreadView({ threadId, emailId }: ThreadViewProps) {
       .filter((m) => !m.seen)
       .map((m) => m.id);
     if (unseenIds.length === 0) return;
-    markSeenMutate({ ids: unseenIds });
+    markSeenMutate({ ids: unseenIds, threadId });
   }, [threadId, q.data, markSeenMutate]);
 
   const snooze = useMutation({
@@ -257,7 +270,7 @@ export function ThreadView({ threadId, emailId }: ThreadViewProps) {
       toast.success("Snoozed");
       queryClient.invalidateQueries({ queryKey: ["unibox", "search"] });
       queryClient.invalidateQueries({ queryKey: ["unibox", "overview"] });
-      queryClient.invalidateQueries({ queryKey: ["unibox", "count"] });
+      queryClient.invalidateQueries({ queryKey: ["unibox", "unseen-count"] });
       setSnoozeOpen(false);
       setCustomMode(false);
     },

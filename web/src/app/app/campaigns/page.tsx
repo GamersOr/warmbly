@@ -28,6 +28,7 @@ import {
     FileTextIcon,
     FilterIcon,
     FolderIcon,
+    HourglassIcon,
     Loader2Icon,
     type LucideIcon,
     PauseIcon,
@@ -50,8 +51,11 @@ import {
 import { SearchInput } from "@/components/ui/field";
 import {
     campaignDisplayLabel,
+    CAMPAIGN_IDLE_TONE,
+    campaignDisplayTone,
     campaignStatusBucket as statusBucket,
     campaignStatusTone as statusTone,
+    isIdleCampaign,
     isOneTimeCampaign,
 } from "@/components/app/campaigns/status";
 import {
@@ -78,8 +82,11 @@ const KIND_LABEL: Record<KindFilter, string> = {
 // animated dot-grid loader; every other state is a 14px lucide icon so the
 // fixed-width leading slot keeps each row's name aligned. The label/tone maps
 // live in components/app/campaigns/status so pickers share them.
-function CampaignStatusMark({ status }: { status: string }) {
+function CampaignStatusMark({ status, idle }: { status: string; idle?: boolean }) {
     const tone = statusTone(status);
+    if (idle) {
+        return <HourglassIcon className={cn("w-3.5 h-3.5", CAMPAIGN_IDLE_TONE)} aria-label="Waiting for leads" />;
+    }
     if (status === "active") {
         return <span className={cn("campaign-grid", tone)} aria-hidden title="Sending now" />;
     }
@@ -542,7 +549,7 @@ export default function CampaignsPage() {
                                     {/* Fixed-width leading slot so every row's name aligns,
                                         whatever state mark (loader or icon) sits in it. */}
                                     <span className="shrink-0 w-3.5 flex items-center justify-center">
-                                        <CampaignStatusMark status={cstatus} />
+                                        <CampaignStatusMark status={cstatus} idle={isIdleCampaign(c)} />
                                     </span>
                                     <span className="text-[12.5px] text-slate-900 font-medium truncate max-w-[40%]">
                                         {c.name}
@@ -566,7 +573,7 @@ export default function CampaignsPage() {
                                             {c.description}
                                         </span>
                                     )}
-                                    <span className={cn("ml-auto text-[10px] uppercase tracking-[0.1em] font-medium shrink-0", statusTone(cstatus))}>
+                                    <span className={cn("ml-auto text-[10px] uppercase tracking-[0.1em] font-medium shrink-0", campaignDisplayTone(c))}>
                                         {stateLabel}
                                     </span>
                                     <span className="font-mono text-[10.5px] text-slate-400 tabular-nums items-center gap-1 shrink-0 hidden sm:flex">

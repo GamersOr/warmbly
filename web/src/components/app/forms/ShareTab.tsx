@@ -98,7 +98,7 @@ function PersonalizedLinksCard({ form }: { form: Form }) {
     const search = useSearchContacts({
         options: {
             query: debouncedQuery.trim(),
-            filters: [],
+            custom_field_filters: [],
             campaign_ids: [],
             sort_by: "updated_at",
             reverse: false,
@@ -149,7 +149,17 @@ function PersonalizedLinksCard({ form }: { form: Form }) {
 
 export default function ShareTab({ form, baseUrl }: { form: Form; baseUrl: string }) {
     const pageUrl = form.share_url || (baseUrl ? `${baseUrl}/f/${form.public_id}` : "");
-    const scriptUrl = baseUrl ? `${baseUrl}/forms.js` : "";
+    // The embed loads its iframe from its own origin, so the snippet has to
+    // come from the same host as the page: an organization on a verified
+    // custom forms domain would otherwise embed on the shared one.
+    const scriptOrigin = React.useMemo(() => {
+        try {
+            return new URL(pageUrl).origin;
+        } catch {
+            return baseUrl;
+        }
+    }, [pageUrl, baseUrl]);
+    const scriptUrl = scriptOrigin ? `${scriptOrigin}/forms.js` : "";
 
     if (!pageUrl) {
         return (

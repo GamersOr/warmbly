@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -58,22 +58,7 @@ type AdminService interface {
 	GetAnalyticsTrends(ctx context.Context) (*models.AnalyticsTrends, *errx.Error)
 	GetDailyEmailStats(ctx context.Context, startDate, endDate time.Time) ([]models.DailyEmailStats, *errx.Error)
 	GetHourlyEmailStats(ctx context.Context, date time.Time) ([]models.HourlyEmailStats, *errx.Error)
-	GetWorkerLoadStats(ctx context.Context) ([]models.WorkerLoadStats, *errx.Error)
-	GetEmailDistribution(ctx context.Context) ([]models.EmailDistribution, *errx.Error)
 	GetUserGrowthStats(ctx context.Context, startDate, endDate time.Time) ([]models.UserGrowthStats, *errx.Error)
-
-	// Plans
-	ListPlans(ctx context.Context, includePrivate bool) ([]models.Plan, *errx.Error)
-	SearchPlansForAdmin(ctx context.Context, search *models.AdminPlanSearch) (*models.AdminPlansResult, *errx.Error)
-	CreatePlan(ctx context.Context, adminID uuid.UUID, req *models.CreatePlanRequest, ipAddress, userAgent string) (*models.Plan, *errx.Error)
-	GetPlan(ctx context.Context, planID uuid.UUID) (*models.Plan, *errx.Error)
-	UpdatePlan(ctx context.Context, adminID, planID uuid.UUID, req *models.UpdatePlanRequest, ipAddress, userAgent string) (*models.Plan, *errx.Error)
-	DeletePlan(ctx context.Context, adminID, planID uuid.UUID, ipAddress, userAgent string) *errx.Error
-
-	// Enterprise Inquiries
-	ListEnterpriseInquiries(ctx context.Context, search *models.AdminEnterpriseInquirySearch) (*models.AdminEnterpriseInquiriesResult, *errx.Error)
-	GetEnterpriseInquiry(ctx context.Context, id uuid.UUID) (*models.AdminEnterpriseInquiry, *errx.Error)
-	UpdateEnterpriseInquiry(ctx context.Context, adminID, inquiryID uuid.UUID, update *models.UpdateEnterpriseInquiryRequest, ipAddress, userAgent string) *errx.Error
 
 	// Admin Management
 	ListAdmins(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminsResult, *errx.Error)
@@ -114,7 +99,7 @@ func (s *adminService) logAction(ctx context.Context, adminID uuid.UUID, action,
 		CreatedAt:   time.Now(),
 	}
 	if err := s.repo.CreateAuditLog(ctx, log); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 	}
 }
 
@@ -139,7 +124,7 @@ func (s *adminService) LogAdminAction(ctx context.Context, adminID uuid.UUID, ac
 func (s *adminService) SearchMailboxes(ctx context.Context, search *models.AdminMailboxSearch) (*models.AdminMailboxesResult, *errx.Error) {
 	result, err := s.repo.SearchMailboxesForAdmin(ctx, search)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to search mailboxes")
 	}
 	return result, nil
@@ -148,7 +133,7 @@ func (s *adminService) SearchMailboxes(ctx context.Context, search *models.Admin
 func (s *adminService) SearchUsers(ctx context.Context, search *models.AdminUserSearch) (*models.AdminUsersResult, *errx.Error) {
 	result, err := s.repo.SearchUsers(ctx, search)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to search users")
 	}
 	return result, nil
@@ -157,7 +142,7 @@ func (s *adminService) SearchUsers(ctx context.Context, search *models.AdminUser
 func (s *adminService) GetUserDetail(ctx context.Context, userID uuid.UUID) (*models.AdminUserDetail, *errx.Error) {
 	user, err := s.repo.GetUserDetail(ctx, userID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get user detail")
 	}
 	if user == nil {
@@ -169,7 +154,7 @@ func (s *adminService) GetUserDetail(ctx context.Context, userID uuid.UUID) (*mo
 func (s *adminService) GetUserPreview(ctx context.Context, userID uuid.UUID) (*models.AdminUserPreview, *errx.Error) {
 	preview, err := s.repo.GetUserPreview(ctx, userID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get user preview")
 	}
 	if preview == nil {
@@ -186,7 +171,7 @@ func (s *adminService) BanUser(ctx context.Context, adminID, userID uuid.UUID, r
 	// Check if user exists
 	user, err := s.repo.GetUserDetail(ctx, userID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to get user")
 	}
 	if user == nil {
@@ -210,7 +195,7 @@ func (s *adminService) BanUser(ctx context.Context, adminID, userID uuid.UUID, r
 	}
 
 	if err := s.repo.BanUser(ctx, userID, adminID, reason, uint32(scope)); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to ban user")
 	}
 
@@ -222,7 +207,7 @@ func (s *adminService) UnbanUser(ctx context.Context, adminID, userID uuid.UUID,
 	// Check if user exists
 	user, err := s.repo.GetUserDetail(ctx, userID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to get user")
 	}
 	if user == nil {
@@ -235,7 +220,7 @@ func (s *adminService) UnbanUser(ctx context.Context, adminID, userID uuid.UUID,
 	}
 
 	if err := s.repo.UnbanUser(ctx, userID, adminID, reason); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to unban user")
 	}
 
@@ -246,7 +231,7 @@ func (s *adminService) UnbanUser(ctx context.Context, adminID, userID uuid.UUID,
 func (s *adminService) GetUserBans(ctx context.Context, userID uuid.UUID) ([]models.UserBan, *errx.Error) {
 	bans, err := s.repo.GetUserBans(ctx, userID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get user bans")
 	}
 	return bans, nil
@@ -260,7 +245,7 @@ func (s *adminService) GetUserCampaigns(ctx context.Context, userID uuid.UUID, c
 	}
 	result, err := s.repo.SearchCampaigns(ctx, search)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get user campaigns")
 	}
 	return result, nil
@@ -269,7 +254,7 @@ func (s *adminService) GetUserCampaigns(ctx context.Context, userID uuid.UUID, c
 func (s *adminService) GetUserEmails(ctx context.Context, userID uuid.UUID, cursor *uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error) {
 	emails, pagination, err := s.repo.GetUserEmails(ctx, userID, cursor, limit)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, nil, errx.New(errx.Internal, "failed to get user emails")
 	}
 	return emails, pagination, nil
@@ -278,7 +263,7 @@ func (s *adminService) GetUserEmails(ctx context.Context, userID uuid.UUID, curs
 func (s *adminService) GetUserRateLimits(ctx context.Context, userID uuid.UUID) (*models.AdminUserRateLimits, *errx.Error) {
 	limits, err := s.repo.GetUserRateLimits(ctx, userID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get rate limits")
 	}
 	// No row means the enforcement path falls back to the product defaults.
@@ -290,7 +275,7 @@ func (s *adminService) GetUserRateLimits(ctx context.Context, userID uuid.UUID) 
 
 func (s *adminService) UpdateUserRateLimits(ctx context.Context, adminID, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest, ipAddress, userAgent string) (*models.AdminUserRateLimits, *errx.Error) {
 	if err := s.repo.UpdateUserRateLimits(ctx, userID, adminID, update); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to update rate limits")
 	}
 
@@ -303,7 +288,7 @@ func (s *adminService) UpdateUserRateLimits(ctx context.Context, adminID, userID
 func (s *adminService) ListWorkers(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminWorkersResult, *errx.Error) {
 	result, err := s.repo.ListWorkers(ctx, cursor, limit)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list workers")
 	}
 	return result, nil
@@ -312,7 +297,7 @@ func (s *adminService) ListWorkers(ctx context.Context, cursor *uuid.UUID, limit
 func (s *adminService) GetWorkerDetail(ctx context.Context, workerID uuid.UUID) (*models.AdminWorkerDetail, *errx.Error) {
 	worker, err := s.repo.GetWorkerDetail(ctx, workerID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get worker detail")
 	}
 	if worker == nil {
@@ -323,7 +308,7 @@ func (s *adminService) GetWorkerDetail(ctx context.Context, workerID uuid.UUID) 
 
 func (s *adminService) UpdateWorker(ctx context.Context, adminID, workerID uuid.UUID, update *models.AdminUpdateWorker, ipAddress, userAgent string) *errx.Error {
 	if err := s.repo.UpdateWorker(ctx, workerID, update); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to update worker")
 	}
 
@@ -334,7 +319,7 @@ func (s *adminService) UpdateWorker(ctx context.Context, adminID, workerID uuid.
 func (s *adminService) GetWorkerEmails(ctx context.Context, workerID uuid.UUID, cursor *uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error) {
 	emails, pagination, err := s.repo.GetWorkerEmails(ctx, workerID, cursor, limit)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, nil, errx.New(errx.Internal, "failed to get worker emails")
 	}
 	return emails, pagination, nil
@@ -343,7 +328,7 @@ func (s *adminService) GetWorkerEmails(ctx context.Context, workerID uuid.UUID, 
 func (s *adminService) GetWorkerStats(ctx context.Context, workerID uuid.UUID) (*models.WorkerStats, *errx.Error) {
 	stats, err := s.repo.GetWorkerStats(ctx, workerID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get worker stats")
 	}
 	return stats, nil
@@ -351,7 +336,7 @@ func (s *adminService) GetWorkerStats(ctx context.Context, workerID uuid.UUID) (
 
 func (s *adminService) ReassignEmails(ctx context.Context, adminID uuid.UUID, emailIDs []uuid.UUID, newWorkerID uuid.UUID, ipAddress, userAgent string) *errx.Error {
 	if err := s.repo.ReassignEmails(ctx, emailIDs, newWorkerID); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to reassign emails")
 	}
 
@@ -364,7 +349,7 @@ func (s *adminService) ReassignEmails(ctx context.Context, adminID uuid.UUID, em
 func (s *adminService) ListWarmupPools(ctx context.Context) ([]models.WarmupPoolInfo, *errx.Error) {
 	pools, err := s.repo.ListWarmupPools(ctx)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list warmup pools")
 	}
 	return pools, nil
@@ -373,7 +358,7 @@ func (s *adminService) ListWarmupPools(ctx context.Context) ([]models.WarmupPool
 func (s *adminService) GetPoolParticipants(ctx context.Context, poolType string, cursor *uuid.UUID, limit int) (*models.WarmupPoolParticipantsResult, *errx.Error) {
 	result, err := s.repo.GetPoolParticipants(ctx, poolType, cursor, limit)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get pool participants")
 	}
 	return result, nil
@@ -382,7 +367,7 @@ func (s *adminService) GetPoolParticipants(ctx context.Context, poolType string,
 func (s *adminService) ListBlockedAccounts(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminBlockedAccountsResult, *errx.Error) {
 	result, err := s.repo.ListBlockedAccounts(ctx, cursor, limit)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list blocked accounts")
 	}
 	return result, nil
@@ -390,7 +375,7 @@ func (s *adminService) ListBlockedAccounts(ctx context.Context, cursor *uuid.UUI
 
 func (s *adminService) BlockAccount(ctx context.Context, adminID, accountID uuid.UUID, reason string, ipAddress, userAgent string) *errx.Error {
 	if err := s.repo.BlockAccount(ctx, accountID, adminID, reason); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to block account")
 	}
 
@@ -400,7 +385,7 @@ func (s *adminService) BlockAccount(ctx context.Context, adminID, accountID uuid
 
 func (s *adminService) UnblockAccount(ctx context.Context, adminID, accountID uuid.UUID, ipAddress, userAgent string) *errx.Error {
 	if err := s.repo.UnblockAccount(ctx, accountID); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to unblock account")
 	}
 
@@ -413,7 +398,7 @@ func (s *adminService) UnblockAccount(ctx context.Context, adminID, accountID uu
 func (s *adminService) ListAppeals(ctx context.Context, status string, cursor *uuid.UUID, limit int) (*models.WarmupAppealsResult, *errx.Error) {
 	result, err := s.repo.ListAppeals(ctx, status, cursor, limit)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list appeals")
 	}
 	return result, nil
@@ -422,7 +407,7 @@ func (s *adminService) ListAppeals(ctx context.Context, status string, cursor *u
 func (s *adminService) GetAppeal(ctx context.Context, appealID uuid.UUID) (*models.WarmupAppeal, *errx.Error) {
 	appeal, err := s.repo.GetAppeal(ctx, appealID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get appeal")
 	}
 	if appeal == nil {
@@ -434,7 +419,7 @@ func (s *adminService) GetAppeal(ctx context.Context, appealID uuid.UUID) (*mode
 func (s *adminService) ReviewAppeal(ctx context.Context, adminID, appealID uuid.UUID, approved bool, notes string, ipAddress, userAgent string) *errx.Error {
 	appeal, err := s.repo.GetAppeal(ctx, appealID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to get appeal")
 	}
 	if appeal == nil {
@@ -446,7 +431,7 @@ func (s *adminService) ReviewAppeal(ctx context.Context, adminID, appealID uuid.
 	}
 
 	if err := s.repo.ReviewAppeal(ctx, appealID, adminID, approved, notes); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to review appeal")
 	}
 
@@ -463,7 +448,7 @@ func (s *adminService) ReviewAppeal(ctx context.Context, adminID, appealID uuid.
 func (s *adminService) SearchCampaigns(ctx context.Context, search *models.AdminCampaignSearch) (*models.AdminCampaignsResult, *errx.Error) {
 	result, err := s.repo.SearchCampaigns(ctx, search)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to search campaigns")
 	}
 	return result, nil
@@ -472,7 +457,7 @@ func (s *adminService) SearchCampaigns(ctx context.Context, search *models.Admin
 func (s *adminService) GetCampaignDetail(ctx context.Context, campaignID uuid.UUID) (*models.AdminCampaignDetail, *errx.Error) {
 	campaign, err := s.repo.GetCampaignDetail(ctx, campaignID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get campaign detail")
 	}
 	if campaign == nil {
@@ -484,7 +469,7 @@ func (s *adminService) GetCampaignDetail(ctx context.Context, campaignID uuid.UU
 func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uuid.UUID, reason, ipAddress, userAgent string) *errx.Error {
 	campaign, err := s.repo.GetCampaignDetail(ctx, campaignID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to get campaign")
 	}
 	if campaign == nil {
@@ -495,7 +480,7 @@ func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uui
 	// never will, and either can become true between here and the UPDATE.
 	stopped, err := s.repo.StopCampaign(ctx, campaignID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to stop campaign")
 	}
 	if !stopped {
@@ -510,7 +495,7 @@ func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uui
 			Message:    "Campaign force-stopped by platform staff: " + reason,
 			Metadata:   map[string]interface{}{"reason": reason},
 		}); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 		}
 	}
 
@@ -526,7 +511,7 @@ func (s *adminService) StopCampaign(ctx context.Context, adminID, campaignID uui
 func (s *adminService) GetPlatformOverview(ctx context.Context) (*models.PlatformOverview, *errx.Error) {
 	overview, err := s.repo.GetPlatformOverview(ctx)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get platform overview")
 	}
 	return overview, nil
@@ -535,7 +520,7 @@ func (s *adminService) GetPlatformOverview(ctx context.Context) (*models.Platfor
 func (s *adminService) GetAnalyticsTrends(ctx context.Context) (*models.AnalyticsTrends, *errx.Error) {
 	trends, err := s.repo.GetAnalyticsTrends(ctx)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get analytics trends")
 	}
 	return trends, nil
@@ -544,7 +529,7 @@ func (s *adminService) GetAnalyticsTrends(ctx context.Context) (*models.Analytic
 func (s *adminService) GetDailyEmailStats(ctx context.Context, startDate, endDate time.Time) ([]models.DailyEmailStats, *errx.Error) {
 	stats, err := s.repo.GetDailyEmailStats(ctx, startDate, endDate)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get daily email stats")
 	}
 	return stats, nil
@@ -553,244 +538,19 @@ func (s *adminService) GetDailyEmailStats(ctx context.Context, startDate, endDat
 func (s *adminService) GetHourlyEmailStats(ctx context.Context, date time.Time) ([]models.HourlyEmailStats, *errx.Error) {
 	stats, err := s.repo.GetHourlyEmailStats(ctx, date)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get hourly email stats")
 	}
 	return stats, nil
 }
 
-func (s *adminService) GetWorkerLoadStats(ctx context.Context) ([]models.WorkerLoadStats, *errx.Error) {
-	stats, err := s.repo.GetWorkerLoadStats(ctx)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to get worker load stats")
-	}
-	return stats, nil
-}
-
-func (s *adminService) GetEmailDistribution(ctx context.Context) ([]models.EmailDistribution, *errx.Error) {
-	dist, err := s.repo.GetEmailDistribution(ctx)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to get email distribution")
-	}
-	return dist, nil
-}
-
 func (s *adminService) GetUserGrowthStats(ctx context.Context, startDate, endDate time.Time) ([]models.UserGrowthStats, *errx.Error) {
 	stats, err := s.repo.GetUserGrowthStats(ctx, startDate, endDate)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get user growth stats")
 	}
 	return stats, nil
-}
-
-// Plans
-
-func (s *adminService) ListPlans(ctx context.Context, includePrivate bool) ([]models.Plan, *errx.Error) {
-	plans, err := s.repo.ListPlans(ctx, includePrivate)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to list plans")
-	}
-	return plans, nil
-}
-
-func (s *adminService) SearchPlansForAdmin(ctx context.Context, search *models.AdminPlanSearch) (*models.AdminPlansResult, *errx.Error) {
-	result, err := s.repo.SearchPlansForAdmin(ctx, search)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to search plans")
-	}
-	return result, nil
-}
-
-// resolveDuration maps the API's billing period onto a durations row. An
-// unknown period is the caller's mistake, not an internal error.
-func (s *adminService) resolveDuration(ctx context.Context, d models.Duration) (*uuid.UUID, *errx.Error) {
-	if d == "" {
-		return nil, errx.New(errx.BadRequest, "duration is required")
-	}
-	id, err := s.repo.DurationIDByTitle(ctx, string(d))
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to resolve plan duration")
-	}
-	if id == nil {
-		return nil, errx.New(errx.BadRequest, "unknown plan duration")
-	}
-	return id, nil
-}
-
-func (s *adminService) CreatePlan(ctx context.Context, adminID uuid.UUID, req *models.CreatePlanRequest, ipAddress, userAgent string) (*models.Plan, *errx.Error) {
-	plan := &models.Plan{
-		ID:                 uuid.New(),
-		Name:               &req.Name,
-		MaxContacts:        req.MaxContacts,
-		DailyEmails:        req.DailyEmails,
-		AIGeneration:       req.AIGeneration,
-		AccountLimit:       req.AccountLimit,
-		Price:              req.Price,
-		DiscountedPrice:    req.DiscountedPrice,
-		Duration:           req.Duration,
-		Public:             req.Public,
-		DedicatedWorkers:   req.DedicatedWorkers,
-		DailyCampaignLimit: req.DailyCampaignLimit,
-		MaxCampaigns:       req.MaxCampaigns,
-		MaxActiveCampaigns: req.MaxActiveCampaigns,
-		MaxTeamMembers:     req.MaxTeamMembers,
-		MaxEmailAccounts:   req.MaxEmailAccounts,
-	}
-
-	durationID, xerr := s.resolveDuration(ctx, plan.Duration)
-	if xerr != nil {
-		return nil, xerr
-	}
-
-	if err := s.repo.CreatePlan(ctx, plan, *durationID); err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to create plan")
-	}
-
-	s.logAction(ctx, adminID, "create_plan", "plan", plan.ID, map[string]any{"name": req.Name}, ipAddress, userAgent)
-	return plan, nil
-}
-
-func (s *adminService) GetPlan(ctx context.Context, planID uuid.UUID) (*models.Plan, *errx.Error) {
-	plan, err := s.repo.GetPlan(ctx, planID)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to get plan")
-	}
-	if plan == nil {
-		return nil, errx.ErrNotFound
-	}
-	return plan, nil
-}
-
-func (s *adminService) UpdatePlan(ctx context.Context, adminID, planID uuid.UUID, req *models.UpdatePlanRequest, ipAddress, userAgent string) (*models.Plan, *errx.Error) {
-	plan, err := s.repo.GetPlan(ctx, planID)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to get plan")
-	}
-	if plan == nil {
-		return nil, errx.ErrNotFound
-	}
-
-	// Apply updates
-	if req.Name != nil {
-		plan.Name = req.Name
-	}
-	if req.MaxContacts != nil {
-		plan.MaxContacts = *req.MaxContacts
-	}
-	if req.DailyEmails != nil {
-		plan.DailyEmails = *req.DailyEmails
-	}
-	if req.AIGeneration != nil {
-		plan.AIGeneration = *req.AIGeneration
-	}
-	if req.AccountLimit != nil {
-		plan.AccountLimit = *req.AccountLimit
-	}
-	if req.Price != nil {
-		plan.Price = *req.Price
-	}
-	if req.DiscountedPrice != nil {
-		plan.DiscountedPrice = *req.DiscountedPrice
-	}
-	if req.Duration != nil {
-		plan.Duration = *req.Duration
-	}
-	if req.Public != nil {
-		plan.Public = *req.Public
-	}
-	if req.DedicatedWorkers != nil {
-		plan.DedicatedWorkers = *req.DedicatedWorkers
-	}
-	if req.DailyCampaignLimit != nil {
-		plan.DailyCampaignLimit = req.DailyCampaignLimit
-	}
-	if req.MaxCampaigns != nil {
-		plan.MaxCampaigns = req.MaxCampaigns
-	}
-	if req.MaxActiveCampaigns != nil {
-		plan.MaxActiveCampaigns = req.MaxActiveCampaigns
-	}
-	if req.MaxTeamMembers != nil {
-		plan.MaxTeamMembers = req.MaxTeamMembers
-	}
-	if req.MaxEmailAccounts != nil {
-		plan.MaxEmailAccounts = req.MaxEmailAccounts
-	}
-
-	durationID, xerr := s.resolveDuration(ctx, plan.Duration)
-	if xerr != nil {
-		return nil, xerr
-	}
-
-	if err := s.repo.UpdatePlan(ctx, plan, *durationID); err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to update plan")
-	}
-
-	s.logAction(ctx, adminID, "update_plan", "plan", planID, nil, ipAddress, userAgent)
-	return plan, nil
-}
-
-func (s *adminService) DeletePlan(ctx context.Context, adminID, planID uuid.UUID, ipAddress, userAgent string) *errx.Error {
-	// Check if plan is in use
-	inUse, err := s.repo.IsPlanInUse(ctx, planID)
-	if err != nil {
-		sentry.CaptureException(err)
-		return errx.New(errx.Internal, "failed to check plan usage")
-	}
-	if inUse {
-		return errx.New(errx.BadRequest, "cannot delete plan that is in use")
-	}
-
-	if err := s.repo.DeletePlan(ctx, planID); err != nil {
-		sentry.CaptureException(err)
-		return errx.New(errx.Internal, "failed to delete plan")
-	}
-
-	s.logAction(ctx, adminID, "delete_plan", "plan", planID, nil, ipAddress, userAgent)
-	return nil
-}
-
-// Enterprise Inquiries
-
-func (s *adminService) ListEnterpriseInquiries(ctx context.Context, search *models.AdminEnterpriseInquirySearch) (*models.AdminEnterpriseInquiriesResult, *errx.Error) {
-	result, err := s.repo.ListEnterpriseInquiries(ctx, search)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to list enterprise inquiries")
-	}
-	return result, nil
-}
-
-func (s *adminService) GetEnterpriseInquiry(ctx context.Context, id uuid.UUID) (*models.AdminEnterpriseInquiry, *errx.Error) {
-	inquiry, err := s.repo.GetEnterpriseInquiry(ctx, id)
-	if err != nil {
-		sentry.CaptureException(err)
-		return nil, errx.New(errx.Internal, "failed to get enterprise inquiry")
-	}
-	if inquiry == nil {
-		return nil, errx.ErrNotFound
-	}
-	return inquiry, nil
-}
-
-func (s *adminService) UpdateEnterpriseInquiry(ctx context.Context, adminID, inquiryID uuid.UUID, update *models.UpdateEnterpriseInquiryRequest, ipAddress, userAgent string) *errx.Error {
-	if err := s.repo.UpdateEnterpriseInquiry(ctx, inquiryID, update); err != nil {
-		sentry.CaptureException(err)
-		return errx.New(errx.Internal, "failed to update enterprise inquiry")
-	}
-
-	s.logAction(ctx, adminID, "update_enterprise_inquiry", "enterprise_inquiry", inquiryID, map[string]any{"update": update}, ipAddress, userAgent)
-	return nil
 }
 
 // Admin Management
@@ -798,7 +558,7 @@ func (s *adminService) UpdateEnterpriseInquiry(ctx context.Context, adminID, inq
 func (s *adminService) ListAdmins(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminsResult, *errx.Error) {
 	result, err := s.repo.ListAdmins(ctx, cursor, limit)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list admins")
 	}
 	return result, nil
@@ -811,7 +571,7 @@ func (s *adminService) GrantAdminPermissions(ctx context.Context, adminID, targe
 	}
 
 	if err := s.repo.UpdateUserAdminPermissions(ctx, targetUserID, uint32(permissions), adminID); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to grant admin permissions")
 	}
 
@@ -826,7 +586,7 @@ func (s *adminService) RevokeAdminPermissions(ctx context.Context, adminID, targ
 	}
 
 	if err := s.repo.UpdateUserAdminPermissions(ctx, targetUserID, 0, adminID); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to revoke admin permissions")
 	}
 
@@ -839,7 +599,7 @@ func (s *adminService) RevokeAdminPermissions(ctx context.Context, adminID, targ
 func (s *adminService) SearchAuditLogs(ctx context.Context, search *models.AdminAuditLogSearch) (*models.AdminAuditLogsResult, *errx.Error) {
 	result, err := s.repo.SearchAuditLogs(ctx, search)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to search audit logs")
 	}
 	return result, nil

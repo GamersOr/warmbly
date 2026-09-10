@@ -21,13 +21,15 @@ import useRegister from "@/lib/api/hooks/auth/useRegister";
 import useRegisterConfirm from "@/lib/api/hooks/auth/useRegisterConfirm";
 import { saveTokens } from "@/lib/auth";
 import getUser from "@/lib/api/client/auth/getUser";
-import { WEBSITE_URL, TURNSTILE_KEY, API_URL } from "@/lib/information";
+import { TURNSTILE_KEY, API_URL } from "@/lib/information";
+import useBrand from "@/hooks/useBrand";
 import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
 import type Session from "@/lib/api/models/auth/Session";
 import beginSSO from "@/lib/api/client/auth/beginSSO";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
-import * as Sentry from "@sentry/react";
+import { captureException } from "@/lib/observability";
+import { isEmpty, readAcquisition } from "@/lib/acquisition";
 import type Token from "@/lib/api/models/auth/Token";
 import {
     beginPasskeyLogin,
@@ -214,6 +216,13 @@ export default function LoginPage() {
         () => new URLSearchParams(location.search).get("invite") ?? "",
         [location.search],
     );
+    // Where this signup came from, read once from the URL so a re-render or a
+    // history replace cannot lose it. Empty for a direct visit.
+    const acquisition = useMemo(() => {
+        const acq = readAcquisition();
+        return isEmpty(acq) ? undefined : acq;
+    }, []);
+
     const signupPossible = authConfig.registration === "false" || !!inviteToken;
     // Set when the API refuses a signup the screen believed was possible.
     const [refusal, setRefusal] = useState<SignupBlock | null>(null);
@@ -311,7 +320,7 @@ export default function LoginPage() {
             await completeSession(token);
         } catch (e) {
             // Cancel / no-passkey is expected here; report only real failures.
-            if (!(e instanceof PasskeyCancelled)) Sentry.captureException(e);
+            if (!(e instanceof PasskeyCancelled)) captureException(e);
         }
     }, [completeSession]);
 
@@ -327,7 +336,7 @@ export default function LoginPage() {
             })
             .catch((e) => {
                 setPasskeyStatus("error");
-                Sentry.captureException(e);
+                captureException(e);
             })
             .finally(() => {
                 explicitPasskeyChallengePendingRef.current = false;
@@ -550,6 +559,7 @@ export default function LoginPage() {
                     password: data.password,
                     turnstile: token,
                     invite: inviteToken || undefined,
+                    acquisition,
                 });
                 // Email verification off means the account already exists and
                 // is signed in: land in the dashboard.
@@ -647,14 +657,14 @@ export default function LoginPage() {
             try {
                 const res = mode === "signin"
                     ? await loginMutation.mutateAsync({ email, password, turnstile: token })
-                    : await registerMutation.mutateAsync({ email, password, turnstile: token, invite: inviteToken || undefined });
+                    : await registerMutation.mutateAsync({ email, password, turnstile: token, invite: inviteToken || undefined, acquisition });
                 toast.success("Code resent!");
                 setSession(res.session ?? "");
             } catch (e) {
                 toast.error(buildError(e as AppError));
             }
         });
-    }, [mode, email, password, inviteToken, loginMutation, registerMutation, withCaptcha]);
+    }, [mode, email, password, inviteToken, acquisition, loginMutation, registerMutation, withCaptcha]);
 
     return (
         <div className="relative">
@@ -1165,6 +1175,7 @@ function SignUpStep({
     });
     const pw = watch("password");
     const termsChecked = watch("acceptTerms");
+    const brand = useBrand();
 
     const { evaluate } = usePasswordStrength();
     const [strength, setStrength] = useState<{ score: 0 | 1 | 2 | 3 | 4; warning: string }>({ score: 0, warning: "" });
@@ -1225,13 +1236,21 @@ function SignUpStep({
                     </div>
                     <span className="text-[13px] text-slate-400 leading-relaxed">
                         I agree to the{" "}
-                        <a href={`${WEBSITE_URL}/terms`} target="_blank" rel="noopener noreferrer" className="text-sky-500 hover:text-sky-600 font-medium transition-colors">
-                            Terms of Service
-                        </a>
+                        {brand.terms_url ? (
+                            <a href={brand.terms_url} target="_blank" rel="noopener noreferrer" className="text-sky-500 hover:text-sky-600 font-medium transition-colors">
+                                Terms of Service
+                            </a>
+                        ) : (
+                            "Terms of Service"
+                        )}
                         {" "}and{" "}
-                        <a href={`${WEBSITE_URL}/privacy`} target="_blank" rel="noopener noreferrer" className="text-sky-500 hover:text-sky-600 font-medium transition-colors">
-                            Privacy Policy
-                        </a>
+                        {brand.privacy_url ? (
+                            <a href={brand.privacy_url} target="_blank" rel="noopener noreferrer" className="text-sky-500 hover:text-sky-600 font-medium transition-colors">
+                                Privacy Policy
+                            </a>
+                        ) : (
+                            "Privacy Policy"
+                        )}
                     </span>
                 </label>
                 <FieldError message={errors.acceptTerms?.message} />

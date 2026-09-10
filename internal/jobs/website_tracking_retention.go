@@ -4,7 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/getsentry/sentry-go"
+	"github.com/warmbly/warmbly/internal/jobrun"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -24,13 +25,13 @@ func (j *WebsiteTrackingRetentionJob) Run(ctx context.Context) error {
 	}
 	cutoffs, err := j.repo.RetentionCutoffs(ctx, time.Now())
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return err
 	}
 	var last error
 	for _, c := range cutoffs {
 		if _, err := j.repo.PruneBefore(ctx, c.OrganizationID, c.Before); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 			last = err
 		}
 	}
@@ -39,15 +40,5 @@ func (j *WebsiteTrackingRetentionJob) Run(ctx context.Context) error {
 
 // Start runs the job once on boot and then on the interval until ctx ends.
 func (j *WebsiteTrackingRetentionJob) Start(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	_ = j.Run(ctx)
-	for {
-		select {
-		case <-ticker.C:
-			_ = j.Run(ctx)
-		case <-ctx.Done():
-			return
-		}
-	}
+	jobrun.Loop(ctx, "website_tracking_retention", interval, true, j.Run)
 }

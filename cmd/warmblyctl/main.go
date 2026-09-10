@@ -69,8 +69,14 @@ func dispatch(ctx context.Context, args []string) error {
 		return runUser(ctx, args[1:])
 	case "org":
 		return runOrg(ctx, args[1:])
+	case "backup":
+		return runBackup(ctx, args[1:])
+	case "restore":
+		return runRestore(ctx, args[1:])
 	case "api":
 		return runAPI(ctx, args[1:])
+	case "fleet":
+		return runFleet(ctx, args[1:])
 	}
 	if _, ok := apiFamilies[args[0]]; ok {
 		return runAPIResource(ctx, args[0], args[1:])
@@ -99,9 +105,17 @@ var commands = []command{
 	{"user revoke-admin", "Take platform admin away from an account", composeExec + "user revoke-admin --email old@example.com"},
 	{"user disable-2fa", "Clear an account's TOTP enrollment after a lost authenticator", composeExec + "user disable-2fa --email you@example.com"},
 	{"hash-password", "Print an argon2 hash for WARMBLY_BOOTSTRAP_PASSWORD_HASH", "printf '%s' 'your-password' | docker compose -p warmbly exec -T backend warmblyctl hash-password"},
+	{"backup", "Write the whole instance (database, blobs, keys) to one restorable bundle", composeExec + "backup --out /data/blobs/warmbly-backup.tar.gz"},
+	{"restore", "Restore a bundle onto this instance, replacing everything on it", composeExec + "restore --file /data/blobs/warmbly-backup.tar.gz"},
 	{"org list", "List the workspaces on this instance with their id, owner, and size", composeExec + "org list"},
 	{"org export", "Write a whole workspace to a portable archive file", composeExec + "org export --org you@example.com --out /tmp/workspace.warmbly.zip"},
 	{"org import", "Apply an archive to a workspace on this instance", composeExec + "org import --org you@example.com --file /tmp/workspace.warmbly.zip"},
+	{"fleet join-token", "Issue the token a machine needs to join the fleet. Shown once", composeExec + "fleet join-token"},
+	{"fleet list", "Every worker and consumer: role, version, liveness and usage", composeExec + "fleet list"},
+	{"fleet version", "Show or set the version every node should be running", composeExec + "fleet version v1.4.2"},
+	{"fleet channel", "Follow stable or dev releases, or hold the fleet where it is", composeExec + "fleet channel stable"},
+	{"fleet pin", "Hold one node at a version, to canary or to hold it back", composeExec + "fleet pin <node-id> v1.4.1"},
+	{"fleet remove", "Forget a node. Its mailboxes re-place themselves", composeExec + "fleet remove <node-id>"},
 }
 
 func usage(w *os.File) {
@@ -145,6 +159,10 @@ Environment:
   WARMBLY_API_KEY  API key (wmbly_...) for the API commands.
   WARMBLY_API_URL  API base URL for the API commands. Defaults to this instance's
                    API_PUBLIC_URL, then the hosted service.
+
+  backup and restore read the same crypto settings as org export/import, plus
+  BLOB_FS_ROOT for the blob tree. Run them inside the backend container, which
+  is also where pg_dump and psql live.
 
   org export and org import additionally read the instance's crypto settings,
   because a workspace's sealed values have to be opened on the way out and

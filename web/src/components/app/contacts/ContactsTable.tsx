@@ -69,6 +69,10 @@ import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
 import type { ContactCampaignProgress, LeadEngagement, LeadStatus, VerificationSource, VerificationStatus } from "@/lib/api/models/app/contacts/Contact";
 import type { CampaignLeadCounts } from "@/lib/api/models/app/contacts/SearchContactsResult";
 import ContactsEditBulk from "./ContactsEditBulk";
+import { selectionOf } from "@/lib/api/models/app/contacts/ContactSelection";
+import type ContactSelection from "@/lib/api/models/app/contacts/ContactSelection";
+import * as rowSelection from "./selection";
+import type { RowSelection } from "./selection";
 import { NewContactDialog } from "./NewContactDialog";
 import ExportDialog from "./ExportDialog";
 import ImportWizard from "./ImportWizard";
@@ -111,19 +115,25 @@ import {
 
 type SubFilter = "all" | "subscribed" | "unsubscribed";
 
+// Mirrors maxIntegrationPushSize on the backend: one synchronous push is a
+// live call per contact against the CRM's API.
+const MAX_CRM_PUSH = 500;
+
 export default function ContactsTable({
     current_campaign,
     segment,
 }: {
     current_campaign?: MiniCampaign;
     // Scope the list to one segment's members (the segment detail page).
-    segment?: { id: string; name: string };
+    segment?: { id: string; name: string; color?: string };
 }) {
     const confirm = useConfirm();
     const segmentMembers = useSetSegmentMembers();
     // Enrolling a segment writes campaign leads, so it takes the campaign permission.
     const campaignWrite = useWriteGuard("MANAGE_CAMPAIGNS");
-    const [selected, setSelected] = React.useState<string[]>([]);
+    // Ticked rows, or "everything the search matches" minus what was unticked
+    // after; see ./selection for the two shapes and what each one means.
+    const [rowSel, setRowSel] = React.useState<RowSelection>(rowSelection.emptySelection);
     const [del, setDelete] = React.useState<boolean>(false);
     const [edit, setEdit] = React.useState<string>("");
     // Which tab the drawer opens on. Row click → default (overview); the
@@ -134,7 +144,6 @@ export default function ContactsTable({
         setEdit(id);
     }, []);
     const [bulkEdit, setBulkEdit] = React.useState<boolean>(false);
-    const [subFilter, setSubFilter] = React.useState<SubFilter>("all");
     const [newOpen, setNewOpen] = React.useState<boolean>(false);
     const [exportOpen, setExportOpen] = React.useState<boolean>(false);
     const [importOpen, setImportOpen] = React.useState<boolean>(false);
@@ -162,19 +171,40 @@ export default function ContactsTable({
     }
     // Half-filled custom-field pills stay in the bar but never reach the server.
     const searchOptions = React.useMemo(
-        () => ({ ...searchProps, filters: searchProps.filters.filter(isCompleteCustomFilter) }),
+        () => ({ ...searchProps, custom_field_filters: searchProps.custom_field_filters.filter(isCompleteCustomFilter) }),
         [searchProps],
     );
     const contactsData = useSearchContacts({ options: searchOptions });
 
+    // The stat strip's subscription facet is the same filter the bar exposes,
+    // so it goes to the server: the total, the pages and "select all matching"
+    // then all agree with what the strip says.
+    const subFilter: SubFilter =
+        searchProps.subscribed === undefined ? "all" : searchProps.subscribed ? "subscribed" : "unsubscribed";
+    const setSubFilter = (v: SubFilter) =>
+        setSearchProps((s) => ({ ...s, subscribed: v === "all" ? undefined : v === "subscribed" }));
+
+    const clearSelection = React.useCallback(() => setRowSel(rowSelection.emptySelection), []);
+    const isRowSelected = React.useCallback((id: string) => rowSelection.isRowSelected(rowSel, id), [rowSel]);
+    // A different result set makes a select-all stale and a tick list
+    // meaningless, so the selection resets with the filters. Sort is excluded:
+    // it reorders the same rows.
+    const selectionScope = React.useMemo(() => {
+        const { sort_by: _sortBy, reverse: _reverse, ...rest } = searchOptions;
+        return JSON.stringify(rest);
+    }, [searchOptions]);
+    React.useEffect(() => {
+        clearSelection();
+    }, [selectionScope, clearSelection]);
+
     // Inside a segment, "remove" pins the contact out as a manual exclude so
     // it stays out even while the conditions still match it.
     async function excludeFromSegment() {
-        if (!segment || selected.length === 0 || segmentMembers.isPending) return;
+        if (!segment || selectionCount === 0 || segmentMembers.isPending) return;
         try {
-            await segmentMembers.mutateAsync({ id: segment.id, contacts: selected, mode: "exclude" });
-            toast.success(`Removed ${selected.length} contact${selected.length === 1 ? "" : "s"} from ${segment.name}`);
-            setSelected([]);
+            const removed = await segmentMembers.mutateAsync({ id: segment.id, selection, mode: "exclude" });
+            toast.success(`Removed ${removed.toLocaleString()} contact${removed === 1 ? "" : "s"} from ${segment.name}`);
+            clearSelection();
         } catch (err) {
             toast.error(buildError(err as AppError));
         }
@@ -233,17 +263,18 @@ export default function ContactsTable({
     const [filterResetToken, setFilterResetToken] = React.useState(0);
 
     // In a campaign, "remove" detaches the leads; the contacts themselves stay.
-    async function removeFromCampaign(ids: string[]) {
-        if (!current_campaign || ids.length === 0 || bulkUpdate.isPending) return;
+    async function removeFromCampaign(target: ContactSelection, count: number) {
+        if (!current_campaign || count === 0 || bulkUpdate.isPending) return;
         try {
-            await bulkUpdate.mutateAsync({
-                contacts: ids,
+            const updated = await bulkUpdate.mutateAsync({
+                ...target,
                 add_campaigns: [],
                 remove_campaigns: [current_campaign.id],
                 fields: [],
             });
-            toast.success(`Removed ${ids.length} lead${ids.length === 1 ? "" : "s"} from ${current_campaign.name}`);
-            setSelected((bef) => bef.filter((x) => !ids.includes(x)));
+            const n = updated.length || count;
+            toast.success(`Removed ${n.toLocaleString()} lead${n === 1 ? "" : "s"} from ${current_campaign.name}`);
+            clearSelection();
         } catch (err) {
             toast.error(buildError(err as AppError));
         }
@@ -264,11 +295,16 @@ export default function ContactsTable({
     );
 
     async function pushToCRM(connectionId: string, providerLabel: string) {
-        if (selected.length === 0 || pushContacts.isPending) return;
-        const ids = selected;
-        const t = toast.loading(`Pushing ${ids.length} to ${providerLabel}…`);
+        if (selectionCount === 0 || pushContacts.isPending) return;
+        // The push is a live call per contact against the CRM, so the server
+        // caps it; say so here instead of letting the request fail.
+        if (selectionCount > MAX_CRM_PUSH) {
+            toast.error(`Push to CRM takes up to ${MAX_CRM_PUSH.toLocaleString()} contacts at a time. Narrow the selection and try again.`);
+            return;
+        }
+        const t = toast.loading(`Pushing ${selectionCount.toLocaleString()} to ${providerLabel}…`);
         try {
-            const res = await pushContacts.mutateAsync({ connectionId, contact_ids: ids });
+            const res = await pushContacts.mutateAsync({ connectionId, ...selection });
             if (res.pushed === 0) {
                 toast.error(
                     `Couldn't push to ${providerLabel}${res.failed ? ` (${res.failed} failed)` : ""}`,
@@ -286,13 +322,21 @@ export default function ContactsTable({
 
     const contacts = contactsData.contacts;
     const total = contactsData.data?.pages[0]?.pagination.total ?? 0;
-    const filtered = React.useMemo(() => {
-        if (!contacts) return [];
-        if (subFilter === "all") return contacts;
-        return contacts.filter((c) =>
-            subFilter === "subscribed" ? c.subscribed : !c.subscribed,
-        );
-    }, [contacts, subFilter]);
+    const rows = React.useMemo(() => contacts ?? [], [contacts]);
+
+    // What every bulk action applies to, and how many contacts that is. In
+    // select-all mode the server resolves the filter, so the count here is the
+    // search total minus whatever was unticked after.
+    const loadedIDs = React.useMemo(() => rows.map((c) => c.id), [rows]);
+    const selection = React.useMemo<ContactSelection>(
+        () => rowSelection.toRequest(rowSel, searchOptions),
+        [rowSel, searchOptions],
+    );
+    const selectionCount = rowSelection.selectionCount(rowSel, total);
+    // Ticking every loaded row still leaves the rest of the match set behind;
+    // that gap is what the banner offers to close.
+    const loadedAllSelected = rowSelection.allLoadedSelected(rowSel, loadedIDs);
+    const canSelectAllMatching = rowSelection.canSelectAllMatching(rowSel, loadedIDs, total);
 
     // Prefer the server's org-wide facet counts (first page's `counts` block) so
     // the stat strip is accurate at scale. Before that lands, fall back to a
@@ -317,32 +361,21 @@ export default function ContactsTable({
         return stats;
     }, [serverCounts, contacts]);
 
-    const isSelectedAll = React.useMemo(() => {
-        if (!filtered.length) return false;
-        return filtered.every((v) => selected.includes(v.id));
-    }, [filtered, selected]);
+    const toggleAll = () => setRowSel((s) => rowSelection.toggleLoaded(s, loadedIDs));
+    const selectAllMatching = () => setRowSel(rowSelection.selectAllMatching());
 
-    function toggleAll() {
-        if (isSelectedAll) {
-            setSelected((bef) => bef.filter((id) => !filtered.some((c) => c.id === id)));
-        } else {
-            setSelected((bef) => Array.from(new Set([...bef, ...filtered.map((c) => c.id)])));
-        }
-    }
-
-    async function bulkDelete() {
-        if (selected.length === 0) return;
+    async function bulkDelete(target: ContactSelection, count: number) {
+        if (count === 0) return;
         try {
             confirm?.setLoading(true);
-            const ids = selected;
             try {
                 setDelete(true);
-                await toast.promise(contactsBulkDelete.mutateAsync(ids), {
-                    loading: `Deleting ${ids.length} contacts…`,
-                    success: "Contacts deleted",
+                await toast.promise(contactsBulkDelete.mutateAsync(target), {
+                    loading: `Deleting ${count.toLocaleString()} ${count === 1 ? "contact" : "contacts"}…`,
+                    success: count === 1 ? "Contact deleted" : "Contacts deleted",
                     error: (err: AppError) => buildError(err),
                 });
-                setSelected([]);
+                clearSelection();
             } finally {
                 setDelete(false);
             }
@@ -357,16 +390,17 @@ export default function ContactsTable({
     const batchResearch = useBatchResearch();
     const metered = useAiMetered();
     function bulkResearch() {
-        if (selected.length === 0) return;
-        const ids = selected;
+        if (selectionCount === 0) return;
         confirm?.show(
-            `Research ${ids.length} ${ids.length === 1 ? "contact" : "contacts"}? ${
-                metered ? `This uses up to ${ids.length * 2} AI credits and runs` : "This runs"
+            `Research ${selectionCount.toLocaleString()} ${selectionCount === 1 ? "contact" : "contacts"}? ${
+                metered
+                    ? `This uses up to ${(selectionCount * 2).toLocaleString()} AI credits and runs`
+                    : "This runs"
             } in the background.`,
             async () => {
-                const res = await batchResearch.mutateAsync({ contactIds: ids, objective: "" });
-                toast.success(`Queued research for ${res.queued} contacts`);
-                setSelected([]);
+                const res = await batchResearch.mutateAsync({ selection, objective: "" });
+                toast.success(`Queued research for ${res.queued.toLocaleString()} contacts`);
+                clearSelection();
             },
         );
     }
@@ -375,28 +409,26 @@ export default function ContactsTable({
     // updates live as its verdict lands; marking deliverable is immediate.
     const verification = useRequestContactVerification();
     function bulkVerify() {
-        if (selected.length === 0) return;
-        const ids = selected;
+        if (selectionCount === 0) return;
         confirm?.show(
-            `Re-verify ${ids.length} ${ids.length === 1 ? "address" : "addresses"}? Verdicts land in the background${
-                ids.length > 50 ? " over the next few minutes" : ""
+            `Re-verify ${selectionCount.toLocaleString()} ${selectionCount === 1 ? "address" : "addresses"}? Verdicts land in the background${
+                selectionCount > 50 ? " over the next few minutes" : ""
             }.`,
             async () => {
-                const res = await verification.mutateAsync({ contacts: ids, action: "verify" });
-                toast.success(`Re-checking ${res.affected} ${res.affected === 1 ? "address" : "addresses"}`);
-                setSelected([]);
+                const res = await verification.mutateAsync({ ...selection, action: "verify" });
+                toast.success(`Re-checking ${res.affected.toLocaleString()} ${res.affected === 1 ? "address" : "addresses"}`);
+                clearSelection();
             },
         );
     }
     function bulkMarkDeliverable() {
-        if (selected.length === 0) return;
-        const ids = selected;
+        if (selectionCount === 0) return;
         confirm?.show(
-            `Mark ${ids.length} ${ids.length === 1 ? "address" : "addresses"} deliverable? Campaigns will send to them even if verification refused them. Use this for a list you verified elsewhere.`,
+            `Mark ${selectionCount.toLocaleString()} ${selectionCount === 1 ? "address" : "addresses"} deliverable? Campaigns will send to them even if verification refused them. Use this for a list you verified elsewhere.`,
             async () => {
-                const res = await verification.mutateAsync({ contacts: ids, action: "mark_deliverable" });
-                toast.success(`${res.affected} marked deliverable`);
-                setSelected([]);
+                const res = await verification.mutateAsync({ ...selection, action: "mark_deliverable" });
+                toast.success(`${res.affected.toLocaleString()} marked deliverable`);
+                clearSelection();
             },
         );
     }
@@ -433,18 +465,27 @@ export default function ContactsTable({
             errorMessage={(contactsData.error as Error | undefined)?.message ?? "Request failed."}
             onRetry={() => contactsData.refetch()}
             isRefetching={contactsData.isFetching && !contactsData.isPending}
-            contacts={filtered}
-            selected={selected}
-            onToggle={(id, on) =>
-                setSelected((bef) => (on ? [...bef, id] : bef.filter((x) => x !== id)))
-            }
-            isSelectedAll={isSelectedAll}
+            contacts={rows}
+            isRowSelected={isRowSelected}
+            onToggle={(id, on) => setRowSel((s) => rowSelection.toggleRow(s, id, on))}
+            isSelectedAll={loadedAllSelected}
             onToggleAll={toggleAll}
+            banner={
+                <SelectAllBanner
+                    noun={current_campaign ? "lead" : segment ? "member" : "contact"}
+                    selectAll={rowSel.all}
+                    count={selectionCount}
+                    loadedCount={rows.length}
+                    total={total}
+                    canSelectAllMatching={canSelectAllMatching}
+                    onSelectAllMatching={selectAllMatching}
+                    onClear={clearSelection}
+                />
+            }
             onRowClick={openContact}
             onDelete={(id) =>
                 confirm?.show(`Delete this contact?`, async () => {
-                    setSelected([id]);
-                    await bulkDelete();
+                    await bulkDelete(selectionOf(id), 1);
                 })
             }
             onRemoveFromCampaign={
@@ -452,7 +493,7 @@ export default function ContactsTable({
                     ? (id) =>
                           confirm?.show(
                               "Remove this lead from the campaign? The contact stays in your workspace.",
-                              async () => removeFromCampaign([id]),
+                              async () => removeFromCampaign(selectionOf(id), 1),
                           )
                     : undefined
             }
@@ -487,7 +528,7 @@ export default function ContactsTable({
                                         ? "Pick people from your contacts, import a file, or add one by hand. The linked segments could not be loaded."
                                         : "Pick people from your contacts, link a segment, import a file, or add one by hand."
                                 : segment
-                                    ? "Nobody matches its conditions yet. Adjust them or pin contacts in."
+                                    ? "Nothing matches it yet. Pin people in from your contacts, import a file, or add one by hand."
                                     : "Add or upload contacts to get started."
             }
             emptyCta={
@@ -532,6 +573,29 @@ export default function ContactsTable({
                             Import file
                         </TopbarAction>
                     </div>
+                ) : segment ? (
+                    <div className="flex flex-wrap items-center justify-center gap-1.5">
+                        <TopbarAction
+                            icon={<UsersIcon className="w-3 h-3" />}
+                            onClick={() => setFromContactsOpen(true)}
+                        >
+                            Add contacts
+                        </TopbarAction>
+                        <TopbarAction
+                            variant="ghost"
+                            icon={<UploadIcon className="w-3 h-3" />}
+                            onClick={() => setImportOpen(true)}
+                        >
+                            Import file
+                        </TopbarAction>
+                        <TopbarAction
+                            variant="ghost"
+                            icon={<UserPlusIcon className="w-3 h-3" />}
+                            onClick={() => setNewOpen(true)}
+                        >
+                            New contact
+                        </TopbarAction>
+                    </div>
                 ) : (
                     <TopbarAction
                         icon={<UserPlusIcon className="w-3 h-3" />}
@@ -544,6 +608,9 @@ export default function ContactsTable({
             hasNextPage={!!contactsData.hasNextPage}
             isFetchingNextPage={contactsData.isFetchingNextPage}
             onLoadMore={() => contactsData.fetchNextPage()}
+            nextPageFailed={contactsData.isFetchNextPageError}
+            loadedCount={contacts?.length ?? 0}
+            totalCount={total}
         />
     );
 
@@ -629,7 +696,7 @@ export default function ContactsTable({
                 />
                 {tableNode}
                 <SelectionBar
-                    count={selected.length}
+                    count={selectionCount}
                     deleting={del}
                     pushTargets={pushTargets}
                     pushing={pushContacts.isPending}
@@ -642,20 +709,20 @@ export default function ContactsTable({
                     verifying={verification.isPending}
                     onDelete={() =>
                         confirm?.show(
-                            `Are you sure you want to delete ${selected.length} contacts?`,
-                            bulkDelete,
+                            deletePrompt(selectionCount),
+                            () => bulkDelete(selection, selectionCount),
                         )
                     }
-                    onClear={() => setSelected([])}
-                    selected={selected}
+                    onClear={clearSelection}
+                    selection={selection}
                     segment={segment}
                     onExclude={excludeFromSegment}
                     excluding={segmentMembers.isPending}
                     campaign={current_campaign}
                     onRemoveFromCampaign={() =>
                         confirm?.show(
-                            `Remove ${selected.length} lead${selected.length === 1 ? "" : "s"} from this campaign? The contacts stay in your workspace.`,
-                            async () => removeFromCampaign(selected),
+                            `Remove ${selectionCount.toLocaleString()} lead${selectionCount === 1 ? "" : "s"} from this campaign? The contacts stay in your workspace.`,
+                            async () => removeFromCampaign(selection, selectionCount),
                         )
                     }
                     removing={bulkUpdate.isPending}
@@ -668,7 +735,9 @@ export default function ContactsTable({
                 <ContactsEditBulk
                     active={bulkEdit}
                     setActive={setBulkEdit}
-                    selected={selected}
+                    selection={selection}
+                    count={selectionCount}
+                    onDone={clearSelection}
                     scope={current_campaign ? { kind: "campaign", name: current_campaign.name } : undefined}
                 />
                 <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} campaign={current_campaign} />
@@ -696,7 +765,7 @@ export default function ContactsTable({
                     open={exportOpen}
                     onClose={() => setExportOpen(false)}
                     filters={searchOptions}
-                    selectedIds={selected}
+                    selectedIds={rowSel.all ? [] : rowSel.ids}
                     totalKnown={total}
                     scopeContext={exportScope}
                 />
@@ -809,7 +878,7 @@ export default function ContactsTable({
 
             <SectionBar
                 label={segment ? "Segment members" : subFilter === "all" ? "All contacts" : `${subFilter[0].toUpperCase()}${subFilter.slice(1)}`}
-                count={filtered.length}
+                count={total}
             >
                 <SearchInput
                     value={searchProps.query}
@@ -873,7 +942,7 @@ export default function ContactsTable({
             </PageBody>
 
             <SelectionBar
-                count={selected.length}
+                count={selectionCount}
                 deleting={del}
                 pushTargets={pushTargets}
                 pushing={pushContacts.isPending}
@@ -886,18 +955,16 @@ export default function ContactsTable({
                 verifying={verification.isPending}
                 onDelete={() =>
                     confirm?.show(
-                        `Are you sure you want to delete ${selected.length} contacts?`,
-                        bulkDelete,
+                        deletePrompt(selectionCount),
+                        () => bulkDelete(selection, selectionCount),
                     )
                 }
-                onClear={() => setSelected([])}
-                selected={selected}
+                onClear={clearSelection}
+                selection={selection}
                 segment={segment}
                 onExclude={excludeFromSegment}
                 excluding={segmentMembers.isPending}
             />
-
-            {filtered.length === 0 && !contactsData.isPending ? null : null}
 
             <SegmentEditor
                 open={segmentPreset !== null}
@@ -909,7 +976,9 @@ export default function ContactsTable({
             <ContactsEditBulk
                 active={bulkEdit}
                 setActive={setBulkEdit}
-                selected={selected}
+                selection={selection}
+                count={selectionCount}
+                onDone={clearSelection}
                 scope={segment ? { kind: "segment", name: segment.name } : undefined}
             />
             <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} segment={segment} />
@@ -924,15 +993,16 @@ export default function ContactsTable({
                 open={exportOpen}
                 onClose={() => setExportOpen(false)}
                 filters={searchOptions}
-                selectedIds={selected}
+                selectedIds={rowSel.all ? [] : rowSel.ids}
                 totalKnown={total}
                 scopeContext={exportScope}
             />
             <ImportWizard
                 open={importOpen}
                 onClose={() => setImportOpen(false)}
+                lockedSegment={segment}
             />
-            <SyncSourcesPanel open={syncOpen} onClose={() => setSyncOpen(false)} />
+            <SyncSourcesPanel open={syncOpen} onClose={() => setSyncOpen(false)} segment={segment} />
         </Page>
     );
 }
@@ -945,10 +1015,11 @@ function ContactsTableBody({
     onRetry,
     isRefetching,
     contacts,
-    selected,
+    isRowSelected,
     onToggle,
     isSelectedAll,
     onToggleAll,
+    banner,
     onRowClick,
     onDelete,
     onRemoveFromCampaign,
@@ -958,6 +1029,9 @@ function ContactsTableBody({
     hasNextPage,
     isFetchingNextPage,
     onLoadMore,
+    nextPageFailed,
+    loadedCount,
+    totalCount,
 }: {
     embedded?: boolean;
     isLoading: boolean;
@@ -984,10 +1058,12 @@ function ContactsTableBody({
         verification_confidence?: number;
         created_at: Date;
     }[];
-    selected: string[];
+    isRowSelected: (id: string) => boolean;
     onToggle: (id: string, on: boolean) => void;
     isSelectedAll: boolean;
     onToggleAll: () => void;
+    // Sits between the header and the rows: "select all N matching".
+    banner: React.ReactNode;
     onRowClick: (id: string, tab?: ContactSlideTab) => void;
     onDelete: (id: string) => void;
     // In a campaign, the row's destructive action detaches the lead instead
@@ -999,6 +1075,12 @@ function ContactsTableBody({
     hasNextPage: boolean;
     isFetchingNextPage: boolean;
     onLoadMore: () => void;
+    // Whether the failure was the next page rather than a refetch of the whole
+    // list, which decides what "Try again" runs.
+    nextPageFailed: boolean;
+    // How far through the list we are, so "Load more" says how much is left.
+    loadedCount: number;
+    totalCount: number;
 }) {
     if (isLoading) {
         return (
@@ -1015,7 +1097,11 @@ function ContactsTableBody({
             </div>
         );
     }
-    if (isError) {
+    // A page that fails once rows are loaded is reported in the footer instead;
+    // throwing away 500 loaded leads because page 13 failed is worse than the
+    // failure. The count is of rows LOADED, not of rows left after the
+    // client-side subscription filter, which can hide all of them.
+    if (isError && loadedCount === 0) {
         return (
             <div className="px-5 py-12 text-center">
                 <div className="mx-auto mb-3 size-8 rounded-md bg-red-50 text-red-600 flex items-center justify-center">
@@ -1050,11 +1136,70 @@ function ContactsTableBody({
             </div>
         );
     }
+    // "Try again" runs the request that actually failed: the page that did not
+    // arrive, or a refetch of the whole list when it was the refetch that broke.
+    const retry = nextPageFailed ? onLoadMore : onRetry;
+    const retrying = nextPageFailed ? isFetchingNextPage : isRefetching;
+    const footer = isError ? (
+        <div className="px-5 py-3 flex flex-col items-center gap-2 border-t border-slate-200/60">
+            <p className="text-[11.5px] text-slate-500 text-center max-w-[52ch] leading-relaxed">
+                <AlertTriangleIcon className="w-3 h-3 inline-block mr-1 -mt-px text-red-500" />
+                {errorMessage}
+            </p>
+            <button
+                type="button"
+                onClick={retry}
+                disabled={retrying}
+                className="h-7 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
+            >
+                {retrying ? (
+                    <Loader2Icon className="w-3 h-3 animate-spin" />
+                ) : (
+                    <RefreshCcwIcon className="w-3 h-3" />
+                )}
+                Try again
+            </button>
+        </div>
+    ) : hasNextPage ? (
+        <div className="px-5 py-3 flex justify-center border-t border-slate-200/60">
+            <button
+                onClick={onLoadMore}
+                disabled={isFetchingNextPage}
+                className="h-7 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
+            >
+                {isFetchingNextPage ? (
+                    <>
+                        <Loader2Icon className="w-3 h-3 animate-spin" />
+                        Loading…
+                    </>
+                ) : (
+                    <>
+                        <PlusIcon className="w-3 h-3" />
+                        Load more
+                        {totalCount > loadedCount && (
+                            <span className="text-slate-400">
+                                · {loadedCount.toLocaleString()} of {totalCount.toLocaleString()}
+                            </span>
+                        )}
+                    </>
+                )}
+            </button>
+        </div>
+    ) : null;
+
+    // Rows are loaded but the sub-filter hides all of them: still say so, and
+    // still surface a failed page rather than swallowing it.
     if (contacts.length === 0) {
-        return <EmptyBlock title={emptyTitle} body={emptyBody} cta={emptyCta} />;
+        return (
+            <>
+                <EmptyBlock title={emptyTitle} body={emptyBody} cta={emptyCta} />
+                {footer}
+            </>
+        );
     }
     return (
         <>
+            {banner}
             <table className="w-full text-left">
                 <thead className="sticky top-0 bg-white z-[1]">
                     <tr className="border-b border-slate-200">
@@ -1088,7 +1233,20 @@ function ContactsTableBody({
                             </>
                         )}
                         {embedded ? (
-                            <Th className="w-28 hidden md:table-cell">Current step</Th>
+                            <>
+                                <Th className="w-28 hidden md:table-cell">Current step</Th>
+                                <Th className="w-36 hidden xl:table-cell">
+                                    <span className="inline-flex items-center gap-1">
+                                        Sender
+                                        <span
+                                            className="inline-flex cursor-help text-slate-300 hover:text-slate-500"
+                                            title="The mailbox this lead's whole sequence sends from. It is picked when the first email goes out and every follow-up keeps it, so the contact always hears from one address."
+                                        >
+                                            <InfoIcon className="w-3 h-3" aria-label="How the sender is chosen" />
+                                        </span>
+                                    </span>
+                                </Th>
+                            </>
                         ) : (
                             <Th className="w-24 text-right hidden md:table-cell">Campaigns</Th>
                         )}
@@ -1098,7 +1256,7 @@ function ContactsTableBody({
                 </thead>
                 <tbody>
                     {contacts.map((c) => {
-                        const isSel = selected.includes(c.id);
+                        const isSel = isRowSelected(c.id);
                         const name =
                             (c.first_name || c.last_name)
                                 ? `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim()
@@ -1224,6 +1382,7 @@ function ContactsTableBody({
                                     </>
                                 )}
                                 {embedded ? (
+                                    <>
                                     <td className="px-3 hidden md:table-cell">
                                         {lead?.current_step ? (
                                             <span
@@ -1240,6 +1399,19 @@ function ContactsTableBody({
                                             <span className="text-[11px] text-slate-300">Not started</span>
                                         )}
                                     </td>
+                                    <td className="px-3 hidden xl:table-cell">
+                                        {lead?.sender ? (
+                                            <span
+                                                title={`Every step of this lead's sequence sends from ${lead.sender}`}
+                                                className="block truncate text-[11.5px] text-slate-600"
+                                            >
+                                                {lead.sender}
+                                            </span>
+                                        ) : (
+                                            <span className="text-[11px] text-slate-300">Not assigned</span>
+                                        )}
+                                    </td>
+                                    </>
                                 ) : (
                                     <td className="px-3 text-right font-mono text-[12px] text-slate-600 tabular-nums hidden md:table-cell">
                                         {c.campaigns?.length ?? 0}
@@ -1297,27 +1469,7 @@ function ContactsTableBody({
                     })}
                 </tbody>
             </table>
-            {hasNextPage && (
-                <div className="px-5 py-3 flex justify-center border-t border-slate-200/60">
-                    <button
-                        onClick={onLoadMore}
-                        disabled={isFetchingNextPage}
-                        className="h-7 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
-                    >
-                        {isFetchingNextPage ? (
-                            <>
-                                <Loader2Icon className="w-3 h-3 animate-spin" />
-                                Loading…
-                            </>
-                        ) : (
-                            <>
-                                <PlusIcon className="w-3 h-3" />
-                                Load more
-                            </>
-                        )}
-                    </button>
-                </div>
-            )}
+            {footer}
         </>
     );
 }
@@ -1628,6 +1780,73 @@ function StripChip({
     );
 }
 
+// deletePrompt words the confirm so a 12,000-row select-all does not read the
+// same as three ticked rows.
+function deletePrompt(count: number): string {
+    if (count === 1) return "Delete this contact? It is removed from every campaign and segment it belongs to.";
+    return `Delete ${count.toLocaleString()} contacts? They are removed from every campaign and segment they belong to. This cannot be undone.`;
+}
+
+// The bridge between "every row on screen" and "every row that matches". The
+// table only ever holds the pages it has loaded, so ticking the header can
+// never mean the whole filtered set on its own; this says what is selected and
+// offers the rest in one click.
+function SelectAllBanner({
+    noun,
+    selectAll,
+    count,
+    loadedCount,
+    total,
+    canSelectAllMatching,
+    onSelectAllMatching,
+    onClear,
+}: {
+    noun: string;
+    selectAll: boolean;
+    count: number;
+    loadedCount: number;
+    total: number;
+    canSelectAllMatching: boolean;
+    onSelectAllMatching: () => void;
+    onClear: () => void;
+}) {
+    if (!selectAll && !canSelectAllMatching) return null;
+    const plural = (n: number) => (n === 1 ? noun : `${noun}s`);
+    return (
+        <div className="px-5 py-2 bg-sky-50/70 border-b border-sky-100 text-[12px] text-sky-900 flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1 text-center">
+            {selectAll ? (
+                <>
+                    <span>
+                        All <span className="font-medium">{count.toLocaleString()}</span> {plural(count)} matching this
+                        view are selected.
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onClear}
+                        className="font-medium underline underline-offset-2 hover:text-sky-700"
+                    >
+                        Clear selection
+                    </button>
+                </>
+            ) : (
+                <>
+                    <span>
+                        The <span className="font-medium">{loadedCount.toLocaleString()}</span> {plural(loadedCount)} loaded
+                        here are selected.
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onSelectAllMatching}
+                        className="font-medium underline underline-offset-2 hover:text-sky-700"
+                    >
+                        Select all {total.toLocaleString()} matching
+                    </button>
+                </>
+            )}
+        </div>
+    );
+}
+
 function SelectionBar({
     count,
     deleting,
@@ -1642,7 +1861,7 @@ function SelectionBar({
     verifying,
     onDelete,
     onClear,
-    selected,
+    selection,
     segment,
     onExclude,
     excluding,
@@ -1663,7 +1882,7 @@ function SelectionBar({
     verifying: boolean;
     onDelete: () => void;
     onClear: () => void;
-    selected: string[];
+    selection: ContactSelection;
     segment?: { id: string; name: string };
     onExclude: () => void;
     excluding: boolean;
@@ -1680,7 +1899,7 @@ function SelectionBar({
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 flex items-center max-w-[calc(100vw-16px)] flex-wrap justify-center md:max-w-none md:flex-nowrap gap-1.5 rounded-md border border-slate-200 bg-white shadow-[0_6px_20px_-4px_rgba(15,23,42,0.12),0_2px_4px_rgba(15,23,42,0.04)] px-2 py-1.5">
             <div className="inline-flex items-center gap-1.5 px-2 h-7 rounded bg-sky-50 text-sky-700 text-[12px] font-medium">
                 <CheckIcon className="w-3 h-3" />
-                <span>{count} selected</span>
+                <span>{count.toLocaleString()} selected</span>
             </div>
             {pushTargets.length > 0 && (
                 <PopoverMenu side="top" align="center">
@@ -1699,7 +1918,7 @@ function SelectionBar({
                         </button>
                     </PopoverMenuTrigger>
                     <PopoverMenuContent>
-                        <PopoverMenuLabel>Push {count} to</PopoverMenuLabel>
+                        <PopoverMenuLabel>Push {count.toLocaleString()} to</PopoverMenuLabel>
                         {pushTargets.map((t) => {
                             const label = PROVIDER_LABELS[t.provider];
                             const custom = t.label && t.label.toLowerCase() !== t.provider ? ` · ${t.label}` : "";
@@ -1720,7 +1939,7 @@ function SelectionBar({
             >
                 Edit
             </button>
-            <AddToSegmentMenu contacts={selected} onDone={onClear} />
+            <AddToSegmentMenu selection={selection} count={count} onDone={onClear} />
             {segment && (
                 <button
                     type="button"
@@ -1765,7 +1984,7 @@ function SelectionBar({
                 </PopoverMenuTrigger>
                 <PopoverMenuContent>
                     <PopoverMenuLabel>Address verification</PopoverMenuLabel>
-                    <PopoverMenuItem onSelect={onVerify}>Re-verify {count}</PopoverMenuItem>
+                    <PopoverMenuItem onSelect={onVerify}>Re-verify {count.toLocaleString()}</PopoverMenuItem>
                     <PopoverMenuItem onSelect={onMarkDeliverable}>Mark deliverable</PopoverMenuItem>
                 </PopoverMenuContent>
             </PopoverMenu>

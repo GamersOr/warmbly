@@ -19,10 +19,12 @@ import (
 // the service.
 func (r *contactRepository) ListCampaignStates(ctx context.Context, orgID, contactID uuid.UUID) ([]models.ContactCampaignState, *errx.Error) {
 	campQuery := `
-		SELECT cam.id, cam.name, cam.status, c.subscribed, ` + undeliverableClause("cam.id") + `
+		SELECT cam.id, cam.name, cam.status, c.subscribed, ` + undeliverableClause("cam.id") + `,
+		       cl.email_account_id, COALESCE(sender.email, '')
 		FROM campaign_leads cl
 		JOIN campaigns cam ON cam.id = cl.campaign_id AND cam.organization_id = $2
 		JOIN contacts c ON c.id = cl.contact_id AND c.organization_id = $2
+		LEFT JOIN email_accounts sender ON sender.id = cl.email_account_id
 		WHERE cl.contact_id = $1
 		ORDER BY cam.created_at DESC
 	`
@@ -39,7 +41,8 @@ func (r *contactRepository) ListCampaignStates(ctx context.Context, orgID, conta
 	var camps []campRow
 	for rows.Next() {
 		var cr campRow
-		if err := rows.Scan(&cr.state.CampaignID, &cr.state.CampaignName, &cr.state.CampaignStatus, &cr.subscribed, &cr.undeliverable); err != nil {
+		if err := rows.Scan(&cr.state.CampaignID, &cr.state.CampaignName, &cr.state.CampaignStatus, &cr.subscribed, &cr.undeliverable,
+			&cr.state.SenderID, &cr.state.SenderEmail); err != nil {
 			rows.Close()
 			db.CaptureError(err, "", nil, "ListCampaignStates campaigns scan")
 			return nil, errx.InternalError()
@@ -137,7 +140,12 @@ func (r *contactRepository) ListCampaignStates(ctx context.Context, orgID, conta
 func (r *contactRepository) campaignStepsForContact(ctx context.Context, campaignID, contactID uuid.UUID) ([]models.ContactCampaignStep, string, *errx.Error) {
 	stepQuery := `
 		SELECT s.id, s.name, s.subject, s.kind, s.action, s.position,
-		       p.sent_at, p.opened_at, p.clicked_at, p.replied_at, p.bounced_at, p.failed_at,
+		       p.sent_at,
+		       -- A person's open, as in the Leads list this mirrors: a client
+		       -- prefetch or a gateway scan must not read as the recipient
+		       -- having opened the step.
+		       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END,
+		       p.clicked_at, p.replied_at, p.bounced_at, p.failed_at,
 		       COALESCE(p.send_attempts, 0), p.dispatched_at, COALESCE(p.failure_reason, '')
 		FROM sequences s
 		LEFT JOIN campaign_contact_progress p

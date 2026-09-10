@@ -35,6 +35,9 @@ const (
 	EventCampaignStarted   EventType = "CAMPAIGN_STARTED"
 	EventCampaignPaused    EventType = "CAMPAIGN_PAUSED"
 	EventCampaignCompleted EventType = "CAMPAIGN_COMPLETED"
+	// EventCampaignIdle: a continuous campaign ran out of leads and stays
+	// active waiting for more (Status stays "active").
+	EventCampaignIdle EventType = "CAMPAIGN_IDLE"
 
 	// Email account events
 	EventAccountConnected     EventType = "ACCOUNT_CONNECTED"

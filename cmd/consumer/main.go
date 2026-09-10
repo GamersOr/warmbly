@@ -15,17 +15,20 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconf "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/getsentry/sentry-go"
+	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/advanced"
 	"github.com/warmbly/warmbly/internal/app/cipher"
 	jobs "github.com/warmbly/warmbly/internal/app/consumer"
+	"github.com/warmbly/warmbly/internal/app/contact"
 	"github.com/warmbly/warmbly/internal/app/credits"
 	"github.com/warmbly/warmbly/internal/app/creditwatch"
 	"github.com/warmbly/warmbly/internal/app/feature"
 	"github.com/warmbly/warmbly/internal/app/inboxagent"
+	"github.com/warmbly/warmbly/internal/app/instancesettings"
 	"github.com/warmbly/warmbly/internal/app/integration"
 	"github.com/warmbly/warmbly/internal/app/nativeactions"
 	"github.com/warmbly/warmbly/internal/app/notification"
+	"github.com/warmbly/warmbly/internal/app/opsnotify"
 	"github.com/warmbly/warmbly/internal/app/replyclassify"
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/webhook"
@@ -42,12 +45,15 @@ import (
 	"github.com/warmbly/warmbly/internal/infrastructure/kms"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/infrastructure/storage"
+	"github.com/warmbly/warmbly/internal/jobrun"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/notify"
 	"github.com/warmbly/warmbly/internal/observability"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/pkg/encrypt"
 	"github.com/warmbly/warmbly/internal/pkg/generation"
 	"github.com/warmbly/warmbly/internal/pkg/geo"
+	"github.com/warmbly/warmbly/internal/pkg/nodeagent"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -164,14 +170,14 @@ func main() {
 		}
 		pubsubClient, err := pubsub.NewClient(ctx, gcpProjectID)
 		if err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureFatal(err)
 			log.Fatal(err)
 		}
 		defer pubsubClient.Close()
 		// Idempotently ensure the realtime topics + subscriptions exist (safe to
 		// run from both backend and consumer; AlreadyExists is treated as success).
 		if err := pubsubClient.EnsureRealtimeTopology(ctx); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureFatal(err)
 			log.Fatal("Failed to provision Pub/Sub topics/subscriptions: ", err)
 		}
 		streamingPublisher = pubsub.NewStreamingPublisher(pubsubClient)
@@ -184,7 +190,7 @@ func main() {
 	// Repositories
 	credEncrypter, err := encrypt.FromEnv()
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureFatal(err)
 		log.Fatal("Invalid CREDENTIALS_ENCRYPTION_KEY: ", err)
 	}
 	emailRepo := repository.NewEmailRepostory(primaryDB, credEncrypter)
@@ -314,10 +320,18 @@ func main() {
 	// wiring native actions here a reply-triggered automation's add_tag /
 	// create_deal / label_email node would fail with "native actions are not
 	// available". Mirrors the backend wiring.
+	// The lead-intake actions (create or update contact, add to campaign) write
+	// through a contact service so a reply-triggered flow in this process gets
+	// the same plan check, campaign wake and contact.created as the backend.
+	contactServiceC := contact.NewService(contactRepo, subscriptionRepoConsumer, planRepoConsumer, streamingPublisher)
+	if aware, ok := contactServiceC.(contact.WebhookAware); ok {
+		aware.WireWebhooks(webhookService)
+	}
 	integrationServiceC.SetNativeActions(nativeactions.Adapter{
-		Adv:      advancedService,
-		Contacts: contactRepo,
-		Orgs:     orgRepoConsumer,
+		Adv:        advancedService,
+		Contacts:   contactRepo,
+		Orgs:       orgRepoConsumer,
+		ContactSvc: contactServiceC,
 	})
 	// In-app notifications: the reply/bounce/complaint gate fires in THIS
 	// process (inbox ingest + deliverability ingest run in the consumer), so the
@@ -340,6 +354,22 @@ func main() {
 		log.Printf("Warning: notification email disabled, EMAIL_NAME/EMAIL_ADDRESS not set: %v", ecErr)
 	}
 	notificationService.WireDelivery(notifEmail, integrationServiceC, repository.NewUserRepostory(primaryDB, kmsClient), orgRepoConsumer)
+
+	// Operator alerts. The dead-worker detector runs in this process, and a
+	// stranded fleet is the operator's problem, not a tenant's. Reads the same
+	// channel list the admin panel writes; a mail transport is optional (the
+	// chat and webhook transports do not need one).
+	var opsMailer opsnotify.Mailer
+	if notifEmail != nil {
+		if m, ok := notifEmail.(opsnotify.Mailer); ok {
+			opsMailer = m
+		}
+	}
+	opsNotifierC := opsnotify.NewService(
+		instancesettings.NewService(instancesettings.NewStore(primaryDB.Pool)),
+		opsMailer,
+		config.AppBaseURL(),
+	)
 	// Mobile push (APNs) fires from THIS process too: reply/bounce/complaint
 	// notifications are created here. Redis backs the immediate-then-digest
 	// window shared with the backend. The sender stays a nil interface (not a
@@ -373,6 +403,10 @@ func main() {
 
 	eventsPublisher := events.NewPublisher(consumerBus, s3Client, consumerCodec, cipherService)
 
+	// Every consumer loop records to scheduled_job_runs, so the admin panel
+	// lists it next to the backend's and can ask it to run now.
+	jobrun.Configure(repository.NewJobRunRepository(primaryDB), "consumer")
+
 	// JobsService
 	jobsService := &jobs.JobsService{
 		Bus:                         consumerBus,
@@ -391,6 +425,7 @@ func main() {
 		WarmupEngagementRepo:        repository.NewWarmupEngagementRepository(primaryDB.Pool),
 		WarmupService:               warmupService,
 		WorkerRepo:                  workerRepo,
+		FleetNodeRepo:               repository.NewFleetNodeRepository(primaryDB),
 		LifecycleRepo:               repository.NewSendLifecycleRepository(primaryDB),
 		Publisher:                   eventsPublisher,
 		StreamingPublisher:          streamingPublisher,
@@ -399,6 +434,7 @@ func main() {
 		AdminRepo:                   repository.NewAdminRepository(primaryDB.Pool),
 		AssignmentService:           workerAssignmentSvc,
 		Notifier:                    notificationService,
+		OpsNotifier:                 opsNotifierC,
 		TaskRepo:                    taskRepo,
 		CampaignRepo:                campaignRepo,
 		CampaignProgressRepo:        campaignProgressRepo,
@@ -445,11 +481,11 @@ func main() {
 	// so the admin dashboard can render liveness without touching Redis.
 	go jobsService.StartWorkerHeartbeatSync(ctx, 60*time.Second)
 
-	// Re-evaluate per-mailbox risk bands hourly and migrate to a matching
-	// risk_pool worker when the band changes. Skipped if AssignmentService
-	// or WorkerRepo are nil.
+	// Re-evaluate per-mailbox risk bands hourly. The band feeds warmup partner
+	// selection and pacing; it does not move mailboxes between workers, because
+	// the worker is not the sending identity.
 	go jobsService.StartRiskRebalancer(ctx, 1*time.Hour)
-	// Same cadence, different question: risk_band picks the worker, the
+	// Same cadence, different question: the band describes reputation, the
 	// lifecycle picks whether the mailbox is in cold rotation at all.
 	go jobsService.StartLifecycleRebalancer(ctx, 1*time.Hour)
 	// The abuse sweep: cross-account shape, plus what each organization's mail
@@ -499,6 +535,9 @@ func main() {
 	); terr != nil {
 		log.Println("tracking consumer unavailable; opens/clicks not consumed:", terr)
 	} else {
+		// The engagement prune reads its window from the instance settings on
+		// every pass, so shortening it in the admin panel needs no restart.
+		trackingConsumer.WireRetention(instancesettings.NewService(instancesettings.NewStore(primaryDB.Pool)))
 		defer trackingConsumer.Close()
 		go func() {
 			if err := trackingConsumer.Start(ctx); err != nil {
@@ -508,7 +547,68 @@ func main() {
 		log.Println("Tracking consumer started, listening on", trackingCfg.Topic)
 	}
 
+	// The consumer is a fleet node like any other: it enrols, heartbeats,
+	// reports what it is running and what it is using, and picks up the
+	// version the control plane wants. Before this it was anonymous, so a
+	// dead one stayed invisible until work started backing up.
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		newConsumerAgent().Run(ctx)
+	}()
+
 	log.Println("Consumer started, listening on", kafka.TopicWorkerEvents)
 	jobsService.Start(ctx)
+
+	// Give the farewell beat a moment to land, bounded so a wedged backend
+	// cannot stop the consumer exiting.
+	select {
+	case <-agentDone:
+	case <-time.After(8 * time.Second):
+		log.Println("timed out waiting for the shutdown heartbeat")
+	}
 	log.Println("Consumer stopped")
+}
+
+// newConsumerAgent builds the fleet agent for this consumer.
+//
+// Identity resolution mirrors the worker's: an explicit WARMBLY_NODE_ID wins,
+// otherwise it is derived from the hostname so a container recreate keeps the
+// same identity instead of leaving a dead row behind on every restart.
+func newConsumerAgent() *nodeagent.Agent {
+	id := resolveConsumerID()
+	return nodeagent.New(nodeagent.Config{
+		NodeID:            id,
+		Role:              models.NodeRoleConsumer,
+		Name:              os.Getenv("WARMBLY_NODE_NAME"),
+		Region:            os.Getenv("WARMBLY_NODE_REGION"),
+		Version:           os.Getenv("WARMBLY_VERSION"),
+		BaseURL:           consumerBackendURL(),
+		Token:             os.Getenv("INTERNAL_API_TOKEN"),
+		TargetVersionPath: os.Getenv("WARMBLY_TARGET_VERSION_PATH"),
+	})
+}
+
+func resolveConsumerID() uuid.UUID {
+	if raw := os.Getenv("WARMBLY_NODE_ID"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			return id
+		}
+		log.Printf("WARMBLY_NODE_ID is not a valid uuid; deriving one from the hostname instead")
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		// Last resort. A random id means this process shows up as a new node
+		// on every restart, which is visible in the dashboard rather than
+		// silent, so it is a better failure than refusing to start.
+		return uuid.New()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("warmbly-consumer:"+host))
+}
+
+func consumerBackendURL() string {
+	if v := os.Getenv("WARMBLY_BACKEND_URL"); v != "" {
+		return v
+	}
+	return os.Getenv("ENCRYPTED_KEYS_BACKEND_URL")
 }

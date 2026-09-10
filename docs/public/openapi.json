@@ -4286,7 +4286,7 @@
                   "step_id": {
                     "type": "string",
                     "format": "uuid",
-                    "description": "Scope the attachment to one sequence step."
+                    "description": "Scope the attachment to one sequence step of this campaign, which is then the only step that sends it. Omit to attach the file to every step. A step of another campaign is 404."
                   }
                 }
               }
@@ -5689,7 +5689,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "Opaque pagination cursor from the previous page's pagination.next_cursor.",
+            "description": "Opaque pagination cursor from the previous page's pagination.next_cursor. It carries the exact position of the next page under the ordering it was issued for, so rows that share a sort value are never skipped or repeated. A malformed cursor, or one replayed with a different sort_by or reverse than it was issued under, is a 400.",
             "schema": {
               "type": "string"
             }
@@ -5873,7 +5873,7 @@
         ],
         "operationId": "contacts_bulk_update",
         "summary": "Bulk update contacts",
-        "description": "Applies one set of edits across up to 1000 contacts: add/remove campaigns and categories, custom-field operations, and subscription. Scope `BULK_CONTACTS`.",
+        "description": "Applies one set of edits across a selection of contacts (up to 1000 by ID, or everything a filter matches, up to 50000): add/remove campaigns and categories, custom-field operations, and subscription. Scope `BULK_CONTACTS`.",
         "security": [
           {
             "bearerAuth": []
@@ -5909,7 +5909,7 @@
             }
           },
           "400": {
-            "description": "No contacts provided or more than 1000.",
+            "description": "A selection that names nothing, an explicit list over 1000 or an exclusion list over 50000 (`too_many_contacts`), a select-all with no filters, a filter matching no contacts, or a filter matching more than 50000 (`selection_too_large`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5956,7 +5956,7 @@
         ],
         "operationId": "contacts_bulk_delete",
         "summary": "Bulk delete contacts",
-        "description": "Deletes up to 1000 contacts by ID. Scope `BULK_CONTACTS`.",
+        "description": "Deletes a selection of contacts: up to 1000 by ID, or everything a filter matches (up to 50000). Scope `BULK_CONTACTS`.",
         "security": [
           {
             "bearerAuth": []
@@ -5969,17 +5969,24 @@
         ],
         "requestBody": {
           "required": true,
-          "description": "A JSON array of contact ID strings (1 to 1000).",
+          "description": "A JSON array of contact ID strings (1 to 1000), or a ContactSelection object naming a filter.",
           "content": {
             "application/json": {
               "schema": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 1000,
-                "items": {
-                  "type": "string",
-                  "format": "uuid"
-                }
+                "oneOf": [
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1000,
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  {
+                    "$ref": "#/components/schemas/ContactSelection"
+                  }
+                ]
               }
             }
           }
@@ -5989,7 +5996,7 @@
             "description": "Contacts deleted."
           },
           "400": {
-            "description": "Empty array or more than 1000 IDs.",
+            "description": "A selection that names nothing, an explicit list over 1000 or an exclusion list over 50000 (`too_many_contacts`), a select-all with no filters, a filter matching no contacts, or a filter matching more than 50000 (`selection_too_large`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -6793,7 +6800,7 @@
         ],
         "operationId": "contacts_timeline_list",
         "summary": "List a contact's timeline",
-        "description": "Merged activity feed: sends, opens, clicks, replies, bounces, deliverability/suppression events, notes, and meeting bookings. Requires a selected organization. Paginate via the `before` timestamp. Scope `READ_CONTACTS`.",
+        "description": "Merged activity feed: sends, opens, clicks, replies, bounces, deliverability/suppression events, notes, meeting bookings, lifecycle events, and website page views. Requires a selected organization. Paginate with the opaque `cursor` from `pagination.next_cursor`; the cursor carries the exact position of the last event (time, source, row), so events that share a timestamp are never skipped or repeated. Scope `READ_CONTACTS`.",
         "security": [
           {
             "bearerAuth": []
@@ -6822,10 +6829,20 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque pagination cursor from `pagination.next_cursor`. A malformed cursor is a 400.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "before",
             "in": "query",
             "required": false,
-            "description": "The `at` timestamp of the oldest event from the previous page (RFC 3339 nano).",
+            "deprecated": true,
+            "description": "Deprecated: use `cursor`. Returns the events strictly older than this timestamp (RFC 3339 nano), which can skip events that share an instant with the page boundary. Ignored when `cursor` is set.",
             "schema": {
               "type": "string",
               "format": "date-time"
@@ -6834,7 +6851,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Timeline events with a has_more flag.",
+            "description": "A page of timeline events with the pagination envelope.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6844,7 +6861,7 @@
             }
           },
           "400": {
-            "description": "Invalid contact ID, or no organization selected.",
+            "description": "Invalid contact ID, limit, cursor or before timestamp, or no organization selected.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14903,7 +14920,7 @@
             }
           },
           "400": {
-            "description": "Bad request (no/too many/invalid contact ids).",
+            "description": "A selection that names nothing, an exclusion list over 50000 or one resolving to more than 500 contacts (`too_many_contacts`), a select-all with no filters, a filter matching no contacts, or a filter matching more than 50000 (`selection_too_large`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -20730,6 +20747,7 @@
         "required": [
           "id",
           "campaign_id",
+          "step_id",
           "filename",
           "created_at"
         ],
@@ -20747,7 +20765,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The sequence step that sends this file. Null means every step of the campaign sends it."
           },
           "filename": {
             "type": "string"
@@ -21216,6 +21235,26 @@
           "body_plain": {
             "type": "string"
           },
+          "contact_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A contact of the organization to render for. Omitted renders the built-in sample. Requires READ_CONTACTS."
+          },
+          "campaign_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Campaign whose opt-out footer, plain-text setting and attachments apply."
+          },
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Mailbox whose signature applies and which is reported as the sender."
+          },
+          "step_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The step being previewed, so the attachment list is the one that step sends. Omitted lists the campaign-wide files only."
+          },
           "contact": {
             "type": "object",
             "description": "Override fields on the built-in sample contact.",
@@ -21271,6 +21310,42 @@
               "type": "string"
             },
             "description": "Literal {{...}} tokens left after render. Omitted when empty."
+          },
+          "from": {
+            "type": "object",
+            "description": "The sender as recipients see it. Present when account_id was given.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string",
+                "format": "email"
+              }
+            }
+          },
+          "attachments": {
+            "type": "array",
+            "description": "The files this send carries: the campaign-wide attachments plus step_id's own. Present when campaign_id was given and there are any.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "size": {
+                  "type": "integer",
+                  "description": "Size in bytes."
+                },
+                "mime_type": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       },
@@ -21718,11 +21793,11 @@
           },
           "sort_by": {
             "type": "string",
-            "description": "Sort column, e.g. first_name, campaign_count."
+            "description": "Sort column: created_at (the default), updated_at, first_name, last_name, email, or campaign_count. Any other value falls back to created_at."
           },
           "reverse": {
             "type": "boolean",
-            "description": "Descending when true."
+            "description": "Ascending when true. The default is descending."
           }
         }
       },
@@ -21859,11 +21934,35 @@
           }
         }
       },
-      "ContactBulkUpdateRequest": {
+      "ContactSelection": {
         "type": "object",
-        "description": "One set of edits applied across many contacts.",
-        "required": [
-          "contacts"
+        "description": "Names the contacts a bulk action applies to: either an explicit id list, or every contact matching a search (all + filters) minus the ids in exclude. The filter form lets one call cover far more contacts than a page, and is refused with selection_too_large past 50000 matches.",
+        "oneOf": [
+          {
+            "required": [
+              "contacts"
+            ],
+            "properties": {
+              "all": {
+                "enum": [
+                  false
+                ]
+              }
+            }
+          },
+          {
+            "required": [
+              "all",
+              "filters"
+            ],
+            "properties": {
+              "all": {
+                "enum": [
+                  true
+                ]
+              }
+            }
+          }
         ],
         "properties": {
           "contacts": {
@@ -21874,7 +21973,92 @@
               "type": "string",
               "format": "uuid"
             },
-            "description": "Contact IDs to edit (1 to 1000)."
+            "description": "Contact ids (1 to 1000). Required unless all is set."
+          },
+          "all": {
+            "type": "boolean",
+            "description": "Resolve the selection from filters instead of contacts."
+          },
+          "filters": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ContactSearchRequest"
+              }
+            ],
+            "description": "The search whose matches the action applies to. Required when all is true."
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 50000,
+            "description": "Contact ids to drop from the resolved set. Ignored unless all is set."
+          }
+        }
+      },
+      "ContactBulkUpdateRequest": {
+        "type": "object",
+        "description": "One set of edits applied across a selection of contacts.",
+        "oneOf": [
+          {
+            "required": [
+              "contacts"
+            ],
+            "properties": {
+              "all": {
+                "enum": [
+                  false
+                ]
+              }
+            }
+          },
+          {
+            "required": [
+              "all",
+              "filters"
+            ],
+            "properties": {
+              "all": {
+                "enum": [
+                  true
+                ]
+              }
+            }
+          }
+        ],
+        "properties": {
+          "contacts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Contact IDs to edit (1 to 1000). Required unless all is set."
+          },
+          "all": {
+            "type": "boolean",
+            "description": "Resolve the selection from filters instead of contacts."
+          },
+          "filters": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ContactSearchRequest"
+              }
+            ],
+            "description": "The search whose matches the action applies to. Required when all is true."
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 50000,
+            "description": "Contact ids to drop from the resolved set. Ignored unless all is set."
           },
           "add_campaigns": {
             "type": "array",
@@ -22305,7 +22489,14 @@
               "note",
               "meeting_booked",
               "meeting_rescheduled",
-              "meeting_canceled"
+              "meeting_canceled",
+              "contact_created",
+              "campaign_added",
+              "campaign_removed",
+              "category_added",
+              "category_removed",
+              "form_submitted",
+              "page_hit"
             ]
           },
           "at": {
@@ -22382,15 +22573,100 @@
             "type": "string",
             "format": "uuid",
             "description": "Note author."
+          },
+          "machine": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "email_opened / email_clicked: true when an automated fetcher (a mail privacy proxy, a security gateway following links) did it rather than the person."
+          },
+          "machine_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which rule caught a machine open or click: prefetch, instant or burst. Absent on an open summarised from the lead alone."
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContactLinkClick"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "email_clicked: the exact link clicked. Absent on clicks recorded before per-link attribution."
+          },
+          "origin": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EngagementOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "email_opened / email_clicked: where the event came from, when it was logged per event."
+          },
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "category_added / category_removed: the category, as it was at the time."
+          },
+          "category_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "category_added / category_removed: the category's title at the time."
+          },
+          "source_detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "contact_created: the file, campaign, sheet or API key name behind `source`."
+          },
+          "form_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "form_submitted: the hosted form."
+          },
+          "form_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "form_submitted: the form's name."
+          },
+          "page_hit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WebsitePageHit"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "page_hit: the page view from the website tracking snippet. `subject` carries the page title, or its path when untitled."
           }
         }
       },
       "ContactTimelineResult": {
         "type": "object",
-        "description": "A page of timeline events. Paginate via has_more and the `before` query param; this list does not use a cursor envelope.",
+        "description": "A page of timeline events. Paginate with pagination.next_cursor as the `cursor` query param. has_more mirrors pagination.has_more and is kept for older clients.",
         "required": [
           "data",
-          "has_more"
+          "has_more",
+          "pagination"
         ],
         "properties": {
           "data": {
@@ -22401,6 +22677,9 @@
           },
           "has_more": {
             "type": "boolean"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
           }
         }
       },
@@ -27145,21 +27424,67 @@
       },
       "IntegrationPushRequest": {
         "type": "object",
-        "required": [
-          "contact_ids"
-        ],
         "properties": {
           "contact_ids": {
             "type": "array",
-            "description": "Contact ids to push. Deduplicated server-side. At least 1, at most 500.",
+            "description": "Contact ids to push. Deduplicated server-side. At least 1, at most 500. Required unless all is set.",
             "items": {
               "type": "string",
               "format": "uuid"
             },
             "minItems": 1,
             "maxItems": 500
+          },
+          "all": {
+            "type": "boolean",
+            "description": "Resolve the selection from filters instead of contacts."
+          },
+          "filters": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ContactSearchRequest"
+              }
+            ],
+            "description": "The search whose matches the action applies to. Required when all is true."
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 50000,
+            "description": "Contact ids to drop from the resolved set. Ignored unless all is set."
           }
-        }
+        },
+        "description": "Contacts to push. The resolved set is capped at 500 whichever form is used: the push calls the CRM once per contact inside the request.",
+        "oneOf": [
+          {
+            "required": [
+              "contact_ids"
+            ],
+            "properties": {
+              "all": {
+                "enum": [
+                  false
+                ]
+              }
+            }
+          },
+          {
+            "required": [
+              "all",
+              "filters"
+            ],
+            "properties": {
+              "all": {
+                "enum": [
+                  true
+                ]
+              }
+            }
+          }
+        ]
       },
       "IntegrationPushResult": {
         "type": "object",
@@ -28635,6 +28960,196 @@
               "type": "string"
             },
             "description": "Values that were neither a valid address nor a valid domain."
+          }
+        }
+      },
+      "ContactLinkClick": {
+        "type": "object",
+        "description": "The link behind an email_clicked event: where it went, the anchor text it was minted from, and the UTM parameters the destination carried.",
+        "required": [
+          "id",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "url": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "Anchor text the link was minted from."
+          },
+          "utm_source": {
+            "type": "string"
+          },
+          "utm_medium": {
+            "type": "string"
+          },
+          "utm_campaign": {
+            "type": "string"
+          },
+          "utm_term": {
+            "type": "string"
+          },
+          "utm_content": {
+            "type": "string"
+          },
+          "user_agent": {
+            "type": "string"
+          }
+        }
+      },
+      "EngagementOrigin": {
+        "type": "object",
+        "description": "Where an open or click came from. Every field is omitted when unknown; the source address itself is never stored.",
+        "properties": {
+          "client": {
+            "type": "string",
+            "description": "Mail client or image proxy named by the user agent (Gmail, Apple Mail, Outlook)."
+          },
+          "device_type": {
+            "type": "string"
+          },
+          "os": {
+            "type": "string"
+          },
+          "browser": {
+            "type": "string"
+          },
+          "browser_version": {
+            "type": "string"
+          },
+          "country_code": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          }
+        }
+      },
+      "WebsitePageHit": {
+        "type": "object",
+        "description": "A page view reported by the website tracking snippet and tied to the contact through an email-link ticket.",
+        "required": [
+          "id",
+          "visitor_id",
+          "session_key",
+          "occurred_at",
+          "url",
+          "path",
+          "title",
+          "referrer",
+          "referrer_domain",
+          "landing",
+          "utm_source",
+          "utm_medium",
+          "utm_campaign",
+          "utm_term",
+          "utm_content",
+          "device_type",
+          "os",
+          "browser",
+          "browser_version",
+          "device_brand",
+          "language",
+          "timezone",
+          "screen_width",
+          "screen_height",
+          "country_code",
+          "region",
+          "city"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "visitor_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_key": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "url": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "referrer": {
+            "type": "string"
+          },
+          "referrer_domain": {
+            "type": "string"
+          },
+          "landing": {
+            "type": "boolean",
+            "description": "True for the first view of a session."
+          },
+          "utm_source": {
+            "type": "string"
+          },
+          "utm_medium": {
+            "type": "string"
+          },
+          "utm_campaign": {
+            "type": "string"
+          },
+          "utm_term": {
+            "type": "string"
+          },
+          "utm_content": {
+            "type": "string"
+          },
+          "device_type": {
+            "type": "string"
+          },
+          "os": {
+            "type": "string"
+          },
+          "browser": {
+            "type": "string"
+          },
+          "browser_version": {
+            "type": "string"
+          },
+          "device_brand": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "screen_width": {
+            "type": "integer"
+          },
+          "screen_height": {
+            "type": "integer"
+          },
+          "country_code": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
           }
         }
       }

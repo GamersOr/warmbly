@@ -9,10 +9,6 @@ export type WorkerInstallState =
     | "uninstalling"
     | "uninstalled";
 
-export type WorkerType = "shared" | "dedicated";
-
-export type WorkerRiskPool = "clean" | "risky" | "quarantine";
-export type WorkerEgressKind = "cold_smtp" | "oauth_api" | "warmup_only";
 export type WorkerHealthState =
     | "healthy"
     | "watch"
@@ -26,11 +22,9 @@ export interface ManagedWorker {
     notes: string;
     ip_addr: string;
     active: boolean;
-    free_tier: boolean;
-    worker_type: WorkerType;
     account_count: number;
-    risk_pool: WorkerRiskPool;
-    egress_kind: WorkerEgressKind;
+    /** Sign-in geography hint the placer scores on. Empty is fine. */
+    region: string;
     health_state: WorkerHealthState;
     load_score: number;
 
@@ -82,8 +76,8 @@ export interface AdminWorkerEmailsResult {
 export interface CreateWorkerInput {
     name: string;
     notes?: string;
-    worker_type: WorkerType;
-    free_tier: boolean;
+    /** Optional sign-in geography hint. The only placement input an operator sets. */
+    region?: string;
     ssh_host: string;
     ssh_port?: number;
     ssh_user?: string;
@@ -247,16 +241,6 @@ export interface HourlyEmailStat {
     total_sent: number;
 }
 
-export interface WorkerLoadStat {
-    worker_id: string;
-    worker_name: string;
-    emails_sent_today: number;
-    queued_emails: number;
-    connected_emails: number;
-    cpu_usage?: number;
-    memory_usage?: number;
-}
-
 export interface UserGrowthStat {
     date: string;
     new_users: number;
@@ -405,82 +389,6 @@ export interface AdminLimitRequestSearch {
         | "field"
         | "org_name";
     sort_desc?: boolean;
-}
-
-// /admin/plans — plan catalog and custom-plan management.
-
-export interface Plan {
-    id: string;
-    name?: string | null;
-    max_contacts: number;
-    daily_emails: number;
-    ai_generation: boolean;
-    account_limit: number;
-    price: number;
-    discounted_price: number;
-    duration: { id: string; title: string } | string;
-    savings: number;
-    public: boolean;
-    stripe_price_id?: string | null;
-    stripe_product_id?: string | null;
-    dedicated_workers: number;
-    daily_campaign_limit?: number | null;
-    max_campaigns?: number | null;
-    max_active_campaigns?: number | null;
-    max_team_members?: number | null;
-    max_email_accounts?: number | null;
-    updated_at: string;
-    created_at: string;
-}
-
-export interface UpdatePlanRequest {
-    name?: string;
-    max_contacts?: number;
-    daily_emails?: number;
-    ai_generation?: boolean;
-    account_limit?: number;
-    price?: number;
-    discounted_price?: number;
-    dedicated_workers?: number;
-    daily_campaign_limit?: number;
-    max_campaigns?: number;
-    max_active_campaigns?: number;
-    max_team_members?: number;
-    max_email_accounts?: number;
-    public?: boolean;
-}
-
-export interface AdminPlanSearch {
-    q?: string;
-    visibility?: "public" | "private" | "";
-    duration?: string; // "month" | "year"; "" = any
-    ai_generation?: boolean;
-    has_stripe?: boolean;
-    has_subscribers?: boolean;
-    // Numeric ranges
-    price_min?: number;
-    price_max?: number;
-    daily_emails_min?: number;
-    daily_emails_max?: number;
-    account_limit_min?: number;
-    account_limit_max?: number;
-    // Date range
-    created_within?: number;
-    created_after?: string;
-    created_before?: string;
-    cursor?: string;
-    limit?: number;
-    sort_by?: "price" | "name" | "daily_emails" | "account_limit" | "created_at";
-    sort_desc?: boolean;
-}
-
-export interface AdminPlansResult {
-    data: Plan[];
-    pagination: {
-        total?: number | null;
-        next_cursor?: string | null;
-        has_more: boolean;
-    };
 }
 
 // /admin/campaigns/* — platform-wide campaign admin (force-stop runaway
@@ -832,6 +740,12 @@ export interface AdminOrgListItem {
     campaign_count: number;
     active_campaigns: number;
     risk_state?: OrgRiskState | null;
+    /** Acquisition channel recorded once at signup. Absent for a direct
+     *  signup, which is most of them, and always absent on a self-host. */
+    utm_source?: string | null;
+    utm_medium?: string | null;
+    utm_campaign?: string | null;
+    landing_path?: string | null;
     plan_name?: string | null;
     plan_public?: boolean | null;
     is_enterprise: boolean;
@@ -968,6 +882,12 @@ export interface AdminOrgSearch {
     enterprise?: boolean;
     risk_state?: OrgRiskState | "";
     risk_flagged?: boolean;
+    // Acquisition channel
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
+    has_acquisition?: boolean;
+    no_acquisition?: boolean;
     // Subscription state
     subscription_status?: string;
     cancel_at_period_end?: boolean;

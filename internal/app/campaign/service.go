@@ -19,7 +19,8 @@ const campaignCooldownSeconds = 60
 
 type CampaignService interface {
 	Create(ctx context.Context, userID string, orgID *uuid.UUID, data *models.CreateCampaign) (*models.Campaign, *errx.Error)
-	Get(ctx context.Context, userID, id string) (*models.Campaign, *errx.Error)
+	// Get loads one of orgID's campaigns; any other id is not found.
+	Get(ctx context.Context, orgID, id string) (*models.Campaign, *errx.Error)
 	Search(ctx context.Context, userID, query, cursor, folder, status, kind, limit string) (*models.CampaignsResult, *errx.Error)
 	Overview(ctx context.Context, orgID string) (*models.CampaignsOverview, *errx.Error)
 	// Estimate projects how many contacts a set of segments reaches and how
@@ -54,6 +55,13 @@ type CampaignService interface {
 	// new leads sit at "Queued / Not started". Best effort and never an error to
 	// the caller — the lead was still added.
 	WakeCampaigns(ctx context.Context, orgID uuid.UUID, campaignIDs []string)
+
+	// KeepRunning turns on the campaign's "Keep running for new leads" setting
+	// because a live lead source (a form, an automation) now feeds it, the
+	// same way linking a segment does. reason is written to the campaign's
+	// activity log on the transition; a campaign already continuous is left
+	// alone. Returns ErrNotFound when the campaign is not the organization's.
+	KeepRunning(ctx context.Context, orgID, campaignID uuid.UUID, reason string) *errx.Error
 
 	// Explicit sender pool (feature 1).
 	ListCampaignSenders(ctx context.Context, orgID uuid.UUID, campaignID string) ([]models.CampaignSender, *errx.Error)

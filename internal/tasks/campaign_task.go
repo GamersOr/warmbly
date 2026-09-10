@@ -8,13 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/errs"
+	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
 	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/scheduler"
 	"github.com/warmbly/warmbly/internal/tasks/proto"
@@ -27,7 +28,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// STEP 1: Parse task ID
 	taskID, err := uuid.Parse(task.TaskId)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.New(errx.BadRequest, "invalid task ID")
 	}
 
@@ -53,7 +54,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// STEP 2: Load task record
 	taskRecord, err := s.taskRepo.GetTask(ctx, taskID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.InternalError()
 	}
 
@@ -72,14 +73,14 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 
 	// STEP 3: Mark task as active (with advisory lock)
 	if err := s.taskRepo.UpdateTaskStatusWithLock(ctx, taskID, "active"); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.InternalError()
 	}
 
 	// STEP 4: Load campaign task details
 	campaignTask, err := s.taskRepo.GetCampaignTask(ctx, taskID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.InternalError()
 	}
 
@@ -111,7 +112,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			executionStatus = "completed"
 			return nil
 		}
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.InternalError()
 	}
 
@@ -204,9 +205,13 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 		if errors.Is(err, scheduler.ErrCampaignDeferred) {
 			// A valid contact exists but no eligible mailbox right now (ESP-strict
-			// has no same-provider mailbox, or the daily new-lead cap is reached).
+			// has no same-provider mailbox, the daily new-lead cap is reached, or
+			// every mailbox has spent its daily budget or is outside its hours).
 			// Reschedule at the deferred slot WITHOUT sending and WITHOUT touching
 			// progress / daily counters / rotation — mirrors the daily-limit path.
+			// This task completes without a send, and completing it must not
+			// spend the mailbox's budget either (issue #306): the budget counts
+			// reserved sends, never bare wake-ups.
 			// Capped: the next-due moment can be days out, and until this chain
 			// wakes nothing re-reads the campaign, so leads imported meanwhile
 			// would sit queued until then.
@@ -214,6 +219,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			if cerr := s.createCampaignTask(ctx, campaign.ID, accountID, scheduledNext); cerr != nil {
 				log.Warn().Err(cerr).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to schedule deferred campaign task")
 			}
+			s.clearIdle(ctx, campaign)
 			s.taskRepo.UpdateTaskStatus(ctx, taskID, "completed")
 			executionStatus = "completed"
 			return nil
@@ -237,6 +243,13 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 					return nil
 				}
 				reason = fmt.Sprintf("%s (%d lead(s) skipped: address verification refused them)", reason, n)
+			}
+			// A continuous campaign out of leads is waiting, not finished
+			// (issue #336). Only its end date ends it.
+			if errors.Is(err, scheduler.ErrCampaignCompleted) && campaign.Continuous {
+				s.idleCampaign(ctx, campaign, taskID)
+				executionStatus = "completed"
+				return nil
 			}
 			s.campaignRepo.UpdateStatus(ctx, campaign.ID, "completed")
 			if s.campaignLogRepo != nil {
@@ -276,7 +289,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		// successor. Record the failure for dashboard review, reset the task to
 		// pending, and return 5xx so Cloud Tasks retries (with backoff). The
 		// campaign reconciler is the backstop if retries are ever exhausted.
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		s.recordSchedulerFailure(ctx, campaign.ID, "scheduler_error", "Could not compute the next step; retrying", err)
 		// Pulse the dashboard so the failure appears live for the whole team. A
 		// CAMPAIGN_UPDATED with empty status invalidates the campaign logs query
@@ -289,11 +302,13 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			})
 		}
 		if rerr := s.taskRepo.UpdateTaskStatus(ctx, taskID, "pending"); rerr != nil {
-			sentry.CaptureException(rerr)
+			errs.CaptureException(rerr)
 		}
 		executionStatus = "failed"
 		return errx.InternalError()
 	}
+
+	s.clearIdle(ctx, campaign)
 
 	// STEP 7: Load contact and sequence
 	contact, xerr := s.contactRepo.GetByID(ctx, nextPair.ContactID)
@@ -365,7 +380,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 
 	sequence, err := s.campaignRepo.GetSequenceByID(ctx, nextPair.SequenceID)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.InternalError()
 	}
 
@@ -413,23 +428,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		return nil
 	}
 
-	// Load campaign attachments (campaign-wide; metadata only — the worker
-	// fetches the bytes from object storage by S3 key at send time).
-	var attachmentRefs []models.AttachmentRef
-	if s.attachmentRepo != nil {
-		atts, attErr := s.attachmentRepo.ListByCampaign(ctx, campaign.ID)
-		if attErr != nil {
-			log.Warn().Err(attErr).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to load campaign attachments")
-		} else {
-			for _, a := range atts {
-				attachmentRefs = append(attachmentRefs, models.AttachmentRef{
-					S3Key:    a.S3Key,
-					Filename: a.Filename,
-					MimeType: a.MimeType,
-				})
-			}
-		}
-	}
+	// Load this step's attachments (campaign-wide files plus the step's own;
+	// metadata only — the worker fetches the bytes from object storage by S3
+	// key at send time).
+	attachmentRefs := s.campaignAttachmentRefs(ctx, campaign.ID, sequence.ID)
 
 	// STEP 7.5: Update campaign task with contact_id and sequence_id for tracking
 	// This allows the tracking consumer to find the correct contact/sequence when
@@ -451,6 +453,28 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		return xerr
 	}
 
+	// STEP 9.25: Stamp the mailbox this send actually goes out from. The chain
+	// seeds a task with the previous tick's pick, and rotation chooses again
+	// here, so tasks.email_account_id (today's budget, the min-gap clock,
+	// rotation's own position, bounce and complaint rates, the contact's
+	// activity feed) has to be corrected before the send (issue #392). Failing
+	// it fails the task like the reservation: a send charged to another mailbox
+	// would let this one past its daily cap.
+	if account.ID != taskRecord.EmailAccountID {
+		if err := s.taskRepo.UpdateTaskEmailAccount(ctx, taskID, account.ID); err != nil {
+			errs.CaptureException(err)
+			s.taskRepo.RecordTaskFailure(ctx, taskID, "Could not record the sending mailbox", err.Error())
+			s.recordSchedulerFailure(ctx, campaign.ID, "sender_attribution_failed",
+				fmt.Sprintf("Could not record which mailbox is sending to %s; retrying", contact.Email), err)
+			if uerr := s.taskRepo.UpdateTaskStatus(ctx, taskID, "pending"); uerr != nil {
+				errs.CaptureException(uerr)
+			}
+			executionStatus = "failed"
+			return errx.InternalError()
+		}
+		taskRecord.EmailAccountID = account.ID
+	}
+
 	// STEP 9.5: Resolve {{form_link:...}} markers to per-recipient form URLs
 	// BEFORE templating, so the substituted literal survives the naive
 	// fallback and gets wrapped by click tracking in STEP 11 like any link.
@@ -464,7 +488,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	optOut := s.resolveOptOut(ctx, orgID, campaign)
 	var unsubscribeURL string
 	if s.unsubLinks != nil && s.unsubLinks.Enabled() {
-		unsubscribeURL = s.unsubLinks.URL(orgID, campaign.ID, contact.ID, time.Now())
+		// On the workspace's own verified tracking domain when it has one, so
+		// the opt-out address sits on the sender's domain like every other link
+		// in the email rather than naming the platform.
+		unsubscribeURL = s.unsubLinks.URLOn(resolveOptOutOrigin(account, campaign), orgID, campaign.ID, contact.ID, time.Now())
 	}
 	extra := map[string]string{UnsubscribeLinkVar: unsubscribeURL}
 
@@ -523,7 +550,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 				})
 			}
 			if rerr := s.taskRepo.UpdateTaskStatus(ctx, taskID, "pending"); rerr != nil {
-				sentry.CaptureException(rerr)
+				errs.CaptureException(rerr)
 			}
 			executionStatus = "failed"
 			return errx.InternalError()
@@ -539,6 +566,12 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 		bodyHTML = ""
 	}
+
+	// STEP 10.7: A hand-placed {{.UnsubscribeLink}} resolved to the bare signed
+	// URL; give it an anchor so the recipient reads "Unsubscribe" and not the
+	// API address (issue #341). After the plain part was derived, so plain text
+	// keeps the URL it needs, and before tracking, which leaves it alone.
+	bodyHTML = linkifyUnsubscribeURL(bodyHTML, unsubscribeURL, optOut.LinkText)
 
 	// STEP 10.75: Score the copy the recipient will actually receive, after
 	// merge fields, spintax, A/B and AI blocks have resolved. Advisory: it
@@ -604,14 +637,21 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// so the link is never rewritten into a tracked ticket.
 	bodyHTML, bodyPlain = appendOptOut(bodyHTML, bodyPlain, optOut, unsubscribeURL)
 
+	// STEP 12.75: Copy any embedded stylesheet onto the elements it matches.
+	// Outlook.com, Yahoo and Gmail's mobile clients drop <style> blocks, so a
+	// design written with classes arrives unstyled without this. Last, so the
+	// signature and footer are inlined with the body; a no-op for a body with
+	// no <style>, which is every campaign written in the visual editor.
+	bodyHTML = mailhtml.InlineCSS(bodyHTML)
+
 	// STEP 13: Warm the organization DEK so the publisher's encrypt pass (the
 	// one whose ciphertext is actually sent) fails fast here if KMS is down.
 	if account.OrganizationID == nil {
-		sentry.CaptureException(fmt.Errorf("email account %s has no organization", account.ID))
+		errs.CaptureException(fmt.Errorf("email account %s has no organization", account.ID))
 		return errx.InternalError()
 	}
 	if _, err := s.cipherService.Cipher(ctx, *account.OrganizationID); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.InternalError()
 	}
 
@@ -645,16 +685,20 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// and the next tick emails the same person again (issue #169). The
 	// reservation also counts the send against the day's counters, so a lost
 	// stamp can never let the daily cap over-send either.
-	reserved, rerr := s.campaignProgressRepo.ReserveSend(ctx, campaign.ID, contact.ID, sequence.ID, taskID, nextPair.IsNewLead)
+	//
+	// It also binds the lead to this mailbox, in the same transaction, so every
+	// remaining step of this contact's sequence leaves from the address they
+	// are about to hear from (issue #401).
+	reserved, rerr := s.campaignProgressRepo.ReserveSend(ctx, campaign.ID, contact.ID, sequence.ID, taskID, account.ID, nextPair.IsNewLead)
 	if rerr != nil {
 		// The attempt could not be made durable, so it must not be made at all.
 		// Retry the whole task rather than sending something nothing remembers.
-		sentry.CaptureException(rerr)
+		errs.CaptureException(rerr)
 		s.taskRepo.RecordTaskFailure(ctx, taskID, "Could not reserve the send", rerr.Error())
 		s.recordSchedulerFailure(ctx, campaign.ID, "send_reservation_failed",
 			fmt.Sprintf("Could not record the send to %s before dispatching it; retrying", contact.Email), rerr)
 		if uerr := s.taskRepo.UpdateTaskStatus(ctx, taskID, "pending"); uerr != nil {
-			sentry.CaptureException(uerr)
+			errs.CaptureException(uerr)
 		}
 		executionStatus = "failed"
 		return errx.InternalError()
@@ -700,7 +744,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		// if none ever comes.
 		if !errors.Is(err, ErrSendDispatchUnknown) {
 			if relErr := s.campaignProgressRepo.ReleaseSend(ctx, campaign.ID, contact.ID, sequence.ID, nextPair.IsNewLead); relErr != nil {
-				sentry.CaptureException(relErr)
+				errs.CaptureException(relErr)
 				log.Error().Err(relErr).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to release the reservation for a send that never left; the reclaimer will retry it")
 			}
 		}
@@ -778,7 +822,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	// Today's counters were bumped by the reservation, inside the same
 	// transaction, so the new-lead/day cap can never under-count.
 	if err := s.stampSendRecorded(ctx, campaign.ID, contact.ID, sequence.ID); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		log.Error().Err(err).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Str("contact_id", contact.ID.String()).Msg("Failed to record email sent; the worker result will repair the stamp")
 		if s.campaignLogRepo != nil {
 			s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
@@ -817,9 +861,32 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		})
 	}
 
+	// This contact's sequence changed address. It only happens when the mailbox
+	// they had been hearing from stopped being one this campaign can send from
+	// (disconnected, taken off its sending accounts, resting, or held by warmup
+	// health), and it is the kind of thing an owner should find in the activity
+	// log rather than in a confused reply.
+	if prev := nextPair.AssignedSender; prev != nil && *prev != account.ID && s.campaignLogRepo != nil {
+		from := "its previous mailbox"
+		if old, oerr := s.emailRepo.GetByID(ctx, *prev); oerr == nil && old != nil {
+			from = old.Email
+		}
+		s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+			CampaignID: campaign.ID,
+			EventType:  "sender_reassigned",
+			Message: fmt.Sprintf("%s now hears from %s: %s can no longer send for this campaign",
+				contact.Email, account.Email, from),
+			Metadata: map[string]interface{}{
+				"contact_id":      contact.ID.String(),
+				"account_id":      account.ID.String(),
+				"prev_account_id": prev.String(),
+			},
+		})
+	}
+
 	// STEP 18: Mark task as completed (with advisory lock)
 	if err := s.taskRepo.UpdateTaskStatusWithLock(ctx, taskID, "completed"); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return errx.InternalError()
 	}
 
@@ -908,7 +975,7 @@ func autoPauseReason(err error) string {
 	case errors.Is(err, scheduler.ErrDomainAuthFailing):
 		return "Campaign auto-paused: every mailbox is sending from a domain that fails SPF or DMARC authentication"
 	case errors.Is(err, scheduler.ErrNoEligibleMailbox):
-		return "Campaign auto-paused: every mailbox is outside its sending window or over its daily budget"
+		return "Campaign auto-paused: no mailbox can send under its current sending settings (check each mailbox's sending behaviour profile and timezone)"
 	default:
 		return "Campaign auto-paused: no active email accounts available"
 	}
@@ -945,6 +1012,56 @@ func (s *tasksService) pauseUndeliverable(ctx context.Context, campaignID, taskI
 	}
 }
 
+// CampaignIdleEventType is the activity log entry written when a continuous
+// campaign runs out of leads and waits; CampaignIdleMessage is its text.
+const (
+	CampaignIdleEventType = "idle"
+	CampaignIdleMessage   = "Waiting for new leads: every lead has finished the sequence. The campaign stays active and sends to leads as they arrive."
+)
+
+// idleCampaign parks a continuous campaign that has nothing left to send. It
+// stays active with no chain: a lead add wakes it, and the reconciler re-checks
+// it every pass. Logged and broadcast once per wait, not once per pass.
+func (s *tasksService) idleCampaign(ctx context.Context, campaign *models.Campaign, taskID uuid.UUID) {
+	if taskID != uuid.Nil {
+		s.taskRepo.UpdateTaskStatus(ctx, taskID, "completed")
+	}
+	transitioned, err := s.campaignRepo.MarkIdle(ctx, campaign.ID)
+	if err != nil {
+		log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Msg("could not mark the campaign idle")
+		return
+	}
+	if !transitioned {
+		return
+	}
+	if s.campaignLogRepo != nil {
+		s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+			CampaignID: campaign.ID,
+			EventType:  CampaignIdleEventType,
+			Message:    CampaignIdleMessage,
+		})
+	}
+	if s.streamingPublisher != nil {
+		s.streamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
+			BaseEvent:  pubsub.BaseEvent{EventType: pubsub.EventCampaignIdle, UserID: campaign.UserID},
+			OrgID:      campaignOrgID(campaign),
+			CampaignID: campaign.ID.String(),
+			Name:       campaign.Name,
+			Status:     "active",
+		})
+	}
+}
+
+// clearIdle ends an idle wait once the campaign has something to send again.
+func (s *tasksService) clearIdle(ctx context.Context, campaign *models.Campaign) {
+	if campaign.IdleSince == nil {
+		return
+	}
+	if err := s.campaignRepo.ClearIdle(ctx, campaign.ID); err != nil {
+		log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Msg("could not clear the campaign's idle mark")
+	}
+}
+
 // autoPauseCampaign parks a campaign that has nothing it can send from. The
 // reason is carried through to the activity log because "paused_no_accounts"
 // covers several very different fixes (connect a mailbox, widen a sending
@@ -970,12 +1087,12 @@ func (s *tasksService) autoPauseCampaign(ctx context.Context, campaignID, taskID
 func (s *tasksService) haltOrglessCampaign(ctx context.Context, campaignID, taskID uuid.UUID) {
 	const reason = "Campaign paused: it has no workspace, so unsubscribes, bounces and complaints cannot be checked before sending. Contact support to reattach it."
 
-	sentry.CaptureException(fmt.Errorf("campaign %s reached the send path with no organization", campaignID))
+	errs.CaptureException(fmt.Errorf("campaign %s reached the send path with no organization", campaignID))
 	log.Error().Str("campaign_id", campaignID.String()).Str("task_id", taskID.String()).
 		Msg("campaign send blocked: no organization, suppression cannot be enforced")
 
 	if err := s.campaignRepo.UpdateStatusWithLock(ctx, campaignID, "paused"); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 	}
 	s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
 	if s.campaignLogRepo != nil {

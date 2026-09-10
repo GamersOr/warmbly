@@ -5,25 +5,38 @@ import (
 	"time"
 
 	"github.com/warmbly/warmbly/internal/config"
+	"github.com/warmbly/warmbly/internal/jobrun"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
-// FormEventsRetentionJob prunes funnel events past the platform window; the
-// forms analytics ranges top out at 90 days, so the fixed window keeps double
-// coverage without a per-org setting.
+// FormEventsRetentionJob prunes funnel events past the retention window. The
+// window is an instance setting, read on every pass, so an operator who
+// shortens it in the admin panel sees the next sweep honour it.
 type FormEventsRetentionJob struct {
-	repo repository.FormEventRepository
+	repo      repository.FormEventRepository
+	retention RetentionSource
 }
 
 func NewFormEventsRetentionJob(repo repository.FormEventRepository) *FormEventsRetentionJob {
 	return &FormEventsRetentionJob{repo: repo}
 }
 
+// WireRetention attaches the instance settings the window is read from. Unset
+// keeps the compiled default.
+func (j *FormEventsRetentionJob) WireRetention(src RetentionSource) *FormEventsRetentionJob {
+	j.retention = src
+	return j
+}
+
 func (j *FormEventsRetentionJob) Run(ctx context.Context) error {
 	if j.repo == nil {
 		return nil
 	}
-	before := time.Now().AddDate(0, 0, -config.FormEventsRetentionDays)
+	days := config.FormEventsRetentionDaysDefault
+	if j.retention != nil {
+		days = j.retention.RetentionWindows(ctx).FormEventDays
+	}
+	before := time.Now().AddDate(0, 0, -days)
 	if _, xerr := j.repo.PruneBefore(ctx, before); xerr != nil {
 		return xerr
 	}
@@ -32,15 +45,5 @@ func (j *FormEventsRetentionJob) Run(ctx context.Context) error {
 
 // Start runs the job once on boot and then on the interval until ctx ends.
 func (j *FormEventsRetentionJob) Start(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	_ = j.Run(ctx)
-	for {
-		select {
-		case <-ticker.C:
-			_ = j.Run(ctx)
-		case <-ctx.Done():
-			return
-		}
-	}
+	jobrun.Loop(ctx, "form_events_retention", interval, true, j.Run)
 }

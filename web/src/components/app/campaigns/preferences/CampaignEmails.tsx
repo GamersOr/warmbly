@@ -115,8 +115,9 @@ export function RotationRampSection({
                     }
                 />
                 <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
-                    Each mailbox stays within its own daily limit, and follow-ups always come from the mailbox that
-                    sent the first email — so every thread stays consistent.
+                    Rotation picks the mailbox for a lead's first email, and every follow-up to that lead comes from
+                    the same address, so the conversation stays consistent. Each mailbox stays within its own daily
+                    limit, and a lead only changes address if its mailbox stops being able to send for this campaign.
                 </p>
             </div>
 
@@ -265,6 +266,17 @@ export function LeadFlowSection({
                         id="campaign-pref-prioritize-new"
                         value={newCampaign.prioritize_new_leads}
                         onChange={(v) => setNewCampaign((bef) => ({ ...bef, prioritize_new_leads: v }))}
+                    />
+                }
+            />
+            <SettingRow
+                title="Keep running for new leads"
+                description="Out of leads, the campaign stays active and waits instead of finishing, so leads from a linked segment, a form, the API or an automation keep getting the sequence. Linking a segment, a form or an automation to this campaign turns it on, and so does starting the campaign once every lead has finished."
+                control={
+                    <Toggle
+                        id="campaign-pref-continuous"
+                        value={newCampaign.continuous}
+                        onChange={(v) => setNewCampaign((bef) => ({ ...bef, continuous: v }))}
                     />
                 }
             />

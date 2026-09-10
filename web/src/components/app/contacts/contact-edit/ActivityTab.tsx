@@ -335,6 +335,20 @@ function CampaignCard({ state }: { state: ContactCampaignState }) {
                             )
                         }
                     />
+                    <PanelFact
+                        label="Sender"
+                        value={
+                            state.sender_email ? (
+                                <span title={`Every step of this sequence sends from ${state.sender_email}`}>
+                                    {state.sender_email}
+                                </span>
+                            ) : (
+                                <span title="Picked when the first email goes out; every follow-up then keeps it.">
+                                    Chosen at the first email
+                                </span>
+                            )
+                        }
+                    />
                     <div className="sm:col-span-2">
                         <NextActionFact
                             next={state.next}
@@ -1435,6 +1449,8 @@ export function sourceLabel(source?: string | null): string {
             return "Created by the AI assistant";
         case "form":
             return "Submitted a form";
+        case "automation":
+            return "Created by an automation";
         case "unknown":
         case undefined:
         case null:
@@ -1506,6 +1522,8 @@ function createdLabel(source?: string | null): string {
             return "Created by AI assistant";
         case "form":
             return "Submitted a form";
+        case "automation":
+            return "Created by automation";
         case "manual":
             return "Created manually";
         default:

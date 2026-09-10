@@ -116,6 +116,8 @@ func (d Deps) registerCampaignTools(r *Registry) {
 			"ramp_start":         intProp("Ramp starting volume."),
 			"ramp_increment":     intProp("Ramp daily increment."),
 			"ramp_ceiling":       intProp("Ramp ceiling."),
+			"entry_delay_minutes": intProp(
+				"Minutes to wait before a contact's FIRST email, counted from when they entered the campaign. 0 sends it as soon as the schedule allows; max 129600 (90 days)."),
 		}, "campaign_id"),
 		Risk:            generation.RiskWrite,
 		RequiredOrgPerm: models.PermManageCampaigns,
@@ -228,6 +230,7 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		RampStart         *int    `json:"ramp_start"`
 		RampIncrement     *int    `json:"ramp_increment"`
 		RampCeiling       *int    `json:"ramp_ceiling"`
+		EntryDelayMinutes *int    `json:"entry_delay_minutes"`
 	}](args)
 	if err != nil {
 		return "", err
@@ -254,6 +257,7 @@ func (d Deps) updateCampaign(ctx context.Context, inv Invocation, args json.RawM
 		RampStart:         in.RampStart,
 		RampIncrement:     in.RampIncrement,
 		RampCeiling:       in.RampCeiling,
+		EntryDelayMinutes: in.EntryDelayMinutes,
 	}
 	camp, xerr := d.Campaigns.Update(ctx, inv.UserID.String(), in.CampaignID, upd)
 	if xerr != nil {
@@ -522,6 +526,10 @@ func (d Deps) listCampaignLeads(ctx context.Context, inv Invocation, args json.R
 			row["opened"] = lp.Opened
 			row["replied"] = lp.Replied
 			row["current_step"] = lp.CurrentStep
+			if lp.Sender != "" {
+				// The mailbox this lead's whole sequence sends from.
+				row["sender"] = lp.Sender
+			}
 			if lp.LastActivityAt != nil {
 				row["last_activity_at"] = lp.LastActivityAt
 			}

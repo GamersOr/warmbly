@@ -4,10 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 
 	"github.com/warmbly/warmbly/internal/app/guardrail"
+	"github.com/warmbly/warmbly/internal/jobrun"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -35,7 +36,7 @@ func (j *GuardrailJob) Run(ctx context.Context) {
 	if j.svc != nil {
 		paused, err := j.svc.Sweep(ctx)
 		if err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 		} else if paused > 0 {
 			log.Info().Int("paused", paused).Msg("guardrail sweep paused campaigns")
 		}
@@ -43,7 +44,7 @@ func (j *GuardrailJob) Run(ctx context.Context) {
 
 	if j.behaviorRepo != nil {
 		if _, err := j.behaviorRepo.PurgePlansBefore(ctx, time.Now().Add(-planRetention)); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 		}
 	}
 }
@@ -69,21 +70,12 @@ func NewGuardrailScheduler(job *GuardrailJob, interval time.Duration) *Guardrail
 
 // Start runs Run() on every tick until ctx is cancelled or Stop() is called.
 func (s *GuardrailScheduler) Start(ctx context.Context) {
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
-
-	s.job.Run(ctx)
-
-	for {
-		select {
-		case <-ticker.C:
-			s.job.Run(ctx)
-		case <-s.stopCh:
-			return
-		case <-ctx.Done():
-			return
-		}
-	}
+	ctx, cancel := stopContext(ctx, s.stopCh)
+	defer cancel()
+	jobrun.Loop(ctx, "guardrail_sweep", s.interval, true, func(ctx context.Context) error {
+		s.job.Run(ctx)
+		return nil
+	})
 }
 
 // Stop halts the scheduler.

@@ -42,13 +42,15 @@ Conditions decide membership, and two overrides sit on top of them:
 
 The segment header shows how many contacts are pinned in or out, and a **Pinned contacts** panel below it lists them; **Back to automatic** clears an override so the conditions decide again. A contact's own drawer has a **Segments** section that shows every segment, whether the contact is in it, and the same pin in, pin out and back-to-automatic controls.
 
-**New contact** on a segment page pins as well: a contact created from inside a segment joins that segment, so it appears in the list you created it from even when the conditions do not describe it yet.
+**New contact** and **Import** on a segment page pin as well: a contact created or a file uploaded from inside a segment joins that segment, so it appears in the list you started from even when the conditions do not describe it yet. The import wizard names the segment in its header and confirms it on the result step, and rows it skipped as duplicates join too.
 
-Sequences can pin too: the **Add to segment** and **Remove from segment** action steps apply the override to a contact as it moves through a campaign flow, so a positive reply can drop someone into a "warm" segment automatically. So can an import: the file import wizard's **Add to segments** picker on its Options step pins every contact in the file into the segments you choose, so a fresh list can land straight in the audience it was collected for.
+Sequences can pin too: the **Add to segment** and **Remove from segment** action steps apply the override to a contact as it moves through a campaign flow, so a positive reply can drop someone into a "warm" segment automatically. So can an import: the file import wizard's **Add to segments** picker on its Options step pins every contact in the file into the segments you choose, so a fresh list can land straight in the audience it was collected for. A [Google Sheets sync source](/guides/contacts-crm/#importing) carries the same targets and re-applies them on every run, which is how a sheet you keep appending to keeps feeding one audience.
+
+A segment with no conditions at all is a plain list: it holds exactly the contacts you pin in, so creating one and importing into it is the shortest way to turn a file into an audience.
 
 ## Using a segment
 
-- **Browse**: a segment page lists its current members with the same table, filters, detail drawer and bulk actions as the contacts page.
+- **Browse**: a segment page lists its current members with the same table, filters, detail drawer and bulk actions as the contacts page, including [**Select all matching**](/guides/contacts-crm/#selecting-rows) so an action covers every member and not only the rows loaded so far, for selections up to `50,000` contacts.
 - **Add to campaign**: enrols every current member as a lead of the campaign you pick, from the segment page or with **From segment** on a campaign's Leads tab. Contacts already in that campaign are skipped, and a running campaign wakes up to schedule the new leads. This is a snapshot: contacts who join the segment later are not added until you run it again. To keep a campaign fed automatically, [link the segment](#linking-a-segment-to-a-campaign) instead.
 - **Link to campaign**: attaches the segment to a campaign as a live audience, so contacts who join the segment later become leads on their own. See [below](#linking-a-segment-to-a-campaign).
 - **One-time email**: send one message to the segment without building a sequence. **Campaigns** > **New campaign** > **One-time email** picks the segments, shows how many contacts they resolve to and how long the mailbox pool needs, and sends now or on a date. See [one-time emails](/guides/campaigns/#one-time-emails).
@@ -61,7 +63,7 @@ Sequences can pin too: the **Add to segment** and **Remove from segment** action
 
 Where **Add to campaign** copies today's members once, a linked segment is a live audience: the campaign keeps enrolling whoever the segment says belongs. Manage the links from the **Segments** button on a campaign's Leads tab; a campaign can link up to 20 segments.
 
-Linking enrols every current member as a lead immediately. From then on, any contact who enters the segment, a new contact, an import, a condition edit, a manual pin-in, or simply drifting into a date or engagement condition, is enrolled automatically; a background check picks up drift about every 2 minutes.
+Linking enrols every current member as a lead immediately and turns on the campaign's **Keep running for new leads** setting, so the campaign waits for members instead of finishing when it runs out (turn it off in the campaign's preferences if you want it to finish). From then on, any contact who enters the segment, a new contact, an import, a condition edit, a manual pin-in, or simply drifting into a date or engagement condition, is enrolled automatically; a background check picks up drift about every 2 minutes.
 
 The Leads tab shows every linked segment in a **Linked segments** strip: the segment's name, how many of its members are leads (`120/120`), a **no contacts** mark when it currently matches nobody, and a **held out** count when members were removed from the campaign by hand. Clicking a chip filters the list to that segment's leads; **Add back** re-enrols held-out members.
 
@@ -69,8 +71,8 @@ Enrolment is additive. A contact who later falls out of the segment keeps their 
 
 The campaign reacts to growth by status:
 
-- **Active**: woken up to schedule the new leads straight away.
-- **Finished**: restarted automatically, through the same launch checks as pressing play.
+- **Active**, including one **waiting for leads**: woken up to schedule the new leads straight away, or after the campaign's [delay before the first email](/guides/campaigns/#delay-before-the-first-email) when it sets one. That delay counts from the moment the contact is enrolled as a lead, which for a linked segment is when the background check picks them up, not from when they joined the segment or when the campaign started. So someone the segment adds months later still gets the full wait from their own enrolment.
+- **Finished**: restarted automatically, through the same launch checks as pressing play. A refused restart is noted in the campaign's activity log.
 - **Paused** (or draft): the leads accumulate and send when the campaign runs.
 
 A segment linked to a campaign cannot be deleted; detach it from the campaign first.

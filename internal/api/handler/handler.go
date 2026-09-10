@@ -14,6 +14,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/behavior"
 	"github.com/warmbly/warmbly/internal/app/bootstrap"
 	"github.com/warmbly/warmbly/internal/app/campaign"
+	"github.com/warmbly/warmbly/internal/app/cliauth"
 	"github.com/warmbly/warmbly/internal/app/cloudlink"
 	"github.com/warmbly/warmbly/internal/app/compose"
 	"github.com/warmbly/warmbly/internal/app/contact"
@@ -25,6 +26,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/emailsend"
 	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
 	"github.com/warmbly/warmbly/internal/app/feature"
+	"github.com/warmbly/warmbly/internal/app/fleetnode"
 	"github.com/warmbly/warmbly/internal/app/form"
 	"github.com/warmbly/warmbly/internal/app/group"
 	"github.com/warmbly/warmbly/internal/app/instancecheck"
@@ -35,6 +37,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/mcp"
 	"github.com/warmbly/warmbly/internal/app/notification"
 	"github.com/warmbly/warmbly/internal/app/oauth"
+	"github.com/warmbly/warmbly/internal/app/opsnotify"
 	"github.com/warmbly/warmbly/internal/app/organization"
 	"github.com/warmbly/warmbly/internal/app/orgrisk"
 	"github.com/warmbly/warmbly/internal/app/orgtransfer"
@@ -43,7 +46,6 @@ import (
 	"github.com/warmbly/warmbly/internal/app/poollink"
 	"github.com/warmbly/warmbly/internal/app/ratelimit"
 	"github.com/warmbly/warmbly/internal/app/referral"
-	"github.com/warmbly/warmbly/internal/app/releases"
 	"github.com/warmbly/warmbly/internal/app/research"
 	"github.com/warmbly/warmbly/internal/app/segment"
 	"github.com/warmbly/warmbly/internal/app/sequence"
@@ -67,7 +69,6 @@ import (
 	"github.com/warmbly/warmbly/internal/app/webhook"
 	"github.com/warmbly/warmbly/internal/app/websitetracking"
 	"github.com/warmbly/warmbly/internal/app/worker"
-	"github.com/warmbly/warmbly/internal/app/worker_orchestrator"
 	"github.com/warmbly/warmbly/internal/pkg/generation"
 
 	"github.com/warmbly/warmbly/internal/infrastructure/encryptedkeys"
@@ -157,11 +158,10 @@ type Handler struct {
 	AdminService         admin.AdminService
 	AdminOutreachService adminoutreach.Service
 
-	// Worker orchestration (SSH-driven lifecycle for admin-managed workers)
-	WorkerOrchestrator *worker_orchestrator.Orchestrator
-	WorkerRepo         repository.WorkerRepository
-	CredentialsRepo    repository.CredentialsRepository
-	ReleasesService    *releases.Service
+	// Fleet. Nodes enrol with the join token and pull everything else; the
+	// control plane never reaches into a machine.
+	FleetNodes *fleetnode.Service
+	WorkerRepo repository.WorkerRepository
 	// UpdatesService backs the admin panel's update indicator and button.
 	UpdatesService *updates.Service
 
@@ -288,17 +288,21 @@ type Handler struct {
 	// /api/v1/internal/tracked-links/:id (same no-direct-Postgres rule).
 	TrackedLinks repository.TrackedLinkRepository
 
+	// Verified custom tracking and forms domains, read by the on-demand TLS
+	// gate at /tls/authorize so a reverse proxy can obtain a certificate for a
+	// hostname that was not known when the instance was installed.
+	CustomDomains repository.CustomDomainRepository
+
 	// Direct repositories used by handlers that don't yet have a
 	// service layer (avatars, etc.). Keep narrow and add a service
 	// only when business logic accumulates.
-	UserRepo                 repository.UserRepository
-	OrgRepo                  repository.OrganizationRepository
-	AttachmentRepo           repository.AttachmentRepository
-	StorageBackendRepo       repository.StorageBackendRepository
-	CloudCredentialRepo      repository.CloudCredentialRepository
-	ProvisioningTemplateRepo repository.ProvisioningTemplateRepository
-	ProvisioningJobRepo      repository.ProvisioningJobRepository
-	ProvisioningPolicyRepo   repository.ProvisioningPolicyRepository
+	UserRepo           repository.UserRepository
+	OrgRepo            repository.OrganizationRepository
+	AttachmentRepo     repository.AttachmentRepository
+	EmailImageRepo     repository.EmailImageRepository
+	StorageBackendRepo repository.StorageBackendRepository
+	FleetNodeRepo      repository.FleetNodeRepository
+	FleetSettingsRepo  repository.FleetSettingsRepository
 
 	// Danger zone (delayed deletions for orgs & user accounts)
 	DangerZoneService dangerzone.Service
@@ -311,9 +315,24 @@ type Handler struct {
 	PoolLinkService  poollink.Service
 	CloudLinkService cloudlink.Service
 
+	// Device-code sign-in for the `warmbly` CLI. Nil-safe: routes answer 501.
+	CLIAuthService cliauth.Service
+
 	// Infrastructure liveness probes for the admin System Status page.
 	// Wired in cmd/backend/main.go where the concrete clients live.
 	SystemChecker *sysstatus.Checker
+
+	// Admin operations pages: cross-workspace reads of mailbox sync, the send
+	// outcome loop, fleet placement and abuse signals, plus the scheduled job
+	// registry every background loop records to. Nil-safe: the endpoints
+	// answer 501 when the repository is not wired.
+	AdminSyncRepo    repository.AdminSyncRepository
+	AdminSendsRepo   repository.AdminSendsRepository
+	AdminFleetRepo   repository.AdminFleetRepository
+	AdminInsightRepo repository.AdminInsightRepository
+	JobRuns          repository.JobRunRepository
+	// WebhookRepo backs the operator's "reclaim stuck deliveries" action.
+	WebhookRepo repository.WebhookRepository
 
 	// Operator visibility (admin panel, Instance section).
 	//
@@ -328,4 +347,7 @@ type Handler struct {
 	// InstanceSettings is the database-backed settings tier. It holds only
 	// keys no environment variable owns.
 	InstanceSettings instancesettings.Service
+	// OpsNotifier delivers instance-wide operator alerts. Nil disables the
+	// notification admin surface.
+	OpsNotifier opsnotify.Notifier
 }

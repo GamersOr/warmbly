@@ -164,6 +164,15 @@ type Campaign struct {
 	MaxNewLeadsPerDay  int  `json:"max_new_leads_per_day"`
 	PrioritizeNewLeads bool `json:"prioritize_new_leads"`
 
+	// EntryDelayMinutes holds a contact's FIRST email back for this long after
+	// they entered the campaign. 0 means the first email is due immediately.
+	EntryDelayMinutes int `json:"entry_delay_minutes"`
+
+	// Continuous keeps the campaign active when it runs out of leads: it waits
+	// for more instead of finishing. IdleSince is set while it waits.
+	Continuous bool       `json:"continuous"`
+	IdleSince  *time.Time `json:"idle_since,omitempty"`
+
 	// Auto-pause guardrails. Rates are evaluated over a rolling window and the
 	// campaign is paused the moment a band is breached, rather than waiting for
 	// a mailbox provider to react first. A rate threshold of 0 disables that
@@ -319,6 +328,8 @@ type UpdateCampaign struct {
 	ESPMatchMode       *string `json:"esp_match_mode,omitempty"`
 	MaxNewLeadsPerDay  *int    `json:"max_new_leads_per_day,omitempty"`
 	PrioritizeNewLeads *bool   `json:"prioritize_new_leads,omitempty"`
+	EntryDelayMinutes  *int    `json:"entry_delay_minutes,omitempty"`
+	Continuous         *bool   `json:"continuous,omitempty"`
 	TrackingDomain     *string `json:"tracking_domain,omitempty"`
 
 	UTMTracking *bool   `json:"utm_tracking,omitempty"`
@@ -341,7 +352,8 @@ type UpdateCampaign struct {
 // next wakeup time is computed from.
 func (u *UpdateCampaign) TouchesSchedule() bool {
 	return u.StartDate.Set || u.EndDate.Set || u.Timezone != nil || u.Days != nil ||
-		u.StartTime != nil || u.EndTime != nil || u.ScheduleWindows != nil
+		u.StartTime != nil || u.EndTime != nil || u.ScheduleWindows != nil ||
+		u.EntryDelayMinutes != nil
 }
 
 // CreateCampaign is the payload accepted by POST /campaigns. Name is required;
@@ -376,6 +388,9 @@ type CreateCampaign struct {
 	StartTime *string    `json:"start_time,omitempty"`
 	EndTime   *string    `json:"end_time,omitempty"`
 
+	// Authoritative per-day schedule. When sent, supersedes Days/StartTime/EndTime.
+	ScheduleWindows *ScheduleWindows `json:"schedule_windows,omitempty"`
+
 	// Sender pool — accepts UUIDs already created by the user.
 	EmailTagIDs []string `json:"email_tag_ids,omitempty"`
 	FolderIDs   []string `json:"folder_ids,omitempty"`
@@ -396,6 +411,8 @@ type CreateCampaign struct {
 	ESPMatchMode       *string `json:"esp_match_mode,omitempty"`
 	MaxNewLeadsPerDay  *int    `json:"max_new_leads_per_day,omitempty"`
 	PrioritizeNewLeads *bool   `json:"prioritize_new_leads,omitempty"`
+	EntryDelayMinutes  *int    `json:"entry_delay_minutes,omitempty"`
+	Continuous         *bool   `json:"continuous,omitempty"`
 	TrackingDomain     *string `json:"tracking_domain,omitempty"`
 
 	// Automatic UTM tagging (off unless sent). Empty values keep the defaults.

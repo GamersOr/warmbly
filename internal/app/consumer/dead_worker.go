@@ -3,10 +3,12 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/jobrun"
 	"github.com/warmbly/warmbly/internal/models"
 )
 
@@ -15,6 +17,39 @@ import (
 // *notification.Service; local interface to avoid an import cycle.
 type OrgNotifier interface {
 	NotifyOrg(ctx context.Context, orgID uuid.UUID, perm models.OrganizationPermission, exclude uuid.UUID, category models.NotificationCategory, title, body, link string, meta map[string]any, groupKey string)
+}
+
+// OperatorNotifier is the instance-wide operator alert surface, declared here
+// so this package needs no import of it. Nil disables it.
+type OperatorNotifier interface {
+	NotifyOperator(key, title, summary string, fields map[string]string)
+}
+
+// notifyOperatorWorkerDown alerts the operator that a worker is gone. It shares
+// the same once-per-incident SetNX guard shape as the tenant notice, under its
+// own key so the two audiences are independent.
+func (s *JobsService) notifyOperatorWorkerDown(ctx context.Context, workerID uuid.UUID, mailboxes int, reassigned bool) {
+	if s.OpsNotifier == nil || s.Cache == nil {
+		return
+	}
+	ok, err := s.Cache.SetNX(ctx, "worker:opsnotify:"+workerID.String(), "1", 6*time.Hour).Result()
+	if err != nil || !ok {
+		return
+	}
+	outcome := "Mailboxes were moved to a healthy worker automatically."
+	if !reassigned {
+		outcome = "No healthy replacement of the same tier was available, so sending from those mailboxes is paused."
+	}
+	s.OpsNotifier.NotifyOperator(
+		"worker.offline",
+		"Worker stopped responding",
+		outcome,
+		map[string]string{
+			"Worker":     workerID.String(),
+			"Mailboxes":  strconv.Itoa(mailboxes),
+			"Reassigned": map[bool]string{true: "yes", false: "no"}[reassigned],
+		},
+	)
 }
 
 // notifyWorkerDown tells each affected org's manage_emails members about a
@@ -57,20 +92,12 @@ func (s *JobsService) StartDeadWorkerDetection(ctx context.Context, interval tim
 	if s.WorkerRepo == nil {
 		return
 	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			detectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			s.detectDeadWorkers(detectCtx)
-			cancel()
-		}
-	}
+	jobrun.Loop(ctx, "dead_worker_detection", interval, false, func(ctx context.Context) error {
+		detectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		s.detectDeadWorkers(detectCtx)
+		return nil
+	})
 }
 
 func (s *JobsService) detectDeadWorkers(ctx context.Context) {
@@ -116,6 +143,7 @@ func (s *JobsService) detectDeadWorkers(ctx context.Context) {
 		if err != nil || replacement == nil {
 			log.Warn().Str("worker_id", w.ID.String()).Msg("no healthy replacement worker found")
 			s.notifyWorkerDown(ctx, w.ID, s.accountOrgs(ctx, accountIDs), false)
+			s.notifyOperatorWorkerDown(ctx, w.ID, len(accountIDs), false)
 			continue
 		}
 
@@ -184,6 +212,7 @@ func (s *JobsService) detectDeadWorkers(ctx context.Context) {
 			}
 
 			s.notifyWorkerDown(ctx, w.ID, affectedOrgs, true)
+			s.notifyOperatorWorkerDown(ctx, w.ID, reassigned, true)
 		}
 
 		if reassigned == len(accountIDs) {
@@ -214,7 +243,7 @@ func (s *JobsService) deactivateIfLongDead(ctx context.Context, w models.Worker)
 	if n, herr := s.Cache.Exists(ctx, "worker:heartbeat:"+w.ID.String()).Result(); herr != nil || n > 0 {
 		return
 	}
-	if err := s.WorkerRepo.DeactivateWorker(ctx, w.ID); err != nil {
+	if err := s.FleetNodeRepo.Deactivate(ctx, w.ID); err != nil {
 		log.Warn().Err(err).Str("worker_id", w.ID.String()).Msg("failed to deactivate dead worker")
 		return
 	}
@@ -233,9 +262,7 @@ func (s *JobsService) accountOrgs(ctx context.Context, accountIDs []uuid.UUID) m
 }
 
 func (s *JobsService) findHealthyWorker(ctx context.Context, deadWorker models.Worker) (*models.Worker, error) {
-	// Get workers of the same tier that are alive
-	freeTier := deadWorker.FreeTier
-	workers, err := s.WorkerRepo.GetSharedWorkersByTier(ctx, freeTier)
+	workers, err := s.WorkerRepo.ListPlaceableWorkers(ctx)
 	if err != nil {
 		return nil, err
 	}

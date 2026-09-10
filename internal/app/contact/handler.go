@@ -76,6 +76,7 @@ func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID
 	}
 	s.wakeCampaigns(ctx, orgID, attached)
 	s.syncSegmentCampaigns(ctx, orgID)
+	s.emitCreated(ctx, orgID, contacts, created)
 	return created, nil
 }
 
@@ -96,7 +97,7 @@ func (s *contactService) checkSegmentTargets(ctx context.Context, orgID uuid.UUI
 }
 
 func (s *contactService) Search(ctx context.Context, orgID, cursor, category, limit string, filters models.SearchContacts) (*models.ContactsResult, *errx.Error) {
-	cursorId, err := paging.DecodeCursor(cursor)
+	cursorPos, err := paging.DecodeSortCursor(cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +115,7 @@ func (s *contactService) Search(ctx context.Context, orgID, cursor, category, li
 		return nil, err
 	}
 
-	return s.contactRepository.Search(ctx, orgID, categoryId, cursorId, filters, limitN)
+	return s.contactRepository.Search(ctx, orgID, categoryId, cursorPos, filters, limitN)
 }
 
 // validateLeadFilters gates the single-campaign Leads-view filters: an unknown
@@ -218,6 +219,6 @@ func (s *contactService) ListSentEmails(ctx context.Context, userID, contactID u
 	return s.contactRepository.ListSentEmails(ctx, userID, contactID, limit, beforeSentAt, beforeTaskID)
 }
 
-func (s *contactService) ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, before *time.Time) (*models.ContactTimelineResult, *errx.Error) {
-	return s.contactRepository.ListTimeline(ctx, userID, orgID, contactID, limit, before)
+func (s *contactService) ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, cursor *models.ContactTimelineKey) (*models.ContactTimelineResult, *errx.Error) {
+	return s.contactRepository.ListTimeline(ctx, userID, orgID, contactID, limit, cursor)
 }

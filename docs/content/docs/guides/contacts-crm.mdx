@@ -9,7 +9,7 @@ Contacts are the people you reach out to; the CRM tracks what happens after they
 
 Two routes share the same column-mapping screen: a file upload and an on-demand Google Sheets sync.
 
-**From a file** (CSV, TSV, or XLSX, up to 50 MB and 50,000 rows), the wizard runs **Upload**, **Map**, **Options**, **Result**. Parsing happens server-side. Start it from Contacts, or from a campaign's Leads tab to attach the imports to that campaign automatically. The result step reports imported, updated, skipped, and failed counts, and failed rows download as an error CSV you can fix and re-import.
+**From a file** (CSV, TSV, or XLSX, up to 50 MB and 50,000 rows), the wizard runs **Upload**, **Map**, **Options**, **Result**. Parsing happens server-side. Start it from Contacts, or from a campaign's Leads tab to attach the imports to that campaign automatically, or from a [segment](/guides/segments/)'s member list to pin every row into that segment. The wizard names the target it inherited in its header and on the Options step, and the result step confirms it. The result step reports imported, updated, skipped, and failed counts, and failed rows download as an error CSV you can fix and re-import.
 
 You must map at least one column to **Email**.
 
@@ -31,9 +31,11 @@ Rows with a missing or invalid email are reported with a line number and reason 
 
 Problems with the mapping itself, an unnamed custom field or a name Warmbly cannot use, are reported once before anything is written, so a single typo can never fail every row.
 
-The **Options** step also decides where the contacts land: **Add to campaigns** enrols everyone in the file as leads of the campaigns you pick (hidden when the wizard was started from a campaign's Leads tab, since that campaign is already the target), and **Add to segments** pins them into the [segments](/guides/segments/) you pick as manual includes, so they stay members whatever the segment's conditions say.
+The **Options** step also decides where the contacts land: **Add to campaigns** enrols everyone in the file as leads of the campaigns you pick (hidden when the wizard was started from a campaign's Leads tab, since that campaign is already the target), and **Add to segments** pins them into the [segments](/guides/segments/) you pick as manual includes, so they stay members whatever the segment's conditions say. Started from a segment, that segment is always applied and shown as a fixed row; the picker below it adds more.
 
-**From Google Sheets**, a sheet is a reusable **sync source** rather than a one-time upload. Connect it once (Warmbly reads only the tab you choose and never writes back), paste the spreadsheet ID from the URL between `/d/` and `/edit`, pick the tab, map columns, then set duplicate handling, a label, and optionally a campaign to enroll into and categories to apply. **Nothing syncs automatically**: press **Sync now**, or save and sync immediately.
+**From Google Sheets**, a sheet is a reusable **sync source** rather than a one-time upload. Connect it once (Warmbly reads only the tab you choose and never writes back), paste the spreadsheet ID from the URL between `/d/` and `/edit`, pick the tab, map columns, then set duplicate handling, a label, and optionally a campaign to enroll into, categories to apply and segments to pin into. **Nothing syncs automatically**: press **Sync now**, or save and sync immediately.
+
+Segment targets apply on every run, so a sheet you keep adding rows to keeps feeding the same audience. Opening **Sync sources** from a segment's member list lists only the sources feeding it and pre-targets a new one to it. A segment deleted later is dropped from the run rather than stopping it.
 
 Saved sources live in your Sync sources list to re-run, edit, or remove. Each sync dedupes on lowercased email using your chosen duplicate handling, so re-syncing a sheet with new rows is safe.
 
@@ -71,9 +73,21 @@ See [Personalization & expressions](/guides/expressions/) for the full templatin
 
 A filter bar sits above the contact list. **Category**, **Segment**, **Status** and **Campaign** are always there; open one, tick values, and the list updates immediately with the matching count next to the bar. **Add filter** adds a custom-field condition (field, contains/is/starts with/ends with, value), a date-added or last-updated range, a number-of-campaigns range, the address verification verdict and, on a campaign's Leads tab, lead status and engagement. Each active filter is a pill you can reopen to change or remove with its cross; **Clear** drops them all, and **Save as segment** turns the current set into a [segment](/guides/segments/). Free-text search and sort stay in the toolbar.
 
+## Selecting rows
+
+Tick a row's checkbox to select it, or the one in the table header to select every row loaded so far. Contact lists load in pages as you scroll, so the header checkbox on its own only ever covers what is on screen.
+
+When more contacts match than are loaded, a bar appears under the header: **Select all N matching**. Clicking it hands the whole filtered set to the next action, however many pages that is, and the selection bar counts the full number rather than the loaded rows. Unticking a row afterwards takes just that contact out and the count follows. **Clear selection** in the bar, or the header checkbox, drops back to nothing.
+
+The set is the one the list is showing: search, filters, the subscription facet, and the campaign or segment the list is scoped to all narrow it. Changing any of them clears the selection, because it would no longer mean what it did when you made it. A selection past `50,000` contacts is refused rather than half-applied; add a filter and work through it in parts.
+
+Every bulk action reads the selection: **Edit**, **Segment**, **Remove from segment**, **Remove from campaign**, **Research**, **Verify**, **Mark deliverable** and **Delete**. **Push to CRM** is the exception: it calls the CRM once per contact while you wait, so it stays capped at `500` at a time.
+
+**Select all matching** is in the **From contacts** picker too, on a campaign's Leads tab and a segment page, so a whole search can be added as leads or members in one step.
+
 ## Editing many contacts at once
 
-Tick rows in any contact list, a segment's members or a campaign's leads, and the selection bar's **Edit** opens a bulk panel. It can add or remove campaigns, add or remove categories, force a subscription state, and queue custom-field operations (add, edit, delete, rename) that run on every selected contact.
+Tick rows in any contact list, a segment's members or a campaign's leads, and the selection bar's **Edit** opens a bulk panel. It can add or remove campaigns, add or remove categories, force a subscription state, and queue custom-field operations (add, edit, delete, rename) that run on every selected contact, including a **Select all matching** selection that reaches past the loaded pages.
 
 Nothing is applied while you build it up. The header names the list the selection came from, and a **Will apply** strip above the buttons lists every queued change as a chip you can take back one at a time before pressing Apply. A field operation missing its key, or its value where one is needed, is marked and skipped rather than sent half-finished.
 
@@ -100,10 +114,14 @@ Every contact records its first-touch source: how it entered the workspace, with
 | Import | Created by the file import wizard | The file name |
 | Sheet sync | Created by a Google Sheets sync source | The sheet |
 | API | Created through the API with an API key | The key's name |
+| Form | Submitted a hosted [form](/guides/forms/) | The form |
+| Automation | Written by an automation's **Create or update contact** action | The automation |
 | AI assistant | Created by the assistant on your behalf | |
 | Unknown | Created before Warmbly recorded sources | |
 
 Only new contacts get a source. An import or API call that matches an existing contact updates its fields and leaves the original source in place, so an address that arrived by hand and later turned up in a file still reads as manual.
+
+A new contact is also an event. `contact.created` goes to your [webhooks](/guides/webhooks/) and can start an [automation](/guides/automations/#triggers) with the contact's fields and source, except for bulk arrivals, which stay silent: file imports, sheet syncs, and a single API request adding more than 100 contacts.
 
 ## Activity timeline
 

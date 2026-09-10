@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"html/template"
 
-	"github.com/getsentry/sentry-go"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 )
 
 // Generic transactional notification used by the in-app notification
@@ -42,10 +42,11 @@ var notificationTmpl = template.Must(template.New("notification_content").Parse(
 
 // GenerateNotificationHTML renders a generic notification email. ctaURL
 // is optional (empty drops the button); ctaLabel defaults to "Open in
-// Warmbly" when a URL is present but no label is supplied.
+// <product name>" when a URL is present but no label is supplied.
 func GenerateNotificationHTML(title, body, ctaURL, ctaLabel string) (string, error) {
+	brand := CompanyName()
 	if ctaURL != "" && ctaLabel == "" {
-		ctaLabel = "Open in Warmbly"
+		ctaLabel = "Open in " + brand
 	}
 	data := struct {
 		Title    string
@@ -55,12 +56,12 @@ func GenerateNotificationHTML(title, body, ctaURL, ctaLabel string) (string, err
 	}{Title: title, Body: body, CTAURL: ctaURL, CTALabel: ctaLabel}
 	var buf bytes.Buffer
 	if err := notificationTmpl.Execute(&buf, data); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return "", err
 	}
 	subject := title
 	if subject == "" {
-		subject = "Notification from Warmbly"
+		subject = "Notification from " + brand
 	}
 	return renderEmail(subject, buf.String())
 }

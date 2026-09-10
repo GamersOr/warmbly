@@ -10,11 +10,11 @@ import (
 	"context"
 	"strings"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/pkg/crypt"
 	"golang.org/x/oauth2"
 )
@@ -54,7 +54,7 @@ func (s *emailService) OAuthReauth(ctx context.Context, userID string, orgID *uu
 
 	state, err := crypt.Nonce()
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.InternalError()
 	}
 
@@ -149,12 +149,9 @@ func (s *emailService) UpdateSMTPIMAPCredentials(ctx context.Context, orgID *uui
 	if s.workerAssignment == nil {
 		return nil, errx.ErrEmailOnboardNoWorker
 	}
-	// Any healthy worker can run the one-shot validation handshake, same as at
-	// connect time; tier only matters for placement.
-	w, werr := s.workerAssignment.SelectSharedWorker(ctx, false)
-	if werr != nil || w == nil {
-		w, werr = s.workerAssignment.SelectSharedWorker(ctx, true)
-	}
+	// Any live worker can run the one-shot validation handshake, same as at
+	// connect time.
+	w, werr := s.workerAssignment.SelectValidationWorker(ctx)
 	if werr != nil || w == nil {
 		return nil, errx.ErrEmailOnboardNoWorker
 	}

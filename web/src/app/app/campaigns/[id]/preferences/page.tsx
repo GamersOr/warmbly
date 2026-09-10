@@ -230,6 +230,7 @@ export default function CampaignPreferences() {
             ...(newData.prioritize_new_leads !== campaign.prioritize_new_leads && {
                 prioritize_new_leads: newData.prioritize_new_leads,
             }),
+            ...(newData.continuous !== campaign.continuous && { continuous: newData.continuous }),
             ...(newData.risky_emails !== campaign.risky_emails && { risky_emails: newData.risky_emails }),
 
             // Auto-pause guardrails

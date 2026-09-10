@@ -1,9 +1,13 @@
 package models
 
 import (
+	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/config"
 	"golang.org/x/oauth2"
 )
 
@@ -147,10 +151,9 @@ type EmailAuthTransition struct {
 	OrganizationID *uuid.UUID
 }
 
-// Mail connection security modes. TLS is mandatory either way; the difference
-// is whether it is negotiated before the protocol greeting or upgraded in-band
-// after it. Storing the mode explicitly is what lets a mailbox live on any
-// port: inferring it from the port only ever worked for 465/587/993/143.
+// Mail connection security modes. Storing the mode explicitly is what lets a
+// mailbox live on any port: inferring it from the port only ever worked for
+// 465/587/993/143.
 const (
 	// MailSecurityTLS is implicit TLS: the server speaks TLS from the first
 	// byte. SMTP 465 (SMTPS), IMAP 993 (IMAPS).
@@ -158,17 +161,85 @@ const (
 	// MailSecurityStartTLS is a plaintext greeting upgraded in-band with
 	// STARTTLS. SMTP 587/25/2525, IMAP 143.
 	MailSecurityStartTLS = "starttls"
+	// MailSecurityNone is no encryption at all, and is only ever legal
+	// against a loopback host (see LoopbackMailHost). It exists for the
+	// local relays that speak no TLS because they never listen on a network
+	// interface: Proton Bridge on 127.0.0.1:1143/1025, a Dovecot sharing a
+	// host with its worker, a Mailpit-style sink. The credentials never
+	// reach a wire, which is the whole reason this is allowed; anywhere
+	// else it is refused, in validation and again at dial time.
+	MailSecurityNone = "none"
 )
 
-// ValidMailSecurity reports whether s is a known security mode.
+// ValidMailSecurity reports whether s is a known security mode. It does not
+// say whether the mode is legal for a given host: MailSecurityNone also has
+// to pass LoopbackMailHost, which is the caller's job.
 func ValidMailSecurity(s string) bool {
-	return s == MailSecurityTLS || s == MailSecurityStartTLS
+	return s == MailSecurityTLS || s == MailSecurityStartTLS || s == MailSecurityNone
+}
+
+// LoopbackMailHost reports whether host addresses this machine, the only
+// place MailSecurityNone is allowed.
+//
+// Literals only, deliberately: a name that resolves to 127.0.0.1 today can
+// resolve elsewhere at dial time, so accepting one here would be a check the
+// network could walk out from under. The dialer verifies the peer it actually
+// got as well, which is what closes that gap for good.
+func LoopbackMailHost(host string) bool {
+	host = NormalizeMailHost(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// NormalizeMailHost is a stored host as the dialer and the TLS layer want it:
+// trimmed, and without the brackets a bare IPv6 literal is usually pasted
+// with. Brackets belong to the host:port form, not to the host, and carrying
+// them into tls.Config.ServerName would fail verification against an address
+// that is otherwise correct.
+func NormalizeMailHost(host string) string {
+	host = strings.TrimSpace(host)
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return host[1 : len(host)-1]
+	}
+	return host
+}
+
+// CleartextMailAllowed is the whole rule for MailSecurityNone in one place:
+// the host is this machine, and this deployment runs its workers on the
+// operator's own machine.
+//
+// Every place that opens a socket asks it, not just the connect form, because
+// credentials reach a worker by more than the form. An organization archive
+// exported from a self-hosted instance carries its mailboxes, so an import
+// could otherwise hand a hosted worker a mailbox that dials its own loopback
+// in the clear. The dialer additionally checks the peer it actually got,
+// which is the half no hostname can promise.
+func CleartextMailAllowed(host string) bool {
+	return config.SelfHosted() && LoopbackMailHost(host)
+}
+
+// MailDialAddress builds the address to dial a mailbox leg on.
+//
+// net.JoinHostPort, not fmt.Sprintf: an IPv6 literal needs brackets in a
+// host:port string, so "::1" on 1143 has to become "[::1]:1143". Without them
+// the address reads as the host "::1:1143" with no port at all, and every
+// dial to a mailbox on an IPv6 address fails looking like a dead server.
+func MailDialAddress(host string, port int) string {
+	return net.JoinHostPort(NormalizeMailHost(host), strconv.Itoa(port))
 }
 
 // ResolveSMTPSecurity returns the security mode to dial SMTP with: the stored
 // choice when it is set, otherwise the conventional default for the port. The
 // fallback keeps mailboxes connected across the rollout, when the stored value
 // is empty and events from older workers carry no mode at all.
+//
+// MailSecurityNone is never inferred, only obeyed: dropping encryption is
+// always an explicit choice, never something a port number decides.
 func ResolveSMTPSecurity(security string, port int) string {
 	if ValidMailSecurity(security) {
 		return security
@@ -180,7 +251,8 @@ func ResolveSMTPSecurity(security string, port int) string {
 }
 
 // ResolveIMAPSecurity is ResolveSMTPSecurity for IMAP, where implicit TLS is
-// the norm (993) and 143 is the STARTTLS port.
+// the norm (993) and 143 is the STARTTLS port. Like the SMTP resolver it
+// never infers MailSecurityNone.
 func ResolveIMAPSecurity(security string, port int) string {
 	if ValidMailSecurity(security) {
 		return security
@@ -220,20 +292,26 @@ type Oauth2SmtpImap struct {
 
 type NewOauthAccount struct {
 	OrganizationID *uuid.UUID
-	Provider       InboxProvider
-	Name           string
-	Email          string
-	AccessToken    string
-	RefreshToken   string
-	ExpiresAt      time.Time
+	// Allowance, when set, is enforced again inside the insert transaction
+	// under the organization's mailbox lock, so concurrent connects cannot
+	// both take the last slot.
+	Allowance    *MailboxAllowance
+	Provider     InboxProvider
+	Name         string
+	Email        string
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    time.Time
 }
 
 type NewSMTPIMAPAccount struct {
 	OrganizationID *uuid.UUID
-	Name           string
-	Email          string
-	SMTP           *Service
-	IMAP           *Service
+	// Allowance: see NewOauthAccount.
+	Allowance *MailboxAllowance
+	Name      string
+	Email     string
+	SMTP      *Service
+	IMAP      *Service
 }
 
 // EmailOnboardingState is stored in Redis for the lifetime of an OAuth round trip.
@@ -338,4 +416,45 @@ type BulkEmailTags struct {
 	EmailIDs   []string `json:"email_ids" binding:"required,min=1,max=1000"`
 	AddTags    []string `json:"add_tags" binding:"max=100"`
 	RemoveTags []string `json:"remove_tags" binding:"max=100"`
+}
+
+// MailboxBulkRowStatus is the per-row outcome of a bulk SMTP/IMAP connect.
+type MailboxBulkRowStatus string
+
+const (
+	// MailboxBulkConnected: the mailbox was validated and connected.
+	MailboxBulkConnected MailboxBulkRowStatus = "connected"
+	// MailboxBulkSkipped: the mailbox was already connected, so re-uploading
+	// a file is safe.
+	MailboxBulkSkipped MailboxBulkRowStatus = "skipped"
+	// MailboxBulkFailed: the row was refused; Code says why.
+	MailboxBulkFailed MailboxBulkRowStatus = "failed"
+)
+
+// MailboxBulkRow is one row's answer. Row echoes the caller's own row number
+// so the dashboard can hand back the failed lines of the file it uploaded.
+type MailboxBulkRow struct {
+	Row     int                  `json:"row"`
+	Email   string               `json:"email"`
+	Status  MailboxBulkRowStatus `json:"status"`
+	Code    string               `json:"code,omitempty"`
+	Message string               `json:"message,omitempty"`
+	ID      *uuid.UUID           `json:"id,omitempty"`
+}
+
+// MailboxBulkSummary counts the batch.
+type MailboxBulkSummary struct {
+	Total     int `json:"total"`
+	Connected int `json:"connected"`
+	Skipped   int `json:"skipped"`
+	Failed    int `json:"failed"`
+}
+
+// MailboxBulkResult is the answer to POST /emails/onboarding/smtp-imap/bulk.
+type MailboxBulkResult struct {
+	Data    []MailboxBulkRow   `json:"data"`
+	Summary MailboxBulkSummary `json:"summary"`
+	// Allowance is the workspace's mailbox allowance after the batch, so the
+	// dashboard can say how many more rows will fit without another call.
+	Allowance *MailboxAllowance `json:"allowance,omitempty"`
 }

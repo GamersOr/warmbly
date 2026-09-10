@@ -25,15 +25,17 @@ var (
 	ErrNoEmailAccounts = errors.New("no email accounts available for this campaign")
 
 	// ErrNoEligibleMailbox is the narrower case: the campaign HAS mailboxes,
-	// but every one was gated out for both today and tomorrow (daily cap
-	// reached, warmup health, or outside its own sending window). Reporting
-	// that as ErrNoEmailAccounts sent people looking at their tag configuration
-	// for a problem that was never there.
+	// but none can send under its current settings, and waiting will not
+	// change that (a sending-behaviour profile with no working days). A gate
+	// that lifts on its own, such as a spent daily budget, a closed sending
+	// window or a warmup health hold, is a deferral instead, never this.
+	// Reporting this as ErrNoEmailAccounts sent people looking at their tag
+	// configuration for a problem that was never there.
 	//
 	// It wraps ErrNoEmailAccounts so existing callers that pause the campaign
 	// on errors.Is(err, ErrNoEmailAccounts) keep behaving exactly as before.
 	ErrNoEligibleMailbox = fmt.Errorf(
-		"%w: every mailbox is outside its sending window or over its daily budget", ErrNoEmailAccounts)
+		"%w: no mailbox can send under its current sending settings", ErrNoEmailAccounts)
 
 	// ErrDomainAuthFailing is the narrower case again: every mailbox in the
 	// campaign's pool was gated by the sending-domain authentication check.
@@ -58,6 +60,16 @@ var (
 	// contact; the returned accountID is a nominal pool mailbox for the wakeup
 	// task only (the next invocation re-evaluates selection from scratch).
 	ErrCampaignDeferred = errors.New("campaign send deferred - no eligible mailbox for this contact right now")
+
+	// ErrSenderBusy is the narrower deferral: this lead's sequence belongs to
+	// one mailbox, and that mailbox has nothing left today. Every step of a
+	// conversation comes from the address the contact first heard from, so the
+	// lead waits for it rather than being written to by a stranger.
+	//
+	// It wraps ErrCampaignDeferred, so every caller that reschedules on a
+	// deferral behaves exactly as before; only the contact drawer, which words
+	// the reason, tests for it.
+	ErrSenderBusy = fmt.Errorf("%w: the mailbox this lead's sequence belongs to has no capacity left today", ErrCampaignDeferred)
 )
 
 // DeferSlot is the wakeup time a caller must use after CalculateNextCampaignTime

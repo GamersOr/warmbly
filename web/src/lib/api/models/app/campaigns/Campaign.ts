@@ -1,5 +1,3 @@
-import type Sequence from "./sequences/Sequence";
-
 export type CampaignKind = "sequence" | "one_time";
 
 export default interface Campaign {
@@ -69,6 +67,15 @@ export default interface Campaign {
     max_new_leads_per_day: number;
     prioritize_new_leads: boolean;
 
+    // Delay before a contact's FIRST email, in minutes, counted from when they
+    // entered the campaign. 0 sends it as soon as the schedule allows.
+    entry_delay_minutes: number;
+
+    // Keep running for new leads: out of leads, the campaign waits (idle_since
+    // set) instead of finishing. Linking a segment turns it on.
+    continuous: boolean;
+    idle_since?: string | null;
+
     // Auto-pause guardrails. Bounce and complaint rates are ceilings (pause at
     // or above); the reply rate is a floor (pause below). A rate of 0 turns its
     // rule off. guardrail_tripped_at/reason are server-owned.
@@ -99,7 +106,6 @@ export default interface Campaign {
 
     // Extra
     analytics: null;
-    sequences: Sequence[] | null;
 }
 
 // One sending window within a day, in minutes since local midnight (end > start).

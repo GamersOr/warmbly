@@ -16,6 +16,7 @@ import {
     updateSegment,
 } from "@/lib/api/client/app/segments";
 import type { SegmentMemberMode, SegmentPreview, SegmentWrite } from "@/lib/api/models/app/segments/Segment";
+import type ContactSelection from "@/lib/api/models/app/contacts/ContactSelection";
 
 // Every segment read lives under ["segments"]: the realtime spine invalidates
 // that prefix on any segment or contact mutation, since membership is live.
@@ -100,8 +101,8 @@ export function useDeleteSegment() {
 export function useSetSegmentMembers() {
     const queryClient = useQueryClient();
     return useMutation({
-        mutationFn: ({ id, contacts, mode }: { id: string; contacts: string[]; mode: SegmentMemberMode }) =>
-            setSegmentMembers(id, contacts, mode),
+        mutationFn: ({ id, selection, mode }: { id: string; selection: ContactSelection; mode: SegmentMemberMode }) =>
+            setSegmentMembers(id, selection, mode),
         // ["contacts"] as a whole: the list moves and each pinned contact's
         // own segments panel changes.
         onSuccess: () =>
@@ -125,11 +126,14 @@ export function useSetCampaignSegments() {
     return useMutation({
         mutationFn: ({ campaignId, segmentIds }: { campaignId: string; segmentIds: string[] }) =>
             setCampaignSegments(campaignId, segmentIds),
-        // Linking enrols leads right away, so the campaign's contact list moves.
-        onSuccess: () =>
+        // Linking enrols leads right away, so the campaign's contact list
+        // moves, and it turns "keep running for new leads" on.
+        onSuccess: (_data, { campaignId }) =>
             Promise.all([
                 queryClient.invalidateQueries({ queryKey: ["contacts"] }),
                 queryClient.invalidateQueries({ queryKey: ["segments"] }),
+                queryClient.invalidateQueries({ queryKey: ["campaigns", campaignId] }),
+                queryClient.invalidateQueries({ queryKey: ["campaigns", "list"] }),
             ]),
     });
 }

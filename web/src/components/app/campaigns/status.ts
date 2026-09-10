@@ -54,6 +54,21 @@ export interface CampaignStatusSubject {
     status?: string;
     kind?: string;
     start_date?: Date | string | null;
+    idle_since?: Date | string | null;
+}
+
+// An active continuous campaign with nothing left to send: still running,
+// waiting for leads. Its own label and tone, so it never reads as stuck.
+export function isIdleCampaign(c: Pick<CampaignStatusSubject, "status" | "idle_since">): boolean {
+    return c.status === "active" && !!c.idle_since;
+}
+
+export const CAMPAIGN_IDLE_LABEL = "waiting for leads";
+export const CAMPAIGN_IDLE_TONE = "text-sky-600";
+
+export function campaignDisplayTone(c: CampaignStatusSubject): string {
+    if (isIdleCampaign(c)) return CAMPAIGN_IDLE_TONE;
+    return campaignStatusTone(c.status ?? "draft");
 }
 
 export function isOneTimeCampaign(c: Pick<CampaignStatusSubject, "kind">): boolean {
@@ -65,6 +80,7 @@ export function isOneTimeCampaign(c: Pick<CampaignStatusSubject, "kind">): boole
 // their sequence wording since the reasons are the same.
 export function campaignDisplayLabel(c: CampaignStatusSubject): string {
     const status = c.status ?? "draft";
+    if (isIdleCampaign(c)) return CAMPAIGN_IDLE_LABEL;
     if (!isOneTimeCampaign(c)) return campaignStatusLabel(status);
     if (status === "completed") return "sent";
     if (status === "active") {

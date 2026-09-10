@@ -7,7 +7,7 @@ A campaign sends a sequence of steps to each contact: the first email, then foll
 
 ## The flow canvas
 
-Steps lay out top to bottom, the first marked `Start`.
+Steps lay out top to bottom, the first marked `Start`. Above it sits the **Trigger** card, `Contact enters`: every contact starts there, and it carries how long their first email waits after they entered. Click its control to change that (the same setting as **Schedule** > **Before the first email**; see [the campaign guide](/guides/campaigns/#delay-before-the-first-email)). The trigger card is not a step: it cannot be moved, deleted or connected from.
 
 - Steps never connect themselves on the canvas. You drag a connector dot from one card to another. The only exception is the campaign wizard: follow-ups written there arrive already connected in order, with their waits set.
 - A step with no outgoing line ends the sequence for that contact (`Ends here`; unconnected paths show `Stop`).
@@ -20,11 +20,84 @@ Each card has two source dots: the **bottom dot** is a plain "go there next" con
 
 A step has an internal **name** (never seen by recipients), a **subject** with a variable menu for merge fields like `{{.FirstName}}`, and a rich-text **body**.
 
-The Preview tab renders through the real send engine against a sample contact, so merge fields, conditionals, and spintax resolve exactly as they will at send time. Malformed templates (an `{{if}}` with no `{{end}}`) are flagged before you start the campaign. See [Personalization](/guides/expressions/) for everything you can put in copy.
+### The body editor
+
+The toolbar carries undo and redo (`Ctrl+Z` and `Ctrl+Shift+Z`, or `Cmd` on a Mac), bold, italic, underline and strikethrough, a heading, bullet and numbered lists, links, images, the font menu, text and highlight colour, alignment, tables, the personalization menu, an AI block, a condition, spintax, and a form link. `Shift+Enter` puts a line break inside a paragraph rather than starting a new one.
+
+**Alignment** is left, centre, right and justify, applied to whichever blocks the selection covers. Pressing the alignment a block already has clears it again, so a body can go back to inheriting rather than pinning one on every paragraph.
+
+**The font menu** sets the typeface and the size. Sizes come as presets from 12 to 36 px and as a box for any value between 8 and 96. Only the typefaces every mail client can resolve are offered, and each one is a full stack rather than a single name: a web font is never loaded by Gmail or by Outlook on Windows, so choosing one would only decide which fallback the reader gets, and it is better to choose the fallback yourself. Both are written onto the text as inline styles, which is the only place a mail client reads them from.
+
+<Callout type="info" title="Sizes are in pixels">
+Every client honours `px`. Anything under 13px is hard to read on a phone, which is where most cold email is opened.
+</Callout>
+
+Pasting copy from Gmail, Outlook, Word or another email tool keeps its paragraphs, lists, links and emphasis, along with its tables, inline styles, colours, fonts and alignment. The blank-line scaffolding those tools ship (an empty `div` per gap, Word's spacer paragraphs) is dropped on the way in, because the editor already spaces paragraphs itself and keeping both renders every gap twice.
+
+Tables are worth knowing about: they are the only layout Outlook on Windows renders reliably, because it lays messages out with Word rather than a browser engine. Anything built with `position`, `flex` or `grid` collapses there. The table menu inserts a two by two grid and, once the cursor is inside one, adds and removes rows and columns, merges cells and deletes the table. The dashed cell borders you see while editing are the editing surface only; the sent email carries whatever borders the markup asks for.
+
+#### Images
+
+The image button offers three ways in: upload a file, paste an address, or pick something already in the workspace library. You can also drag an image straight onto the body, or paste a screenshot from the clipboard.
+
+Uploads go to a library shared by the whole workspace, so a logo uploaded once is one click away in every campaign. PNG, JPG, GIF and WebP are accepted, up to 5 MB each, and they count against the same storage limit as attachments, shown under **Settings > Billing**.
+
+Select a placed image and a small bar appears over it: quarter, half or full column width (or the image's own size), left, center or right alignment, and the alt text. Alt text is worth filling in. Most clients block remote images until the reader allows them, so alt text is what the first look actually shows, and it is what the plain-text version of the email carries in the image's place.
+
+Deleting an image from the library also deletes the file, so it stops loading in mail already sent. The dashboard asks before it does.
+
+<Callout type="warn" title="Images cost you deliverability">
+Cold email from a real person rarely has images. An image-heavy body reads as a marketing blast to filters that cannot read the picture, and the content check flags it. One signature logo or one product shot is usually the most a first touch should carry.
+</Callout>
+
+#### Writing the HTML yourself
+
+The `</>` button on the right of the toolbar swaps the body for its HTML. What you type there is stored exactly as you wrote it, merge fields and conditions included, so a template built elsewhere keeps its markup. The only thing that changes on the way out is what the send path adds or resolves: merge fields fill in, a `<style>` block is inlined onto the elements it matches, and the signature, opt-out footer and tracking are appended.
+
+HTML is a property of the step, not of the tab you happen to be on. A step written as markup opens as markup the next time anyone edits it, so a design cannot be quietly flattened by being reopened. Paste a whole HTML email into the visual editor and the step switches to HTML on its own and keeps the markup verbatim, because a document with its own `<head>` and `<style>` block is not something any visual editor can hold faithfully. The same happens if you copy the source of an email out of a file and paste it as text.
+
+Switching back to the visual editor hands the markup to the editor's own structure, which keeps paragraphs, breaks, headings, lists, links, emphasis, images, tables, `div` containers, colours, fonts and alignment. Anything outside that is named in a confirmation before it is dropped, and staying in HTML keeps it.
+
+#### CSS is inlined when the email sends
+
+Write your CSS in a `<style>` block as you normally would. When the email sends, every rule that matches something is copied onto the elements it matches, as a `style` attribute. Outlook.com, Yahoo and Gmail's mobile apps drop embedded stylesheets outright, so a design written with classes arrives unstyled without this.
+
+What that means in practice:
+
+- rules stay in the `<style>` block when they cannot be inlined: media queries, `@font-face`, `@keyframes`, and anything keyed on `:hover` or another reader state
+- a media query overriding a rule that has become an inline style needs `!important` on its declarations, or the inline style wins. This is true of every email tool that inlines CSS
+- your own `style` attribute still beats a stylesheet rule, and `!important` still beats that, exactly as in a browser
+- the rules that were inlined are removed from the `<style>` block, so the email does not carry its stylesheet twice
+- nothing happens to a body with no `<style>` block. Existing campaigns send byte for byte as before
+- `<style data-warmbly-inline="false">` is left exactly as written, if you want the cascade you wrote and know your readers
+
+#### What mail clients will do to it
+
+Under the body, and under the Preview tab, a panel names what your markup will run into: `<script>`, `<form>` and `<iframe>` being stripped, an external stylesheet that no client will ever fetch, CSS that Outlook on Windows ignores, images with no alt text, a web font that will fall back, and whether the message is long enough for Gmail to clip it. Gmail truncates anything over 102 KB behind a "View entire message" link, which also hides your unsubscribe footer and stops opens being recorded for readers who do not expand it.
+
+None of it blocks a send. It is there because writing email HTML means writing for renderers that disagree, and it is better to find out in the editor than from a reply.
+
+#### The plain-text half
+
+Every HTML email ships with a plain-text alternative beside it, and inbox providers read it.
+
+For a step written in HTML in the dashboard, Warmbly stores no plain-text half and renders one when the email sends: headings and paragraphs keep their line breaks, list items are bulleted, table rows become lines, each link keeps its destination in brackets after its text, and the stylesheet and any hidden preheader are left out. The mailbox's plain-text signature and the opt-out line follow it. The Preview tab shows the result, so you can read what a text-only client gets.
+
+This only applies when there is no plain-text body to send. Set `body_plain` through the API and that text is sent as written; leave it empty and the send path renders one from the HTML.
+
+### Preview and test
+
+The Preview tab renders through the real send engine, so merge fields, conditionals, and spintax resolve exactly as they will at send time. It draws the body the way a mail client would, in its own frame, rather than the way the editor does. **Preview as** picks who it renders for: a built-in sample contact, one of the campaign's leads, or any contact you search for, so a custom field your list does not actually have shows up as an unresolved token instead of looking fine. The mailbox picker next to it adds that sender's signature and shows the From name recipients will see. When the campaign is known the preview also appends the opt-out footer and lists the files attached to the campaign. Malformed templates (an `{{if}}` with no `{{end}}`) are flagged before you start the campaign. See [Personalization](/guides/expressions/) for everything you can put in copy.
+
+**Send test** in the preview mails the saved step to an address of your choice through the chosen mailbox, rendered for the chosen contact and carrying the attachments, signature and opt-out footer. Save the step first: the test sends what is stored, not unsaved edits. Opens and clicks on a test are not tracked, and its opt-out link names nobody, so clicking it suppresses no one.
 
 <Callout type="info" title="Templates">
 Apply a saved template to a step, or save a step as a reusable one from the composer. Templates carry their subject and body and live in your shared library.
 </Callout>
+
+### Attachments
+
+Upload attachments for a step below its composer by dragging and dropping files or clicking the upload area. A file uploaded there is sent with every email from that step and from no other step, and can be removed in the same place. Files attached to the campaign itself rather than to a step, which can only be added through the API, ride every step: they are listed under **Sent with every step** so each step shows everything it carries. Attachments count against your workspace storage limit, shown under **Settings > Billing**; an upload that would pass it is refused with `storage_limit_reached`, and two uploads racing for the last of the quota cannot both get in. Removing a step deletes the files scoped to it.
 
 ### Action steps
 
@@ -51,7 +124,7 @@ Switch steps always run on the normal schedule, so an instant reply branch leadi
 
 ## Wait and spacing
 
-Spacing belongs to the **target** step, not a separate node, so there is no wait block on the canvas. Click the connection leading into a step and set "wait N days before it" (0 to 60). The line shows a `wait 3d` label.
+Spacing belongs to the **target** step, not a separate node, so there is no wait block on the canvas. The one delay that is not a step's own is the wait before the *first* email, which lives on the Trigger card. Click the connection leading into a step and set "wait N days before it" (0 to 60). The line shows a `wait 3d` label.
 
 Because the wait belongs to the target, every path into that step uses the same wait. Spacing follow-ups out keeps your sending pattern natural; see [Deliverability](/guides/deliverability/).
 

@@ -4,14 +4,15 @@ import (
 	"context"
 	"time"
 
-	"github.com/getsentry/sentry-go"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
+	"github.com/warmbly/warmbly/internal/jobrun"
 )
 
 // WarmupBatchPoller reconciles in-flight OpenAI Batch API warmup-generation jobs:
-// it polls each active batch, ingests completed ones into the content bank, and
-// marks failed/expired/cancelled ones. It is a thin scheduler around
+// it polls each active batch, ingests what each finished one produced into the
+// content bank, and marks empty ones failed. It is a thin scheduler around
 // warmupcontent.Service.PollBatches; all policy lives in the service. Batches run
 // async (up to a 24h window) so a coarse 5-minute tick is plenty.
 type WarmupBatchPoller struct {
@@ -39,7 +40,7 @@ func (p *WarmupBatchPoller) Run(ctx context.Context) error {
 		return nil
 	}
 	if err := p.svc.PollBatches(ctx); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return err
 	}
 	return nil
@@ -47,21 +48,9 @@ func (p *WarmupBatchPoller) Run(ctx context.Context) error {
 
 // Start begins scheduled execution on the configured interval.
 func (p *WarmupBatchPoller) Start(ctx context.Context) {
-	ticker := time.NewTicker(p.interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if err := p.Run(ctx); err != nil {
-				sentry.CaptureException(err)
-			}
-		case <-p.stopCh:
-			return
-		case <-ctx.Done():
-			return
-		}
-	}
+	ctx, cancel := stopContext(ctx, p.stopCh)
+	defer cancel()
+	jobrun.Loop(ctx, "warmup_batch_poller", p.interval, false, p.Run)
 }
 
 // Stop halts scheduled execution.

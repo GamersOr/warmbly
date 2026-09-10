@@ -29,6 +29,7 @@ import { CommandPalette } from "@/components/shared/CommandPalette";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { GlobalCursorsProvider } from "@/components/app/presence/GlobalCursors";
 import AgentPanel from "@/components/app/agent/AgentPanel";
+import { useRouteKey } from "@/hooks/useRouteKey";
 
 export function AppShell() {
     useKeyboardShortcuts();
@@ -46,9 +47,13 @@ export function AppShell() {
     // Pages scroll this inner container, not the window, so nothing resets the
     // offset between routes: navigating from halfway down a long list used to
     // land mid-page on the next one. Reset before paint so it never flashes.
+    // Keyed on the route identity, not the raw pathname, so a page that keeps
+    // in-page state in the URL (the unibox's open thread) is not scrolled away
+    // from what the user was reading.
+    const routeKey = useRouteKey();
     useLayoutEffect(() => {
         scrollRef.current?.scrollTo({ top: 0, left: 0 });
-    }, [pathname]);
+    }, [routeKey]);
 
     return (
         <div className="fixed inset-0 flex flex-col">
@@ -80,7 +85,7 @@ export function AppShell() {
                                         content area and stays that way until
                                         the query lands (only a reload fixes
                                         it). This is that boundary. */}
-                                    <Suspense fallback={<RouteFallback />}>
+                                    <Suspense key={routeKey} fallback={<RouteFallback />}>
                                         <SubscriptionGate>
                                             <Outlet />
                                         </SubscriptionGate>

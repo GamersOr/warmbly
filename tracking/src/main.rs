@@ -10,6 +10,7 @@ mod links;
 mod nats;
 mod observability;
 mod producer;
+mod unsubscribe;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -26,7 +27,10 @@ use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
-use crate::handlers::{health, track_click, track_open, track_page_hit, tracking_js, AppState};
+use crate::handlers::{
+    health, track_click, track_open, track_page_hit, tracking_js, unsubscribe_page,
+    unsubscribe_submit, unsubscribe_undo, AppState,
+};
 use crate::observability::report_error;
 use crate::producer::Producer;
 
@@ -55,6 +59,7 @@ async fn connect_producer(config: &Config) -> Producer {
             Err(e) => {
                 if attempt >= MAX_ATTEMPTS {
                     report_error("Failed to create tracking event producer", e.as_ref());
+                    observability::flush();
                     std::process::exit(1);
                 }
                 warn!(
@@ -84,10 +89,12 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             report_error("Failed to load config", e.as_ref());
+            observability::flush();
             std::process::exit(1);
         }
     };
-    observability::init(&config.env);
+    // Held until main returns so queued events are flushed on shutdown.
+    let _sentry = observability::init(&config.env, Some(&config.sentry_dsn), &config.release);
     info!("Starting tracking service on {}", config.addr());
 
     // Event-bus producer (NATS by default; Kafka when EVENTBUS_PROVIDER=kafka
@@ -108,6 +115,19 @@ async fn main() {
             "/p",
             post(track_page_hit).layer(DefaultBodyLimit::max(hits::MAX_BODY_BYTES)),
         )
+        // Recipient opt-out. A workspace's verified tracking domain is the
+        // host its campaign mail carries, so the unsubscribe address in that
+        // mail resolves here; the backend owns the pages behind it.
+        .route(
+            "/unsubscribe/:token",
+            get(unsubscribe_page)
+                .post(unsubscribe_submit)
+                .layer(DefaultBodyLimit::max(unsubscribe::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/unsubscribe/:token/resubscribe",
+            post(unsubscribe_undo).layer(DefaultBodyLimit::max(unsubscribe::MAX_BODY_BYTES)),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -122,6 +142,7 @@ async fn main() {
         Ok(a) => a,
         Err(e) => {
             observability::report_issue("Invalid tracking listen address", &e.to_string());
+            observability::flush();
             std::process::exit(1);
         }
     };
@@ -131,6 +152,7 @@ async fn main() {
         Ok(l) => l,
         Err(e) => {
             observability::report_issue("Failed to bind tracking listener", &e.to_string());
+            observability::flush();
             std::process::exit(1);
         }
     };
@@ -144,6 +166,7 @@ async fn main() {
     .await
     {
         observability::report_issue("Tracking server terminated unexpectedly", &e.to_string());
+        observability::flush();
         std::process::exit(1);
     }
 }

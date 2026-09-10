@@ -5,6 +5,15 @@ description: A step-by-step guide to running the whole Warmbly platform yourself
 
 Warmbly self-hosts with **no cloud account of any kind**: no AWS, no GCP, no Stripe, no Kafka. One `docker-compose.yml` runs everything on local, open-source pieces, and every external dependency is an environment variable you can flip later.
 
+<Callout title="Just want it running?">
+```bash
+curl -fsSL https://warmbly.com/install.sh | sh
+```
+That pulls the published release images and skips everything on this page: no clone, no compiler, under two minutes. Add `--wizard` and it asks where your data lives, what is kept and for how long, and how it is backed up. See [Install](/development/install/).
+
+This page is the build-from-source path, and the reference for every setting either path writes. Take it when you want to run modified code, a platform we publish no image for, or a build you produced yourself.
+</Callout>
+
 Three commands give you a working install. Everything after them is optional, and nothing below is needed before you have seen it running.
 
 <Mermaid
@@ -174,7 +183,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:5173          # dashbo
 
 If one does not print `200`, `make logs backend` (or the service in question) will say why, and [troubleshooting](#troubleshooting) covers the usual causes.
 
-The admin panel's **System Status** page shows the same probes plus the platform mail transport, with a live connection check and a send-test button.
+The admin panel's **Instance > Setup and health > Services** tab shows the same probes plus the platform mail transport, with a live connection check and a send-test button.
 
 ## What is running
 
@@ -406,7 +415,7 @@ Credentials are never sent over an unencrypted connection. If the relay does not
 
 The backend dials the relay once at boot and logs the result, so a broken configuration shows up in `docker compose logs backend` rather than as a failed password reset weeks later.
 
-The admin panel's **System Status** page has a Platform mail card with the current transport, a live connection check that shows the SMTP error verbatim, and a send-test button.
+The admin panel's **Instance > Setup and health > Services** tab has a Platform mail card with the current transport, a live connection check that shows the SMTP error verbatim, and a send-test button.
 
 ### Deliverability
 
@@ -686,53 +695,85 @@ WORKER_ID=<a uuid you generate once>     # uuidgen
 
 Set it only when you run a single worker per host. Scaled replicas share one environment, so a pinned `WORKER_ID` would make them collide; leave it unset when using `--scale` and let the state volume handle it.
 
-The remote installer handles this for you: it derives the UUID from the machine's public IPv4, so a reinstall on the same IP keeps the same identity and reputation.
+The join script handles this for you: it records the node id the control plane assigned and reuses it when you re-run the command, so a rebuild on the same machine keeps the same identity and its mailboxes.
 
-### Remote workers
+### Adding a machine
 
-A remote worker VPS must be able to reach the backend URL, NATS (or Kafka), and Redis.
+Every Warmbly process that runs on a machine you own is a node. Adding one is two commands: issue a join token, then run one command on the machine.
 
-<Callout type="warn" title="The enrolled worker inherits the backend's addresses">
-The config handed to a worker is generated from the backend's own environment. On a stock local install that means `ENCRYPTED_KEYS_BACKEND_URL=http://localhost:8080`, `NATS_URL=nats://nats:4222`, and `REDIS=redis://redis:6379`, none of which resolve on another machine. Before enrolling a remote worker, set `API_PUBLIC_URL`, `NATS_URL`, and `REDIS` on the backend to addresses the VPS can actually reach, and open those ports.
+```bash
+# On the instance
+warmblyctl fleet join-token
+
+# On the new machine (needs Docker, systemd and root)
+curl -fsSL https://api.example.com/join.sh | sh -s -- \
+  --url https://api.example.com \
+  --token <join-token> \
+  --role worker \
+  --region eu-central
+```
+
+`--role` is `worker` (sends and syncs mail) or `consumer` (processes events). `--region` is optional and only affects worker placement: a mailbox scores better on a worker near where its provider expects sign-ins.
+
+Nothing connects back to the machine, before or after. It needs no inbound port, no SSH key and no cloud account; the only credential involved is the join token, which is used once and never stored. Re-running the same command on the same machine re-joins it under the same identity, keeping its history and its mailboxes.
+
+The script enrols the node, writes the config the control plane hands back to `/etc/warmbly/node.env`, installs a systemd service and an update timer, and starts it. Add `--dry-run` to see what it would write without changing anything.
+
+<Callout type="warn" title="The node inherits the backend's addresses">
+The config handed to a node is generated from the backend's own environment. On a stock local install that means `ENCRYPTED_KEYS_BACKEND_URL=http://localhost:8080`, `NATS_URL=nats://nats:4222`, and `REDIS=redis://redis:6379`, none of which resolve on another machine. Before adding a remote node, set `API_PUBLIC_URL`, `NATS_URL`, and `REDIS` on the backend to addresses the machine can actually reach, and open those ports.
 </Callout>
 
-The generated `worker.env` carries the decryption material the worker needs: the internal API token, `KMS_LOCAL_MASTER_KEY`, and `CREDENTIALS_ENCRYPTION_KEY`. It is returned exactly once, over the one-time enrollment token, and the token is rejected on any reuse. Serve the API over HTTPS before enrolling anything across a network you do not control.
+That config carries the decryption material the node needs: the internal API token, `KMS_LOCAL_MASTER_KEY`, and `CREDENTIALS_ENCRYPTION_KEY`. Serve the API over HTTPS before adding a node across a network you do not control. It deliberately does not include `PRIMARY_DB`: a worker reaches relational data through the internal API and nothing else.
 
-On `BLOB_PROVIDER=filesystem`, a remote worker writes blobs to its own local disk rather than a volume the backend shares. Use `BLOB_PROVIDER=s3` with a bucket both sides can reach when you run workers off-host.
+`BLOB_PROVIDER=filesystem` does not survive a fleet. A worker reads the message body the backend wrote, so the two need the same storage with permissions that let both reach it, and a node on another machine has neither. The join script creates and mounts `BLOB_FS_ROOT` so the node starts, and warns you, but sends will fail when the worker cannot read the body. Use `BLOB_PROVIDER=s3` with a bucket both sides can reach before running nodes off-host.
 
 <Mermaid
   chart={`
 sequenceDiagram
-  participant A as Admin panel
+  participant O as Operator
   participant B as Backend
-  participant V as VPS
-  A->>B: Create worker (one-time enrollment token)
-  V->>B: GET /worker-install.sh
-  V->>B: POST /api/v1/workers/enroll (token)
-  B-->>V: full worker config (worker.env)
-  V->>V: systemd unit + docker run
-  V-->>B: heartbeat every 90s
+  participant M as Machine
+  O->>B: warmblyctl fleet join-token
+  M->>B: GET /join.sh
+  M->>B: POST /api/v1/fleet/join (token, role)
+  B-->>M: node id + config + version to run
+  M->>M: systemd service + update timer
+  M-->>B: heartbeat
+  B-->>M: version you should be running
 `}
 />
 
-**Token enrollment, one command on the VPS.** Creating a worker through the admin API with `generate_enrollment_token` returns a one-time `wmenroll_...` token. Then:
+### Keeping nodes current
+
+Nodes update themselves. Each heartbeat asks the control plane what version it should be running; when the answer differs from what it is running, the host-side timer pulls that image and restarts the service. Nothing is pushed.
 
 ```bash
-curl -fsSL https://api.example.com/worker-install.sh | sudo bash -s -- \
-  --enroll wmenroll_... --api-base https://api.example.com
+warmblyctl fleet version            # what the fleet should be on
+warmblyctl fleet version v1.4.2     # move the whole fleet
+warmblyctl fleet channel stable     # follow releases again
+warmblyctl fleet pin <node> v1.4.1  # hold or canary one machine
 ```
 
-**Or SSH-managed from the admin panel.** Go to Workers, **Add Worker** (host, port, user), paste the generated SSH public key into the VPS's `~/.ssh/authorized_keys`, click **Test connection** (the first success pins the host fingerprint), then **Install**.
+Setting a tag also pins the channel, so a release landing later does not silently undo a deliberate rollback. `fleet channel stable` resumes following releases.
 
-Either way the installer installs Docker if it is missing, derives the worker's UUID from the machine's public IPv4 (same IP, same identity and reputation), writes `/etc/warmbly/worker.env`, creates the `warmbly-worker.service` systemd unit, and adds a daily self-update timer. Run it with `--help` for every flag: `--ips` for multi-IP machines, plus `--update`, `--uninstall`, and `--purge`.
+The backend is deliberately excluded: it is the thing that tells every node what version to be, so it is upgraded the same way as the rest of your infrastructure. Upgrade the backend, and the fleet follows.
 
-Set `WORKER_IMAGE` on the backend explicitly, for example `ghcr.io/<owner>/warmbly/worker:prod`. Its built-in default does not match what CI publishes.
+### Watching the fleet
 
-### Day-2 operations
+```bash
+warmblyctl fleet list
+```
 
-From each worker's detail page in the admin panel: Test connection, Install (idempotent), Restart, Pull latest and restart, Apply config and restart (environment only, no image pull), Live status, Logs, Update OS packages, Reboot, Rotate SSH keys, Uninstall, and Delete.
+```
+ROLE      NAME      STATE  VERSION           REGION      MEM    SEEN     ID
+worker    box-1     live   v1.4.2            eu-central  128MB  12s ago  de434ce4-...
+consumer  events-1  live   v1.0.0 -> v1.4.2  -           96MB   30s ago  2b334317-...
+```
 
-"Apply config" only rewrites the environment file. Use "Pull latest and restart" to move a worker onto a new image.
+`STATE` is `live` (beating), `unreachable` (enrolled but silent) or `stopped` (told us it was shutting down). A version shown as `a -> b` is a node that has not picked up the target yet. The same view is in the admin panel under Fleet.
+
+A node leaves rotation the moment it stops: on shutdown it sends a farewell beat that marks it inactive. If it dies without one (hard kill, machine loss), placement stops considering it once its heartbeat goes stale. Either way nothing is placed onto a machine that is no longer answering.
+
 
 ## Images and releases
 
@@ -740,8 +781,12 @@ CI publishes multi-arch images to `ghcr.io/<owner>/warmbly/`, which works on any
 
 | Trigger | Images | Tags |
 |---------|--------|------|
-| Push to `main` | backend, consumer, worker, tracking, realtime | `:<sha>`, `:dev` |
+| Push to `main` | backend, consumer, worker, forms, updater, tracking, realtime | `:<sha>`, `:dev` |
 | Tag `vX.Y.Z` | all of the above plus web and admin | `:vX.Y.Z`, `:vX.Y`, `:vX`, `:prod` |
+
+One thing to know if you are running a fork: GHCR creates each package private and does not inherit your repository's visibility, so images published by a green workflow stay unreadable to everyone else until you make each package public by hand. On a personal fork that is the package's own settings page, reached from the Packages tab on your profile. On an organization fork it is the same page reached from the org's Packages, and public packages have to be permitted in the org's package settings first, or the control is greyed out. There is no API for either. `make images-check` tells you where a given tag stands, with no credentials, and it is the same check the release runs before it publishes.
+
+Every app service in `docker-compose.yml` carries both an `image:` and a `build:` key, so the same file serves both paths. `docker compose pull && docker compose up -d` runs the published images and compiles nothing; `docker compose up --build` still builds this checkout. Pin a release with `WARMBLY_TAG=v1.4.2` in `.env`, or point `WARMBLY_IMAGE_PREFIX` at your own registry.
 
 To move a worker fleet onto a new release, update `WORKER_IMAGE` and use "Pull latest and restart" on each worker. Control-plane migrations are forward-only, so prefer rolling forward over rolling back.
 
@@ -759,7 +804,17 @@ Upgrading is safe with data in place: migrations are forward-only and apply on b
 
 ### Backing up
 
-Back up three things. All three, or the backup is not a backup:
+One command writes all three of the things that only restore together:
+
+```bash
+docker compose -p warmbly exec backend warmblyctl backup --out /data/blobs/warmbly.tar.gz
+docker compose -p warmbly cp backend:/data/blobs/warmbly.tar.gz ./warmbly.tar.gz \
+  && docker compose -p warmbly exec -T backend rm -f /data/blobs/warmbly.tar.gz
+```
+
+That bundle holds the database, the blob root and the encryption keys, and `warmblyctl restore` puts it back on another host, refusing to run when that host's keys are not the ones the bundle was sealed with. [Data control](/development/data-control/#backups) covers scheduling it and moving an instance.
+
+By hand, if you would rather assemble it yourself, it is these three and no fewer:
 
 ```bash
 docker compose -p warmbly exec -T postgres pg_dump -U warmbly warmbly_dev > backup.sql

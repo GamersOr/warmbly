@@ -19,15 +19,10 @@ import (
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
-// CampaignWaker wakes a campaign's parked send chain after leads are added.
+// CampaignWaker wakes a campaign's parked send chain after leads are added,
+// and restarts a finished one. Satisfied structurally by campaign.CampaignService.
 type CampaignWaker interface {
 	WakeCampaigns(ctx context.Context, orgID uuid.UUID, campaignIDs []string)
-}
-
-// CampaignStarter restarts a completed campaign whose linked segments grew.
-// Satisfied structurally by campaign.CampaignService.
-type CampaignStarter interface {
-	StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string, opts models.StartCampaignOptions) *errx.Error
 }
 
 type Service interface {
@@ -57,7 +52,6 @@ type Service interface {
 	// membership drift (dates, engagement, nested segments) still enrols.
 	StartCampaignSegmentSync(ctx context.Context, interval time.Duration)
 	SetCampaignWaker(w CampaignWaker)
-	SetCampaignStarter(st CampaignStarter)
 	SetEnrolmentAuditor(a EnrolmentAuditor)
 }
 
@@ -73,11 +67,10 @@ type CustomFieldLister interface {
 }
 
 type service struct {
-	repo    repository.SegmentRepository
-	fields  CustomFieldLister
-	waker   CampaignWaker
-	starter CampaignStarter
-	audit   EnrolmentAuditor
+	repo   repository.SegmentRepository
+	fields CustomFieldLister
+	waker  CampaignWaker
+	audit  EnrolmentAuditor
 	// orgSync coalesces org-wide enrolment passes, one entry per org that is
 	// currently syncing. Guarded by syncMu, which owns every transition so an
 	// entry is only dropped when nothing is running or queued.
@@ -98,7 +91,6 @@ func NewService(repo repository.SegmentRepository, fields CustomFieldLister) Ser
 }
 
 func (s *service) SetCampaignWaker(w CampaignWaker)       { s.waker = w }
-func (s *service) SetCampaignStarter(st CampaignStarter)  { s.starter = st }
 func (s *service) SetEnrolmentAuditor(a EnrolmentAuditor) { s.audit = a }
 
 func (s *service) List(ctx context.Context, orgID uuid.UUID) ([]models.Segment, *errx.Error) {
@@ -388,27 +380,17 @@ func (s *service) syncLinkedCampaign(ctx context.Context, lc models.LinkedCampai
 	return added, nil
 }
 
-// reactToEnrolment wakes an active campaign and restarts a completed one when
-// new leads arrived, whichever path enrolled them.
+// reactToEnrolment wakes an active campaign and restarts a finished one when
+// new leads arrived. WakeCampaigns owns both (the finished case goes through
+// the full launch checks), so a segment enrolment, a direct add and an
+// automation all behave the same way. Paused and draft campaigns accumulate.
 func (s *service) reactToEnrolment(ctx context.Context, lc models.LinkedCampaign, added int) {
-	if added == 0 {
+	if added == 0 || s.waker == nil {
 		return
 	}
 	switch lc.Status {
-	case "active":
-		if s.waker != nil {
-			s.waker.WakeCampaigns(ctx, lc.OrganizationID, []string{lc.CampaignID.String()})
-		}
-	case "completed":
-		// Completed only means the campaign ran out of leads; new segment
-		// members are exactly the reason to pick it back up. StartCampaign
-		// re-runs every launch check, so a campaign past its end date, over
-		// plan limits, or with a risky list stays closed.
-		if s.starter != nil {
-			if xerr := s.starter.StartCampaign(ctx, lc.OrganizationID, lc.CampaignID.String(), models.StartCampaignOptions{Automatic: true}); xerr != nil {
-				log.Info().Str("campaign_id", lc.CampaignID.String()).Str("reason", xerr.Message).Msg("segment sync: completed campaign not restarted")
-			}
-		}
+	case "active", "completed":
+		s.waker.WakeCampaigns(ctx, lc.OrganizationID, []string{lc.CampaignID.String()})
 	}
 }
 

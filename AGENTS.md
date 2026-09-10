@@ -13,6 +13,15 @@ At a product level, the app does four main things:
 
 The backend API is the control plane. Workers are the execution plane.
 
+It ships as a hosted service and as a self-host, and the two are the same code.
+The front door for the self-host is one command,
+`curl -fsSL https://warmbly.com/install.sh | sh`, which pulls the published
+release images and needs no clone and no compiler. `--wizard` turns it into an
+interactive install that asks the data-control questions up front: where each
+store lives, what is kept and for how long, how it is backed up. The script is
+`site/public/install.sh` and it has its own rules below; the docs are
+`docs/content/docs/development/install.mdx` and `data-control.mdx`.
+
 ## Working In This Repo
 
 CI is strict. `go build ./...` succeeding is not enough — `golangci-lint` runs `gofmt` as part of its checks, and a single unformatted import block or mis-indented doc comment will fail the PR even when the code compiles cleanly. Before declaring any Go change done:
@@ -39,6 +48,7 @@ Docs stay in sync:
 - the customer docs site lives in `docs/` (Fumadocs, served at docs.warmbly.com); content is MDX under `docs/content/docs/` in three sections: `guides/` (product behavior), `learn/` (fundamentals), `api/` (API reference)
 - any change that alters user-visible behavior must update the matching docs page in the same change: a new or changed endpoint updates `api/endpoints.mdx` (scope map) and, where relevant, `api/authentication.mdx`; a new or changed API permission updates `api/permissions.mdx` including the permission table, presets, and all three language tabs in the constants section; a new or changed error code updates `api/error-codes.mdx`; a new or changed product feature, default, limit, or setting updates the relevant `guides/` page (or adds one, registered in `guides/meta.json` under the right section group)
 - removing or renaming a feature, endpoint, or permission means removing or updating its docs too; do not leave stale docs behind
+- self-hosting behavior has its own pages under `docs/content/docs/development/`: a change to the installer or to what it asks updates `install.mdx`; a change to where a store lives, how long something is kept, or how an instance is backed up or moved updates `data-control.mdx`; a new environment variable updates `configuration.mdx`, and a new database-backed setting updates its table there as well as the admin panel
 - follow the docs conventions: frontmatter `title` is the H1 (no `#` heading in the body), no decorative sidebar icons (pages and `meta.json` sections carry no `icon`; the source loader has the lucide icon plugin disabled, and code-sample tabs use the real language logo instead), sentence-case headings, no em dashes in prose, internal links use trailing slashes (`/guides/mailboxes/`)
 - verify with `pnpm types:check` and `pnpm lint` in `docs/` (the site is a fully static export; `pnpm build` writes `out/`)
 
@@ -81,6 +91,69 @@ Rows move as `jsonb` in both directions, so adding a *column* to an existing tab
 
 The same applies to the customer-facing side of a feature: if it stores org data, its docs page and `docs/content/docs/guides/workspace-export-import.mdx` should agree about whether that data moves.
 
+### The installer is a published artifact
+
+`site/public/install.sh` is the one-command self-host installer, served
+verbatim from the static site at `https://warmbly.com/install.sh`. What is in
+the repo is byte for byte what a stranger pipes into their shell, which makes
+it the highest-consequence file here that is not Go.
+
+It is a wizard: an animated stepper, arrow-key and vim menus, live pull and
+health screens, a review pass, and a `--demo` mode that plays the whole thing
+while installing nothing. `docs/content/docs/development/install.mdx` documents
+it and `data-control.mdx` documents what its questions decide; the
+`warmbly-install` skill is the agent-facing version.
+
+Rules, all of them learned from breaking them:
+
+- **POSIX sh, not bash.** It runs under whatever `/bin/sh` the host has, which
+  on Debian and Ubuntu is dash. A `sh -n` that passes under your own shell
+  proves nothing about that; `make installer-check` runs `dash -n` and
+  `shellcheck -s sh`
+- **`set -eu`, everything in a function, `main "$@"` on the last line**, so a
+  truncated download executes nothing. Watch for `[ x ] && y` as a function's
+  LAST command: it returns non-zero when the test fails, and under `set -e`
+  that ends the run. Use an `if`, or end with `return 0`
+- **Nothing drawn inside a redraw loop may be wider than the terminal.** A
+  wrapped line is two physical rows while every `ESC[nA` counts logical ones,
+  so one long option hint makes the menu draw over itself and over whatever was
+  on screen before it. Everything in a loop goes through `fit`
+- **The screen is not ours.** It appends by default, `--clear` is opt-in, and
+  `ESC[3J` (erase scrollback) is never sent
+- **Regenerate the checksum.** `site/public/install.sh.sha256` is what makes
+  "download, verify, read, run" a real alternative to piping into a shell.
+  `make installer-sha`, and CI fails when the two disagree
+- **Every answer is a flag and a `WARMBLY_*` variable.** An install that can
+  only be driven by keyboard cannot be driven by Ansible, cloud-init or an
+  agent, and the wizard exists to be optional
+- **Idempotent.** A second run adopts the existing `.env`, never regenerates a
+  secret (a new `CREDENTIALS_ENCRYPTION_KEY` is permanent data loss) and never
+  moves an existing data root
+
+Run `make installer-check` before pushing a change to it (POSIX parse,
+shellcheck, `--help`, `--demo`, `--print-env`, a compose file per answer shape,
+a pty width regression test, and the checksum). `make installer-demo` is how
+you see a UI change without installing anything.
+
+`site/public/cli.sh` is the second published script, served at
+`https://warmbly.com/cli.sh`, and it installs the `warmbly` CLI rather than an
+instance. Every rule above applies to it, plus two of its own:
+
+- **It verifies what it downloads.** The release publishes `checksums.txt`
+  next to the archives, and a mismatch installs nothing rather than warning.
+  Never weaken that to a warning
+- **Release assets are named without the version**, so
+  `releases/latest/download/warmbly_<os>_<arch>.tar.gz` resolves with no
+  GitHub API call. The unauthenticated API is rate limited per IP, which is
+  what breaks a curl installer on a shared runner. `scripts/build-cli.sh` and
+  the platform list in `cli.sh` have to agree; `make cli-check` fails when they
+  do not
+
+`make cli-check` runs the whole thing (POSIX parse, shellcheck, `--help`,
+`--dry-run`, a real install from a local mirror, checksum tampering, uninstall,
+the PowerShell parse and the checksum), and `make cli-sha` regenerates the
+checksum after any edit. `site/public/cli.ps1` is the Windows half.
+
 ### Verification: what to run, what to skip
 
 Keep the loop fast. The signals that matter are formatting, lint, and typecheck — not local builds or browser automation.
@@ -91,6 +164,11 @@ Always, before calling a Go change done:
 - run `make lint` (golangci-lint, which first runs `make check-migrations`)
 
 For frontend changes, run `pnpm typecheck` and `pnpm lint` in any tree you touched.
+
+For a change to `site/public/install.sh`, run `make installer-check`; it is the
+same script CI runs and it regenerates nothing, so a stale checksum fails there
+exactly as it will in CI. For `site/public/cli.sh` or `cli.ps1`, the equivalent
+is `make cli-check` (and `make cli-sha` after any edit).
 
 Do not:
 
@@ -108,7 +186,7 @@ Infra runs in docker; the Go services and frontends run natively on the host for
 - `make dev` — the one-command stack: brings up the docker infra and waits for postgres, applies migrations, loads seed fixtures (skip with `SEED=false`), installs web + admin deps on first run, starts realtime and tracking as containers, then runs backend + forms + consumer + worker + dashboard + admin in one terminal. Login: dev@warmbly.com / password123, with the emailed login code in Mailpit at http://localhost:18025. Ctrl-C stops the app; infra stays up.
 - `make infra` — start the backing services in docker (postgres, redis, nats, mailpit). Run once; leave running. Kafka, Schema Registry, localstack, cloud-tasks, and stripe-mock are gone; the stack is no-cloud by default (NATS, local KMS, filesystem blobs, in-process tasks).
 - `make backend` — run the API natively on `:8080` (applies the embedded migrations on boot against the docker postgres).
-- `make consumer` / `make worker` / `make worker-premium` — run those Go services natively, each in its own terminal. Two native workers exist because tier placement is strict: free-trial orgs place onto the free-tier worker (`make worker`), paid orgs onto the premium one (`make worker-premium`). The workers read encrypted DEKs through the backend's `/internal/dek` endpoint (the prod `http` provider, no worker DB), so `make backend` must be running and their `INTERNAL_API_TOKEN` must match (the targets are pre-wired to match).
+- `make consumer` / `make worker` — run those Go services natively, each in its own terminal. Both register themselves as fleet nodes on their first heartbeat, so they show up in `warmblyctl fleet list` without any enrolment step in dev. Workers are interchangeable, so one is enough; run a second `make worker WORKER_ID=<uuid>` in another terminal when you want to watch placement spread mailboxes across a fleet. The workers read encrypted DEKs through the backend's `/internal/dek` endpoint (the prod `http` provider, no worker DB), so `make backend` must be running and their `INTERNAL_API_TOKEN` must match (the targets are pre-wired to match).
 - `make run` — backend + forms + consumer + worker together in one terminal (Ctrl-C stops all).
 - `make forms` — the public forms service natively on `:8090` (`cmd/forms`): builds the `forms/` TanStack app, then serves it plus the embed loader and public submissions. No database; it resolves forms and forwards submissions through the backend's internal API, so `make backend` must be running and `INTERNAL_API_TOKEN` must match (pre-wired). The backend's `FORMS_DOMAIN=localhost:8090` makes dashboard share links point at it; `make forms FORMS_PORT=8091` (matched on `make backend`) moves it when worktrees share the machine. `make forms-web` runs the Vite dev server (:5175) for iterating on the app itself.
 - `make sandbox` — fully working demo environment: seeds the "Sunrise Labs" showcase org (live mailboxes: SMTP -> mailpit, IMAP -> dovecot, credentials sealed with `CREDENTIALS_ENCRYPTION_KEY`) and runs the simulator that plays the internet (delivers mail into dovecot inboxes, opens pixels, clicks tracked links, replies as contacts). Needs `make run` + `make tracking` alongside. Docs: `docs/content/docs/development/sandbox.mdx`.
@@ -116,6 +194,8 @@ Infra runs in docker; the Go services and frontends run natively on the host for
 - `make web` / `make admin` / `make site` — frontend dev servers (5173 / 5174 / 4321), pointed at the native backend.
 - `make seed` — load fixtures (after the backend has applied migrations).
 - `make fmt` / `make lint` — format and lint Go.
+- `make installer-demo` — walk the self-host installer's wizard with nothing installed: the real questions and review, a played pull and start. No Docker, no network, no file written. `WARMBLY_DEMO_FAST=1` collapses the animations while iterating on them.
+- `make installer-check` / `make installer-sha` — everything CI runs against `site/public/install.sh`, and the checksum regeneration that has to follow any edit to it.
 
 Prefer native `make backend` over rebuilding the docker backend image: docker rebuilds are slow because the image bakes in the migrations and the compiled binary, so a one-line change means a full image build + container recreate. The native targets skip all of that. The dockerized hot-reload flow (`make app`) and prod-image smoke test (`make up`) remain available when you specifically need containers.
 
@@ -197,41 +277,100 @@ API keys with the `REALTIME_SUBSCRIBE` permission (bit 11) can connect to the sa
 - `cmd/backend`: API and business orchestration
 - `cmd/consumer`: consumes Kafka events and updates platform state
 - `cmd/worker`: execution worker for send/sync operations
+- `cmd/cli`: the `warmbly` CLI, the customer-facing one. A signed-in, multi-host client of the public REST API (`internal/cli/*` holds its config, HTTP client and renderers). It never serves HTTP and never touches Postgres; `cmd/warmblyctl` is the operator's CLI and keeps the database half. The directory is `cli` and the binary is `warmbly`, so every build target names its output explicitly (`-o warmbly`), and `go install` needs the rename documented in `docs/content/docs/api/cli.mdx`
 - `cmd/forms`: the public face of hosted lead-capture forms (`internal/formserver`): serves the built `forms/` app, per-form page shells (with the per-form embed CSP), the embed loader and public submissions on their own origin (`FORMS_DOMAIN`). No database; the backend's internal API is its only dependency, like the tracking service
 - `forms/`: the public form page app (React + TanStack Router/Query/Form, Vite CSR build). Renders a published form from the same-origin `/api/forms/:publicID`, submits to `/api/forms/:publicID/submit`; the Go forms service hosts the build
 - `tracking/`: open and click tracking service
 - `realtime/`: websocket fanout service
 - `web/`: in-product frontend (dashboard). Customer-facing only: it holds no platform-admin screens, and operator tooling must not be added back here
 - `admin/`: platform admin panel (:5174), the single operator surface. Workers, users, orgs, warmup, campaigns, analytics, audit. Every route sits behind `RequireAdmin` and the backend's `RequireAdminPermission` gates
-- `site/`: public marketing site (Astro 5 + Tailwind v4)
+- `site/`: public marketing site (Astro 5 + Tailwind v4). `site/public/install.sh` is the self-host installer served at warmbly.com/install.sh and `site/public/cli.sh` is the CLI installer served at warmbly.com/cli.sh (with `cli.ps1` for Windows), each with its checksum next to it; see the rules above before touching either
 - `deploy/`: production deploy manifests, infrastructure, and runtime config
 - `docs/`: documentation site (docs.warmbly.com); product guides, API reference, and self-hosting/engineering docs under `content/docs/development/`
-- `scripts/`: one-off tooling (codegen, migrations, local dev utilities)
+- `scripts/`: one-off tooling (codegen, migrations, installer checks, local dev utilities)
+- `skills/`: agent playbooks shipped with the repo (`warmbly-cli` for the `warmbly` CLI, `warmbly-api` for the same product surface through `warmblyctl`, `warmbly-ops` for instance administration, `warmbly-install` for standing an instance up and moving it). A command an operator can run is not usable by an agent until it is in one of these
 
 ## Worker Topology
 
 Workers are intended to run distributed across many machines, with one worker process per machine.
 
-That layout matters because it lets the system spread sending activity across different machine-level network identities and IP addresses instead of concentrating traffic through a single sender runtime.
+**There is one kind of worker.** No tier, no type, no risk pool, no egress category. You stand a worker up, it heartbeats, and the control plane decides what runs on it. The only thing an operator may set is an optional free-form `WORKER_REGION` label, and leaving it blank is fine.
+
+Do not reintroduce a worker category. The four that used to exist (`free_tier`, `worker_type`, `risk_pool`, `egress_kind`) were removed in migration `000140` because they all rested on a premise that is false for this architecture: that the worker's IP is the sending identity.
+
+It is not. A worker never talks to a recipient's MX. It authenticates to the customer's own mailbox provider, and that provider delivers from its own outbound pool. So:
+
+- **the worker IP is invisible to recipient spam filtering.** Google strips the submitting client's IP; Microsoft dropped `X-Originating-IP` years ago. A spam-prone mailbox therefore cannot contaminate a healthy neighbour on the same machine, which is why hard risk segregation of workers bought nothing
+- **the worker IP is very visible to the mailbox provider**, where it drives sign-in risk challenges, per-IP auth throttles (`454 4.7.0`) and per-IP rate limits (`421 4.7.28`). Exchange Online also caps SMTP AUTH at ~3 concurrent connections and ~30 msg/min per mailbox, and IMAP at ~8 concurrent sessions
+
+The practical inversion: **IP stability per mailbox beats IP diversity.** Moving a mailbox changes the client address its provider sees and buys a security challenge for nothing, so a migration is a cost, not a win. A fleet where nothing rotates is a healthy fleet.
 
 In production, workers are treated as individually addressable executors:
 
 - each worker has its own `worker_id`
 - email accounts are assigned to a specific worker
 - worker events are delivered through worker-specific Kafka topics
-- the platform can rebalance or migrate accounts between workers
+- the platform can rebalance or migrate accounts between workers, reluctantly
 
-This repo already models three worker modes:
+Placement is a score, never a filter (`internal/app/worker/placement.go`). Hard constraints cover only whether the work can be done: heartbeating, health in `healthy`/`watch`, and enough capacity headroom for the mailbox's weight. Everything else is a preference term: capacity headroom, incumbency (weighted highest), region match, tenant blast radius, per-provider crowding on one address, and foreign tenants for orgs entitled to isolated egress.
 
-- shared free-tier workers
-- shared premium workers
-- dedicated workers assigned to a single paying organization
+Capacity is one number for every worker in cold-mailbox equivalents, because each mailbox declares its own cost through `MailboxWeight`: `smtp_imap` = 1.0, `gmail`/`outlook` = 0.05, warmup-only = 0.4. Those are the `email_provider` enum values as stored; do not invent provider strings for them.
+
+Rotation is gated separately (`internal/app/worker/rotation.go`) and is deliberately reluctant:
+
+| Urgency | Trigger | Residency floor | Destination bar |
+|---|---|---|---|
+| Immediate | worker inactive, not heartbeating, blocked, quarantined | none | anything eligible |
+| Elevated | worker throttled | 6h | anything eligible |
+| Opportunistic | worker over 85% utilization, isolated-egress drift | 72h | must beat the incumbent by `RotationMinScoreGain` |
+
+Isolated egress (the entitlement `plan.IsolatedEgress()`, still stored in `plans.dedicated_workers`) binds an org to a worker through `dedicated_worker_assignments`. It is a strong placement preference, not a pin: the worker carries no marking, so a reserved worker going down never strands the customer.
 
 The relevant code paths are in:
 
-- `internal/app/worker/assignment.go`
-- `internal/repository/pg_worker.go`
-- `internal/infrastructure/db/migrations/000015_worker_tiers.up.sql`
+- `internal/app/fleetnode/service.go` (enrolment, heartbeat, desired version)
+- `internal/app/worker/placement.go` (the score)
+- `internal/app/worker/rotation.go` (when a move is allowed)
+- `internal/app/worker/assignment.go` (the service that commits placements)
+- `internal/app/fleet/rebalance.go` (the rotation loop)
+- `internal/repository/pg_worker_placement.go`
+- `internal/infrastructure/db/migrations/000140_worker_decategorization.up.sql`
+
+## The Fleet Is Pull-Based
+
+Every Warmbly process that runs on a machine you own is a **node**: `worker` (sends and syncs mail) or `consumer` (processes events). Both share one lifecycle and one registry.
+
+A node joins by running one command with the instance join token, then heartbeats forever. **Nothing is ever pushed to a node.** Everything the control plane wants it to do comes back in the heartbeat reply, which today is exactly one instruction: what version to be running.
+
+Do not reintroduce a push path. Migration `000142` deleted the whole of it — the Hetzner provider, `provisioning_templates`/`_jobs`/`_policy`, `worker_profiles`, `aws_credentials`, the SSH orchestrator and every `workers.ssh_*` column — because onboarding a machine you already own does not need a cloud API or a keypair, and an update does not need someone to shell in and run it.
+
+Shape:
+
+- `fleet_nodes` is the registry every role shares: identity, region, address, version, liveness, resource usage. `workers` is the placement extension and holds only `account_count`, `health_state`, `load_score`; `workers.id` IS the node id, enforced by a foreign key
+- a node is created by enrolling, never by an admin form. `EnsureWorkerRow` adds the placement half when a node declares itself a worker
+- liveness lives on `fleet_nodes.last_seen_at` and nowhere else. `models.Worker` is a flat view over `workers JOIN fleet_nodes`, so read it through `workerSelect` rather than adding a second source of truth
+- `models.NodeLivenessWindow` is the one definition of live. The node paces its own beat at a third of it, from the value the server returns
+
+Auto-update:
+
+- `internal/app/releases` resolves the head of the configured channel from GitHub Releases and writes the tag to `admin_settings` under `fleet.release`. It updates nothing itself
+- the heartbeat reply carries `desired_version`; the node writes it to a file and a systemd timer (`warmbly-node-update`, installed by the join script) pulls and restarts. The process being replaced is never the process doing the replacing
+- an empty `desired_version` means "no opinion" and must never be read as "downgrade to nothing". A node that cannot be told what to run keeps running what it has
+- a per-node `pinned_version` overrides the fleet target, for canarying or holding a machine back
+- **the backend is deliberately excluded.** It is what tells everyone else their version; a self-update that goes wrong leaves nothing to recover with
+
+The join script is `internal/api/handler/nodescript/join.sh`, embedded and served at `GET /join.sh` by the instance itself, so a self-hosted fleet never depends on a vendor host and always gets a script matching its backend. There is exactly one copy: do not add a mirror under `scripts/` or `site/public/`. All the POSIX-sh rules for published scripts apply to it (`sh -n`, `shellcheck -s sh`, everything in a function, `main "$@"` last).
+
+Run `make join-check` before pushing a change to it; it is a prerequisite of `make lint`. It asserts on what `join.sh --print-unit` *renders*; an earlier version compared a heredoc copied into the checker itself and stayed green when the original bug was put back. It exists because nothing covered the script and three separate defects shipped into the branch as a result: a systemd unit built with `$(cat ...)`, which systemd never expands, so the machine restart-looped while the script printed "Done"; a missing bind mount, so the node wrote its update target inside the container and auto-update silently never ran; and an env file assembled by picking a multi-line value back out of JSON with sed, which appended a stray fragment. Assert on what the shell *renders*, not on the source text: every one of those parsed fine. The two invariants that leave no trace in the rendered unit (that `main` validates before writing anything, and that `install_units` prepares the blob root) are checked at their call sites instead, matched on the first field, which a mention inside a string or a comment cannot satisfy. That does mean those calls have to stay standalone statements, which `join.sh` notes above each set of asserted calls; a looser regex was tried and turned out to be satisfied by the name appearing inside a `warn` message, which is a far worse failure than a reformat that reports itself. Every assertion there was mutation-tested: the bug it guards was reintroduced and the check was watched to fail.
+
+Two rules that follow from those:
+
+- **systemd runs no shell.** No `$(...)`, no globbing, no word splitting in a unit. A value that has to vary comes from an `EnvironmentFile` as `${VAR}`, which expands to exactly one argument
+- **What the node may write and what root reads are different directories.** The container runs as uid 1000; it gets `/var/lib/warmbly/node` and nothing else. `image-ref` lives one level up, root-owned, because systemd feeds it to a root `docker run --network host` and a node that could rewrite it would choose the image root executes
+
+The env the join endpoint hands a node is rendered from the backend's own environment (`nodeEnvKeys` in `internal/api/handler/fleet_nodes.go`). `PRIMARY_DB` is deliberately absent: a worker reaches relational data through the internal API and nothing else, and shipping a DSN here would quietly undo that boundary.
+
+Operator surface: `warmblyctl fleet` (join-token, list, show, remove, pin, version, channel) and the admin panel's Fleet section. There is no install, restart, logs or reboot action anywhere, because nothing reaches into a machine.
 
 ## Warmup Pool Model
 
@@ -348,14 +487,14 @@ Warmup posture:
 
 ### Worker-level distribution rule
 
-For shared workers, distribute volume by mailbox budget and IP spread:
+Distribute by mailbox budget, not by a per-worker sending target. Note what this rule is and is not for: spreading mailboxes across workers does **not** improve recipient-side deliverability, because the worker is not the sending identity (see Worker Topology). It limits blast radius and keeps any one address from crowding one provider's auth rate limits.
 
-- no shared worker should become a concentration point for a large fraction of total cold-email traffic
-- prefer adding more workers and spreading accounts rather than increasing per-worker density
-- if one worker holds many active cold mailboxes, keep the total planned worker volume equal to the sum of those mailbox caps, not an independent higher target
-- as a conservative planning heuristic, shared workers should usually stay near the equivalent of about `10` actively sending cold mailboxes at default settings, or roughly `500` cold campaign emails/day, unless there is explicit evidence that the worker/IP pool can safely sustain more
+- no worker should become a concentration point for a large fraction of one customer's mailboxes, because losing it stops that fraction of their sending
+- keep a worker's total planned volume equal to the sum of its mailboxes' caps, not an independent higher target
+- avoid piling many mailboxes of the same provider onto one worker; that is the combination that earns a per-IP auth throttle (`providerSoftCap` in `placement.go`)
+- prefer adding workers over increasing per-worker density, but do not churn existing mailboxes to achieve it
 
-Dedicated workers may carry higher organization-specific volume, but those increases should come from more healthy mailboxes, not from forcing a small number of inboxes to send too much.
+Increases in volume should come from more healthy mailboxes, never from forcing a small number of inboxes to send too much.
 
 ### Internet research constraints
 
@@ -758,7 +897,8 @@ Rules that follow from this:
 - the per-task result is always `EMAIL_FAILED`; the typed account events (`EMAIL_AUTH_ERROR` and friends) are raised in addition and carry an `EmailErrorEvent`, never a `SendEmailResult`
 - the backend refuses to publish a send to a worker that is not heartbeating (`tasks.NewWorkerLiveness`), because a command queued for a dead worker is never executed and never answered
 - the campaign wizard (and `POST /campaigns` with `steps`) connects steps in order at creation. Routing has no implicit "next position": a step with no outgoing connection ends the flow
-- the campaign task handler sends whatever pair `CalculateNextCampaignTime` returns, so the scheduler is the timing gate: when the step's hard constraints (wait_after, start date, sending windows, day capacity, mailbox min-gap) sit beyond `config.CampaignNotDueGraceSeconds`, it returns `ErrCampaignDeferred` with the slot instead of a pair, and the task reschedules without sending. Without this, any early tick (the successor task after a send, a duplicate chain, a moved slot) sends a "wait 3 days" follow-up seconds after step one
+- the campaign task handler sends whatever pair `CalculateNextCampaignTime` returns, so the scheduler is the timing gate: when the step's hard constraints (the campaign's entry delay for a first step, wait_after, start date, sending windows, day capacity, mailbox min-gap) sit beyond `config.CampaignNotDueGraceSeconds`, it returns `ErrCampaignDeferred` with the slot instead of a pair, and the task reschedules without sending. Without this, any early tick (the successor task after a send, a duplicate chain, a moved slot) sends a "wait 3 days" follow-up seconds after step one
+- `campaigns.entry_delay_minutes` holds a contact's FIRST email that long after they entered the campaign, anchored on `campaign_leads.added_at` (nullable and deliberately unbackfilled; a NULL falls back to the campaign's `created_at`). It is applied in the router's due check (`route` in `pg_campaign_progress.go`) and floors the placer through `ContactSequencePair.NotBefore`. Follow-up spacing is still each step's own `wait_after`
 - schedule edits on an active campaign reschedule the parked wakeup (`rescheduleCampaignWakeup` in the campaign service): clearing or shortening a future start date takes effect immediately instead of when the old slot fires. PATCH `start_date`/`end_date` accept explicit `null` to clear (`models.NullableTime` distinguishes absent from null)
 
 ## Control Plane vs Execution Plane
@@ -776,7 +916,7 @@ If a new feature requires heavy joins, admin queries, billing checks, or complex
 
 - do not add direct Postgres usage to `cmd/worker` or `internal/app/worker` unless explicitly required
 - preserve worker-specific Kafka topic routing
-- preserve separation between free, premium, and dedicated worker capacity
+- do not reintroduce worker categories; placement is a score over live state
 - preserve separation between free and premium warmup pools
 - optimize for many-worker deployments, not a single giant worker
 - document any change that alters worker assignment, pool membership, or network boundaries
@@ -787,6 +927,8 @@ These files are the fastest way to rebuild context:
 
 - `README.md`
 - `docs/content/docs/development/architecture.mdx`
+- `docs/content/docs/development/install.mdx` and `data-control.mdx` (what a self-hoster is asked, and what each answer decides)
+- `site/public/install.sh` (the installer itself)
 - `cmd/worker/main.go`
 - `internal/app/worker/assignment.go`
 - `internal/tasks/email_task.go`

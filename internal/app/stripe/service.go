@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/getsentry/sentry-go"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/stripe/stripe-go/v76"
 	portalsession "github.com/stripe/stripe-go/v76/billingportal/session"
 	"github.com/stripe/stripe-go/v76/checkout/session"
@@ -27,6 +29,7 @@ import (
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/analytics"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -85,6 +88,10 @@ type StripeService interface {
 	// referral hooks in the webhook flow are skipped).
 	WireReferral(r ReferralRewarder)
 
+	// WireAnalytics attaches the product-analytics sink (post-construction;
+	// nil = money events are not counted, which is the self-host default).
+	WireAnalytics(a ProductAnalytics)
+
 	// WireCredits attaches the AI-credit granter and an audit logger
 	// (post-construction; nil = the credit grant/reset hooks are skipped).
 	WireCredits(g CreditGranter, a AuditLogger)
@@ -116,6 +123,19 @@ type ReferralRewarder interface {
 	InviteeDiscountCode(ctx context.Context, inviteeOrgID uuid.UUID) string
 }
 
+// OperatorNotifier is the instance-wide operator alert surface, injected
+// post-construction so this package needs no import of it. Nil disables it.
+type OperatorNotifier interface {
+	NotifyOperator(key, title, summary string, fields map[string]string)
+}
+
+// ProductAnalytics counts a started subscription. Satisfied by
+// *analytics.Client; nil-safe, so an instance with no POSTHOG_KEY counts
+// nothing. Properties never name an organization or a person.
+type ProductAnalytics interface {
+	Capture(name string, req analytics.Request, properties map[string]any)
+}
+
 type stripeService struct {
 	cfg              *config.StripeConfig
 	subRepo          repository.SubscriptionRepository
@@ -125,9 +145,16 @@ type stripeService struct {
 	referral         ReferralRewarder
 	credits          CreditGranter
 	audit            AuditLogger
+	opsNotify        OperatorNotifier
+	productAnalytics ProductAnalytics
 }
 
+// WireOperatorNotifier attaches the operator alert channel.
+func (s *stripeService) WireOperatorNotifier(n OperatorNotifier) { s.opsNotify = n }
+
 func (s *stripeService) WireReferral(r ReferralRewarder) { s.referral = r }
+
+func (s *stripeService) WireAnalytics(a ProductAnalytics) { s.productAnalytics = a }
 
 func (s *stripeService) WireCredits(g CreditGranter, a AuditLogger) { s.credits = g; s.audit = a }
 
@@ -159,7 +186,7 @@ func (s *stripeService) CreateCustomer(ctx context.Context, userID uuid.UUID, em
 
 	cust, err := customer.New(params)
 	if err != nil {
-		sentry.CaptureException(fmt.Errorf("stripe customer creation failed: %w", err))
+		errs.CaptureException(fmt.Errorf("stripe customer creation failed: %w", err))
 		return "", errx.New(errx.Internal, "failed to create billing account")
 	}
 
@@ -193,7 +220,7 @@ func (s *stripeService) ApplyCustomerCredit(ctx context.Context, customerID stri
 	}
 	txn, err := balancetxn.New(params)
 	if err != nil {
-		sentry.CaptureException(fmt.Errorf("stripe customer balance txn failed: %w", err))
+		errs.CaptureException(fmt.Errorf("stripe customer balance txn failed: %w", err))
 		return "", errx.New(errx.Internal, "failed to apply referral credit")
 	}
 	return txn.ID, nil
@@ -299,7 +326,7 @@ func (s *stripeService) CreateCheckoutSession(ctx context.Context, userID uuid.U
 		if reservedID != nil {
 			_ = s.discountService.CancelRedemptionByID(ctx, *reservedID)
 		}
-		sentry.CaptureException(fmt.Errorf("stripe checkout session failed: %w", err))
+		errs.CaptureException(fmt.Errorf("stripe checkout session failed: %w", err))
 		return nil, errx.New(errx.Internal, "failed to create checkout session")
 	}
 
@@ -308,7 +335,7 @@ func (s *stripeService) CreateCheckoutSession(ctx context.Context, userID uuid.U
 	// checkout.session.expired.
 	if reservedID != nil {
 		if xerr := s.discountService.AttachRedemptionStripe(ctx, *reservedID, &sess.ID, couponID); xerr != nil {
-			sentry.CaptureException(fmt.Errorf("attach discount redemption refs failed: %s", xerr.Message))
+			errs.CaptureException(fmt.Errorf("attach discount redemption refs failed: %s", xerr.Message))
 		}
 	}
 
@@ -348,7 +375,7 @@ func (s *stripeService) mintCoupon(dc *models.DiscountCode) (string, *errx.Error
 
 	c, err := coupon.New(params)
 	if err != nil {
-		sentry.CaptureException(fmt.Errorf("stripe coupon creation failed: %w", err))
+		errs.CaptureException(fmt.Errorf("stripe coupon creation failed: %w", err))
 		return "", errx.New(errx.Internal, "failed to apply discount")
 	}
 	return c.ID, nil
@@ -399,7 +426,7 @@ func (s *stripeService) CreateCreditCheckoutSession(ctx context.Context, userID,
 
 	sess, serr := session.New(params)
 	if serr != nil {
-		sentry.CaptureException(fmt.Errorf("stripe credit checkout session failed: %w", serr))
+		errs.CaptureException(fmt.Errorf("stripe credit checkout session failed: %w", serr))
 		return nil, errx.New(errx.Internal, "failed to create checkout session")
 	}
 	return sess, nil
@@ -488,7 +515,7 @@ func (s *stripeService) CreatePortalSession(ctx context.Context, customerID, ret
 
 	sess, err := portalsession.New(params)
 	if err != nil {
-		sentry.CaptureException(fmt.Errorf("stripe portal session failed: %w", err))
+		errs.CaptureException(fmt.Errorf("stripe portal session failed: %w", err))
 		return "", errx.New(errx.Internal, "failed to create billing portal session")
 	}
 
@@ -510,7 +537,7 @@ func (s *stripeService) CancelSubscription(ctx context.Context, subscriptionID s
 
 	_, err := subscription.Update(subscriptionID, params)
 	if err != nil {
-		sentry.CaptureException(fmt.Errorf("stripe subscription cancel failed: %w", err))
+		errs.CaptureException(fmt.Errorf("stripe subscription cancel failed: %w", err))
 		return errx.New(errx.Internal, "failed to update subscription")
 	}
 
@@ -619,7 +646,7 @@ func (s *stripeService) ChangePlan(ctx context.Context, orgID uuid.UUID, newPlan
 	// a direct plan change). Best-effort: the discount is already live.
 	if reservedID != nil {
 		if xerr := s.discountService.AttachRedemptionStripe(ctx, *reservedID, nil, couponID); xerr != nil {
-			sentry.CaptureException(fmt.Errorf("attach discount redemption refs failed: %s", xerr.Message))
+			errs.CaptureException(fmt.Errorf("attach discount redemption refs failed: %s", xerr.Message))
 		}
 	}
 
@@ -856,7 +883,7 @@ func (s *stripeService) handleCheckoutCompleted(ctx context.Context, event *stri
 			subID = &sub.ID
 		}
 		if xerr := s.discountService.MarkRedemptionApplied(ctx, checkoutSession.ID, subID); xerr != nil {
-			sentry.CaptureException(fmt.Errorf("mark discount redemption applied failed: %s", xerr.Message))
+			errs.CaptureException(fmt.Errorf("mark discount redemption applied failed: %s", xerr.Message))
 		}
 	}
 
@@ -930,6 +957,50 @@ func (s *stripeService) handleSubscriptionCreated(ctx context.Context, event *st
 	return s.handleSubscriptionUpdated(ctx, event)
 }
 
+// countSubscriptionStarted records a workspace starting to pay.
+//
+// It fires from the webhook rather than the browser because this is the money
+// event and it has to be exact: the customer may have closed the tab on
+// Stripe's success page, and an ad blocker would drop the browser's version.
+//
+// It hangs off the trial-to-paid transition rather than off the
+// customer.subscription.created event, so a redelivered or duplicated webhook
+// does not report a second start: by the time it arrives the subscription
+// already carries a Stripe id and the transition no longer reads as new. That
+// is the same guard the paid-worker migration beside it relies on, and it is
+// bounded by the same window, which is far narrower than the webhook
+// idempotency check that runs before either of them.
+//
+// Unlike the signup event there is no browser request to join: Stripe called
+// us, not the customer. So this lands as its own cookieless visitor and is
+// useful as a count and a plan mix, not as the end of a session funnel.
+// Nothing here names the organization or the person.
+func (s *stripeService) countSubscriptionStarted(ctx context.Context, sub *models.Subscription, plan *models.Plan, stripeSub *stripe.Subscription) {
+	if s.productAnalytics == nil || stripeSub == nil {
+		return
+	}
+
+	props := map[string]any{"status": string(stripeSub.Status)}
+	if plan != nil {
+		props["plan"] = plan.Name
+	} else if sub != nil {
+		if p, err := s.planRepo.GetByID(ctx, sub.PlanID); err == nil && p != nil {
+			props["plan"] = p.Name
+		}
+	}
+	if len(stripeSub.Items.Data) > 0 {
+		if price := stripeSub.Items.Data[0].Price; price != nil {
+			props["currency"] = string(price.Currency)
+			props["amount"] = float64(price.UnitAmount) / 100
+			if price.Recurring != nil {
+				props["interval"] = string(price.Recurring.Interval)
+			}
+		}
+	}
+
+	s.productAnalytics.Capture("subscription_started", analytics.Request{}, props)
+}
+
 func (s *stripeService) handleSubscriptionUpdated(ctx context.Context, event *stripe.Event) *errx.Error {
 	var stripeSub stripe.Subscription
 	if err := json.Unmarshal(event.Data.Raw, &stripeSub); err != nil {
@@ -992,36 +1063,49 @@ func (s *stripeService) handleSubscriptionUpdated(ctx context.Context, event *st
 		return errx.New(errx.Internal, "failed to update subscription")
 	}
 
+	// The workspace has started paying. Reported after the write, so a failed
+	// update never counts as a start, and keyed off the same transition the
+	// premium-worker migration below uses, so a redelivered webhook does not
+	// count a second one.
+	if wasTrialOnly && sub.HasPaidSubscription() {
+		s.countSubscriptionStarted(ctx, sub, newPlan, &stripeSub)
+	}
+
 	// Handle worker migrations if workerAssignment service is available
 	if s.workerAssignment != nil {
 		isNowPaid := sub.HasPaidSubscription()
 
-		// Trial user converting to paid - migrate to premium workers.
-		// Use a bounded timeout context since these goroutines outlive the HTTP request.
-		if wasTrialOnly && isNowPaid {
-			go func() {
-				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				defer cancel()
-				s.workerAssignment.MigrateOrgToPremiumWorkers(bgCtx, sub.OrganizationID)
-			}()
-		}
+		// Converting a trial to paid no longer moves anything: workers are
+		// interchangeable, so an org's mailboxes are already wherever the
+		// placer thinks they belong.
+		_ = wasTrialOnly
+		_ = isNowPaid
 
-		// Handle dedicated worker migration on plan change
+		// Isolated egress is the only plan change with a placement effect, and
+		// it is a reservation, not a migration: the rotation loop converges the
+		// org's mailboxes onto the reserved worker on its own schedule, which
+		// keeps a plan change from re-authenticating every mailbox at once.
 		if newPlan != nil && newPlan.ID != oldPlanID {
-			hadDedicated := oldPlan != nil && oldPlan.DedicatedWorkers > 0
-			needsDedicated := newPlan.DedicatedWorkers > 0
+			hadIsolation := oldPlan.IsolatedEgress()
+			needsIsolation := newPlan.IsolatedEgress()
 
-			if !hadDedicated && needsDedicated {
+			orgID, subID := sub.OrganizationID, sub.ID
+			switch {
+			case !hadIsolation && needsIsolation:
 				go func() {
 					bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 					defer cancel()
-					s.workerAssignment.MigrateOrgToDedicated(bgCtx, sub.OrganizationID, sub.ID)
+					if err := s.workerAssignment.ReserveIsolatedWorker(bgCtx, orgID, subID); err != nil {
+						log.Warn().Err(err).Str("org_id", orgID.String()).Msg("stripe: reserve isolated worker failed")
+					}
 				}()
-			} else if hadDedicated && !needsDedicated {
+			case hadIsolation && !needsIsolation:
 				go func() {
 					bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 					defer cancel()
-					s.workerAssignment.MigrateOrgToShared(bgCtx, sub.OrganizationID)
+					if err := s.workerAssignment.ReleaseIsolatedWorker(bgCtx, orgID); err != nil {
+						log.Warn().Err(err).Str("org_id", orgID.String()).Msg("stripe: release isolated worker failed")
+					}
 				}()
 			}
 		}
@@ -1041,9 +1125,8 @@ func (s *stripeService) handleSubscriptionDeleted(ctx context.Context, event *st
 		return nil
 	}
 
-	// Check if org had dedicated workers
 	oldPlan, _ := s.planRepo.GetByID(ctx, sub.PlanID)
-	hadDedicated := oldPlan != nil && oldPlan.DedicatedWorkers > 0
+	hadIsolation := oldPlan.IsolatedEgress()
 
 	sub.Status = models.SubscriptionStatusCanceled
 	canceledAt := time.Now()
@@ -1053,21 +1136,17 @@ func (s *stripeService) handleSubscriptionDeleted(ctx context.Context, event *st
 		return errx.New(errx.Internal, "failed to update subscription")
 	}
 
-	// Handle worker migration - move back to free tier workers.
-	// Use bounded timeout context since these goroutines outlive the HTTP request.
-	if s.workerAssignment != nil {
+	// Cancelling releases the reserved worker back to the fleet. Nothing else
+	// moves: a cancelled org's mailboxes keep the workers they are on, which
+	// is both cheaper and better for them than a forced re-authentication.
+	if s.workerAssignment != nil && hadIsolation {
 		orgID := sub.OrganizationID
-		if hadDedicated {
-			go func() {
-				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				defer cancel()
-				s.workerAssignment.MigrateOrgToShared(bgCtx, orgID)
-			}()
-		}
 		go func() {
 			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			s.workerAssignment.MigrateOrgToFreeWorkers(bgCtx, orgID)
+			if err := s.workerAssignment.ReleaseIsolatedWorker(bgCtx, orgID); err != nil {
+				log.Warn().Err(err).Str("org_id", orgID.String()).Msg("stripe: release isolated worker failed")
+			}
 		}()
 	}
 
@@ -1119,7 +1198,7 @@ func (s *stripeService) handleInvoicePaid(ctx context.Context, event *stripe.Eve
 		(inv.BillingReason == stripe.InvoiceBillingReasonSubscriptionCreate ||
 			inv.BillingReason == stripe.InvoiceBillingReasonSubscriptionCycle) {
 		if err := s.credits.ResetMonthlyAllowance(ctx, sub.OrganizationID, plan.MonthlyCredits, event.ID); err != nil {
-			sentry.CaptureException(fmt.Errorf("monthly credit reset failed for org %s: %w", sub.OrganizationID, err))
+			errs.CaptureException(fmt.Errorf("monthly credit reset failed for org %s: %w", sub.OrganizationID, err))
 		} else if s.audit != nil {
 			s.audit.LogAction(ctx, sub.OrganizationID, sub.UserID, models.AuditActionUpdate, models.AuditEntityCreditGrant, nil, "", "", nil, map[string]string{
 				"reason":  "monthly_reset",
@@ -1161,8 +1240,60 @@ func (s *stripeService) handleChargeRefunded(ctx context.Context, event *stripe.
 }
 
 func (s *stripeService) handleInvoicePaymentFailed(ctx context.Context, event *stripe.Event) *errx.Error {
-	// Payment failed - subscription status will be updated via subscription.updated event
+	// The subscription's own status is updated by the subscription.updated
+	// event; this hook exists so an operator hears about the failure when it
+	// happens rather than discovering it from a churned customer.
+	if s.opsNotify != nil {
+		var inv struct {
+			CustomerEmail string `json:"customer_email"`
+			Customer      string `json:"customer"`
+			Number        string `json:"number"`
+			AmountDue     int64  `json:"amount_due"`
+			Currency      string `json:"currency"`
+		}
+		_ = json.Unmarshal(event.Data.Raw, &inv)
+		s.opsNotify.NotifyOperator(
+			"subscription.payment_failed",
+			"Payment failed",
+			"Stripe could not collect an invoice, so that workspace's sending is at risk.",
+			map[string]string{
+				"Customer": firstNonEmpty(inv.CustomerEmail, inv.Customer),
+				"Invoice":  inv.Number,
+				"Amount":   formatStripeAmount(inv.AmountDue, inv.Currency),
+			},
+		)
+	}
 	return nil
+}
+
+// zeroDecimalCurrencies have no minor unit, so their amounts are already whole
+// units and must not be divided. https://docs.stripe.com/currencies
+var zeroDecimalCurrencies = map[string]bool{
+	"bif": true, "clp": true, "djf": true, "gnf": true, "jpy": true, "kmf": true,
+	"krw": true, "mga": true, "pyg": true, "rwf": true, "ugx": true, "vnd": true,
+	"vuv": true, "xaf": true, "xof": true, "xpf": true,
+}
+
+// formatStripeAmount renders a Stripe amount for a human, honouring the
+// currency's exponent.
+func formatStripeAmount(amount int64, currency string) string {
+	code := strings.ToLower(strings.TrimSpace(currency))
+	if code == "" {
+		code = "usd"
+	}
+	if zeroDecimalCurrencies[code] {
+		return fmt.Sprintf("%d %s", amount, strings.ToUpper(code))
+	}
+	return fmt.Sprintf("%.2f %s", float64(amount)/100, strings.ToUpper(code))
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func mapStripeStatus(status stripe.SubscriptionStatus) models.SubscriptionStatus {

@@ -24,7 +24,7 @@ import { DataTable, type Column } from "@/components/data/DataTable";
 import { useCursorPager } from "@/lib/useCursorPager";
 import { emptyRange, rangeActive, rangeWithin, rangeAfter, rangeBefore, type DateRange } from "@/lib/dateRange";
 import { searchMailboxes } from "@/lib/api/client/admin/mailboxes";
-import { listManagedWorkers } from "@/lib/api/client/admin/workers";
+import { listFleetNodes, type FleetNode } from "@/lib/api/client/admin/fleetNodes";
 import type { AdminMailboxRow } from "@/lib/api/models/admin";
 
 type StatusFilter = "active" | "inactive" | "all";
@@ -166,8 +166,10 @@ export default function MailboxesPage() {
     const userId = params.get("user") || undefined;
     const workerParam = params.get("worker") || "";
 
-    const [query, setQuery] = useState("");
-    const [status, setStatus] = useState<StatusFilter>("active");
+    // `?q=` seeds the search box so the command palette can land here on a
+    // mailbox; a status of "all" keeps a disabled mailbox findable that way.
+    const [query, setQuery] = useState(params.get("q") ?? "");
+    const [status, setStatus] = useState<StatusFilter>(params.get("q") ? "all" : "active");
     const [provider, setProvider] = useState("");
     const [warmup, setWarmup] = useState<WarmupFilter>("all");
     const [workerId, setWorkerId] = useState(workerParam);
@@ -196,7 +198,15 @@ export default function MailboxesPage() {
         setWorkerId(workerParam);
     }, [workerParam]);
 
-    const { data: workersData } = useQuery({ queryKey: ["admin", "workers", "managed"], queryFn: listManagedWorkers, staleTime: 60_000 });
+    // The page stays mounted when the palette lands here again with another
+    // ?q=, so the search box follows the URL rather than only its first value.
+    const qParam = params.get("q") ?? "";
+    useEffect(() => {
+        setQuery(qParam);
+        if (qParam) setStatus("all");
+    }, [qParam]);
+
+    const { data: workersData } = useQuery({ queryKey: ["admin", "workers", "managed"], queryFn: () => listFleetNodes("worker"), staleTime: 60_000 });
     const workerOptions = [
         { value: "any", label: "Any worker" },
         ...(workersData?.data ?? []).map((w) => ({ value: w.id, label: w.name || w.id.slice(0, 8) })),
@@ -304,6 +314,7 @@ export default function MailboxesPage() {
         next.delete("org");
         next.delete("user");
         next.delete("worker");
+        next.delete("q");
         setParams(next, { replace: true });
     }
 

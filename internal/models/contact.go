@@ -1,6 +1,7 @@
 package models
 
 import (
+	"bytes"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,6 +63,11 @@ type Contact struct {
 	// leads are queued, in progress, replied, bounced, or unsubscribed.
 	CampaignLead *ContactCampaignProgress `json:"campaign_lead,omitempty"`
 
+	// IsNew is set by the upsert write when this call inserted the row rather
+	// than matching an existing contact. Server-side only: it decides whether
+	// a contact.created event fires.
+	IsNew bool `json:"-"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -94,6 +100,9 @@ type ContactCampaignProgress struct {
 	// FailureReason is the worker's reason for the last failed send, set only
 	// when Status is "failed".
 	FailureReason string `json:"failure_reason,omitempty"`
+	// Sender is the mailbox address this lead's whole sequence sends from,
+	// fixed when its first email went out. Empty until then.
+	Sender string `json:"sender,omitempty"`
 }
 
 // Lead status constants for ContactCampaignProgress.Status.
@@ -251,9 +260,31 @@ const (
 	ContactVerificationActionMarkUndeliverable = "mark_undeliverable"
 )
 
+// MaxContactBulkSelection bounds how many contacts one "select all matching"
+// bulk action may resolve to. Past it the action is refused and the user
+// narrows the filters, so a stray click can never walk a whole workspace.
+const MaxContactBulkSelection = 50000
+
+// ContactSelection names the contacts a bulk action applies to. Either an
+// explicit id list (Contacts), or every contact matching a search (All +
+// Filters) minus the rows the user unticked afterwards (Exclude), which is
+// what the dashboard's "select all matching" sends. A selection that names
+// both prefers the filter.
+type ContactSelection struct {
+	Contacts []string `json:"contacts"`
+	// All switches the selection from the id list to Filters.
+	All bool `json:"all,omitempty"`
+	// Filters is the same search body /contacts/search takes, so the set
+	// resolved here is exactly the set the list was showing.
+	Filters *SearchContacts `json:"filters,omitempty"`
+	// Exclude drops ids from the resolved set: the rows unticked after a
+	// select-all. Ignored unless All is set.
+	Exclude []string `json:"exclude,omitempty"`
+}
+
 // ContactVerificationRequest is the body of POST /contacts/verification.
 type ContactVerificationRequest struct {
-	Contacts []string `json:"contacts"`
+	ContactSelection
 	// CampaignID selects every lead of one campaign that verification refused
 	// (the "re-verify skipped leads" action), instead of listing ids.
 	CampaignID string `json:"campaign_id,omitempty"`
@@ -366,10 +397,14 @@ type ContactSentEmail struct {
 	SequenceName *string    `json:"step_name,omitempty"`
 
 	// Engagement (from campaign_contact_progress, may be nil).
-	OpenedAt  *time.Time `json:"opened_at,omitempty"`
-	ClickedAt *time.Time `json:"clicked_at,omitempty"`
-	RepliedAt *time.Time `json:"replied_at,omitempty"`
-	BouncedAt *time.Time `json:"bounced_at,omitempty"`
+	// OpenedAt is a person's open. An automated fetch (client prefetch,
+	// security gateway) lands in MachineOpenedAt instead, so the two are
+	// never mistaken for each other.
+	OpenedAt        *time.Time `json:"opened_at,omitempty"`
+	MachineOpenedAt *time.Time `json:"machine_opened_at,omitempty"`
+	ClickedAt       *time.Time `json:"clicked_at,omitempty"`
+	RepliedAt       *time.Time `json:"replied_at,omitempty"`
+	BouncedAt       *time.Time `json:"bounced_at,omitempty"`
 }
 
 type ContactSentEmailsResult struct {
@@ -414,12 +449,73 @@ const (
 	TimelinePageHit ContactTimelineEventType = "page_hit"
 )
 
+// ContactTimelineSource ranks the tables the timeline is merged from. It is
+// the middle key of the feed's order (at, source, id): two events at the same
+// instant sort by source, then by that source's row id, so a page boundary
+// can never split a tie. The values are part of the cursor; never renumber.
+type ContactTimelineSource int
+
+const (
+	// campaign_contact_progress stamps, keyed by the step (sequence) id.
+	TimelineSourceProgressSent    ContactTimelineSource = 1
+	TimelineSourceProgressOpened  ContactTimelineSource = 2
+	TimelineSourceProgressClicked ContactTimelineSource = 3
+	TimelineSourceProgressReplied ContactTimelineSource = 4
+	TimelineSourceProgressBounced ContactTimelineSource = 5
+
+	TimelineSourceLinkClick      ContactTimelineSource = 6  // email_link_clicks
+	TimelineSourceOpen           ContactTimelineSource = 7  // email_opens
+	TimelineSourceReplyIntent    ContactTimelineSource = 8  // reply_intents
+	TimelineSourceDeliverability ContactTimelineSource = 9  // deliverability_events
+	TimelineSourceSuppression    ContactTimelineSource = 10 // suppressed_recipients
+	TimelineSourceNote           ContactTimelineSource = 11 // contact_notes
+	TimelineSourceMeeting        ContactTimelineSource = 12 // meeting_bookings
+	TimelineSourceActivity       ContactTimelineSource = 13 // contact_activities
+	TimelineSourcePageHit        ContactTimelineSource = 14 // website_page_hits
+)
+
+// Valid reports whether s names a source the timeline is merged from. A
+// cursor carrying any other rank is malformed: zero is reserved for the
+// legacy bare-timestamp bound and anything above the last source would
+// re-admit the events at the cursor's instant.
+func (s ContactTimelineSource) Valid() bool {
+	return s >= TimelineSourceProgressSent && s <= TimelineSourcePageHit
+}
+
+// ContactTimelineKey is one event's position in the merged feed. A page
+// resumes strictly after the key of the last event it returned, comparing
+// (At, Source, ID) as a tuple, which is what the opaque cursor carries.
+type ContactTimelineKey struct {
+	At     time.Time
+	Source ContactTimelineSource
+	ID     uuid.UUID
+}
+
+// Before reports whether k sorts after o in the feed's newest-first order,
+// which is to say it is the older position: a smaller time, or the same time
+// and a lower source rank, or the same time and source and a lower id (uuid
+// order is the byte order Postgres uses, so Go and SQL agree).
+func (k ContactTimelineKey) Before(o ContactTimelineKey) bool {
+	if !k.At.Equal(o.At) {
+		return k.At.Before(o.At)
+	}
+	if k.Source != o.Source {
+		return k.Source < o.Source
+	}
+	return bytes.Compare(k.ID[:], o.ID[:]) < 0
+}
+
 // ContactTimelineEvent is one entry in the merged activity feed. The
 // optional fields are tagged with omitempty so the JSON stays compact
 // for event types that don't carry that data.
 type ContactTimelineEvent struct {
 	Type ContactTimelineEventType `json:"type"`
 	At   time.Time                `json:"at"`
+
+	// Position in the feed, used for the merged sort and the next-page
+	// cursor. Not part of the wire shape: the row ids are not unique across
+	// sources, so a client gets an opaque cursor instead.
+	Key ContactTimelineKey `json:"-"`
 
 	// Mailbox sender (email_sent / opened / clicked / replied / bounced).
 	EmailAccountID    *uuid.UUID `json:"email_account_id,omitempty"`
@@ -520,9 +616,12 @@ func (o EngagementOrigin) Empty() bool {
 
 type ContactTimelineResult struct {
 	Data []ContactTimelineEvent `json:"data"`
-	// True if we hit the per-call cap and the caller should paginate
-	// via the `before` query param.
+	// Deprecated: read pagination.has_more. Kept for clients written against
+	// the bare-timestamp pagination that predated the cursor envelope.
 	HasMore bool `json:"has_more"`
+	// NextCursor is an opaque (at, source, id) position; pass it back as
+	// `cursor` for the next page. Total is never counted across the sources.
+	Pagination Pagination `json:"pagination"`
 }
 
 type UpdateContact struct {
@@ -596,13 +695,17 @@ const (
 	ContactSourceAPI         ContactSource = "api"
 	ContactSourceAIAssistant ContactSource = "ai_assistant"
 	ContactSourceForm        ContactSource = "form"
+	// ContactSourceAutomation is a contact an automation's "create or update
+	// contact" action wrote; the detail is the automation's name.
+	ContactSourceAutomation ContactSource = "automation"
 )
 
 // Valid reports whether the value is one the database accepts.
 func (s ContactSource) Valid() bool {
 	switch s {
 	case ContactSourceUnknown, ContactSourceManual, ContactSourceCampaign, ContactSourceImport,
-		ContactSourceSheetSync, ContactSourceAPI, ContactSourceAIAssistant, ContactSourceForm:
+		ContactSourceSheetSync, ContactSourceAPI, ContactSourceAIAssistant, ContactSourceForm,
+		ContactSourceAutomation:
 		return true
 	}
 	return false
@@ -665,7 +768,7 @@ type BulkEditContactsField struct {
 }
 
 type BulkEditContactsData struct {
-	Contacts []string `json:"contacts"`
+	ContactSelection
 
 	AddCampaigns     []string                `json:"add_campaigns"`
 	RemoveCampaigns  []string                `json:"remove_campaigns"`
@@ -673,4 +776,9 @@ type BulkEditContactsData struct {
 	RemoveCategories []string                `json:"remove_categories,omitempty"`
 	Fields           []BulkEditContactsField `json:"fields"`
 	Subscribe        *bool                   `json:"subscribe"`
+
+	// SkipRows suppresses the hydrated rows in the response. Set by the
+	// handler for a filter-shaped selection, which can name far more contacts
+	// than are worth serializing back. Never part of the request body.
+	SkipRows bool `json:"-"`
 }

@@ -9,13 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
-	"github.com/warmbly/warmbly/internal/app/dailythrottle"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/pkg/crypt"
 	"golang.org/x/oauth2"
 )
@@ -30,13 +29,13 @@ func (s *emailService) OAuthStart(ctx context.Context, userID string, orgID *uui
 
 	// Refuse early so we don't waste an OAuth round-trip on a request
 	// that the inbox-limit guard would reject after callback.
-	if xerr := s.guardInboxLimit(ctx, orgID); xerr != nil {
+	if _, xerr := s.guardInboxLimit(ctx, orgID); xerr != nil {
 		return nil, xerr
 	}
 
 	state, err := crypt.Nonce()
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return nil, errx.InternalError()
 	}
 
@@ -57,47 +56,42 @@ func (s *emailService) OAuthStart(ctx context.Context, userID string, orgID *uui
 	return &models.EmailOnboardingStartResponse{URL: url, State: state}, nil
 }
 
-// guardMailboxThrottle bounds new-mailbox connection rate per org per
-// day so abuse paths (or accidents) can't connect 200 mailboxes in
-// one tab session. The budget is keyed by org, so a request without
-// one is refused rather than exempted. The check fires only on the
-// actual create paths, not on OAuthStart, so retrying a failed flow
-// doesn't consume the day's budget.
-func (s *emailService) guardMailboxThrottle(ctx context.Context, orgID *uuid.UUID) *errx.Error {
+// guardInboxLimit refuses a connect that would take the workspace past its
+// mailbox allowance (fair use for paid plans, FreeWorkspaceMailboxLimit for
+// free ones, unlimited without billing) and returns the resolved allowance so
+// the insert can enforce it again under the organization's lock. The
+// allowance is counted per org, so no org means it cannot be applied and the
+// connect is refused. Without an allowance source wired, the feature gate's
+// free-or-paid split stands in and the insert is not re-checked.
+func (s *emailService) guardInboxLimit(ctx context.Context, orgID *uuid.UUID) (*models.MailboxAllowance, *errx.Error) {
 	if orgID == nil {
-		return errx.ErrNoOrganization
+		return nil, errx.ErrNoOrganization
 	}
-	if s.throttle == nil {
-		return nil
-	}
-	return s.throttle.CheckAndIncrement(ctx, *orgID, dailythrottle.ResourceMailbox, config.DailyThrottleNewMailboxes)
-}
-
-// guardInboxLimit enforces the per-org inbox cap for free-trial users.
-// Returns nil (allowed) for paid orgs and for trial orgs under the cap.
-// Trial orgs that have already connected one inbox get
-// ErrEmailOnboardInboxLimit; orgs without an active subscription or trial
-// get ErrEmailOnboardTrialExpired. The cap is counted per org, so no org
-// means the cap cannot be applied and the connect is refused.
-func (s *emailService) guardInboxLimit(ctx context.Context, orgID *uuid.UUID) *errx.Error {
-	if orgID == nil {
-		return errx.ErrNoOrganization
+	if s.allowance != nil {
+		a, xerr := s.allowance.MailboxAllowance(ctx, *orgID)
+		if xerr != nil {
+			return nil, xerr
+		}
+		if a.CanAdd(1) {
+			return a, nil
+		}
+		return nil, errx.MailboxAllowanceReached(a.Used, *a.Allowance, a.Paid)
 	}
 	if s.featureGate == nil {
-		return nil
+		return nil, nil
 	}
 	count, xerr := s.emailRepository.CountForOrganization(ctx, *orgID)
 	if xerr != nil {
-		return xerr
+		return nil, xerr
 	}
 	allowed, xerr := s.featureGate.CanAddInbox(ctx, *orgID, count)
 	if xerr != nil {
-		return xerr
+		return nil, xerr
 	}
 	if allowed {
-		return nil
+		return nil, nil
 	}
-	return errx.ErrEmailOnboardInboxLimit
+	return nil, errx.MailboxAllowanceReached(count, models.FreeWorkspaceMailboxLimit, false)
 }
 
 // OAuthFinish validates the state, exchanges the code for tokens, fetches the
@@ -120,10 +114,13 @@ func (s *emailService) OAuthFinish(ctx context.Context, userID, code, state stri
 	}
 
 	// A reauth adds no mailbox, so an org over its inbox cap can still fix one.
+	var allowance *models.MailboxAllowance
 	if sess.EmailAccountID == nil {
-		if xerr := s.guardInboxLimit(ctx, sess.OrganizationID); xerr != nil {
+		a, xerr := s.guardInboxLimit(ctx, sess.OrganizationID)
+		if xerr != nil {
 			return nil, false, xerr
 		}
+		allowance = a
 	}
 
 	provider := models.InboxProvider(sess.Provider)
@@ -158,12 +155,9 @@ func (s *emailService) OAuthFinish(ctx context.Context, userID, code, state stri
 		name = deriveNameFromEmail(owner.Email)
 	}
 
-	if xerr := s.guardMailboxThrottle(ctx, sess.OrganizationID); xerr != nil {
-		return nil, false, xerr
-	}
-
 	acc, xerr := s.emailRepository.NewOauthAccount(ctx, userID, models.NewOauthAccount{
 		OrganizationID: sess.OrganizationID,
+		Allowance:      allowance,
 		Provider:       provider,
 		Name:           name,
 		Email:          owner.Email,
@@ -189,7 +183,8 @@ func (s *emailService) OnboardSMTPIMAP(ctx context.Context, userID string, orgID
 		return nil, xerr
 	}
 
-	if xerr := s.guardInboxLimit(ctx, orgID); xerr != nil {
+	allowance, xerr := s.guardInboxLimit(ctx, orgID)
+	if xerr != nil {
 		return nil, xerr
 	}
 
@@ -203,16 +198,9 @@ func (s *emailService) OnboardSMTPIMAP(ctx context.Context, userID string, orgID
 		return nil, errx.ErrEmailOnboardNoWorker
 	}
 
-	// Pick any healthy worker for the one-shot validation handshake. Tier is
-	// irrelevant here (nothing is placed yet, the worker just dials the
-	// credentials once), so fall back to the other tier rather than failing:
-	// asking only for free-tier workers made onboarding impossible on any
-	// deployment whose workers all register as premium, which includes a stock
-	// self-host install.
-	w, werr := s.workerAssignment.SelectSharedWorker(ctx, false)
-	if werr != nil || w == nil {
-		w, werr = s.workerAssignment.SelectSharedWorker(ctx, true)
-	}
+	// Any live worker can run the one-shot validation handshake: nothing is
+	// placed yet, the worker just dials the credentials once and reports back.
+	w, werr := s.workerAssignment.SelectValidationWorker(ctx)
 	if werr != nil || w == nil {
 		return nil, errx.ErrEmailOnboardNoWorker
 	}
@@ -222,22 +210,19 @@ func (s *emailService) OnboardSMTPIMAP(ctx context.Context, userID string, orgID
 		return nil, xerr
 	}
 
-	if xerr := s.guardMailboxThrottle(ctx, orgID); xerr != nil {
-		return nil, xerr
-	}
-
 	data.OrganizationID = orgID
+	data.Allowance = allowance
 
 	acc, xerr := s.emailRepository.NewSMTPIMAPAccount(ctx, userID, *data)
 	if xerr != nil {
 		return nil, xerr
 	}
 
-	// Assign the long-term worker (free vs paid tier). Failure here is non-fatal:
-	// the scheduler will pick the account up on its next pass.
+	// Place the mailbox for real. Failure here is non-fatal: the scheduler
+	// picks the account up on its next pass.
 	if orgID != nil {
 		if _, err := s.workerAssignment.AssignWorkerToEmail(ctx, acc.ID, *orgID); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 		}
 	}
 
@@ -265,7 +250,7 @@ func (s *emailService) dispatchAccountConnected(ctx context.Context, orgID *uuid
 		"created_at":       acc.CreatedAt,
 	}
 	if _, err := s.webhookService.Dispatch(ctx, *orgID, models.WebhookEventEmailAccountConnected, payload); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 	}
 }
 
@@ -331,12 +316,37 @@ func validPort(port int) bool {
 
 // validateMailSecurity rejects an unknown security mode. Empty is allowed and
 // means "infer from the port", which is how existing clients behave.
+//
+// "none" carries two extra conditions, because it is the one mode that puts a
+// password on an unencrypted socket. It is legal only against a loopback host,
+// where the socket never reaches a wire, and only on a self-hosted instance,
+// where the worker runs on the operator's own machine. On the hosted product
+// the worker is never the customer's machine, so a loopback address there is
+// the WORKER's loopback: the mode could not reach the relay it was meant for
+// and would only be a way to speak plaintext to whatever answers on that port.
 func validateMailSecurity(smtp, imap *models.Service) *errx.Error {
 	if smtp.Security != "" && !models.ValidMailSecurity(smtp.Security) {
 		return errx.ErrEmailSMTPSecurity
 	}
 	if imap.Security != "" && !models.ValidMailSecurity(imap.Security) {
 		return errx.ErrEmailIMAPSecurity
+	}
+	if err := validateCleartextHost(smtp.Security, smtp.Host, errx.ErrEmailSMTPSecurityNotLocal, errx.ErrEmailSMTPSecurityHosted); err != nil {
+		return err
+	}
+	return validateCleartextHost(imap.Security, imap.Host, errx.ErrEmailIMAPSecurityNotLocal, errx.ErrEmailIMAPSecurityHosted)
+}
+
+// validateCleartextHost is the "none" gate for one leg.
+func validateCleartextHost(security, host string, notLocal, hosted *errx.Error) *errx.Error {
+	if security != models.MailSecurityNone {
+		return nil
+	}
+	if !config.SelfHosted() {
+		return hosted
+	}
+	if !models.LoopbackMailHost(host) {
+		return notLocal
 	}
 	return nil
 }

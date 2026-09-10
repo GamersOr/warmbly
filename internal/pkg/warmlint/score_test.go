@@ -159,3 +159,24 @@ func TestScoreIgnoresTrailingPunctuationWhenMatchingAnchors(t *testing.T) {
 		t.Errorf("two self-linking anchors counted as more than two: %+v", res.Issues)
 	}
 }
+
+// The text renderer keeps a link's destination so the plain-text part stays
+// usable, which put URL slugs in front of the trigger-term list: a CTA
+// pointing at /free-trial cost eight points for a word no reader ever sees.
+func TestScoreIgnoresWordsInsideALinkDestination(t *testing.T) {
+	plain := Score("Quick question", `<p>Hi Ana, worth a look?</p>`, "")
+	slug := Score("Quick question", `<p>Hi Ana, <a href="https://example.com/free-trial">worth a look?</a></p>`, "")
+	if slug.Score != plain.Score {
+		t.Errorf("a URL slug changed the content score: %d vs %d (%v)", slug.Score, plain.Score, slug.Issues)
+	}
+}
+
+// A stylesheet is markup machinery, never copy: a class named for a trigger
+// term must not cost a designed email anything.
+func TestScoreIgnoresAStylesheet(t *testing.T) {
+	clean := Score("Quick question", "<p>Hi Ana, ten minutes on Thursday?</p>", "")
+	styled := Score("Quick question", `<style>.free-trial-banner{color:red}</style><p>Hi Ana, ten minutes on Thursday?</p>`, "")
+	if styled.Score != clean.Score {
+		t.Errorf("a stylesheet changed the content score: %d vs %d (%v)", styled.Score, clean.Score, styled.Issues)
+	}
+}

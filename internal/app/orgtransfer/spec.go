@@ -111,6 +111,11 @@ const (
 var Tables = []Table{
 	// ---------- core: the workspace itself ----------
 	{
+		Name: "organization_acquisition", Group: models.OrgDataGroupCore,
+		Scope: scopeOrg,
+		Note:  "Where the workspace came from, recorded once at signup. It travels because it is the workspace's own record; the destination never rewrites it.",
+	},
+	{
 		Name: "organization_roles", Group: models.OrgDataGroupCore,
 		Scope: scopeOrg,
 	},
@@ -360,6 +365,13 @@ var Tables = []Table{
 		Name: "campaign_attachments", Group: models.OrgDataGroupCampaigns,
 		Scope: `campaign_id IN ` + orgCampaigns,
 		Blobs: []BlobColumn{{Column: "s3_key", Kind: BlobKindKey}},
+	},
+	{
+		Name: "email_images", Group: models.OrgDataGroupCampaigns,
+		Scope: scopeOrg,
+		Note: "The workspace's image library for email bodies. Bytes travel, are restored public-read under the same key, and " +
+			"the url is repointed at the destination; mail already sent keeps the address it was written with, so those images still load from the source.",
+		Blobs: []BlobColumn{{Column: "storage_key", Kind: BlobKindKey}},
 	},
 	{
 		Name: "campaign_senders", Group: models.OrgDataGroupCampaigns,
@@ -786,6 +798,7 @@ var ExcludedTables = map[string]string{
 	"dedicated_worker_assignments": "Worker topology, which is a property of the instance rather than the workspace.",
 	"warmup_pools":                 "Instance-global pool definitions shared by every workspace on the instance.",
 	"pool_link_codes":              "In-flight link handshakes between a self-hosted instance and this cloud, valid for minutes.",
+	"cli_auth_codes":               "In-flight `warmbly auth login` handshakes, valid for minutes. The API key an approval mints does travel, with the api_keys rows.",
 	"pool_link_instances":          "Self-hosted instances linked to this workspace's pool allowance. The token hash only authenticates against this instance, and the enrolled mailboxes are mirrors of mailboxes that live elsewhere.",
 	"pool_link_mailboxes":          "Which mailbox rows are warmup-only mirrors for a linked instance. They follow pool_link_instances, which does not travel.",
 	"cloud_link":                   "This instance's own link to Warmbly Cloud: an instance property, not workspace data, and its token would be wrong on any other instance.",

@@ -8,7 +8,7 @@ The environment is authoritative. Warmbly never lets a web form overwrite a sett
 That rule has three consequences worth stating before the tables:
 
 - **Everything on this page is set in the environment of the running process.** With Docker Compose that is the `.env` next to `docker-compose.yml`. With Kubernetes it is the pod spec or a secret. With a bare binary it is the shell or the systemd unit.
-- **Most resolved values are visible, read only, in the admin panel** under **Instance > Configuration** (`http://localhost:5174/configuration` on a stock install). Each row shows the variable name, the value Warmbly actually resolved, where it came from (`env`, `default`, `derived` or `unset`), and whether changing it needs a restart. That page is how you answer "is my variable actually being picked up", without reading source.
+- **Most resolved values are visible, read only, in the admin panel** under **Instance > Configuration > Environment** (`http://localhost:5174/configuration?tab=environment` on a stock install). Each row shows the variable name, the value Warmbly actually resolved, where it came from (`env`, `default`, `derived` or `unset`), and whether changing it needs a restart. That page is how you answer "is my variable actually being picked up", without reading source.
 - **A handful of settings are stored in the database instead**, because no environment variable owns them. They are listed in [settings stored in the database](#settings-stored-in-the-database) and are the only settings editable from a browser.
 
 Secrets are never returned by any API. The configuration page shows a sensitive key as set or unset plus a four character fingerprint of its value, which is enough to confirm that two services hold the same `AUTH_SECRET` without disclosing it to anyone.
@@ -21,7 +21,7 @@ The configuration registry runs inside the backend process, so every value it sh
 
 | How | What you get |
 |---|---|
-| **Instance > Configuration** in the admin panel | The backend's entries with resolved value, source, group and restart requirement |
+| **Instance > Configuration > Environment** in the admin panel | The backend's entries with resolved value, source, group and restart requirement |
 | `make doctor` | The health checks from a shell, including the configuration problems they detect |
 | `GET /admin/instance/config` | The same list as JSON, behind the `manage_settings` admin permission |
 
@@ -97,11 +97,11 @@ The secret check runs in the backend. The consumer and the workers start happily
 
 ## Addresses
 
-Every emailed link (password reset, invitation, the first-run claim link) is built from `APP_URL`. Leave it unset and those links are built against the hosted service, which means a live reset token leaves your deployment.
+Every emailed link (password reset, invitation, the first-run claim link) is built from `APP_URL`. Leave it unset and a self-hosted instance guesses the origin from `CORS_ALLOW_ORIGINS` or `PUBLIC_HOST` instead, and never falls back to the hosted service: a link nobody can open is a support ticket, while a working link to somebody else's dashboard carries a live reset token out of your deployment. Set it.
 
 | Variable | What it does | Default | Restart needed |
 |---|---|---|---|
-| `APP_URL` | The dashboard origin. The source of every emailed link | `https://app.warmbly.com` | no (read per request) |
+| `APP_URL` | The dashboard origin. The source of every emailed link | guessed from `CORS_ALLOW_ORIGINS`, then `PUBLIC_HOST` | no (read per request) |
 | `FRONTEND_BASE_URL` | Alternative name for the same value, read when `APP_URL` is unset | unset | no |
 | `API_PUBLIC_URL` | The backend's public base. Frontends, blob URLs and the OIDC redirect derive from it | derived from `PUBLIC_HOST` under compose | yes |
 | `BACKEND_PUBLIC_URL` | The backend base used in generated worker configuration | falls back to `API_PUBLIC_URL` | yes |
@@ -111,7 +111,7 @@ Every emailed link (password reset, invitation, the first-run claim link) is bui
 | `CORS_ALLOW_ORIGINS` | Comma separated origins allowed to call the API. Anything not listed gets `403` on preflight | derived from `PUBLIC_HOST` under compose | yes |
 | `WEBSOCKET_URL` | The websocket URL the dashboard connects to | derived under compose | yes (container start) |
 | `PHX_HOST` | The realtime service's own hostname | `localhost` | yes |
-| `TRACKING_DOMAIN` | The host that serves open pixels and click links, and the `CNAME` value customers point their own tracking subdomain at. Use a separate, neutral domain in production. Unset means campaign mail ships with no pixel and unwrapped links, and no custom tracking domain can verify | `localhost:3000` under compose, otherwise unset | no |
+| `TRACKING_DOMAIN` | The host that serves open pixels, click links and the unsubscribe pages for workspaces that verified their own domain against it, and the `CNAME` value those customers point their tracking subdomain at. Use a separate, neutral domain in production. Unset means campaign mail ships with no pixel and unwrapped links, no custom tracking domain can verify, and every opt-out is served from `API_PUBLIC_URL` | `localhost:3000` under compose, otherwise unset | no |
 | `TRACKING_SERVICE_URL` | Where the backend reaches the tracking service internally | unset | yes |
 | `FORMS_DOMAIN` | The host hosted form pages and embeds are served on (`forms.example.com`, routed to the forms service). The backend builds share links and embed codes from it; unset leaves forms without a public URL | unset | no (read per request) |
 
@@ -141,6 +141,7 @@ TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
 | `DISABLE_PASSWORD_LOGIN` | Turns off email and password entirely, for single sign-on only deployments | `false` | yes |
 | `SSO_AUTO_PROVISION` | `true` lets a verified identity provider assertion create an account regardless of `DISABLE_REGISTRATION` | `false` | yes |
 | `AUTH_IP_RATE_LIMIT` | Unauthenticated auth requests allowed per source IP per 15 minutes | `60` | yes |
+| `CLI_AUTH_IP_RATE_LIMIT` | CLI sign-in handshake requests allowed per source IP per 15 minutes. Its own budget, because one `warmbly auth login` polls around 200 times and must not exhaust the allowance above | `500` | yes |
 | `WARMBLY_BOOTSTRAP_EMAIL` | First owner's address, read only while the users table is empty | unset | yes |
 | `WARMBLY_BOOTSTRAP_PASSWORD_HASH` | Argon2 PHC string for that owner. Preferred over the plaintext form | unset | yes |
 | `WARMBLY_BOOTSTRAP_PASSWORD` | Plaintext convenience form. Warns at boot, and leaves a password in your process environment | unset | yes |
@@ -195,9 +196,15 @@ Platform mail is the product's own outbound: registration codes, password resets
 | `SMTP_AUTH` | `auto`, `plain`, `login`, `cram-md5` or `none` | `auto` | yes |
 | `SMTP_EHLO_NAME` | EHLO name presented to the relay | the sender domain | yes |
 | `SMTP_TLS_INSECURE_SKIP_VERIFY` | Skips certificate verification. Only for a relay with a private certificate authority | `false` | yes |
-| `EMAIL_BRAND_NAME` and the other `EMAIL_BRAND_*` values | Name, legal entity, address and links in the transactional footer | Warmbly's own | yes |
+| `EMAIL_BRAND_NAME` | The product name in transactional subjects and the header | `Warmbly` | yes |
+| `EMAIL_BRAND_LEGAL_ENTITY`, `EMAIL_BRAND_COMPANY_NUMBER`, `EMAIL_BRAND_PLACE_OF_REG`, `EMAIL_BRAND_ADDRESS` | The identification line in the transactional footer | unset on a self-host, which renders no line | yes |
+| `EMAIL_BRAND_WEBSITE_URL`, `EMAIL_BRAND_TERMS_URL`, `EMAIL_BRAND_PRIVACY_URL`, `EMAIL_BRAND_SUPPORT_EMAIL` | The footer's links and support address | unset on a self-host, which renders no link row | yes |
 | `NOTIFICATION_EMAIL_DAILY_CAP` | Notification emails per user per day. `0` means uncapped | `25` | yes |
 | `NOTIFICATION_PUSH_WINDOW` | How long a notification waits before it is also pushed | `5h` | yes |
+
+A self-hosted instance never fills those in with ours. Warmbly's own company details and website are the hosted service's, not yours, so an unset `EMAIL_BRAND_*` renders nothing rather than sending your users a footer naming a company they have no relationship with. Set them to your own if your jurisdiction wants an identification line on business email.
+
+Despite the prefix, these are not only about email. `GET /v1/auth/config` serves the public half of them (name, website, terms, privacy, support address) and every surface that used to hardcode `warmbly.com` reads it: the sign-in screen's wordmark and its Terms and Privacy links, the copyable API example on the API keys page, a shared stats card, and the "powered by" line at the foot of a [hosted form page](/guides/forms/). Each renders nothing when the value is unset, so a stranger filling in one of your forms is never sent to a website with no relationship to it.
 
 `log` is a real transport, not a broken one: it writes every message to the backend log and delivers nothing. It exists so a fresh install can complete its first sign-in with no relay. What it costs you is password resets, invitation delivery and digests, all of which have a workaround described on [accounts and access](/development/accounts-and-access/#without-a-mail-relay).
 
@@ -249,9 +256,9 @@ An empty `CREDENTIALS_ENCRYPTION_KEY` does not fail at boot. It disables sealing
 | Variable | What it does | Default | Restart needed |
 |---|---|---|---|
 | `BLOB_PROVIDER` | `filesystem` or `s3` | `filesystem` under compose, `s3` for a bare binary | yes |
-| `BLOB_FS_ROOT` | Directory for stored bodies, attachments and avatars. The backend, the consumer and every worker on the host must share it | `/data/blobs` | yes |
+| `BLOB_FS_ROOT` | Directory for stored bodies, attachments, avatars and email body images. The backend, the consumer and every worker on the host must share it | `/data/blobs` | yes |
 | `BLOB_BUCKET` | Bucket name when `BLOB_PROVIDER=s3` | unset | yes |
-| `BLOB_PUBLIC_BASE_URL` | Public base for the backend's `/public` route | derived | yes |
+| `BLOB_PUBLIC_BASE_URL` | Public base for the backend's `/public` route. Images placed in an email body are served from here, so it has to be an address a recipient's mail client can reach | derived | yes |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Credentials for S3 or SES | unset | yes |
 | `AWS_ENDPOINT_URL_S3` | Non-AWS S3 endpoint (MinIO, R2, B2) | unset | yes |
 | `AWS_CONFIG_ENABLED` | `true` reads secrets from AWS SSM or Secrets Manager | `false` | yes |
@@ -314,10 +321,8 @@ The variable must be set on the backend in every environment. The file itself is
 | `WORKER_ID` | Stable uuid for this worker. Leave unset when running scaled replicas, which share one environment | derived, then random | yes |
 | `WORKER_BIND_IP` | Source address to bind outbound connections to, and the seed for a derived `WORKER_ID` | unset | yes |
 | `WORKER_PUBLIC_IP` | The address the worker reports to the control plane | detected | yes |
-| `WORKER_TIER` | `free`, `premium` or `dedicated`. Tier placement is strict | `free` | yes |
-| `WORKER_EGRESS_KIND` | Label describing the worker's egress path | unset | yes |
+| `WARMBLY_NODE_REGION` | Free-form label for where this node egresses from, e.g. `eu-central`. Placement prefers a worker near where a mailbox's provider expects sign-ins; unset scores neutral. Written by the join script from `--region` | unset | yes |
 | `WORKER_IMAGE` | Image the remote installer pulls. The built-in default does not match what CI publishes, so set it | built-in | yes |
-| `WORKER_INSTALLER_PATH` | Path to the installer script the backend serves | built-in | yes |
 | `ENCRYPTED_KEYS_BACKEND_URL` | Backend base the worker fetches organization keys from | unset | yes |
 | `ENCRYPTED_KEYS_WORKER_TOKEN` | The worker's copy of `INTERNAL_API_TOKEN` | unset | yes |
 | `MAIL_TLS_INSECURE` | Skips certificate verification on mailbox connections | `false` | yes |
@@ -376,9 +381,45 @@ Delayed sends run through the local poller, so the backend must be running for s
 
 ## Observability
 
+### Error reporting
+
+Every runtime in Warmbly can report its errors, and none of them do unless you say where. A DSN is the operator's choice, not a requirement of the software, so the default install reports nowhere and contacts no host. Each variable is read by one process, so pointing the backend at a project does not make the dashboard report too.
+
+| Variable | Read by | What it does | Default |
+|---|---|---|---|
+| `SENTRY_DSN` | backend, consumer, worker | Server-side error reporting. Optional in every environment, including `prod` | unset |
+| `SENTRY_DSN` | forms service | The forms service's own errors. It reads its own environment, like tracking | unset |
+| `SENTRY_DSN` | tracking service | Rust errors and panics. An invalid DSN disables reporting with a log line rather than stopping the service | unset |
+| `SENTRY_DSN` | realtime service | An empty string is treated as unset on purpose, because the library rejects `""` hard enough to take the node down | unset |
+| `WARMBLY_SENTRY_DSN` | web, admin containers | Browser error reporting, read at container start like the other `WARMBLY_*` values. Unset means the SDK is never initialised and no host is contacted | unset |
+| `WARMBLY_SENTRY_DSN` | forms service | Stamped into the public form page for the form app's browser errors, along with the service's `APP_ENV` as their environment. Separate from the forms service's own `SENTRY_DSN`: one is a Go process, the other is a page a stranger loads | unset |
+| `WARMBLY_SENTRY_ENVIRONMENT` | web, admin containers | The environment label those browser events carry. Defaults to the build mode. Form pages do not read it: the forms service stamps its own `APP_ENV` into the page instead | unset |
+| `APP_ENV` | every server-side service | Doubles as the environment label on the events that service reports. Browser events take theirs from `WARMBLY_SENTRY_ENVIRONMENT` instead, because the container serving the bundle is not the process reporting the error | `dev` |
+| `WARMBLY_RELEASE` | tracking, realtime | The build events are tagged with. The published images set it from the release tag; the Go services and the frontends read the same value from their build stamp instead | `dev` |
+
+An unset DSN means nothing leaves the process and no Sentry host is contacted. The dashboard, the admin panel and form pages go further and never load the SDK at all, so there is not even a script; the Go, Rust and Elixir services still record errors, to their own logs. A set DSN can point at Sentry Cloud, a self-hosted Sentry, or any Sentry-compatible server such as GlitchTip; nothing in Warmbly assumes sentry.io.
+
+The `admin` panel and the dashboard also tag events with the build they were served from. That value is baked at image build time, because it has to match the release the source maps were uploaded under, so it cannot be changed by a container variable afterwards.
+
+### Product analytics
+
+These exist for the hosted service and are unset everywhere else. A self-hosted instance loads no analytics and sends no usage data: the installer never asks about them, the `.env` template does not mention them, and a build with none of them set contains no analytics script to block.
+
+| Variable | Read by | What it does | Default |
+|---|---|---|---|
+| `POSTHOG_KEY` | backend | Server-side product events (a completed signup, a started subscription). Unset means no client is built and nothing is sent | unset |
+| `POSTHOG_HOST` | backend | Capture host. Point it at a self-hosted PostHog if you run one | `https://us.i.posthog.com` |
+| `WARMBLY_POSTHOG_KEY` | web container | Browser analytics for the dashboard, read at container start. Unset means the SDK chunk is never fetched | unset |
+| `WARMBLY_POSTHOG_HOST` | web container | Capture host for the browser | `https://us.i.posthog.com` |
+| `PUBLIC_POSTHOG_KEY` | `site/` build | Marketing site analytics. Build-time: unset produces a site with no analytics code in it at all | unset |
+| `PUBLIC_POSTHOG_HOST` | `site/` build | Capture host for the site | `https://us.i.posthog.com` |
+
+Everything runs in PostHog's cookieless mode: nothing is stored in the visitor's browser, no `identify` is ever called, and no event property carries a user id, an organization id or an email. The admin panel gets none of it and never will; it is the operator surface and it ships to self-hosters.
+
+### Push
+
 | Variable | What it does | Default |
 |---|---|---|
-| `SENTRY_DSN` | Error reporting. Optional in every environment, including `prod` | unset |
 | `APNS_KEY` or `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC` | Mobile push on backend and consumer. Partial configuration disables push with a warning, never a crash | unset |
 
 ## Updates
@@ -406,6 +447,8 @@ The public face of hosted forms (`cmd/forms`): it serves the React (TanStack) fo
 | `BACKEND_INTERNAL_URL` | Where the service resolves forms and forwards submissions, the same variable the tracking service uses. **Required**: the service exits at boot without it | none |
 | `INTERNAL_API_TOKEN` | Bearer token for those calls, matching the backend's. **Required**: the service exits at boot on an empty value | none |
 | `FORM_IP_RATE_LIMIT` | Public form submissions allowed per source IP per 10 minutes, per forms-service instance | `30` |
+| `SENTRY_DSN` | The service's own error reporting. Unset means none | unset |
+| `WARMBLY_SENTRY_DSN` | Stamped into the form page so the browser app reports too. Unset means the page loads no reporting SDK at all | unset |
 | `TRUSTED_PROXIES` | CIDRs whose `X-Forwarded-For` the service believes, same convention as the backend. Empty trusts nothing and uses the socket peer; set it behind a reverse proxy or the submit limiter throttles the proxy's address instead of the visitor's | empty |
 
 ## Tracking service
@@ -428,7 +471,9 @@ The Rust open and click service. It reads its own environment, so these have to 
 | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | Broker transport when `EVENTBUS_PROVIDER=kafka` | unset |
 | `SCHEMA_REGISTRY_URL`, `SCHEMA_REGISTRY_KEY`, `SCHEMA_REGISTRY_SECRET` | Registry for the Avro codec | unset |
 | `AWS_CONFIG_ENABLED` | `true` falls back to AWS SSM and Secrets Manager for any value missing from the environment | `false` |
-| `APP_ENV` | Environment label used in logs | `dev` |
+| `APP_ENV` | Environment label used in logs, and on reported errors | `dev` |
+| `SENTRY_DSN` | Error and panic reporting. Unset means none; an invalid value logs and disables it rather than stopping the service | unset |
+| `WARMBLY_RELEASE` | The build reported errors are tagged with | `dev` |
 
 ## Realtime service
 
@@ -453,6 +498,7 @@ The Elixir websocket service. Its runtime configuration is read only when the re
 | `RATE_LIMIT_WS_JOIN` | Channel joins per minute, counted per `phx_join` on an open socket | `30` |
 | `RATE_LIMIT_WS_EVENT` | Client events per minute, which is what bounds presence updates | `60` |
 | `SENTRY_DSN` | Error reporting. An empty string is treated as unset on purpose, because the library rejects `""` hard enough to take the node down | unset |
+| `WARMBLY_RELEASE` | The build reported errors are tagged with | `dev` |
 
 <Callout type="warn" title="CHECK_ORIGIN is false by default">
 The shipped default accepts a websocket upgrade from **any** origin. A token is still required to join a channel, so an attacker needs a valid JWT either way, but on a deployment reachable from the internet set `PHX_HOST` to the public websocket hostname and `CHECK_ORIGIN=true` so only your own dashboard can open a socket.
@@ -460,7 +506,7 @@ The shipped default accepts a websocket upgrade from **any** origin. A token is 
 
 ## Settings stored in the database
 
-These are the only settings a browser can change, and no environment variable owns any of them. They live in the admin panel under **Instance > Instance settings** (`/configuration/settings`). Reads are cached for 30 seconds in each process, so a change takes effect everywhere within that window.
+These are the only settings a browser can change, and no environment variable owns any of them. They live in the admin panel under **Instance > Configuration > Settings** (`/configuration?tab=settings`). Reads are cached for 30 seconds in each process, so a change takes effect everywhere within that window.
 
 | Setting | Type | Default | What it does |
 |---|---|---|---|
@@ -471,10 +517,23 @@ These are the only settings a browser can change, and no environment variable ow
 | `sync.backfill_messages` | integer, 1 to 100000 | `5000` | The most messages that import stores per mailbox |
 | `sync.daily_messages_per_mailbox` | integer, 1 to 100000 | `2000` | New (live) messages one mailbox may store per UTC day. Over it, mail waits for the next day; replies to the mailbox's own sends have a separate budget of the same size |
 | `sync.daily_messages_per_org` | integer, 1 to 2000000 | `25000` | New plus imported messages one organization may store per UTC day |
+| `retention.engagement_event_days` | integer, 1 to 3650 | `365` | How long the per-event open and click logs (client, device, approximate location) are kept. Campaign progress keeps its own summary that outlives them, so counts, filters and branching never change |
+| `retention.form_event_days` | integer, 1 to 3650 | `180` | How long form funnel events (views, starts, field-level drop-off) are kept. Funnel reports range up to 90 days, so anything shorter shortens the report too |
+| `retention.audit_log_days` | integer, 1 to 3650 | `90` | How long the audit trail is kept. It carries IP addresses, user agents and change payloads, so this is also how long that data is held |
 | `deliverability.enforce_domain_auth` | boolean | `true` | Whether a sending domain that fails SPF or DMARC stops cold campaign sending and warmup sending from every mailbox on it. Off keeps the check running and still shows the state and the Advisor card, it just never blocks |
 | `deliverability.auth_grace_hours` | integer, 1 to 720 | `72` | How long a domain must stay failing before the gate applies. The clock starts when the background check first sees the failure, so this is also how much warning the owner gets |
 
-The four `sync.*` values are read by the backend when a mailbox is loaded onto a worker (on connect, on reassignment, and by the reconciler's periodic republish), so a change reaches every mailbox within a few minutes without a restart. The fixed pacing numbers around them (burst per five minutes, hourly, backfill pace, the flood threshold and the chronic-overage rule) are compiled constants listed under **Instance > Limits**; see [Mailboxes](/guides/mailboxes/#what-gets-synced) for how the budgets behave.
+The four `sync.*` values are read by the backend when a mailbox is loaded onto a worker (on connect, on reassignment, and by the reconciler's periodic republish), so a change reaches every mailbox within a few minutes without a restart. The fixed pacing numbers around them (burst per five minutes, hourly, backfill pace, the flood threshold and the chronic-overage rule) are compiled constants listed under **Instance > Configuration > Effective limits**; see [Mailboxes](/guides/mailboxes/#what-gets-synced) for how the budgets behave. The four `sync.*` values also have a companion read view on **Operations > Sync**, which shows each mailbox's backfill progress and fair-use throttle against them and can clear a throttle or restart a backfill.
+
+The three `retention.*` values are read by the pruning sweeps on every pass, so shortening one takes effect on the next sweep rather than at the next restart. Deletion is permanent and there is no grace period: what already sits outside a shortened window goes on that sweep. See [data control](/development/data-control/#what-is-kept-and-for-how-long) for what each log holds and what a shorter window costs.
+
+An unattended install can seed the whole document before anyone signs in, with `WARMBLY_SETTINGS_BOOTSTRAP` holding the same partial JSON the admin API takes:
+
+```bash
+WARMBLY_SETTINGS_BOOTSTRAP={"sync":{"backfill_days":30},"retention":{"audit_log_days":30}}
+```
+
+It is applied only while the settings row has never been written, so from the first save in the panel onwards the panel is authoritative and the variable is a no-op. That is what [`install.sh --wizard`](/development/install/) writes when you answer its retention questions.
 
 The two `deliverability.*` values are read on every scheduling pass and every warmup send, so turning the gate off releases blocked mailboxes within the 30 second cache window. Turning it back on does not stop anything retroactively: a domain still has to spend its whole grace window failing first. Only a sustained failure gates, so a domain reading `unknown` (never checked, DNS could not answer, or a special-use domain that cannot resolve) always sends. Manual sends and unibox replies are never gated; see [domain authentication](/guides/deliverability/#domain-authentication).
 
@@ -486,11 +545,12 @@ Changing them is audited, and every value is validated and clamped server side o
 |---|---|
 | `KAFKA_CLUSTER` | Nothing. A loader exists but no caller does. Remove it |
 | `SENTRY_DSN_API` | Nothing, for the same reason. Superseded by `SENTRY_DSN` |
-| `PROVISIONING_DRY_RUN` | It is read, but it cannot be turned off. No real installer adapter is wired yet, so `false` logs a line and is forced back to dry-run rather than creating servers nothing could finish provisioning. `PROVISIONING_RUNNER_ENABLED=false` stops the runner entirely |
 | `CAPTCHA_PROVIDER` | Read, but derived when unset rather than defaulting to a constant. See [captcha](#captcha) |
 
 ## See also
 
+- [Install](/development/install/) for the one-command install that writes all of this for you
+- [Data control](/development/data-control/) for where each store lives and what each retention window governs
 - [First run](/development/first-run/) for claiming a fresh instance
 - [Accounts and access](/development/accounts-and-access/) for who may sign in and how to invite people
 - [Instance health](/development/instance-health/) for the checks that read these values back

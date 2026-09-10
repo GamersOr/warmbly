@@ -83,8 +83,12 @@ func Run(
 	// Public worker enrollment. The one-time enrollment token is the
 	// credential; successful exchange returns a dotenv file for the installer
 	// and consumes the token.
-	r.GET("/worker-install.sh", h.ServeWorkerInstaller)
-	r.POST("/api/v1/workers/enroll", h.EnrollWorker)
+	// Joining the fleet. The script is public (it does nothing without a
+	// token); the enrolment endpoint is the only one reachable with the join
+	// token rather than an operator session, because the machine running it
+	// has no credentials yet.
+	r.GET("/join.sh", h.ServeJoinScript)
+	r.POST("/api/v1/fleet/join", h.FleetJoin)
 
 	// Public OAuth-bouncer pages used by the mailbox onboarding popup.
 	// The provider redirects here; the page postMessages the code/state
@@ -107,6 +111,12 @@ func Run(
 	// Public invitation preview for the /invite landing page. Unauthenticated:
 	// the secret token in the query is the capability.
 	r.GET("/invitations/lookup", h.PreviewInvitation)
+
+	// On-demand TLS gate for the reverse proxy in front of this instance
+	// (Caddy's `ask`). Unauthenticated because the proxy has no credential to
+	// present and the answer is already public: the CNAME that makes a
+	// hostname interesting points here in public DNS.
+	r.GET("/tls/authorize", h.AuthorizeTLSDomain)
 
 	// Internal backend-to-backend endpoints. Workers call these instead of
 	// touching Postgres directly, per the no-direct-data-services rule in
@@ -144,7 +154,7 @@ func Run(
 		// on boot (worker_id + bind_ip + tag) and pull their runtime config
 		// instead of carrying it all in the install-time env file.
 		internal.GET("/worker/config", h.InternalWorkerConfig)
-		internal.POST("/worker/heartbeat", h.InternalWorkerHeartbeat)
+		internal.POST("/fleet/heartbeat", h.FleetHeartbeat)
 
 		// Hosted forms: the forms service (cmd/forms) resolves published
 		// forms, forwards deduped funnel events and visitor submissions
@@ -238,6 +248,18 @@ func Run(
 	{
 		poolLinkPublic.POST("/codes", h.PoolLinkStart)
 		poolLinkPublic.POST("/poll", h.PoolLinkPoll)
+	}
+
+	// `warmbly auth login`. Unauthenticated by nature (the CLI has no key yet),
+	// so it is throttled per source IP, but on its OWN budget: one sign-in
+	// polls around 200 times, which would exhaust the auth allowance and then
+	// lock the same address out of the browser login for the rest of the
+	// window.
+	cliAuthPublic := v1.Group("/auth/cli")
+	cliAuthPublic.Use(m.CLIAuthIPRateLimitMiddleware())
+	{
+		cliAuthPublic.POST("/code", h.CLIAuthStart)
+		cliAuthPublic.POST("/poll", h.CLIAuthPoll)
 	}
 
 	auth := v1.Group("/auth")
@@ -399,6 +421,8 @@ func Run(
 				// Bulk tag add/remove across many mailboxes (set semantics,
 				// naturally idempotent). Static path beside /:id like /verify.
 				emails.PATCH("/tags", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails), h.BulkTagEmails)
+				// How many mailboxes the workspace holds and may hold, and why.
+				emails.GET("/allowance", m.RequireOrganization(), m.RequireAccess(models.PermManageEmails, models.APIPermReadEmails), h.GetMailboxAllowance)
 				emails.GET("/:id/track", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.GetEmailTrackingDomain)
 				emails.PATCH("/:id/track", m.RequireAccess(models.PermManageEmails, models.APIPermWriteEmails), middleware.RequireAPIKeyEmailAccountParam("id"), h.UpdateEmailTrackingDomain)
 				// Write-scoped like the auth-check refresh: persisting the
@@ -437,6 +461,9 @@ func Run(
 				onboardingEmails.POST("/oauth/start", h.StartEmailOAuth)
 				onboardingEmails.POST("/oauth/finish", h.FinishEmailOAuth)
 				onboardingEmails.POST("/smtp-imap", h.ConnectEmailSMTPIMAP)
+				// The CSV import: up to MailboxBulkBatchMax rows per call, answered
+				// per row. Same bar as a single connect.
+				onboardingEmails.POST("/smtp-imap/bulk", h.ConnectEmailSMTPIMAPBulk)
 				// Reconnect flows for an existing mailbox whose credential the
 				// provider invalidated (issue #274). They mutate an existing
 				// org asset, so unlike first connect they sit behind the same
@@ -749,6 +776,11 @@ func Run(
 			// API key management. JWT users need PermManageAPIKeys; API keys
 			// need the APIPermAPIKeys self-service bit. This lets an integration
 			// rotate its own keys without going through the dashboard.
+			// Self-revocation, outside the API_KEYS gate below on purpose: any
+			// valid key may end itself, which is what makes signing a machine
+			// out actually end its access.
+			protected.DELETE("/api-keys/self", m.RequireOrganization(), m.RateLimitMiddleware(models.RateLimitWrite), h.RevokeOwnAPIKey)
+
 			apiKeys := protected.Group("/api-keys")
 			apiKeys.Use(m.RequireOrganization(), m.RequireAccess(models.PermManageAPIKeys, models.APIPermAPIKeys))
 			apiKeys.Use(m.RateLimitMiddleware(models.RateLimitWrite))
@@ -1001,6 +1033,17 @@ func Run(
 				templates.POST("/score", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadTemplates), h.ScoreTemplateContent)
 			}
 
+			// Workspace image library for email bodies. The bytes are public
+			// objects (a recipient's mail client fetches them with no session),
+			// so these routes only manage the library, not the reads.
+			emailImages := protected.Group("/email-images")
+			emailImages.Use(m.RequireOrganization(), m.RateLimitMiddleware(models.RateLimitWrite))
+			{
+				emailImages.GET("", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadCampaigns), h.ListEmailImages)
+				emailImages.POST("", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.UploadEmailImage)
+				emailImages.DELETE("/:id", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteCampaigns), h.DeleteEmailImage)
+			}
+
 			// CRM routes (require org)
 			crmGroup := protected.Group("/crm")
 			crmGroup.Use(m.RequireOrganization(), m.RateLimitMiddleware(models.RateLimitWrite))
@@ -1218,6 +1261,18 @@ func Run(
 				poolLink.GET("/instances", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.PoolLinkListInstances)
 				poolLink.DELETE("/instances/:id", m.RequireOrganization(), m.RequirePermission(models.PermManageSettings), h.PoolLinkRevokeInstance)
 			}
+
+			// Browser half of `warmbly auth login`: a member reviews the code
+			// and approves it into one of their workspaces. Session-only, like
+			// the pool link approval, because approving mints a credential and
+			// an API key must not be able to mint another CLI's key.
+			cliAuth := jwtOnly.Group("/auth/cli")
+			cliAuth.Use(m.RateLimitMiddleware(models.RateLimitWrite))
+			{
+				cliAuth.GET("/codes/:code", h.CLIAuthDescribeCode)
+				cliAuth.POST("/codes/:code/approve", h.CLIAuthApproveCode)
+				cliAuth.POST("/codes/:code/deny", h.CLIAuthDenyCode)
+			}
 			// The linked instance's own surface, authenticated by its token.
 			poolLinkInstance := base.Group("/pool-link/instance")
 			poolLinkInstance.Use(m.PoolLinkAuthMiddleware())
@@ -1373,30 +1428,11 @@ func Run(
 		adminRoutes.POST("/workers/:id/reassign", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminReassignEmails)
 
 		// SSH-managed worker lifecycle (admin-driven add / install / restart / logs)
-		adminRoutes.GET("/workers/managed", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminListSSHWorkers)
-		adminRoutes.POST("/workers", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminCreateWorker)
-		adminRoutes.GET("/workers/:id/managed", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminGetSSHWorker)
-		adminRoutes.POST("/workers/:id/test", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminTestWorker)
-		adminRoutes.POST("/workers/:id/install", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminInstallWorker)
-		adminRoutes.POST("/workers/:id/restart", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminRestartWorker)
-		adminRoutes.POST("/workers/:id/upgrade", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminUpdateWorkerImage)
-		adminRoutes.POST("/workers/:id/uninstall", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminUninstallWorker)
-		adminRoutes.POST("/workers/:id/rotate-keys", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminRotateWorkerKeys)
-		adminRoutes.GET("/workers/:id/live-status", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminWorkerStatusLive)
-		adminRoutes.GET("/workers/:id/logs", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminWorkerLogs)
-		adminRoutes.DELETE("/workers/:id", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminDeleteSSHWorker)
-		adminRoutes.PUT("/workers/:id/profile", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminAssignWorkerProfile)
-		adminRoutes.POST("/workers/:id/apply", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminApplyWorkerConfig)
-		adminRoutes.POST("/workers/:id/system-update", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminSystemUpdate)
-		adminRoutes.POST("/workers/:id/reboot", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminRebootWorker)
-		adminRoutes.POST("/workers/preflight", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminPreflightWorker)
-		adminRoutes.GET("/workers/tags", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminListWorkerTags)
 		adminRoutes.PUT("/workers/:id/tags", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminSetWorkerTags)
 
-		// Removed for self-host: worker convert-to-dedicated + risk-pool (multi-tenant
-		// IP-reputation fleet constructs), reusable AWS credentials + worker profiles
-		// (cloud-fleet env templating), and GitHub release auto-roll. Attach and manage
-		// machines you own via the SSH worker lifecycle above.
+		// Removed for self-host: reusable AWS credentials + worker profiles
+		// (cloud-fleet env templating) and GitHub release auto-roll. Attach and
+		// manage machines you own via the SSH worker lifecycle above.
 
 		// Warmup Management
 		adminRoutes.GET("/warmup/pools", middleware.RequireAdminPermission(models.AdminPermViewWarmupPool), h.AdminListWarmupPools)
@@ -1457,6 +1493,11 @@ func Run(
 		adminRoutes.GET("/instance/limits", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminInstanceLimits)
 		adminRoutes.GET("/instance/settings", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminGetInstanceSettings)
 		adminRoutes.PUT("/instance/settings", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminPutInstanceSettings)
+		// Operator notification channels: the channels themselves are part of
+		// the settings document above; these two are the event catalog the
+		// panel renders and the on-demand delivery probe.
+		adminRoutes.GET("/instance/notifications/events", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminNotificationEvents)
+		adminRoutes.POST("/instance/notifications/test", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminTestNotificationChannel)
 		// Updates: the top-bar indicator polls the state; applying one goes
 		// through the host-side updater and restarts this process.
 		adminRoutes.GET("/instance/update", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminUpdateState)
@@ -1470,11 +1511,62 @@ func Run(
 		adminRoutes.GET("/analytics/emails/hourly", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminGetHourlyEmailStats)
 		adminRoutes.GET("/analytics/users/growth", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminGetUserGrowthStats)
 
-		// Removed for self-host: worker load + email-distribution analytics
-		// (premised on multi-worker IP spread, moot when the mail provider owns the
-		// egress IP), and the SaaS commercial surfaces — plans, discount/promo
-		// codes, and the enterprise-sales inquiry queue — which have no role in a
-		// single-org, billing-disabled deployment.
+		// Signups by channel and trial conversion, from organization_acquisition.
+		adminRoutes.GET("/analytics/acquisition", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminGetAcquisition)
+
+		// Mailbox sync governor: the platform copy of every mailbox's sync
+		// state. Actions re-ship the mailbox to its worker so the worker's live
+		// copy follows.
+		adminRoutes.GET("/sync", middleware.RequireAdminPermission(models.AdminPermViewUsers), h.AdminSearchSync)
+		adminRoutes.POST("/sync/:id/clear-throttle", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminSyncClearThrottle)
+		adminRoutes.POST("/sync/:id/restart-backfill", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminSyncRestartBackfill)
+
+		// Send outcome loop and task queues.
+		adminRoutes.GET("/sends/in-flight", middleware.RequireAdminPermission(models.AdminPermViewCampaigns), h.AdminInFlightSends)
+		adminRoutes.GET("/tasks/dead-letters", middleware.RequireAdminPermission(models.AdminPermViewCampaigns), h.AdminListDeadLetters)
+		adminRoutes.POST("/tasks/dead-letters/:id/replay", middleware.RequireAdminPermission(models.AdminPermStopCampaigns), h.AdminReplayDeadLetter)
+		adminRoutes.GET("/tasks/failures", middleware.RequireAdminPermission(models.AdminPermViewCampaigns), h.AdminRecentTaskFailures)
+		adminRoutes.GET("/webhooks/health", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminWebhookHealth)
+		adminRoutes.POST("/webhooks/reclaim", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminWebhookReclaim)
+
+		// Scheduled jobs: every background loop on the instance, with "run now".
+		adminRoutes.GET("/jobs", middleware.RequireAdminPermission(models.AdminPermViewAnalytics), h.AdminListJobs)
+		adminRoutes.POST("/jobs/:name/run", middleware.RequireAdminPermission(models.AdminPermManageSettings), h.AdminRunJob)
+
+		// Fleet placement: capacity per worker, the control loops' decision
+		// log, and isolated-egress reservations.
+		adminRoutes.GET("/fleet/nodes", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminFleetNodes)
+		adminRoutes.POST("/fleet/join-token", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminFleetIssueJoinToken)
+		adminRoutes.PATCH("/fleet/nodes/:id", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminFleetPatchNode)
+		adminRoutes.DELETE("/fleet/nodes/:id", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminFleetDeleteNode)
+		adminRoutes.GET("/fleet/release", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminFleetRelease)
+		adminRoutes.PUT("/fleet/release", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminFleetSetRelease)
+		adminRoutes.GET("/fleet/capacity", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminFleetCapacity)
+		adminRoutes.GET("/fleet/decisions", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminFleetDecisions)
+		adminRoutes.GET("/fleet/dedicated", middleware.RequireAdminPermission(models.AdminPermViewWorkers), h.AdminFleetDedicated)
+		adminRoutes.POST("/fleet/dedicated/:orgId/release", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminFleetReleaseIsolatedEgress)
+		adminRoutes.POST("/workers/:id/reserve", middleware.RequireAdminPermission(models.AdminPermManageWorkers), h.AdminFleetReserveWorker)
+
+		// Workspace transfers: the same archive service the owner uses from
+		// Settings > Data, driven by the operator for any workspace.
+		adminRoutes.GET("/transfers", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminListTransfers)
+		adminRoutes.GET("/organizations/:id/exports", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminListOrgExports)
+		adminRoutes.POST("/organizations/:id/exports", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminCreateOrgExport)
+		adminRoutes.GET("/organizations/:id/exports/:exportId", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminGetOrgExport)
+		adminRoutes.GET("/organizations/:id/exports/:exportId/download", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminDownloadOrgExport)
+		adminRoutes.DELETE("/organizations/:id/exports/:exportId", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminDeleteOrgExport)
+		adminRoutes.GET("/organizations/:id/imports", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminListOrgImports)
+		adminRoutes.POST("/organizations/:id/imports/preflight", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminPreflightOrgImport)
+		adminRoutes.POST("/organizations/:id/imports", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminCreateOrgImport)
+
+		// Per-workspace developer surface: keys and webhook endpoints.
+		adminRoutes.GET("/organizations/:id/api-keys", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminListOrgAPIKeys)
+		adminRoutes.DELETE("/organizations/:id/api-keys/:keyId", middleware.RequireAdminPermission(models.AdminPermManageOrganizations), h.AdminRevokeOrgAPIKey)
+		adminRoutes.GET("/organizations/:id/webhooks", middleware.RequireAdminPermission(models.AdminPermViewOrganizations), h.AdminListOrgWebhooks)
+
+		// Warmup abuse signals and the block/unblock history.
+		adminRoutes.GET("/warmup/abuse", middleware.RequireAdminPermission(models.AdminPermViewWarmupPool), h.AdminWarmupAbuse)
+		adminRoutes.GET("/warmup/actions", middleware.RequireAdminPermission(models.AdminPermViewWarmupPool), h.AdminWarmupActions)
 
 		// Admin Management
 		adminRoutes.GET("/admins", middleware.RequireAdminPermission(models.AdminPermGrantAdminAccess), h.AdminListAdmins)

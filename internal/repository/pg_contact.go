@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/warmbly/warmbly/internal/config"
@@ -18,6 +17,7 @@ import (
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/db"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/pkg/emailverify"
 	"github.com/warmbly/warmbly/internal/pkg/encrypt"
 	"github.com/warmbly/warmbly/internal/utils"
@@ -65,7 +65,12 @@ type ContactRepository interface {
 	// to the caller's category IDs, creating the ones that don't exist yet.
 	// Keys of the returned map are the lowercased titles.
 	ResolveCategoryNames(ctx context.Context, userID uuid.UUID, names []string) (map[string]uuid.UUID, *errx.Error)
-	Search(ctx context.Context, userID string, category, cursor *string, filters models.SearchContacts, limit int32) (*models.ContactsResult, *errx.Error)
+	Search(ctx context.Context, userID string, category *string, cursor *paging.SortCursor, filters models.SearchContacts, limit int32) (*models.ContactsResult, *errx.Error)
+	// SearchIDs returns the ids of every contact matching the same request
+	// Search runs, capped at max+1 rows so the caller can tell "exactly max"
+	// from "more than max". Backs the dashboard's "select all matching" bulk
+	// actions, which name a filter instead of listing ids.
+	SearchIDs(ctx context.Context, orgID string, filters models.SearchContacts, max int) ([]uuid.UUID, *errx.Error)
 	// SearchCounts returns org-wide contact facet totals for the browse
 	// sidebar (independent of any search filters), mirroring campaigns-overview.
 	SearchCounts(ctx context.Context, orgID string) (*models.ContactsCounts, *errx.Error)
@@ -92,7 +97,7 @@ type ContactRepository interface {
 	// + deliverability + reply joins are skipped (they're org-scoped).
 	GetDetail(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID) (*models.ContactDetail, *errx.Error)
 	ListSentEmails(ctx context.Context, userID, contactID uuid.UUID, limit int, beforeSentAt *time.Time, beforeTaskID *uuid.UUID) (*models.ContactSentEmailsResult, *errx.Error)
-	ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, before *time.Time) (*models.ContactTimelineResult, *errx.Error)
+	ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, cursor *models.ContactTimelineKey) (*models.ContactTimelineResult, *errx.Error)
 	// ListCampaignStates returns the contact's campaigns with their flow,
 	// this contact's progress on every step, and the derived lead status.
 	ListCampaignStates(ctx context.Context, orgID, contactID uuid.UUID) ([]models.ContactCampaignState, *errx.Error)
@@ -372,6 +377,7 @@ func (r *contactRepository) Add(ctx context.Context, userID string, orgID uuid.U
 		if ncon.CustomFields == nil {
 			ncon.CustomFields = map[string]string{}
 		}
+		ncon.IsNew = inserted
 		ncontacts = append(ncontacts, ncon)
 		created = append(created, inserted)
 		if inserted {
@@ -681,6 +687,9 @@ type VerificationCandidate struct {
 // verdicts older than their shelf life: an unknown verdict is retried after
 // config.VerificationUnknownRecheckDays, everything else after
 // config.VerificationRecheckDays. Manual verdicts are never re-checked.
+//
+// A built-in verdict that predates a connected verifier is reopened once, so
+// connecting one actually reaches the addresses it was connected for.
 func (r *contactRepository) ListVerificationCandidates(ctx context.Context, limit int) ([]VerificationCandidate, *errx.Error) {
 	if limit <= 0 {
 		limit = 100
@@ -696,11 +705,34 @@ func (r *contactRepository) ListVerificationCandidates(ctx context.Context, limi
 		    c.verification_checked_at IS NULL
 		    OR (c.verification_status = 'unknown' AND c.verification_checked_at < NOW() - make_interval(days => $2))
 		    OR c.verification_checked_at < NOW() - make_interval(days => $3)
+		    -- A built-in verdict reached before the workspace connected a
+		    -- verifier was reached without it; re-check once rather than after
+		    -- the shelf life. Only the built-in probe's verdicts: one a paid
+		    -- verifier already produced is a real answer, and re-checking it
+		    -- because another verifier was connected spends a credit for
+		    -- nothing.
+		    OR (
+		      c.verification_provider = $6
+		      AND EXISTS (
+		        SELECT 1 FROM integration_connections ic
+		        WHERE ic.organization_id = c.organization_id
+		          AND ic.provider = ANY($5)
+		          AND ic.status <> 'disconnected'
+		          AND c.verification_checked_at < ic.created_at
+		      )
+		    )
 		  )
 		ORDER BY c.verification_checked_at ASC NULLS FIRST, c.created_at ASC
 		LIMIT $1
 	`
-	params := []any{limit, config.VerificationUnknownRecheckDays, config.VerificationRecheckDays, config.VerificationEvidenceFreshDays}
+	providers := make([]string, 0, len(models.VerificationProviders))
+	for _, p := range models.VerificationProviders {
+		providers = append(providers, string(p))
+	}
+	params := []any{
+		limit, config.VerificationUnknownRecheckDays, config.VerificationRecheckDays,
+		config.VerificationEvidenceFreshDays, providers, emailverify.ProviderBuiltin,
+	}
 	rows, err := r.DB.Query(ctx, query, params...)
 	if err != nil {
 		db.CaptureError(err, query, params, "query")
@@ -916,14 +948,100 @@ func (r *contactRepository) GetByIDsAndOrganization(ctx context.Context, organiz
 	return out, nil
 }
 
-func (r *contactRepository) Search(
-	ctx context.Context,
-	orgID string,
-	category,
-	cursor *string,
-	filters models.SearchContacts,
-	limit int32,
-) (*models.ContactsResult, *errx.Error) {
+// contactSortKind decides three things that have to agree: how a row's sort
+// value is written into the cursor, how the cursor's text is cast back for the
+// comparison, and what counts as a well-formed boundary.
+type contactSortKind int
+
+const (
+	sortText contactSortKind = iota
+	sortTimestamp
+	sortNumber
+)
+
+// contactSortTimeLayout mirrors the to_char pattern below, so Go validates
+// exactly the boundaries Postgres will accept.
+const contactSortTimeLayout = "2006-01-02 15:04:05.000000"
+
+// contactSort describes one sortable column of the contacts list: the SQL to
+// order and compare on, its kind, and whether the column admits NULL (which
+// decides where the NULL block sits in the order). Every column here is
+// currently NOT NULL; flipping `nullable` turns on the NULL-aware keyset
+// branches so a nullable sort cannot silently truncate the list.
+type contactSort struct {
+	expr     string
+	kind     contactSortKind
+	nullable bool
+}
+
+// render is the SELECT expression that puts a row's sort value in the cursor.
+// Timestamps get an explicit pattern rather than ::text so a token does not
+// depend on the server's DateStyle.
+func (s contactSort) render() string {
+	if s.kind == sortTimestamp {
+		return fmt.Sprintf("to_char(%s, 'YYYY-MM-DD HH24:MI:SS.US')", s.expr)
+	}
+	return "(" + s.expr + ")::text"
+}
+
+// bound casts a cursor's text boundary back to what expr compares in.
+func (s contactSort) bound(placeholder string) string {
+	switch s.kind {
+	case sortTimestamp:
+		return placeholder + "::text::timestamp"
+	case sortNumber:
+		return placeholder + "::text::bigint"
+	default:
+		return placeholder + "::text"
+	}
+}
+
+// wellFormed rejects a boundary the cast would choke on, so a hand-made cursor
+// is a 400 instead of a database error surfacing as a 500.
+func (s contactSort) wellFormed(v string) bool {
+	switch s.kind {
+	case sortTimestamp:
+		_, err := time.Parse(contactSortTimeLayout, v)
+		return err == nil
+	case sortNumber:
+		_, err := strconv.ParseInt(v, 10, 64)
+		return err == nil
+	default:
+		return true
+	}
+}
+
+// campaignCountLateral counts one contact's campaign memberships, joined only
+// when a filter or the sort actually needs it.
+const campaignCountLateral = `LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS campaign_count
+			FROM campaign_leads cl1
+			WHERE cl1.contact_id = c.id
+		) cl ON TRUE`
+
+var contactSorts = map[string]contactSort{
+	"first_name":     {expr: "c.first_name", kind: sortText},
+	"last_name":      {expr: "c.last_name", kind: sortText},
+	"email":          {expr: "c.email", kind: sortText},
+	"created_at":     {expr: "c.created_at", kind: sortTimestamp},
+	"updated_at":     {expr: "c.updated_at", kind: sortTimestamp},
+	"campaign_count": {expr: "COALESCE(cl.campaign_count,0)", kind: sortNumber},
+}
+
+// contactFilter is a compiled contact search: the WHERE terms, the args they
+// bind, the next free placeholder, and (single-campaign Leads view only) the
+// placeholder the lead-progress subquery reuses.
+type contactFilter struct {
+	clauses        []string
+	args           []any
+	nextArg        int
+	singleCampaign string
+}
+
+// buildContactFilter compiles a search request into WHERE terms. Search and
+// SearchIDs share it so a "select all" bulk action resolves exactly the rows
+// the list was showing, filter for filter.
+func (r *contactRepository) buildContactFilter(ctx context.Context, orgID string, filters models.SearchContacts) (*contactFilter, *errx.Error) {
 	var whereClauses []string
 	var args []any
 	argIndex := 1
@@ -1040,16 +1158,14 @@ func (r *contactRepository) Search(
 		if len(filters.CampaignIDs) == 1 {
 			singleCampaignPlaceholder = placeholders[0]
 		}
-		campaignClause := fmt.Sprintf(`
-			c.id IN (
-				SELECT contact_id
-				FROM campaign_leads
-				WHERE campaign_id IN (%s)
-				GROUP BY contact_id
-				HAVING COUNT(DISTINCT campaign_id) = %d
-			)
-		`, strings.Join(placeholders, ","), len(filters.CampaignIDs))
-		whereClauses = append(whereClauses, campaignClause)
+		// One EXISTS per campaign ("in ALL of them"), each a primary-key probe
+		// the planner can run either way round: driving from the ordered
+		// contacts index for a broad campaign, or from the leads for a narrow
+		// one. A GROUP BY/HAVING over campaign_leads forces the second.
+		for _, ph := range placeholders {
+			whereClauses = append(whereClauses, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM campaign_leads cle WHERE cle.campaign_id = %s AND cle.contact_id = c.id)", ph))
+		}
 	}
 
 	// -----------------------------
@@ -1083,16 +1199,10 @@ func (r *contactRepository) Search(
 			args = append(args, id)
 			argIndex++
 		}
-		categoryClause := fmt.Sprintf(`
-			c.id IN (
-				SELECT contact_id
-				FROM contact_categories
-				WHERE category_id IN (%s)
-				GROUP BY contact_id
-				HAVING COUNT(DISTINCT category_id) = %d
-			)
-		`, strings.Join(placeholders, ","), len(filters.CategoryIDs))
-		whereClauses = append(whereClauses, categoryClause)
+		for _, ph := range placeholders {
+			whereClauses = append(whereClauses, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM contact_categories cce WHERE cce.category_id = %s AND cce.contact_id = c.id)", ph))
+		}
 	}
 
 	// -----------------------------
@@ -1120,67 +1230,111 @@ func (r *contactRepository) Search(
 	}
 
 	// -----------------------------
-	// Sort logic
-	// -----------------------------
-	sortBy := "c.created_at"
-	direction := "DESC"
-	allowedSorts := map[string]bool{
-		"first_name":     true,
-		"last_name":      true,
-		"email":          true,
-		"created_at":     true,
-		"updated_at":     true,
-		"campaign_count": true,
-	}
-
-	if filters.SortBy != "" && allowedSorts[filters.SortBy] {
-		if filters.SortBy == "campaign_count" {
-			sortBy = "campaign_count"
-		} else {
-			sortBy = "c." + filters.SortBy
-		}
-	}
-	if filters.Reverse {
-		direction = "ASC"
-	} else {
-		direction = "DESC"
-	}
-
-	// -----------------------------
-	// Cursor pagination
-	// -----------------------------
-	if cursor != nil && *cursor != "" {
-		cursorOp := ">"
-		if direction == "DESC" {
-			cursorOp = "<"
-		}
-		sortSub := fmt.Sprintf("(SELECT %s FROM contacts WHERE id = $%d)", sortBy, argIndex)
-		args = append(args, *cursor)
-		argIndex++
-
-		whereClauses = append(whereClauses, fmt.Sprintf(`
-			(
-				(%s %s %s)
-				OR (%s = %s AND c.id >= $%d)
-			)
-		`, sortBy, cursorOp, sortSub, sortBy, sortSub, argIndex))
-		args = append(args, *cursor)
-		argIndex++
-	}
-
-	// -----------------------------
 	// Campaign count filters (min/max)
 	// -----------------------------
-	campaignCountClauses := []string{}
 	if filters.MinCampaigns != nil {
-		campaignCountClauses = append(campaignCountClauses, fmt.Sprintf("COALESCE(cl.campaign_count,0) >= $%d", argIndex))
+		whereClauses = append(whereClauses, fmt.Sprintf("COALESCE(cl.campaign_count,0) >= $%d", argIndex))
 		args = append(args, *filters.MinCampaigns)
 		argIndex++
 	}
 	if filters.MaxCampaigns != nil {
-		campaignCountClauses = append(campaignCountClauses, fmt.Sprintf("COALESCE(cl.campaign_count,0) <= $%d", argIndex))
+		whereClauses = append(whereClauses, fmt.Sprintf("COALESCE(cl.campaign_count,0) <= $%d", argIndex))
 		args = append(args, *filters.MaxCampaigns)
 		argIndex++
+	}
+
+	return &contactFilter{
+		clauses:        whereClauses,
+		args:           args,
+		nextArg:        argIndex,
+		singleCampaign: singleCampaignPlaceholder,
+	}, nil
+}
+
+func (r *contactRepository) Search(
+	ctx context.Context,
+	orgID string,
+	category *string,
+	cursor *paging.SortCursor,
+	filters models.SearchContacts,
+	limit int32,
+) (*models.ContactsResult, *errx.Error) {
+	fq, ferr := r.buildContactFilter(ctx, orgID, filters)
+	if ferr != nil {
+		return nil, ferr
+	}
+	whereClauses := fq.clauses
+	args := fq.args
+	argIndex := fq.nextArg
+	singleCampaignPlaceholder := fq.singleCampaign
+
+	// -----------------------------
+	// Sort logic
+	// -----------------------------
+	// campaign_count is a computed column, so the cursor compares against the
+	// expression rather than the SELECT alias, which WHERE cannot see.
+	sortName := "created_at"
+	if _, ok := contactSorts[filters.SortBy]; ok {
+		sortName = filters.SortBy
+	}
+	spec := contactSorts[sortName]
+	direction := "DESC"
+	nulls := "NULLS FIRST"
+	if filters.Reverse {
+		direction = "ASC"
+		nulls = "NULLS LAST"
+	}
+	sortBy := spec.expr
+	// The ordering the cursor is taken under. A token minted under a different
+	// one points at a position that does not exist here.
+	sortKey := sortName + ":" + strings.ToLower(direction)
+
+	// -----------------------------
+	// Cursor pagination
+	// -----------------------------
+	// Keyset, not offset: the token carries the boundary row's own sort value
+	// alongside its id, so a row deleted or re-sorted between pages cannot move
+	// the boundary.
+	if cursor != nil {
+		if cursor.Sort != sortKey {
+			return nil, errx.New(errx.BadRequest, "invalid cursor")
+		}
+		if cursor.Value == nil && !spec.nullable {
+			return nil, errx.New(errx.BadRequest, "invalid cursor")
+		}
+		if cursor.Value != nil && !spec.wellFormed(*cursor.Value) {
+			return nil, errx.New(errx.BadRequest, "invalid cursor")
+		}
+		bound := spec.bound(fmt.Sprintf("$%d", argIndex))
+		args = append(args, cursor.Value)
+		argIndex++
+		idArg := fmt.Sprintf("$%d", argIndex)
+		args = append(args, cursor.ID)
+		argIndex++
+
+		// The tiebreak follows the sort direction, so one index serves both ways
+		// round; the boundary row itself is included because it is this page's
+		// first row.
+		cmp, tie := "<", "<="
+		if direction == "ASC" {
+			cmp, tie = ">", ">="
+		}
+		after := fmt.Sprintf("(%[1]s %[2]s %[3]s OR (%[1]s = %[3]s AND c.id %[5]s %[4]s))", sortBy, cmp, bound, idArg, tie)
+		if spec.nullable {
+			switch {
+			case cursor.Value == nil:
+				// The boundary sits in the NULL block: the rest of that block by
+				// id, plus every non-NULL row when NULLs come first.
+				after = fmt.Sprintf("(%s IS NULL AND c.id %s %s)", sortBy, tie, idArg)
+				if nulls == "NULLS FIRST" {
+					after += fmt.Sprintf(" OR %s IS NOT NULL", sortBy)
+				}
+			case nulls == "NULLS LAST":
+				// Past the non-NULL rows, the NULL block still follows.
+				after += fmt.Sprintf(" OR %s IS NULL", sortBy)
+			}
+		}
+		whereClauses = append(whereClauses, "("+after+")")
 	}
 
 	// -----------------------------
@@ -1189,13 +1343,6 @@ func (r *contactRepository) Search(
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
-	}
-	if len(campaignCountClauses) > 0 {
-		if whereSQL == "" {
-			whereSQL = "WHERE " + strings.Join(campaignCountClauses, " AND ")
-		} else {
-			whereSQL += " AND " + strings.Join(campaignCountClauses, " AND ")
-		}
 	}
 
 	// Per-campaign lead progress. Only computed in the single-campaign (Leads
@@ -1229,6 +1376,13 @@ func (r *contactRepository) Search(
 				-- Total email steps in the sequence, to tell "still sending" (active)
 				-- apart from "every step sent" (completed/done).
 				'total_steps', (SELECT COUNT(*) FROM sequences st WHERE st.campaign_id = %[1]s AND st.kind = 'email'),
+				-- The mailbox this lead's whole sequence sends from, fixed when
+				-- its first email went out. Null until then.
+				'sender', (
+					SELECT ea.email FROM campaign_leads cls
+					JOIN email_accounts ea ON ea.id = cls.email_account_id
+					WHERE cls.campaign_id = %[1]s AND cls.contact_id = c.id
+				),
 				-- The step the contact is on now = the latest step actually sent.
 				-- Labelled the same way the canvas does: custom name, else
 				-- "Email N" (Nth email-kind step by position), else action label.
@@ -1263,6 +1417,16 @@ func (r *contactRepository) Search(
 		)`, singleCampaignPlaceholder, config.CampaignSendMaxAttempts, undeliverableClause(singleCampaignPlaceholder))
 	}
 
+	// campaign_count is only ever read by the min/max filters and the
+	// campaign_count sort; the response carries the campaign list itself. So the
+	// count is a lateral computed for the rows that survive, and it is left out
+	// entirely when nothing asks for it. Aggregating the whole campaign_leads
+	// table on every search was the list's dominant cost.
+	campaignCountJoin := ""
+	if filters.MinCampaigns != nil || filters.MaxCampaigns != nil || sortName == "campaign_count" {
+		campaignCountJoin = campaignCountLateral
+	}
+
 	// Main query.
 	//
 	// Both the `campaigns` and `categories` agg subqueries need the
@@ -1276,7 +1440,6 @@ func (r *contactRepository) Search(
 			c.custom_fields, c.subscribed, c.updated_at, c.created_at,
 			c.verification_status, c.verification_reason, c.is_catch_all, c.verification_checked_at,
 			c.verification_source, c.verification_provider, c.verification_sub_status, c.verification_confidence,
-			COALESCE(cl.campaign_count,0) AS campaign_count,
 			COALESCE(
 				(
 					SELECT json_agg(json_build_object('id', cam.id, 'name', cam.name))
@@ -1295,33 +1458,30 @@ func (r *contactRepository) Search(
 					AND cat.user_id = $%d
 				), '[]'::json
 			) AS categories,
-			%s AS lead_progress
+			%s AS lead_progress,
+			%s AS sort_value
 		FROM contacts c
-		LEFT JOIN (
-			SELECT contact_id, COUNT(campaign_id) AS campaign_count
-			FROM campaign_leads
-			GROUP BY contact_id
-		) cl ON c.id = cl.contact_id
 		%s
-		ORDER BY %s %s, c.id ASC
+		%s
+		ORDER BY %s %s %s, c.id %s
 		LIMIT $%d
-	`, argIndex, argIndex, leadProgressSelect, whereSQL, sortBy, direction, argIndex+1)
+	`, argIndex, argIndex, leadProgressSelect, spec.render(), campaignCountJoin, whereSQL, sortBy, direction, nulls, direction, argIndex+1)
 
 	args = append(args, orgID, limit+1)
 
 	// Skip total count if cursor exists
 	var totalCount *int64
-	if cursor == nil || *cursor == "" {
+	if cursor == nil {
+		countJoin := ""
+		if filters.MinCampaigns != nil || filters.MaxCampaigns != nil {
+			countJoin = campaignCountLateral
+		}
 		countQuery := fmt.Sprintf(`
 			SELECT COUNT(*)
 			FROM contacts c
-			LEFT JOIN (
-				SELECT contact_id, COUNT(campaign_id) AS campaign_count
-				FROM campaign_leads
-				GROUP BY contact_id
-			) cl ON c.id = cl.contact_id
 			%s
-		`, whereSQL)
+			%s
+		`, countJoin, whereSQL)
 		var tmp int64
 		if err := r.DB.QueryRow(ctx, countQuery, args[:argIndex-1]...).Scan(&tmp); err != nil {
 			db.CaptureError(err, "countQuery", args, "queryrow")
@@ -1345,12 +1505,15 @@ func (r *contactRepository) Search(
 	// then produces [null], which crashes any downstream `.subscribed`
 	// access. Always return an array.
 	contacts := make([]models.Contact, 0, limit+1)
+	// The sort value of each row, kept alongside so the next cursor carries the
+	// boundary instead of re-reading it from a row that may be gone by then.
+	sortValues := make([]*string, 0, limit+1)
 	for rows.Next() {
 		var c models.Contact
-		var campaignCount int
 		var campaignsJSON []byte
 		var categoriesJSON []byte
 		var leadProgressJSON []byte
+		var sortValue *string
 
 		if err := rows.Scan(
 			&c.ID, &c.FirstName, &c.LastName, &c.Email,
@@ -1358,7 +1521,8 @@ func (r *contactRepository) Search(
 			&c.UpdatedAt, &c.CreatedAt,
 			&c.VerificationStatus, &c.VerificationReason, &c.IsCatchAll, &c.VerificationCheckedAt,
 			&c.VerificationSource, &c.VerificationProvider, &c.VerificationSubStatus, &c.VerificationConfidence,
-			&campaignCount, &campaignsJSON, &categoriesJSON, &leadProgressJSON,
+			&campaignsJSON, &categoriesJSON, &leadProgressJSON,
+			&sortValue,
 		); err != nil {
 			db.CaptureError(err, "", nil, "scan")
 			return nil, errx.InternalError()
@@ -1379,11 +1543,12 @@ func (r *contactRepository) Search(
 				TotalSteps int        `json:"total_steps"`
 				LastAt     *time.Time `json:"last_at"`
 				Step       *string    `json:"step"`
+				Sender     *string    `json:"sender"`
 
 				Undeliverable bool `json:"undeliverable"`
 			}
 			if err := json.Unmarshal(leadProgressJSON, &lp); err != nil {
-				sentry.CaptureException(err)
+				errs.CaptureException(err)
 				return nil, errx.InternalError()
 			}
 			status := models.LeadStatusPending
@@ -1415,8 +1580,13 @@ func (r *contactRepository) Search(
 			if status == models.LeadStatusFailed && lp.FailReason != nil {
 				failureReason = *lp.FailReason
 			}
+			sender := ""
+			if lp.Sender != nil {
+				sender = *lp.Sender
+			}
 			c.CampaignLead = &models.ContactCampaignProgress{
 				Status:         status,
+				Sender:         sender,
 				Sent:           lp.Sent,
 				Opened:         lp.Opened,
 				MachineOpened:  lp.MachineOpn,
@@ -1435,7 +1605,7 @@ func (r *contactRepository) Search(
 				Name string `json:"name"`
 			}
 			if err := json.Unmarshal(campaignsJSON, &campaigns); err != nil {
-				sentry.CaptureException(err)
+				errs.CaptureException(err)
 				return nil, errx.InternalError()
 			}
 			c.Campaigns = make([]models.MiniCampaign, len(campaigns))
@@ -1448,7 +1618,7 @@ func (r *contactRepository) Search(
 
 		if len(categoriesJSON) > 0 {
 			if err := json.Unmarshal(categoriesJSON, &c.Categories); err != nil {
-				sentry.CaptureException(err)
+				errs.CaptureException(err)
 				return nil, errx.InternalError()
 			}
 		}
@@ -1457,15 +1627,16 @@ func (r *contactRepository) Search(
 		}
 
 		contacts = append(contacts, c)
+		sortValues = append(sortValues, sortValue)
 	}
 
-	// Next cursor
+	// Next cursor. The (limit+1)-th row is the first row of the NEXT page, so
+	// its position is the boundary and the id comparison is inclusive.
 	var nextCursor *string
 	var hasMore bool
 	if len(contacts) > int(limit) {
 		hasMore = true
-		nextID := contacts[limit].ID
-		nextCursor = paging.EncodeUUID(nextID)
+		nextCursor = paging.EncodeSort(sortKey, sortValues[limit], contacts[limit].ID)
 		contacts = contacts[:limit]
 	}
 
@@ -1484,6 +1655,80 @@ func (r *contactRepository) Search(
 // campaign membership derived from the campaign_leads count), and per-category
 // contact counts joined through the org's contacts. Independent of any search
 // filter, like the campaigns-overview drawer counts.
+// SearchIDs resolves a search request to the matching contact ids. It shares
+// buildContactFilter with Search, so the set is exactly the one the list
+// showed; ordering follows the same sort so a capped result is the first max
+// rows the user was looking at rather than an arbitrary slice.
+func (r *contactRepository) SearchIDs(ctx context.Context, orgID string, filters models.SearchContacts, max int) ([]uuid.UUID, *errx.Error) {
+	if _, err := uuid.Parse(orgID); err != nil {
+		return nil, errx.ErrUuid
+	}
+	if max <= 0 {
+		max = models.MaxContactBulkSelection
+	}
+
+	fq, ferr := r.buildContactFilter(ctx, orgID, filters)
+	if ferr != nil {
+		return nil, ferr
+	}
+	args := fq.args
+
+	sortName := "created_at"
+	if _, ok := contactSorts[filters.SortBy]; ok {
+		sortName = filters.SortBy
+	}
+	spec := contactSorts[sortName]
+	direction, nulls := "DESC", "NULLS FIRST"
+	if filters.Reverse {
+		direction, nulls = "ASC", "NULLS LAST"
+	}
+	// Same rule as Search: the count lateral costs a scan, so it is joined only
+	// when a filter or the sort actually reads it.
+	campaignCountJoin := ""
+	if filters.MinCampaigns != nil || filters.MaxCampaigns != nil || sortName == "campaign_count" {
+		campaignCountJoin = campaignCountLateral
+	}
+
+	whereSQL := ""
+	if len(fq.clauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(fq.clauses, " AND ")
+	}
+
+	// max+1 so the caller can report "more than max match" instead of silently
+	// acting on a truncated set.
+	query := fmt.Sprintf(`
+		SELECT c.id
+		FROM contacts c
+		%s
+		%s
+		ORDER BY %s %s %s, c.id %s
+		LIMIT $%d
+	`, campaignCountJoin, whereSQL, spec.expr, direction, nulls, direction, fq.nextArg)
+	args = append(args, max+1)
+
+	rows, err := r.DB.Query(ctx, query, args...)
+	if err != nil {
+		db.CaptureError(err, query, args, "query")
+		return nil, errx.InternalError()
+	}
+	defer rows.Close()
+
+	ids := make([]uuid.UUID, 0, 256)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			db.CaptureError(err, "", nil, "scan")
+			return nil, errx.InternalError()
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, query, args, "rows")
+		return nil, errx.InternalError()
+	}
+	return ids, nil
+}
+
 func (r *contactRepository) SearchCounts(ctx context.Context, orgID string) (*models.ContactsCounts, *errx.Error) {
 	counts := &models.ContactsCounts{Categories: []models.ContactCategoryCount{}}
 
@@ -1779,7 +2024,7 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(campaignsJSON, &campaigns); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 			return nil, errx.InternalError()
 		}
 		c.Campaigns = make([]models.MiniCampaign, len(campaigns))
@@ -1993,7 +2238,7 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(newCampaignsJSON, &campaigns); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 			return nil, errx.InternalError()
 		}
 		for _, c := range campaigns {
@@ -2124,7 +2369,7 @@ func (r *contactRepository) Update(ctx context.Context, userID, contactID string
 		updatedContact.Categories = make([]models.MiniCategory, 0)
 		if len(catJSON) > 0 {
 			if err := json.Unmarshal(catJSON, &updatedContact.Categories); err != nil {
-				sentry.CaptureException(err)
+				errs.CaptureException(err)
 				return nil, errx.InternalError()
 			}
 		}
@@ -2403,7 +2648,7 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 				Name string `json:"name"`
 			}
 			if err := json.Unmarshal(campaignsJSON, &campaigns); err != nil {
-				sentry.CaptureException(err)
+				errs.CaptureException(err)
 				return nil, errx.InternalError()
 			}
 			c.Campaigns = make([]models.MiniCampaign, len(campaigns))
@@ -2420,7 +2665,7 @@ func (r *contactRepository) BulkUpdate(ctx context.Context, userID string, orgID
 		c.Categories = make([]models.MiniCategory, 0)
 		if len(categoriesJSON) > 0 {
 			if err := json.Unmarshal(categoriesJSON, &c.Categories); err != nil {
-				sentry.CaptureException(err)
+				errs.CaptureException(err)
 				return nil, errx.InternalError()
 			}
 		}
@@ -2663,7 +2908,7 @@ func (r *contactRepository) ExportAll(ctx context.Context, orgID string, filters
 	}
 
 	out := make([]models.Contact, 0, 256)
-	var cursor *string
+	var cursor *paging.SortCursor
 	pageSize := int32(500)
 	for {
 		page, xerr := r.Search(ctx, orgID, nil, cursor, search, pageSize)
@@ -2684,14 +2929,13 @@ func (r *contactRepository) ExportAll(ctx context.Context, orgID string, filters
 		if !page.Pagination.HasMore || page.Pagination.NextCursor == nil {
 			break
 		}
-		// NextCursor is now an opaque token; decode it back to the id the next
-		// Search call keys on.
-		id, derr := paging.DecodeUUID(*page.Pagination.NextCursor)
-		if derr != nil {
+		// NextCursor is an opaque token; decode it back to the keyset boundary
+		// the next Search call resumes from.
+		next, derr := paging.DecodeSortCursor(*page.Pagination.NextCursor)
+		if derr != nil || next == nil {
 			break
 		}
-		s := id.String()
-		cursor = &s
+		cursor = next
 	}
 	return out, nil
 }
@@ -2784,7 +3028,7 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(campaignsJSON, &raw); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 			return nil, errx.InternalError()
 		}
 		detail.Campaigns = make([]models.MiniCampaign, len(raw))
@@ -2795,7 +3039,7 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 	detail.Categories = []models.MiniCategory{}
 	if len(categoriesJSON) > 0 {
 		if err := json.Unmarshal(categoriesJSON, &detail.Categories); err != nil {
-			sentry.CaptureException(err)
+			errs.CaptureException(err)
 			return nil, errx.InternalError()
 		}
 	}
@@ -2886,6 +3130,11 @@ func (r *contactRepository) GetDetail(ctx context.Context, userID uuid.UUID, org
 // We deliberately scope by the contact's owning user via the
 // campaign join — this keeps multi-tenant safety even though the
 // tasks table itself has no user_id column.
+//
+// opened_at is a person's open, as it is in campaign analytics and the
+// contact's engagement summary: a fetch by a mail client's prefetch or a
+// security gateway is reported separately as machine_opened_at, so this list
+// never claims a recipient read mail they never opened (issue #392).
 func (r *contactRepository) ListSentEmails(ctx context.Context, userID, contactID uuid.UUID, limit int, beforeSentAt *time.Time, beforeTaskID *uuid.UUID) (*models.ContactSentEmailsResult, *errx.Error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -2906,7 +3155,9 @@ func (r *contactRepository) ListSentEmails(ctx context.Context, userID, contactI
 			cam.id, cam.name,
 			seq.id, seq.name,
 			COALESCE(et.subject, seq.subject, '') AS subject,
-			ccp.opened_at, ccp.clicked_at, ccp.replied_at, ccp.bounced_at
+			CASE WHEN ccp.opened_machine THEN NULL ELSE ccp.opened_at END AS opened_at,
+			CASE WHEN ccp.opened_machine THEN ccp.opened_at END AS machine_opened_at,
+			ccp.clicked_at, ccp.replied_at, ccp.bounced_at
 		FROM tasks t
 		JOIN campaign_tasks ct ON ct.task_id = t.id
 		LEFT JOIN email_accounts ea ON ea.id = t.email_account_id
@@ -2940,7 +3191,7 @@ func (r *contactRepository) ListSentEmails(ctx context.Context, userID, contactI
 			&e.CampaignID, &e.CampaignName,
 			&e.SequenceID, &e.SequenceName,
 			&e.Subject,
-			&e.OpenedAt, &e.ClickedAt, &e.RepliedAt, &e.BouncedAt,
+			&e.OpenedAt, &e.MachineOpenedAt, &e.ClickedAt, &e.RepliedAt, &e.BouncedAt,
 		); err != nil {
 			db.CaptureError(err, "", nil, "ListSentEmails scan")
 			return nil, errx.InternalError()
@@ -2965,11 +3216,21 @@ func (r *contactRepository) ListSentEmails(ctx context.Context, userID, contactI
 	}, nil
 }
 
+// timelineKeyset is the predicate that pages one source of the contact
+// timeline: rows whose (time, source rank, id) tuple sorts strictly before
+// the cursor, which the query receives as three consecutive parameters
+// starting at $first. Every source uses it so SQL and the merged sort agree.
+func timelineKeyset(atCol string, source models.ContactTimelineSource, idCol string, first int) string {
+	return fmt.Sprintf("(%s, %d, %s) < ($%d::timestamptz, $%d::int, $%d::uuid)",
+		atCol, source, idCol, first, first+1, first+2)
+}
+
 // ListTimeline merges per-contact events from several source tables
 // into a single, reverse-chronological feed.
 //
 // Sources:
 //   - campaign_contact_progress       → sent / opened / clicked / replied / bounced
+//   - email_link_clicks, email_opens  → per-event clicks and opens
 //   - reply_intents                   → received replies (with intent classification)
 //   - deliverability_events           → bounce / complaint
 //   - suppressed_recipients           → suppression added
@@ -2978,18 +3239,21 @@ func (r *contactRepository) ListSentEmails(ctx context.Context, userID, contactI
 //   - contact_activities              → creation and campaign / category membership
 //   - website_page_hits               → page views from the tracking snippet
 //
-// We pull up to (limit) candidates from each source ordered by time
-// DESC, then merge-sort in Go. This avoids a 5-way UNION with
-// matching column lists (each source has a different shape), and the
-// per-source limit caps the read at roughly 5*limit rows.
+// We pull one row past the page from each source, newest first, then
+// merge-sort in Go. This avoids a 10-way UNION with matching column lists
+// (each source has a different shape), and the per-source limit caps the
+// read at roughly 10*limit rows. The lookahead row is what makes has_more
+// right when a single source fills the page on its own.
 //
-// The `before` cursor is a wall-clock time; everything strictly older
-// than it is eligible. The caller paginates by setting `before` to
-// the oldest returned event's `At` on the next call.
-func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, before *time.Time) (*models.ContactTimelineResult, *errx.Error) {
+// The feed is ordered by (at, source, id) and a page resumes strictly after
+// the cursor on that tuple, so two events at the same instant, from the
+// same table or different ones, land on one side of a page boundary or the
+// other and are never skipped or repeated. A nil cursor is the first page.
+func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, cursor *models.ContactTimelineKey) (*models.ContactTimelineResult, *errx.Error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	fetch := limit + 1
 
 	// We resolve the contact's email up front because some org-scoped
 	// joins (suppression, deliverability fallback, reply_intents) key
@@ -3006,42 +3270,42 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		return nil, errx.InternalError()
 	}
 
-	// "before" defaults to "now + 1 minute" so the first page picks
-	// up everything. Using a future bound keeps the SQL uniform — every
-	// query passes the same predicate.
-	bound := time.Now().Add(time.Minute)
-	if before != nil {
-		bound = *before
+	// The position the page resumes after. The first page starts a minute
+	// in the future at the lowest rank, which admits every event the same
+	// way a real cursor would, so every query passes the same predicate.
+	after := models.ContactTimelineKey{At: time.Now().Add(time.Minute)}
+	if cursor != nil {
+		after = *cursor
 	}
+	afterSource := int(after.Source)
 
 	events := make([]models.ContactTimelineEvent, 0, limit*2)
 
-	// 1. Engagement events from campaign_contact_progress. One progress
-	//    row can emit up to 5 events (sent/opened/clicked/replied/bounced).
-	//    The coarse clicked stamp is emitted only when no logged click stands
-	//    for it (a stamp written before per-link logging); otherwise source 9
-	//    names the link. A logged click represents the stamp when it landed
-	//    within a minute of it, the stamp being written as the click is logged.
-	progressQuery := `
+	// 1. Engagement stamps from campaign_contact_progress, unnested to one
+	//    row per stamp so the limit and the cursor apply to events, not to
+	//    leads: a lead whose newest stamp is past the cursor must not push
+	//    an older lead's eligible stamp off the page. The coarse opened and
+	//    clicked stamps are emitted only when no logged open or click stands
+	//    for them (a stamp written before per-event logging); otherwise
+	//    sources 9 and 10 carry the event with its origin. A logged event
+	//    represents the stamp when it landed within a minute of it, the
+	//    stamp being written as the event is logged.
+	progressQuery := fmt.Sprintf(`
 		SELECT
-			ccp.sent_at, ccp.opened_at, ccp.clicked_at, ccp.replied_at, ccp.bounced_at,
-			ccp.opened_machine,
-			(ccp.opened_at IS NOT NULL AND EXISTS (
-				SELECT 1 FROM email_opens o
-				WHERE o.campaign_id = ccp.campaign_id AND o.contact_id = ccp.contact_id AND o.sequence_id = ccp.sequence_id
-				  AND o.opened_at BETWEEN ccp.opened_at - INTERVAL '1 minute' AND ccp.opened_at + INTERVAL '1 minute'
-			)) AS has_open_log,
-			(ccp.clicked_at IS NOT NULL AND EXISTS (
-				SELECT 1 FROM email_link_clicks lc
-				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
-				  AND lc.clicked_at BETWEEN ccp.clicked_at - INTERVAL '1 minute' AND ccp.clicked_at + INTERVAL '1 minute'
-			)) AS has_link_clicks,
+			ev.source, ev.at, ccp.sequence_id, ccp.opened_machine,
 			cam.id, cam.name,
 			seq.id, seq.name, seq.subject,
 			ea.id, ea.email, ea.name
 		FROM campaign_contact_progress ccp
 		JOIN campaigns cam ON cam.id = ccp.campaign_id
 		JOIN sequences seq ON seq.id = ccp.sequence_id
+		CROSS JOIN LATERAL (VALUES
+			(%[1]d, ccp.sent_at),
+			(%[2]d, ccp.opened_at),
+			(%[3]d, ccp.clicked_at),
+			(%[4]d, ccp.replied_at),
+			(%[5]d, ccp.bounced_at)
+		) AS ev(source, at)
 		LEFT JOIN LATERAL (
 			SELECT ea.id, ea.email, ea.name
 			FROM   tasks t
@@ -3050,34 +3314,50 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			WHERE  ct.campaign_id = ccp.campaign_id
 			  AND  ct.contact_id  = ccp.contact_id
 			  AND  ct.sequence_id = ccp.sequence_id
-			ORDER  BY t.created_at DESC
+			-- The task holding the step's reservation is the one that put the
+			-- email on the wire; a step can carry several task rows (a retry, a
+			-- tick that skipped as a duplicate) and only that one names the
+			-- mailbox the recipient saw.
+			ORDER  BY COALESCE(t.id = ccp.dispatch_task_id, false) DESC, t.created_at DESC
 			LIMIT  1
 		) ea ON TRUE
 		WHERE ccp.contact_id = $1
 		  AND cam.user_id    = $2
-		  AND COALESCE(ccp.sent_at, ccp.opened_at, ccp.clicked_at, ccp.replied_at, ccp.bounced_at) < $3
-		ORDER BY GREATEST(
-			COALESCE(ccp.sent_at,    'epoch'),
-			COALESCE(ccp.opened_at,  'epoch'),
-			COALESCE(ccp.clicked_at, 'epoch'),
-			COALESCE(ccp.replied_at, 'epoch'),
-			COALESCE(ccp.bounced_at, 'epoch')
-		) DESC
-		LIMIT $4
-	`
-	prows, err := r.DB.Query(ctx, progressQuery, contactID, userID, bound, limit)
+		  AND ev.at IS NOT NULL
+		  AND (ev.at, ev.source, ccp.sequence_id) < ($3::timestamptz, $4::int, $5::uuid)
+		  AND NOT (ev.source = %[2]d AND EXISTS (
+				SELECT 1 FROM email_opens o
+				WHERE o.campaign_id = ccp.campaign_id AND o.contact_id = ccp.contact_id AND o.sequence_id = ccp.sequence_id
+				  AND o.opened_at BETWEEN ccp.opened_at - INTERVAL '1 minute' AND ccp.opened_at + INTERVAL '1 minute'
+		  ))
+		  AND NOT (ev.source = %[3]d AND EXISTS (
+				SELECT 1 FROM email_link_clicks lc
+				WHERE lc.campaign_id = ccp.campaign_id AND lc.contact_id = ccp.contact_id AND lc.sequence_id = ccp.sequence_id
+				  AND lc.clicked_at BETWEEN ccp.clicked_at - INTERVAL '1 minute' AND ccp.clicked_at + INTERVAL '1 minute'
+		  ))
+		ORDER BY ev.at DESC, ev.source DESC, ccp.sequence_id DESC
+		LIMIT $6
+	`,
+		models.TimelineSourceProgressSent,
+		models.TimelineSourceProgressOpened,
+		models.TimelineSourceProgressClicked,
+		models.TimelineSourceProgressReplied,
+		models.TimelineSourceProgressBounced,
+	)
+	prows, err := r.DB.Query(ctx, progressQuery, contactID, userID, after.At, afterSource, after.ID, fetch)
 	if err != nil {
-		db.CaptureError(err, progressQuery, []any{contactID, userID, bound, limit}, "ListTimeline progress")
+		db.CaptureError(err, progressQuery, []any{contactID, userID, after.At, afterSource, after.ID, fetch}, "ListTimeline progress")
 		return nil, errx.InternalError()
 	}
 	for prows.Next() {
-		var sentAt, openedAt, clickedAt, repliedAt, bouncedAt *time.Time
-		var openedMachine, hasOpenLog, hasLinkClicks bool
+		var source int
+		var at time.Time
+		var seqKey uuid.UUID
+		var openedMachine bool
 		var campID, seqID, eaID *uuid.UUID
 		var campName, seqName, seqSubject, eaEmail, eaName *string
 		if err := prows.Scan(
-			&sentAt, &openedAt, &clickedAt, &repliedAt, &bouncedAt,
-			&openedMachine, &hasOpenLog, &hasLinkClicks,
+			&source, &at, &seqKey, &openedMachine,
 			&campID, &campName,
 			&seqID, &seqName, &seqSubject,
 			&eaID, &eaEmail, &eaName,
@@ -3086,46 +3366,43 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			db.CaptureError(err, "", nil, "ListTimeline progress scan")
 			return nil, errx.InternalError()
 		}
-		baseSubject := seqSubject
-		makeEvent := func(t *time.Time, ty models.ContactTimelineEventType) {
-			if t == nil || !t.Before(bound) {
-				return
-			}
-			ev := models.ContactTimelineEvent{
-				Type:              ty,
-				At:                *t,
-				EmailAccountID:    eaID,
-				EmailAccountEmail: eaEmail,
-				EmailAccountName:  eaName,
-				CampaignID:        campID,
-				CampaignName:      campName,
-				SequenceID:        seqID,
-				SequenceName:      seqName,
-			}
-			if baseSubject != nil && *baseSubject != "" {
-				ev.Subject = baseSubject
-			}
-			if ty == models.TimelineEmailOpened {
-				machine := openedMachine
-				ev.Machine = &machine
-			}
-			events = append(events, ev)
+		ev := models.ContactTimelineEvent{
+			At:                at,
+			Key:               models.ContactTimelineKey{At: at, Source: models.ContactTimelineSource(source), ID: seqKey},
+			EmailAccountID:    eaID,
+			EmailAccountEmail: eaEmail,
+			EmailAccountName:  eaName,
+			CampaignID:        campID,
+			CampaignName:      campName,
+			SequenceID:        seqID,
+			SequenceName:      seqName,
 		}
-		makeEvent(sentAt, models.TimelineEmailSent)
-		// A step whose first open is in the log hands its opens to source 10,
-		// one row per open with its origin; the summary column only stands in
-		// for a first open the log never saw (a step tracked before the log
-		// existed), even when later opens were logged.
-		if !hasOpenLog {
-			makeEvent(openedAt, models.TimelineEmailOpened)
+		if seqSubject != nil && *seqSubject != "" {
+			ev.Subject = seqSubject
 		}
-		if !hasLinkClicks {
-			makeEvent(clickedAt, models.TimelineEmailClicked)
+		switch ev.Key.Source {
+		case models.TimelineSourceProgressSent:
+			ev.Type = models.TimelineEmailSent
+		case models.TimelineSourceProgressOpened:
+			ev.Type = models.TimelineEmailOpened
+			machine := openedMachine
+			ev.Machine = &machine
+		case models.TimelineSourceProgressClicked:
+			ev.Type = models.TimelineEmailClicked
+		case models.TimelineSourceProgressReplied:
+			ev.Type = models.TimelineEmailReplied
+		case models.TimelineSourceProgressBounced:
+			ev.Type = models.TimelineEmailBounced
+		default:
+			continue
 		}
-		makeEvent(repliedAt, models.TimelineEmailReplied)
-		makeEvent(bouncedAt, models.TimelineEmailBounced)
+		events = append(events, ev)
 	}
 	prows.Close()
+	if err := prows.Err(); err != nil {
+		db.CaptureError(err, progressQuery, nil, "ListTimeline progress rows")
+		return nil, errx.InternalError()
+	}
 
 	// 9. Per-link clicks: which link, where it went, and whether a person or
 	//    a scanner clicked it. Same campaign scope as the progress feed.
@@ -3146,13 +3423,13 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		) ea ON TRUE
 		WHERE lc.contact_id = $1
 		  AND cam.user_id   = $2
-		  AND lc.clicked_at < $3
-		ORDER BY lc.clicked_at DESC
-		LIMIT $4
+		  AND ` + timelineKeyset("lc.clicked_at", models.TimelineSourceLinkClick, "lc.id", 3) + `
+		ORDER BY lc.clicked_at DESC, lc.id DESC
+		LIMIT $6
 	`
-	crows, err := r.DB.Query(ctx, clickQuery, contactID, userID, bound, limit+1)
+	crows, err := r.DB.Query(ctx, clickQuery, contactID, userID, after.At, afterSource, after.ID, fetch)
 	if err != nil {
-		db.CaptureError(err, clickQuery, []any{contactID, userID, bound, limit}, "ListTimeline link clicks")
+		db.CaptureError(err, clickQuery, []any{contactID, userID, after.At, afterSource, after.ID, fetch}, "ListTimeline link clicks")
 		return nil, errx.InternalError()
 	}
 	for crows.Next() {
@@ -3180,6 +3457,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		ev := models.ContactTimelineEvent{
 			Type:              models.TimelineEmailClicked,
 			At:                at,
+			Key:               models.ContactTimelineKey{At: at, Source: models.TimelineSourceLinkClick, ID: link.ID},
 			EmailAccountID:    eaID,
 			EmailAccountEmail: eaEmail,
 			EmailAccountName:  eaName,
@@ -3229,13 +3507,13 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		) ea ON TRUE
 		WHERE o.contact_id = $1
 		  AND cam.user_id  = $2
-		  AND o.opened_at  < $3
-		ORDER BY o.opened_at DESC
-		LIMIT $4
+		  AND ` + timelineKeyset("o.opened_at", models.TimelineSourceOpen, "o.id", 3) + `
+		ORDER BY o.opened_at DESC, o.id DESC
+		LIMIT $6
 	`
-	orows, err := r.DB.Query(ctx, openQuery, contactID, userID, bound, limit+1)
+	orows, err := r.DB.Query(ctx, openQuery, contactID, userID, after.At, afterSource, after.ID, fetch)
 	if err != nil {
-		db.CaptureError(err, openQuery, []any{contactID, userID, bound, limit}, "ListTimeline opens")
+		db.CaptureError(err, openQuery, []any{contactID, userID, after.At, afterSource, after.ID, fetch}, "ListTimeline opens")
 		return nil, errx.InternalError()
 	}
 	for orows.Next() {
@@ -3261,6 +3539,7 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 		ev := models.ContactTimelineEvent{
 			Type:              models.TimelineEmailOpened,
 			At:                at,
+			Key:               models.ContactTimelineKey{At: at, Source: models.TimelineSourceOpen, ID: id},
 			EmailAccountID:    eaID,
 			EmailAccountEmail: eaEmail,
 			EmailAccountName:  eaName,
@@ -3293,60 +3572,68 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 	if orgID != nil {
 		// 2. Reply intents (inbound replies with classification).
 		replyQuery := `
-			SELECT ri.created_at, ri.intent, ri.campaign_id, cam.name, ri.task_id
+			SELECT ri.id, ri.created_at, ri.intent, ri.campaign_id, cam.name, ri.task_id
 			FROM reply_intents ri
 			LEFT JOIN campaigns cam ON cam.id = ri.campaign_id
 			WHERE ri.organization_id = $1
 			  AND LOWER(ri.contact_email) = LOWER($2)
-			  AND ri.created_at < $3
-			ORDER BY ri.created_at DESC
-			LIMIT $4
+			  AND ` + timelineKeyset("ri.created_at", models.TimelineSourceReplyIntent, "ri.id", 3) + `
+			ORDER BY ri.created_at DESC, ri.id DESC
+			LIMIT $6
 		`
-		rrows, err := r.DB.Query(ctx, replyQuery, *orgID, contactEmail, bound, limit)
+		rrows, err := r.DB.Query(ctx, replyQuery, *orgID, contactEmail, after.At, afterSource, after.ID, fetch)
 		if err != nil {
 			db.CaptureError(err, replyQuery, nil, "ListTimeline replies")
 			return nil, errx.InternalError()
 		}
 		for rrows.Next() {
 			var ev models.ContactTimelineEvent
+			var id uuid.UUID
 			var intent string
-			if err := rrows.Scan(&ev.At, &intent, &ev.CampaignID, &ev.CampaignName, &ev.TaskID); err != nil {
+			if err := rrows.Scan(&id, &ev.At, &intent, &ev.CampaignID, &ev.CampaignName, &ev.TaskID); err != nil {
 				rrows.Close()
 				db.CaptureError(err, "", nil, "ListTimeline replies scan")
 				return nil, errx.InternalError()
 			}
 			ev.Type = models.TimelineReplyReceived
+			ev.Key = models.ContactTimelineKey{At: ev.At, Source: models.TimelineSourceReplyIntent, ID: id}
 			ev.Intent = &intent
 			events = append(events, ev)
 		}
 		rrows.Close()
+		if err := rrows.Err(); err != nil {
+			db.CaptureError(err, replyQuery, nil, "ListTimeline replies rows")
+			return nil, errx.InternalError()
+		}
 
 		// 3. Deliverability events (bounce / complaint / unsubscribe).
 		delivQuery := `
-			SELECT de.created_at, de.event_type, de.provider, de.reason,
+			SELECT de.id, de.created_at, de.event_type, de.provider, de.reason,
 			       de.campaign_id, cam.name, de.task_id
 			FROM deliverability_events de
 			LEFT JOIN campaigns cam ON cam.id = de.campaign_id
 			WHERE de.organization_id = $1
 			  AND (de.contact_id = $2 OR LOWER(de.recipient_email) = LOWER($3))
-			  AND de.created_at < $4
-			ORDER BY de.created_at DESC
-			LIMIT $5
+			  AND ` + timelineKeyset("de.created_at", models.TimelineSourceDeliverability, "de.id", 4) + `
+			ORDER BY de.created_at DESC, de.id DESC
+			LIMIT $7
 		`
-		drows, err := r.DB.Query(ctx, delivQuery, *orgID, contactID, contactEmail, bound, limit)
+		drows, err := r.DB.Query(ctx, delivQuery, *orgID, contactID, contactEmail, after.At, afterSource, after.ID, fetch)
 		if err != nil {
 			db.CaptureError(err, delivQuery, nil, "ListTimeline deliv")
 			return nil, errx.InternalError()
 		}
 		for drows.Next() {
 			var ev models.ContactTimelineEvent
+			var id uuid.UUID
 			var eventType, provider, reason string
-			if err := drows.Scan(&ev.At, &eventType, &provider, &reason, &ev.CampaignID, &ev.CampaignName, &ev.TaskID); err != nil {
+			if err := drows.Scan(&id, &ev.At, &eventType, &provider, &reason, &ev.CampaignID, &ev.CampaignName, &ev.TaskID); err != nil {
 				drows.Close()
 				db.CaptureError(err, "", nil, "ListTimeline deliv scan")
 				return nil, errx.InternalError()
 			}
 			ev.Type = models.TimelineDeliverability
+			ev.Key = models.ContactTimelineKey{At: ev.At, Source: models.TimelineSourceDeliverability, ID: id}
 			ev.Source = &eventType
 			ev.Provider = &provider
 			if reason != "" {
@@ -3355,93 +3642,118 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		drows.Close()
+		if err := drows.Err(); err != nil {
+			db.CaptureError(err, delivQuery, nil, "ListTimeline deliv rows")
+			return nil, errx.InternalError()
+		}
 
-		// 4. Suppression — emit one event at create time. We treat
-		//    later updates as the same event for now.
+		// 4. Suppression: one event per matching entry (the address itself
+		//    and its domain), at create time. Later updates are the same event.
 		suppQuery := `
-			SELECT created_at, reason, source
+			SELECT id, created_at, reason, source
 			FROM suppressed_recipients
 			WHERE organization_id = $1
 			  AND ((kind = 'email' AND email = LOWER($2))
 			    OR (kind = 'domain' AND email = split_part(LOWER($2), '@', 2)))
-			  AND created_at < $3
-			ORDER BY created_at DESC
-			LIMIT 1
+			  AND ` + timelineKeyset("created_at", models.TimelineSourceSuppression, "id", 3) + `
+			ORDER BY created_at DESC, id DESC
+			LIMIT $6
 		`
-		var sAt time.Time
-		var sReason, sSource string
-		if err := r.DB.QueryRow(ctx, suppQuery, *orgID, contactEmail, bound).Scan(&sAt, &sReason, &sSource); err == nil {
+		srows, err := r.DB.Query(ctx, suppQuery, *orgID, contactEmail, after.At, afterSource, after.ID, fetch)
+		if err != nil {
+			db.CaptureError(err, suppQuery, nil, "ListTimeline suppression")
+			return nil, errx.InternalError()
+		}
+		for srows.Next() {
+			var id uuid.UUID
+			var sAt time.Time
+			var sReason, sSource string
+			if err := srows.Scan(&id, &sAt, &sReason, &sSource); err != nil {
+				srows.Close()
+				db.CaptureError(err, "", nil, "ListTimeline suppression scan")
+				return nil, errx.InternalError()
+			}
 			ev := models.ContactTimelineEvent{
 				Type:   models.TimelineSuppressed,
 				At:     sAt,
+				Key:    models.ContactTimelineKey{At: sAt, Source: models.TimelineSourceSuppression, ID: id},
 				Source: &sSource,
 			}
 			if sReason != "" {
 				ev.Reason = &sReason
 			}
 			events = append(events, ev)
-		} else if err != pgx.ErrNoRows {
-			db.CaptureError(err, suppQuery, nil, "ListTimeline suppression")
+		}
+		srows.Close()
+		if err := srows.Err(); err != nil {
+			db.CaptureError(err, suppQuery, nil, "ListTimeline suppression rows")
 			return nil, errx.InternalError()
 		}
 
 		// 5. Notes.
 		notesQuery := `
-			SELECT created_at, user_id, content
+			SELECT id, created_at, user_id, content
 			FROM contact_notes
 			WHERE contact_id = $1
 			  AND organization_id = $2
-			  AND created_at < $3
-			ORDER BY created_at DESC
-			LIMIT $4
+			  AND ` + timelineKeyset("created_at", models.TimelineSourceNote, "id", 3) + `
+			ORDER BY created_at DESC, id DESC
+			LIMIT $6
 		`
-		nrows, err := r.DB.Query(ctx, notesQuery, contactID, *orgID, bound, limit)
+		nrows, err := r.DB.Query(ctx, notesQuery, contactID, *orgID, after.At, afterSource, after.ID, fetch)
 		if err != nil {
 			db.CaptureError(err, notesQuery, nil, "ListTimeline notes")
 			return nil, errx.InternalError()
 		}
 		for nrows.Next() {
 			var ev models.ContactTimelineEvent
-			var uid uuid.UUID
+			var id, uid uuid.UUID
 			var content string
-			if err := nrows.Scan(&ev.At, &uid, &content); err != nil {
+			if err := nrows.Scan(&id, &ev.At, &uid, &content); err != nil {
 				nrows.Close()
 				db.CaptureError(err, "", nil, "ListTimeline notes scan")
 				return nil, errx.InternalError()
 			}
 			ev.Type = models.TimelineNote
+			ev.Key = models.ContactTimelineKey{At: ev.At, Source: models.TimelineSourceNote, ID: id}
 			ev.UserID = &uid
 			ev.Content = &content
 			events = append(events, ev)
 		}
 		nrows.Close()
+		if err := nrows.Err(); err != nil {
+			db.CaptureError(err, notesQuery, nil, "ListTimeline notes rows")
+			return nil, errx.InternalError()
+		}
 
 		// 6. Meetings booked through a connected scheduling provider. The event
 		//    time is when the booking arrived; scheduled_for carries the call
 		//    window so the UI can render "Meeting on <date>".
 		meetingQuery := `
-			SELECT created_at, status, source, event_name, scheduled_for, join_url, canceled_reason
+			SELECT id, created_at, status, source, event_name, scheduled_for, join_url, canceled_reason
 			FROM meeting_bookings
 			WHERE contact_id = $1
 			  AND organization_id = $2
-			  AND created_at < $3
-			ORDER BY created_at DESC
-			LIMIT $4
+			  AND ` + timelineKeyset("created_at", models.TimelineSourceMeeting, "id", 3) + `
+			ORDER BY created_at DESC, id DESC
+			LIMIT $6
 		`
-		mrows, err := r.DB.Query(ctx, meetingQuery, contactID, *orgID, bound, limit)
+		mrows, err := r.DB.Query(ctx, meetingQuery, contactID, *orgID, after.At, afterSource, after.ID, fetch)
 		if err != nil {
 			db.CaptureError(err, meetingQuery, nil, "ListTimeline meetings")
 			return nil, errx.InternalError()
 		}
 		for mrows.Next() {
 			var ev models.ContactTimelineEvent
+			var id uuid.UUID
 			var status, source, eventName, joinURL, canceledReason string
 			var scheduledFor *time.Time
-			if err := mrows.Scan(&ev.At, &status, &source, &eventName, &scheduledFor, &joinURL, &canceledReason); err != nil {
+			if err := mrows.Scan(&id, &ev.At, &status, &source, &eventName, &scheduledFor, &joinURL, &canceledReason); err != nil {
 				mrows.Close()
 				db.CaptureError(err, "", nil, "ListTimeline meetings scan")
 				return nil, errx.InternalError()
 			}
+			ev.Key = models.ContactTimelineKey{At: ev.At, Source: models.TimelineSourceMeeting, ID: id}
 			switch status {
 			case "rescheduled":
 				ev.Type = models.TimelineMeetingRescheduled
@@ -3468,36 +3780,42 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		mrows.Close()
+		if err := mrows.Err(); err != nil {
+			db.CaptureError(err, meetingQuery, nil, "ListTimeline meetings rows")
+			return nil, errx.InternalError()
+		}
 
 		// 7. Lifecycle: creation (with its first-touch source) and campaign /
 		//    category membership changes, from contact_activities. Names were
 		//    resolved when the row was written, so a renamed or deleted
 		//    campaign still reads correctly.
 		lifeQuery := `
-			SELECT created_at, user_id, activity_type, metadata
+			SELECT id, created_at, user_id, activity_type, metadata
 			FROM contact_activities
 			WHERE contact_id = $1
 			  AND organization_id = $2
 			  AND activity_type IN ('contact_created', 'campaign_added', 'campaign_removed', 'category_added', 'category_removed', 'form_submitted')
-			  AND created_at < $3
-			ORDER BY created_at DESC
-			LIMIT $4
+			  AND ` + timelineKeyset("created_at", models.TimelineSourceActivity, "id", 3) + `
+			ORDER BY created_at DESC, id DESC
+			LIMIT $6
 		`
-		lrows, err := r.DB.Query(ctx, lifeQuery, contactID, *orgID, bound, limit)
+		lrows, err := r.DB.Query(ctx, lifeQuery, contactID, *orgID, after.At, afterSource, after.ID, fetch)
 		if err != nil {
 			db.CaptureError(err, lifeQuery, nil, "ListTimeline lifecycle")
 			return nil, errx.InternalError()
 		}
 		for lrows.Next() {
 			var ev models.ContactTimelineEvent
+			var rowID uuid.UUID
 			var typ string
 			var meta map[string]any
-			if err := lrows.Scan(&ev.At, &ev.UserID, &typ, &meta); err != nil {
+			if err := lrows.Scan(&rowID, &ev.At, &ev.UserID, &typ, &meta); err != nil {
 				lrows.Close()
 				db.CaptureError(err, "", nil, "ListTimeline lifecycle scan")
 				return nil, errx.InternalError()
 			}
 			ev.Type = models.ContactTimelineEventType(typ)
+			ev.Key = models.ContactTimelineKey{At: ev.At, Source: models.TimelineSourceActivity, ID: rowID}
 			str := func(k string) *string {
 				if v, ok := meta[k].(string); ok && v != "" {
 					return &v
@@ -3529,6 +3847,10 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		lrows.Close()
+		if err := lrows.Err(); err != nil {
+			db.CaptureError(err, lifeQuery, nil, "ListTimeline lifecycle rows")
+			return nil, errx.InternalError()
+		}
 
 		// 8. Website page views from any browser tied to the contact through
 		//    an email-link ticket.
@@ -3542,11 +3864,11 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			FROM website_page_hits h
 			WHERE h.organization_id = $1
 			  AND h.visitor_id IN (SELECT id FROM website_visitors WHERE contact_id = $2)
-			  AND h.occurred_at < $3
-			ORDER BY h.occurred_at DESC
-			LIMIT $4
+			  AND ` + timelineKeyset("h.occurred_at", models.TimelineSourcePageHit, "h.id", 3) + `
+			ORDER BY h.occurred_at DESC, h.id DESC
+			LIMIT $6
 		`
-		hrows, err := r.DB.Query(ctx, hitQuery, *orgID, contactID, bound, limit)
+		hrows, err := r.DB.Query(ctx, hitQuery, *orgID, contactID, after.At, afterSource, after.ID, fetch)
 		if err != nil {
 			db.CaptureError(err, hitQuery, nil, "ListTimeline page hits")
 			return nil, errx.InternalError()
@@ -3566,7 +3888,12 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 				return nil, errx.InternalError()
 			}
 			hit := h
-			ev := models.ContactTimelineEvent{Type: models.TimelinePageHit, At: h.OccurredAt, PageHit: &hit}
+			ev := models.ContactTimelineEvent{
+				Type:    models.TimelinePageHit,
+				At:      h.OccurredAt,
+				Key:     models.ContactTimelineKey{At: h.OccurredAt, Source: models.TimelineSourcePageHit, ID: h.ID},
+				PageHit: &hit,
+			}
 			subject := h.Title
 			if subject == "" {
 				subject = h.Path
@@ -3575,21 +3902,27 @@ func (r *contactRepository) ListTimeline(ctx context.Context, userID uuid.UUID, 
 			events = append(events, ev)
 		}
 		hrows.Close()
+		if err := hrows.Err(); err != nil {
+			db.CaptureError(err, hitQuery, nil, "ListTimeline page hits rows")
+			return nil, errx.InternalError()
+		}
 	}
 
-	// Merge sort: newest first.
-	sort.Slice(events, func(i, j int) bool { return events[i].At.After(events[j].At) })
+	// Merge sort: newest first, ties broken exactly as each source query
+	// broke them, so the page boundary is the same position everywhere.
+	sort.Slice(events, func(i, j int) bool { return events[j].Key.Before(events[i].Key) })
 
-	hasMore := false
+	res := &models.ContactTimelineResult{Data: events}
 	if len(events) > limit {
-		hasMore = true
-		events = events[:limit]
+		res.Data = events[:limit]
+		last := res.Data[limit-1].Key
+		res.HasMore = true
+		res.Pagination = models.Pagination{
+			NextCursor: paging.EncodeMerged(last.At, int(last.Source), last.ID),
+			HasMore:    true,
+		}
 	}
-
-	return &models.ContactTimelineResult{
-		Data:    events,
-		HasMore: hasMore,
-	}, nil
+	return res, nil
 }
 
 // fillUTM reads the UTM parameters off a clicked link's destination, whether

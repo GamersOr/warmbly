@@ -3,6 +3,7 @@ package advanced
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math/rand"
@@ -10,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/pkg/emailverify"
@@ -21,6 +24,7 @@ import (
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
 	"github.com/warmbly/warmbly/internal/pkg/warmlint"
 	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/tasks/proto"
@@ -1661,6 +1665,15 @@ func (s *service) ReplayDeadLetter(ctx context.Context, organizationID, deadLett
 	return nil
 }
 
+// capitalize upper-cases the first rune of a validator message for display.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	r, n := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[n:]
+}
+
 func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.PreflightReport, *errx.Error) {
 	campaign, err := s.campaignRepo.GetByID(ctx, campaignID)
 	if err != nil || campaign == nil {
@@ -1680,13 +1693,21 @@ func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID u
 
 	readyErr := s.campaignRepo.ValidateCampaignReady(ctx, campaignID)
 	if readyErr != nil {
-		checks = append(checks, models.PreflightCheckResult{
+		// The validator names the missing piece; a generic list of everything
+		// that could be missing sends the owner looking in the wrong place.
+		check := models.PreflightCheckResult{
 			Key:         "campaign_ready",
 			Passed:      false,
 			Severity:    "error",
 			Message:     "Campaign has missing prerequisites (contacts, sequences, or sender accounts).",
 			Remediation: "Add contacts, sequences, and at least one sender account tag match.",
-		})
+		}
+		var bizErr *errx.Error
+		if errors.As(readyErr, &bizErr) && bizErr.Message != "" {
+			check.Message = capitalize(bizErr.Message) + "."
+			check.Remediation = ""
+		}
+		checks = append(checks, check)
 		recommendations = append(recommendations, "Complete core campaign setup before start.")
 	} else {
 		checks = append(checks, models.PreflightCheckResult{
@@ -1754,16 +1775,26 @@ func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID u
 		checks = append(checks, check)
 	}
 
+	// A plain-text campaign has no HTML for an anchor to hide a URL in, so an
+	// in-body opt-out link prints its whole signed address in the copy. The
+	// List-Unsubscribe header does the same job and the reader never sees it.
+	if settings.Preflight.CheckUnsubscribeHeader && campaign.TextOnly {
+		checks = append(checks, s.plainTextOptOutCheck(ctx, campaign, settings.Unsubscribe, &recommendations))
+	}
+
 	if settings.Preflight.CheckTrackingDomain && (campaign.OpenTracking || campaign.LinkTracking) {
-		scope := repository.NewAccountScope(campaign.OrganizationID)
-		accounts, err := s.emailRepo.GetByTags(ctx, scope, campaign.EmailTags)
+		// The same pool the scheduler sends from (explicit senders, tags, or
+		// every active mailbox when neither is picked), so a campaign on the
+		// "all" fallback is never told it has no senders (issue #340).
+		pool, err := repository.ResolveCampaignSenderPool(ctx, s.emailRepo, campaign)
+		accounts := pool.Accounts
 		if err != nil || len(accounts) == 0 {
 			checks = append(checks, models.PreflightCheckResult{
 				Key:         "tracking_domain",
 				Passed:      false,
 				Severity:    "error",
-				Message:     "No sender accounts available for tracking validation.",
-				Remediation: "Attach sender accounts to campaign tags.",
+				Message:     "No active sender mailbox is available to this campaign, so tracking cannot be validated.",
+				Remediation: "Connect a mailbox, or pick mailboxes or tags for the campaign that have an active one.",
 			})
 			recommendations = append(recommendations, "Attach at least one sender account with tracking domain.")
 		} else {
@@ -1994,13 +2025,19 @@ func (s *service) ProcessRetryableDeadLetters(ctx context.Context) (int, *errx.E
 // worstStepContentScore returns the lowest-scoring email step's score, number,
 // leading issue, and how many steps were scored. Only email steps carry copy: a
 // wait or action node would otherwise score as the campaign's worst content.
-func worstStepContentScore(seqs []models.Sequence, attachments int) (worst, worstStep int, issue string, scored int) {
+// attachmentsFor gives the file count of one step's send, which differs per
+// step now that a file can be scoped to one.
+func worstStepContentScore(seqs []models.Sequence, attachmentsFor func(models.Sequence) int) (worst, worstStep int, issue string, scored int) {
 	worst = 101
 	for _, seq := range seqs {
 		if seq.Kind != "" && seq.Kind != "email" {
 			continue
 		}
 		scored++
+		attachments := 0
+		if attachmentsFor != nil {
+			attachments = attachmentsFor(seq)
+		}
 		r := warmlint.ScoreWithAttachments(seq.Subject, seq.BodyHTML, seq.BodyPlain, attachments)
 		if r.Score >= worst {
 			continue
@@ -2017,6 +2054,84 @@ func worstStepContentScore(seqs []models.Sequence, attachments int) (worst, wors
 		}
 	}
 	return worst, worstStep, issue, scored
+}
+
+// plainTextOptOutCheck reports whether a plain-text-only campaign is putting the
+// opt-out link in the body. Link mode is decided by the settings alone; only a
+// hand-placed variable needs the steps, and a step list it could not read
+// reports as FAILED, not passed, like every other check that cannot run.
+func (s *service) plainTextOptOutCheck(ctx context.Context, campaign *models.Campaign, unsub models.UnsubscribeSettings, recommendations *[]string) models.PreflightCheckResult {
+	where := ""
+	if unsub.Effective(campaign.UnsubscribeMode).Mode == models.UnsubscribeModeLink {
+		where = "the opt-out line is set to Unsubscribe link"
+	} else {
+		seqs, err := s.campaignRepo.GetSequencesByCampaignID(ctx, campaign.ID)
+		if err != nil {
+			*recommendations = append(*recommendations, "Re-run preflight; the campaign's steps could not be read.")
+			return models.PreflightCheckResult{
+				Key:         "plain_text_opt_out",
+				Passed:      false,
+				Severity:    "warning",
+				Message:     "Could not read the campaign's steps to check what its opt-out puts in the copy.",
+				Remediation: "Re-run preflight.",
+			}
+		}
+		where = stepPlacingUnsubscribeLink(seqs)
+	}
+
+	check := plainTextOptOutResult(where)
+	if !check.Passed {
+		*recommendations = append(*recommendations, "On a plain-text campaign, let the unsubscribe header carry the opt-out instead of a link in the body.")
+	}
+	return check
+}
+
+// stepPlacingUnsubscribeLink names the first email step whose SHIPPED copy
+// carries the {{.UnsubscribeLink}} variable, or "" when none does. A plain-text
+// campaign sends body_plain, falling back to the text of body_html, so a token
+// that only ever appears in an HTML attribute (the author's own <a href>) never
+// reaches the recipient and is not worth warning about.
+func stepPlacingUnsubscribeLink(seqs []models.Sequence) string {
+	// Named, not numbered: `position` is 0-based on some campaigns and 1-based
+	// on others, so a number computed from it would point at the wrong step.
+	// The list arrives in builder order, so the index is the honest fallback
+	// when a step has no name.
+	for i, seq := range seqs {
+		if seq.Kind != "" && seq.Kind != "email" {
+			continue
+		}
+		body := seq.BodyPlain
+		if strings.TrimSpace(body) == "" {
+			body = mailhtml.ToPlainText(seq.BodyHTML)
+		}
+		if !strings.Contains(seq.Subject, models.UnsubscribeLinkToken) && !strings.Contains(body, models.UnsubscribeLinkToken) {
+			continue
+		}
+		if name := strings.TrimSpace(seq.Name); name != "" {
+			return fmt.Sprintf("the step %q places the unsubscribe link variable", name)
+		}
+		return fmt.Sprintf("step %d places the unsubscribe link variable", i+1)
+	}
+	return ""
+}
+
+// plainTextOptOutResult turns "what puts the link in the body", or "" for
+// nothing, into the check. Only called when campaign.TextOnly is set, so it
+// never fires on an HTML campaign, where the link renders as a word.
+func plainTextOptOutResult(where string) models.PreflightCheckResult {
+	check := models.PreflightCheckResult{
+		Key:      "plain_text_opt_out",
+		Passed:   true,
+		Severity: "warning",
+		Message:  "Plain text only: the opt-out puts no raw URL in the copy.",
+	}
+	if where == "" {
+		return check
+	}
+	check.Passed = false
+	check.Message = fmt.Sprintf("This campaign sends plain text only and %s, so recipients read the whole signed unsubscribe address instead of a word.", where)
+	check.Remediation = "Keep the List-Unsubscribe header on and switch the opt-out line to Reply to opt out, or turn plain text off so the link can render as a word."
+	return check
 }
 
 // contentScoreCheck scores every step's copy and reports the worst. A step list
@@ -2047,9 +2162,11 @@ func (s *service) contentScoreCheck(ctx context.Context, campaignID uuid.UUID, f
 		}
 	}
 
-	// Attachments are campaign-wide and the send path scores them, so preflight
-	// weighs them too rather than reporting a score the feed later contradicts.
-	attachments := 0
+	// The send path scores the files each step actually carries, so preflight
+	// counts them the same way (campaign-wide plus that step's own) rather than
+	// reporting a score the feed later contradicts.
+	campaignWide := 0
+	perStep := map[uuid.UUID]int{}
 	if s.attachmentRepo != nil {
 		atts, aerr := s.attachmentRepo.ListByCampaign(ctx, campaignID)
 		if aerr != nil {
@@ -2063,10 +2180,18 @@ func (s *service) contentScoreCheck(ctx context.Context, campaignID uuid.UUID, f
 				Remediation: "Re-run preflight.",
 			}
 		}
-		attachments = len(atts)
+		for _, a := range atts {
+			if a.SequenceID == nil {
+				campaignWide++
+				continue
+			}
+			perStep[*a.SequenceID]++
+		}
 	}
 
-	worst, worstStep, issue, scored := worstStepContentScore(seqs, attachments)
+	worst, worstStep, issue, scored := worstStepContentScore(seqs, func(seq models.Sequence) int {
+		return campaignWide + perStep[seq.ID]
+	})
 	if scored == 0 {
 		return models.PreflightCheckResult{
 			Key:      "content_score",

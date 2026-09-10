@@ -5,9 +5,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/getsentry/sentry-go"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
+	"github.com/warmbly/warmbly/internal/jobrun"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -37,7 +38,7 @@ func (j *WarmupGenerationJob) Run(ctx context.Context) error {
 	}
 	settings, err := j.repo.GetGenerationSettings(ctx)
 	if err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return err
 	}
 	if settings == nil || !settings.ScheduleEnabled {
@@ -54,7 +55,7 @@ func (j *WarmupGenerationJob) Run(ctx context.Context) error {
 	j.mu.Unlock()
 
 	if err := j.svc.RunScheduled(ctx); err != nil {
-		sentry.CaptureException(err)
+		errs.CaptureException(err)
 		return err
 	}
 	return nil
@@ -79,21 +80,9 @@ func NewWarmupGenerationScheduler(job *WarmupGenerationJob, interval time.Durati
 
 // Start begins scheduled execution.
 func (s *WarmupGenerationScheduler) Start(ctx context.Context) {
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if err := s.job.Run(ctx); err != nil {
-				sentry.CaptureException(err)
-			}
-		case <-s.stopCh:
-			return
-		case <-ctx.Done():
-			return
-		}
-	}
+	ctx, cancel := stopContext(ctx, s.stopCh)
+	defer cancel()
+	jobrun.Loop(ctx, "warmup_generation", s.interval, false, s.job.Run)
 }
 
 // Stop halts the scheduled execution.
