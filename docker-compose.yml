@@ -509,10 +509,12 @@ services:
 
   tracking:
     restart: unless-stopped
-    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/tracking:${WARMBLY_TAG:-prod}
-    build:
-      context: ./tracking
-      dockerfile: Dockerfile
+    # Pulled, not built. Elixir (realtime) and Rust (tracking) are the two
+    # heaviest compiles in the stack and this host cannot finish them: three
+    # from-scratch builds died mid-compile here, twice taking the site down.
+    # Neither service is patched in this fork, so a published release image is
+    # the same code we would have built. Bump the tag with the next merge.
+    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/tracking:${WARMBLY_TRACKING_TAG:-v0.4.4}
     # 3000 is a very common default for other self-hosted tools. Remap the host
     # side with TRACKING_PORT when it is already taken; the container port and
     # everything derived from TRACKING_DOMAIN stay as they are.
@@ -550,10 +552,12 @@ services:
 
   realtime:
     restart: unless-stopped
-    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/realtime:${WARMBLY_TAG:-prod}
-    build:
-      context: .
-      dockerfile: deploy/docker/realtime.Dockerfile
+    # Pulled, not built. Elixir (realtime) and Rust (tracking) are the two
+    # heaviest compiles in the stack and this host cannot finish them: three
+    # from-scratch builds died mid-compile here, twice taking the site down.
+    # Neither service is patched in this fork, so a published release image is
+    # the same code we would have built. Bump the tag with the next merge.
+    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/realtime:${WARMBLY_REALTIME_TAG:-v0.4.4}
     # ports: ["4000:4000"]
     environment:
       PHX_HOST: ${PHX_HOST:-${PUBLIC_HOST:-localhost}}
