@@ -35,7 +35,12 @@ func Run(
 ) *gin.Engine {
 	gin.SetMode(ginMode)
 
-	r := gin.Default()
+	// gin.Default() is Logger plus gin's own Recovery; the recovery here is
+	// ours, which reports the panic with its request context before returning
+	// the same 500. Everything else about the pair is unchanged.
+	r := gin.New()
+	r.Use(gin.Logger())
+	r.Use(middleware.Recovery())
 
 	// Gin trusts every proxy by default, which makes X-Forwarded-For (and so
 	// c.ClientIP()) attacker-controlled: forged values reach the captcha
@@ -121,6 +126,23 @@ func Run(
 	// Internal backend-to-backend endpoints. Workers call these instead of
 	// touching Postgres directly, per the no-direct-data-services rule in
 	// CLAUDE.md. Auth: shared bearer token (INTERNAL_API_TOKEN).
+	// The two broker endpoints sit in their own group. They perform a
+	// privileged operation for the caller rather than moving a record, so they
+	// take NODE_BROKER_TOKEN, which falls back to INTERNAL_API_TOKEN but lets a
+	// split deployment keep the edge services off this credential.
+	broker := r.Group("/api/v1/internal")
+	broker.Use(m.NodeBrokerAuthMiddleware())
+	{
+		// Opens a sealed data key for a node running KMS_PROVIDER=brokered, so
+		// a machine you own needs no cloud credential of its own.
+		broker.POST("/dek/decrypt", h.InternalDecryptDEK)
+
+		// Signs one blob operation for a node running BLOB_PROVIDER=brokered.
+		// The node then transfers directly against the object store, so bodies
+		// and attachments never pass through here.
+		broker.POST("/blobs/presign", h.InternalPresignBlob)
+	}
+
 	internal := r.Group("/api/v1/internal")
 	internal.Use(m.InternalAuthMiddleware())
 	{
@@ -793,6 +815,9 @@ func Run(
 				apiKeys.GET("/:id", h.GetAPIKey)
 				apiKeys.PATCH("/:id", h.UpdateAPIKey)
 				apiKeys.DELETE("/:id", h.RevokeAPIKey)
+				// Revoking ends a key; deleting removes the row and its usage
+				// logs. Separate paths so neither can be reached by accident.
+				apiKeys.DELETE("/:id/permanent", h.DeleteAPIKey)
 				apiKeys.GET("/:id/analytics", h.GetAPIKeyAnalytics)
 				apiKeys.GET("/:id/logs", h.ListAPIKeyUsageLogs)
 			}
@@ -1031,6 +1056,12 @@ func Run(
 				templates.POST("/:id/duplicate", m.RequireAccess(models.PermManageCampaigns, models.APIPermWriteTemplates), h.DuplicateTemplate)
 				templates.POST("/:id/render", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadTemplates), h.RenderTemplate)
 				templates.POST("/score", m.RequireAccess(models.PermViewCampaigns, models.APIPermReadTemplates), h.ScoreTemplateContent)
+				// The AI half of the same check. It spends the workspace's AI
+				// credits, so it takes the WRITE scope even though it writes no
+				// template: a read-only key must not be able to spend money.
+				// JWT members still need only view_campaigns, plus use_ai,
+				// which the second gate layers on as /generation does.
+				templates.POST("/analyze", m.RequireAccess(models.PermViewCampaigns, models.APIPermWriteTemplates), m.RequireAccess(models.PermUseAI, models.APIPermWriteTemplates), h.AnalyzeTemplateContent)
 			}
 
 			// Workspace image library for email bodies. The bytes are public
