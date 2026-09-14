@@ -22,10 +22,10 @@ import (
 //	WARMBLY_TEST_DB=postgres://warmbly:warmbly@localhost:15432/warmbly_dev?sslmode=disable \
 //	  go test ./internal/tasks/ -run LiveWarmupPartner -v
 
-// freePoolID is the seeded free pool. It is used here rather than the premium
-// one because the selector reads EVERY participant of the pool, and the free
-// pool is the one no fixture or seed puts mailboxes in.
-const freePoolID = "77777777-aaaa-0000-0000-000000000001"
+// freePoolID is the free pool migration 000156 seeds on every instance. The
+// test needs it empty, which a scratch database gives and a `make seed` one
+// does not (the dev fixtures join two mailboxes to it), so it skips there.
+var freePoolID = models.WarmupPoolFreeID
 
 type partnerRoutingFixture struct {
 	pool     *pgxpool.Pool
@@ -50,10 +50,6 @@ func newPartnerRoutingFixture(t *testing.T) *partnerRoutingFixture {
 	}
 	t.Cleanup(func() { handle.Pool.Close() })
 
-	var pools int
-	if err := handle.Pool.QueryRow(ctx, `SELECT count(*) FROM warmup_pools WHERE id = $1`, freePoolID).Scan(&pools); err != nil || pools == 0 {
-		t.Skip("free warmup pool not seeded in this database")
-	}
 	// A pick is weighted across the WHOLE pool, so a stray participant would
 	// dilute the measurement into a meaningless pass.
 	var occupied int

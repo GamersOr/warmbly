@@ -11,6 +11,7 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/argon2"
 	"github.com/warmbly/warmbly/internal/pkg/encrypt"
+	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/seed"
 )
 
@@ -420,27 +421,6 @@ func seedWorker(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func seedMailboxes(ctx context.Context, pool *pgxpool.Pool) error {
-	// The free/premium warmup pool rows: nothing else creates them (no
-	// migration seeds warmup_pools and the app only joins existing pools), so
-	// without this the participant insert below is a silent no-op and warmup
-	// partner selection has an empty pool.
-	for _, wp := range []struct {
-		id       string
-		poolType string
-		name     string
-	}{
-		{"77777777-aaaa-0000-0000-000000000001", "free", "Free warmup pool"},
-		{"77777777-aaaa-0000-0000-000000000002", "premium", "Premium warmup pool"},
-	} {
-		if _, err := pool.Exec(ctx, `
-			INSERT INTO warmup_pools (id, pool_type, name, description, max_participants)
-			VALUES ($1, $2::warmup_pool_type, $3, 'Seeded by the sandbox', 1000)
-			ON CONFLICT (id) DO NOTHING`,
-			uuid.MustParse(wp.id), wp.poolType, wp.name); err != nil {
-			return fmt.Errorf("warmup pool %s: %w", wp.poolType, err)
-		}
-	}
-
 	for i, m := range sandboxMailboxes {
 		// Each mailbox sits at its cohort's lifecycle point (see profileFor).
 		// The send window starts at 00:01, NOT 00:00: the scheduler treats a
@@ -493,20 +473,16 @@ func seedMailboxes(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 		// Pool membership with the cohort's evaluated health record, so the
 		// health column shows a believable spread instead of zeros.
-		if _, err := pool.Exec(ctx, `
-			INSERT INTO warmup_pool_participants
-				(pool_id, email_account_id, health_state, last_health_score, spam_score, last_health_evaluated_at)
-			SELECT id, $1, $2, $3, $4, NOW()
-			FROM warmup_pools WHERE pool_type = 'premium'::warmup_pool_type
-			ON CONFLICT (pool_id, email_account_id) DO UPDATE SET
-				health_state = EXCLUDED.health_state,
-				last_health_score = EXCLUDED.last_health_score,
-				spam_score = EXCLUDED.spam_score,
-				last_health_evaluated_at = NOW(),
-				blocked_at = NULL,
-				blocked_until = NULL`,
-			m.id, p.healthState, p.healthScore, p.spamScore); err != nil {
+		if err := repository.NewWarmupRepository(pool).MoveToPool(ctx, models.WarmupPoolPremiumID, m.id, "sender_receiver"); err != nil {
 			return fmt.Errorf("pool join %s: %w", m.email, err)
+		}
+		if _, err := pool.Exec(ctx, `
+			UPDATE warmup_pool_participants
+			   SET health_state = $2, last_health_score = $3, spam_score = $4,
+			       last_health_evaluated_at = NOW(), blocked_at = NULL, blocked_until = NULL
+			 WHERE email_account_id = $1`,
+			m.id, p.healthState, p.healthScore, p.spamScore); err != nil {
+			return fmt.Errorf("pool health %s: %w", m.email, err)
 		}
 		// Give the first few mailboxes a sending-behaviour profile so the
 		// Sending tab has a real rolled workday to show, and the rest keep the

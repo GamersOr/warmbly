@@ -26,7 +26,6 @@ type ledgerFixture struct {
 	warmups WarmupRepository
 	user    uuid.UUID
 	org     uuid.UUID
-	poolID  uuid.UUID
 	address string
 }
 
@@ -35,7 +34,7 @@ func newLedgerFixture(t *testing.T) *ledgerFixture {
 	handle, pool := liveContactDB(t)
 	f := &ledgerFixture{
 		pool: pool, emails: NewEmailRepostory(handle, nil), warmups: NewWarmupRepository(pool),
-		user: uuid.New(), org: uuid.New(), poolID: uuid.New(),
+		user: uuid.New(), org: uuid.New(),
 	}
 	// Mixed case on purpose: the mirror keys on the normalized form.
 	f.address = "Ledger-" + f.org.String()[:8] + "@Test.Local"
@@ -43,7 +42,6 @@ func newLedgerFixture(t *testing.T) *ledgerFixture {
 		f.user, "ledger-"+f.user.String()[:8]+"@test.local")
 	f.exec(t, `INSERT INTO organizations (id, name, slug, owner_user_id) VALUES ($1, 'Ledger Test', $2, $3)`,
 		f.org, "ledger-"+f.org.String()[:8], f.user)
-	f.exec(t, `INSERT INTO warmup_pools (id, pool_type, name) VALUES ($1, 'premium', 'Ledger test pool')`, f.poolID)
 
 	t.Cleanup(func() {
 		c := context.Background()
@@ -54,7 +52,6 @@ func newLedgerFixture(t *testing.T) *ledgerFixture {
 			{`DELETE FROM warmup_pool_participants WHERE email_account_id IN (SELECT id FROM email_accounts WHERE organization_id = $1)`, f.org},
 			{`DELETE FROM warmup_reputation_ledger WHERE organization_id = $1`, f.org},
 			{`DELETE FROM email_accounts WHERE organization_id = $1`, f.org},
-			{`DELETE FROM warmup_pools WHERE id = $1`, f.poolID},
 			{`DELETE FROM organizations WHERE id = $1`, f.org},
 			{`DELETE FROM users WHERE id = $1`, f.user},
 		} {
@@ -85,7 +82,7 @@ func (f *ledgerFixture) addMailbox(t *testing.T, user uuid.UUID) uuid.UUID {
 
 func (f *ledgerFixture) join(t *testing.T, id uuid.UUID) {
 	t.Helper()
-	if err := f.warmups.MoveToPool(context.Background(), f.poolID, id, "sender_receiver"); err != nil {
+	if err := f.warmups.MoveToPool(context.Background(), premiumPoolID, id, "sender_receiver"); err != nil {
 		t.Fatalf("MoveToPool: %v", err)
 	}
 }
@@ -338,6 +335,28 @@ func TestLiveReputationMirrorDoesNotInheritALapsedStanding(t *testing.T) {
 	}
 	if m := f.mirrorRow(t); m != nil {
 		t.Fatalf("a healthy rejoin left the lapsed mirror in place: %+v", m)
+	}
+}
+
+// A pool move is not a change of standing. The mirror trigger is scoped to the
+// standing columns (000156), so moving tiers leaves the retention clock alone;
+// before that every tier change of a penalised mailbox restarted it.
+func TestLiveReputationMirrorIgnoresAPoolMove(t *testing.T) {
+	f := newLedgerFixture(t)
+	id := f.addMailbox(t, f.user)
+	f.join(t, id)
+	f.penalise(t, id, 40, "blocked", ptr(time.Now().Add(20*24*time.Hour)))
+	before := f.mirrorRow(t)
+	if before == nil {
+		t.Fatal("penalty was not mirrored")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := f.warmups.MoveToPool(context.Background(), models.WarmupPoolFreeID, id, "sender_receiver"); err != nil {
+		t.Fatalf("MoveToPool: %v", err)
+	}
+	after := f.mirrorRow(t)
+	if after == nil || !after.recordedAt.Equal(before.recordedAt) {
+		t.Fatalf("a pool move touched the mirror: recorded_at %v -> %v", before.recordedAt, after)
 	}
 }
 
