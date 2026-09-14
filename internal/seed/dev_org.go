@@ -11,9 +11,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
 // Identity anchors shared with cmd/seed's baseline (main.go references these).
@@ -182,18 +183,14 @@ func seedDevMailboxes(ctx context.Context, pool *pgxpool.Pool) error {
 		`, b.id, b.email); err != nil {
 			return fmt.Errorf("smtp creds %s: %w", b.email, err)
 		}
-		if _, err := pool.Exec(ctx, `
-			INSERT INTO warmup_pool_participants (pool_id, email_account_id)
-			SELECT id, $1 FROM warmup_pools WHERE pool_type = 'premium'::warmup_pool_type
-			ON CONFLICT DO NOTHING
-		`, b.id); err != nil {
+		if err := repository.NewWarmupRepository(pool).MoveToPool(ctx, models.WarmupPoolPremiumID, b.id, "sender_receiver"); err != nil {
 			return fmt.Errorf("pool join %s: %w", b.email, err)
 		}
 	}
 	return nil
 }
 
-// seedDevLabels creates the dev user's folders, tags, and categories.
+// seedDevLabels creates the dev workspace's folders, tags, and categories.
 func seedDevLabels(ctx context.Context, pool *pgxpool.Pool) error {
 	entries := []struct {
 		table string
@@ -213,14 +210,15 @@ func seedDevLabels(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	for _, e := range entries {
 		if _, err := pool.Exec(ctx, `
-			INSERT INTO `+e.table+` (id, user_id, title, color, position, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,NOW(),NOW())
+			INSERT INTO `+e.table+` (id, organization_id, user_id, title, color, position, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
 			ON CONFLICT (id) DO UPDATE SET
+				organization_id = EXCLUDED.organization_id,
 				title = EXCLUDED.title,
 				color = EXCLUDED.color,
 				position = EXCLUDED.position,
 				updated_at = NOW()
-		`, e.id, DevUserID, e.title, e.color, e.pos); err != nil {
+		`, e.id, DevOrgID, DevUserID, e.title, e.color, e.pos); err != nil {
 			return fmt.Errorf("%s %s: %w", e.table, e.title, err)
 		}
 	}

@@ -54,8 +54,9 @@ export interface WarmupRampHold {
 export interface WarmupHealthInfo {
     state: "healthy" | "watch" | "throttled" | "quarantined" | "blocked";
     score: number;
-    reason?: string;
+    /** @deprecated Always 0 since the warmup spam score was retired; read score and reason. */
     spam_score: number;
+    reason?: string;
     blocked_until?: string | null;
     evaluated_at?: string | null;
 }

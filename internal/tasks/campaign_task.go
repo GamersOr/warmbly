@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -232,17 +233,43 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			if errors.Is(err, scheduler.ErrCampaignEnded) {
 				reason = "Campaign ended: reached its end date"
 			}
-			// Leads verification refused are never routed. A campaign that ran
-			// out of leads only because of them is not finished: park it for the
-			// owner to re-verify or override (issue #264), instead of letting
-			// "all emails sent" cover for a verifier that may have been wrong.
-			if n, cerr := s.campaignProgressRepo.CountUndeliverableLeads(ctx, campaign.ID); cerr == nil && n > 0 {
+			// Two counts stand between "nothing was routed" and "the campaign is
+			// finished", and BOTH have to be known before it can be closed:
+			// leads verification refused are never routed (issue #264), and a
+			// lead held with no end reports no next-due moment because there is
+			// none to wake up for (issue #470). Either would otherwise let
+			// "all emails sent" close a campaign that still has work.
+			//
+			// A count that FAILS is not zero. Closing on a database hiccup
+			// writes a claim nothing can walk back, so an unreadable count
+			// leaves the campaign active and the next pass asks again.
+			undeliverable, cerr := s.campaignProgressRepo.CountUndeliverableLeads(ctx, campaign.ID)
+			held, herr := s.campaignProgressRepo.CountHeldLeads(ctx, campaign.ID)
+			if cerr != nil || herr != nil {
+				log.Warn().AnErr("undeliverable", cerr).AnErr("held", herr).
+					Str("campaign_id", campaign.ID.String()).
+					Msg("could not tell a finished campaign from a parked one; leaving it active for the next pass")
+				if taskID != uuid.Nil {
+					s.taskRepo.UpdateTaskStatus(ctx, taskID, "completed")
+				}
+				executionStatus = "completed"
+				return nil
+			}
+			if undeliverable > 0 {
 				if errors.Is(err, scheduler.ErrCampaignCompleted) {
-					s.pauseUndeliverable(ctx, campaign.ID, taskID, n)
+					s.pauseUndeliverable(ctx, campaign.ID, taskID, undeliverable)
 					executionStatus = "completed"
 					return nil
 				}
-				reason = fmt.Sprintf("%s (%d lead(s) skipped: address verification refused them)", reason, n)
+				reason = fmt.Sprintf("%s (%d lead(s) skipped: address verification refused them)", reason, undeliverable)
+			}
+			if held > 0 {
+				if errors.Is(err, scheduler.ErrCampaignCompleted) {
+					s.parkHeldLeads(ctx, campaign, taskID, held)
+					executionStatus = "completed"
+					return nil
+				}
+				reason = fmt.Sprintf("%s (%d lead(s) paused)", reason, held)
 			}
 			// A continuous campaign out of leads is waiting, not finished
 			// (issue #336). Only its end date ends it.
@@ -337,6 +364,47 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			executionStatus = "completed"
 			return nil
 		}
+	}
+
+	// Per-lead hold gate, and a backstop rather than the main defence: routing
+	// already excludes held leads, but a pause (or an out-of-office reply) can
+	// land between that read and this dispatch, and a hold the send raced is
+	// the one thing this feature exists to stop. Re-read where it is committed,
+	// alongside suppression and verification.
+	hold, herr := s.campaignProgressRepo.GetLeadHold(ctx, campaign.ID, contact.ID)
+	if errors.Is(herr, repository.ErrLeadNotInCampaign) {
+		// Removed from the campaign between routing and here. Not an error and
+		// not a hold: there is simply nobody to send to, so skip it the way the
+		// other pre-send gates do and let the chain carry on.
+		_ = s.taskRepo.UpdateTaskStatusWithLock(ctx, taskID, "skipped_suppressed")
+		_ = s.createCampaignTask(ctx, campaign.ID, accountID, nextTime)
+		executionStatus = "completed"
+		return nil
+	}
+	if herr != nil {
+		// Fail closed: an unreadable hold is not an absent one, and sending to
+		// somebody who asked not to be is the failure this gate exists for.
+		errs.CaptureException(herr)
+		s.taskRepo.RecordTaskFailure(ctx, taskID, "Could not read the lead's hold", herr.Error())
+		if uerr := s.taskRepo.UpdateTaskStatus(ctx, taskID, "pending"); uerr != nil {
+			errs.CaptureException(uerr)
+		}
+		executionStatus = "failed"
+		return errx.InternalError()
+	}
+	if hold != nil {
+		_ = s.taskRepo.UpdateTaskStatusWithLock(ctx, taskID, "skipped_paused")
+		if s.campaignLogRepo != nil {
+			_ = s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+				CampaignID: campaign.ID,
+				EventType:  "paused_lead",
+				Message:    fmt.Sprintf("Paused lead skipped: %s", contact.Email),
+				Metadata:   map[string]interface{}{"reason": hold.Reason, "source": hold.Source},
+			})
+		}
+		_ = s.createCampaignTask(ctx, campaign.ID, accountID, nextTime)
+		executionStatus = "completed"
+		return nil
 	}
 
 	// Pre-send verification gate: drop addresses already known to be invalid
@@ -441,7 +509,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).Msg("Failed to update campaign task tracking")
 	}
 
-	// stop_on_reply is enforced inside FindNextRoutedPair (STEP 6), and it is now
+	// stop_on_reply is enforced inside FindRoutedPairs (STEP 6), and it is now
 	// ROUTE-AWARE: a contact who replied is only handed back when their next step
 	// is part of the reply flow (the reply branch's own path). The normal cold
 	// sequence stops there, so there is no longer a blanket "contact has replied,
@@ -475,10 +543,26 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		taskRecord.EmailAccountID = account.ID
 	}
 
+	// STEP 9.4: The conversation this step joins. A follow-up is a nudge on the
+	// email the contact already has, not a second cold email, so every step
+	// after their first is threaded onto the last one they received: the
+	// parent's Message-ID becomes In-Reply-To/References, which is what the
+	// RECIPIENT's client threads on, and the parent's provider thread handle
+	// files it in the same conversation in the SENDER's mailbox (issue #472).
+	// A contact's first email has no parent and opens the thread.
+	threadParent := s.threadParent(ctx, campaign.ID, contact.ID, sequence)
+
 	// STEP 9.5: Resolve {{form_link:...}} markers to per-recipient form URLs
 	// BEFORE templating, so the substituted literal survives the naive
 	// fallback and gets wrapped by click tracking in STEP 11 like any link.
 	rawSubject, rawBodyHTML, rawBodyPlain := sequence.Subject, sequence.BodyHTML, sequence.BodyPlain
+	// A reply carries the conversation's subject, so a threading step does not
+	// have one of its own: it inherits it here, before rendering, so the merge
+	// fields resolve for THIS contact. Empty means the step writes its own.
+	threadSubject := s.threadSubject(ctx, campaign.ID, sequence, threadParent)
+	if threadSubject != "" {
+		rawSubject = threadSubject
+	}
 	s.resolveFormLinks(ctx, orgID, campaign, contact, &rawSubject, &rawBodyHTML, &rawBodyPlain)
 
 	// STEP 9.75: The recipient's opt-out. The signed link (when the instance
@@ -516,7 +600,13 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 			// A chosen variant is stored template text, so it goes through the
 			// same render as the step's own copy; the control arm comes back
 			// already rendered, for which this pass is a no-op.
-			subject = expandSpintax(RenderTemplateWith(selection.Subject, *contact, extra))
+			//
+			// A threading step is the exception: its subject belongs to the
+			// conversation, not to the arm, so variants on a follow-up vary
+			// the body only.
+			if threadSubject == "" {
+				subject = expandSpintax(RenderTemplateWith(selection.Subject, *contact, extra))
+			}
 			bodyHTML = expandSpintax(RenderTemplateWith(selection.BodyHTML, *contact, extra))
 			bodyPlain = expandSpintax(RenderTemplateWith(selection.BodyPlain, *contact, extra))
 			// A variant may carry HTML only; keep the plain-text alternative.
@@ -566,6 +656,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		}
 		bodyHTML = ""
 	}
+
+	// A blank HTML alternative never ships as the part the client prefers.
+	// Shared with the preview and the test send (see dropBlankHTMLPart).
+	bodyHTML = dropBlankHTMLPart(bodyHTML, bodyPlain)
 
 	// STEP 10.7: A hand-placed {{.UnsubscribeLink}} resolved to the bare signed
 	// URL; give it an anchor so the recipient reads "Unsubscribe" and not the
@@ -704,13 +798,20 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		return errx.InternalError()
 	}
 	if !reserved {
-		// Another tick already has this (contact, step) in flight or delivered.
-		// End this one instead of sending a second copy, and keep the chain
-		// alive for whoever is next.
+		// The claim was refused: another tick already has this (contact, step)
+		// in flight or delivered, or the lead was paused in the moment between
+		// the gate above and this transaction. End this one instead of sending,
+		// and keep the chain alive for whoever is next. Which of the two it was
+		// is worth recording, so a pause that landed on a send does not read as
+		// a duplicate.
+		outcome, why := "skipped_duplicate", "campaign send skipped: the step is already in flight or sent"
+		if raced, rherr := s.campaignProgressRepo.GetLeadHold(ctx, campaign.ID, contact.ID); rherr == nil && raced != nil {
+			outcome, why = "skipped_paused", "campaign send skipped: the lead was paused as the send was reserved"
+		}
 		log.Warn().Str("campaign_id", campaign.ID.String()).Str("task_id", taskID.String()).
 			Str("contact_id", contact.ID.String()).Str("sequence_id", sequence.ID.String()).
-			Msg("campaign send skipped: the step is already in flight or sent")
-		_ = s.taskRepo.UpdateTaskStatusWithLock(ctx, taskID, "skipped_duplicate")
+			Msg(why)
+		_ = s.taskRepo.UpdateTaskStatusWithLock(ctx, taskID, outcome)
 		_ = s.createCampaignTask(ctx, campaign.ID, accountID, nextTime)
 		executionStatus = "completed"
 		return nil
@@ -730,6 +831,19 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 		Tracking:       tracking,
 		UnsubscribeURL: headerURL,
 		Attachments:    attachmentRefs,
+	}
+	if threadParent != nil {
+		emailMsg.InReplyTo = threadParent.MessageID
+		// The provider handle needs two things the headers do not. It is
+		// meaningless outside the mailbox that owns it, and Gmail will not
+		// file a message in a thread whose subject it does not match, so it
+		// only goes on a message actually carrying the conversation's
+		// subject. Offering one Gmail would refuse costs a failed send; going
+		// without it costs the thread in the sender's own mailbox, and the
+		// recipient still sees a reply.
+		if threadParent.SenderID == account.ID && threadParent.Subject != "" && threadSubject == threadParent.Subject {
+			emailMsg.ThreadID = threadParent.ThreadID
+		}
 	}
 
 	if err := s.emailSender.Send(ctx, taskID, emailMsg, *account); err != nil {
@@ -963,6 +1077,71 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) *errx.Error {
 	return nil
 }
 
+// threadParent resolves the email this step should be sent as a reply to, or
+// nil when it must open a new conversation: the step has reply-in-thread
+// turned off, the contact has had nothing from this campaign yet, or the
+// previous send left no Message-ID to reference.
+//
+// A lookup failure is never fatal. Losing the thread costs the recipient a
+// tidy conversation; refusing the send costs them the email, so a database
+// error here degrades to a new thread and is logged.
+func (s *tasksService) threadParent(ctx context.Context, campaignID, contactID uuid.UUID, sequence *Sequence) *repository.ThreadParent {
+	if sequence == nil || !sequence.ThreadReply {
+		return nil
+	}
+	parent, err := s.campaignProgressRepo.ThreadParentForLead(ctx, campaignID, contactID)
+	if err != nil {
+		log.Warn().Err(err).Str("campaign_id", campaignID.String()).Str("contact_id", contactID.String()).
+			Msg("Could not resolve the thread to reply on; sending as a new conversation")
+		return nil
+	}
+	if parent == nil || parent.MessageID == "" {
+		return nil
+	}
+	return parent
+}
+
+// threadSubject is the subject a step inherits from the conversation it is
+// replying on, or "" when it writes its own (the switch is off, there is no
+// earlier email, or the conversation has no subject yet).
+//
+// The parent answers it whenever there is one, because that is read off what
+// the contact was actually sent. The campaign's own step order is the fallback
+// for when there is not, and it only has to run for a step with no subject of
+// its own: a previous send the worker never confirmed leaves no parent, and a
+// threading step authored in the composer has nothing to fall back on, so
+// without this it would ship a blank Subject header. A step that does have a
+// subject already has something to send, which keeps this off the first-touch
+// path, where there is never a parent and never anything to inherit.
+func (s *tasksService) threadSubject(ctx context.Context, campaignID uuid.UUID, sequence *Sequence, parent *repository.ThreadParent) string {
+	if sequence == nil || !sequence.ThreadReply {
+		return ""
+	}
+	if parent != nil && parent.Subject != "" {
+		return parent.Subject
+	}
+	if strings.TrimSpace(sequence.Subject) != "" {
+		return ""
+	}
+	seqs, err := s.campaignRepo.GetSequencesByCampaignID(ctx, campaignID)
+	if err != nil {
+		log.Warn().Err(err).Str("campaign_id", campaignID.String()).
+			Msg("Could not read the campaign's steps for the conversation subject")
+		return ""
+	}
+	for i := range seqs {
+		if seqs[i].ID != sequence.ID {
+			continue
+		}
+		// StepSubject returns the step's own when there is nothing to inherit,
+		// which is not an inherited subject and must not read as one.
+		if sub := models.StepSubject(seqs, i); sub != sequence.Subject {
+			return sub
+		}
+	}
+	return ""
+}
+
 // autoPauseCampaign pauses a campaign when no active email accounts are available.
 // Uses advisory lock to prevent concurrent auto-pause from multiple tasks.
 // autoPauseReason turns a no-mailbox scheduling error into the sentence the
@@ -1019,6 +1198,58 @@ const (
 	CampaignIdleMessage   = "Waiting for new leads: every lead has finished the sequence. The campaign stays active and sends to leads as they arrive."
 )
 
+// HeldLeadsMessage is the activity-log line for a campaign whose only remaining
+// leads are paused.
+func HeldLeadsMessage(n int) string {
+	lead := "lead is"
+	if n != 1 {
+		lead = "leads are"
+	}
+	return fmt.Sprintf("Waiting: %d %s paused. The campaign stays active and continues when they resume.", n, lead)
+}
+
+// CampaignHeldEventType is the activity log entry for a campaign waiting on
+// paused leads.
+const CampaignHeldEventType = "waiting_on_paused_leads"
+
+// parkHeldLeads leaves a campaign active when the only thing left to send to is
+// a lead somebody parked. It is deliberately NOT idleCampaign: that one is for
+// a continuous campaign out of leads and its MarkIdle refuses a campaign that
+// is not continuous, which would leave this case silent. Nothing here changes
+// the status — the campaign IS active, it is waiting — and the log line is
+// written once per wait rather than once per pass.
+func (s *tasksService) parkHeldLeads(ctx context.Context, campaign *models.Campaign, taskID uuid.UUID, n int) {
+	if taskID != uuid.Nil {
+		s.taskRepo.UpdateTaskStatus(ctx, taskID, "completed")
+	}
+	if s.campaignLogRepo == nil {
+		return
+	}
+	wrote, err := s.campaignLogRepo.CreateLogOnce(ctx, &repository.CampaignLogEntry{
+		CampaignID: campaign.ID,
+		EventType:  CampaignHeldEventType,
+		Message:    HeldLeadsMessage(n),
+		Metadata:   map[string]interface{}{"paused_leads": n},
+	}, "paused_leads", strconv.Itoa(n), time.Now().Add(-campaignHeldLogWindow))
+	if err != nil {
+		log.Warn().Err(err).Str("campaign_id", campaign.ID.String()).Msg("could not record the paused-lead wait")
+		return
+	}
+	if wrote && s.streamingPublisher != nil {
+		s.streamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
+			BaseEvent:  pubsub.BaseEvent{EventType: pubsub.EventCampaignIdle, UserID: campaign.UserID},
+			OrgID:      campaignOrgID(campaign),
+			CampaignID: campaign.ID.String(),
+			Name:       campaign.Name,
+			Status:     campaign.Status,
+		})
+	}
+}
+
+// campaignHeldLogWindow keeps the wait from filling the activity feed: the
+// reconciler re-checks every pass, and the fact does not change between them.
+const campaignHeldLogWindow = 6 * time.Hour
+
 // idleCampaign parks a continuous campaign that has nothing left to send. It
 // stays active with no chain: a lead add wakes it, and the reconciler re-checks
 // it every pass. Logged and broadcast once per wait, not once per pass.
@@ -1066,16 +1297,56 @@ func (s *tasksService) clearIdle(ctx context.Context, campaign *models.Campaign)
 // reason is carried through to the activity log because "paused_no_accounts"
 // covers several very different fixes (connect a mailbox, widen a sending
 // window, repair DNS) and the status alone cannot tell them apart.
+//
+// It is deliberately LOUD. This runs unattended, hours after anyone touched
+// the campaign, and a pause nobody is told about is a campaign that quietly
+// stops sending: an error-level line in the operator's log, an error-level
+// entry in the activity feed so the dashboard tints it red, and an org-scoped
+// realtime pulse so every teammate's campaign list moves to "paused — no
+// accounts" without a refresh.
 func (s *tasksService) autoPauseCampaign(ctx context.Context, campaignID, taskID uuid.UUID, reason string) {
 	s.campaignRepo.UpdateStatusWithLock(ctx, campaignID, "paused_no_accounts")
-	s.taskRepo.UpdateTaskStatus(ctx, taskID, "completed")
-	if s.campaignLogRepo != nil {
-		s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
-			CampaignID: campaignID,
-			EventType:  "auto_paused",
-			Message:    reason,
-		})
+	if taskID != uuid.Nil {
+		s.taskRepo.UpdateTaskStatus(ctx, taskID, "completed")
 	}
+
+	log.Error().Str("campaign_id", campaignID.String()).Str("reason", reason).
+		Msg("campaign auto-paused: no mailbox can send for it")
+
+	// CreateLogOnce, not CreateLog: the reconciler re-checks paused campaigns
+	// too, and a repeat of the SAME reason must not fill the feed or re-pulse
+	// the dashboard every pass. Keyed on the reason rather than the code, so a
+	// pause whose cause changed (DNS, then no mailbox at all) still says so.
+	// The write also reports whether this pause is news, which is what gates
+	// the announcement below.
+	if s.campaignLogRepo == nil {
+		return
+	}
+	entry := &repository.CampaignLogEntry{
+		CampaignID: campaignID,
+		EventType:  "auto_paused",
+		Message:    reason,
+		Metadata: map[string]interface{}{
+			"level":  "error",
+			"code":   "no_accounts",
+			"reason": reason,
+		},
+	}
+	written, err := s.campaignLogRepo.CreateLogOnce(ctx, entry, "reason", reason, time.Now().Add(-time.Hour))
+	if err != nil || !written || s.streamingPublisher == nil {
+		return
+	}
+	campaign, gerr := s.campaignRepo.GetByID(ctx, campaignID)
+	if gerr != nil || campaign == nil {
+		return
+	}
+	s.streamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
+		BaseEvent:  pubsub.BaseEvent{EventType: pubsub.EventCampaignPaused, UserID: campaign.UserID},
+		OrgID:      campaignOrgID(campaign),
+		CampaignID: campaignID.String(),
+		Name:       campaign.Name,
+		Status:     "paused_no_accounts",
+	})
 }
 
 // haltOrglessCampaign stops a campaign that reached the send path with no
@@ -1150,14 +1421,10 @@ func (s *tasksService) executeActionNode(ctx context.Context, campaign *models.C
 	case "label_email":
 		// Apply unibox labels to the contact's most recent conversation. A no-op
 		// when the contact has no thread yet (returns "" thread, nil error).
-		if len(cfg.LabelIDs) == 0 {
+		if len(cfg.LabelIDs) == 0 || campaign.OrganizationID == nil {
 			return nil
 		}
-		owner, perr := uuid.Parse(campaign.UserID)
-		if perr != nil {
-			return nil
-		}
-		if _, xerr := s.advanced.LabelLatestThreadForContact(ctx, owner, contact.Email, cfg.LabelIDs); xerr != nil {
+		if _, xerr := s.advanced.LabelLatestThreadForContact(ctx, *campaign.OrganizationID, contact.Email, cfg.LabelIDs); xerr != nil {
 			return xerr
 		}
 		return nil

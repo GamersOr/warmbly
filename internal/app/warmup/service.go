@@ -53,8 +53,6 @@ const (
 
 	minComplaintSample = 100
 
-	invalidTokenBlockThreshold = 3
-
 	// Tampering: harming pool warmup mail (deleting it or marking it as spam)
 	// bans the mailbox once this many harm events occur within the window.
 	// Default 1 = ban on first harm (Instantly-style zero tolerance); the
@@ -77,13 +75,14 @@ type Service interface {
 	// RemoveFromAllPools takes the mailbox out of warmup; a caller that knows it is not entitled
 	// does not know which pool it is in.
 	RemoveFromAllPools(ctx context.Context, accountID uuid.UUID) *errx.Error
+	// CanParticipate is pinned to the pool the caller drew the row from; a
+	// partner borrowed from the other tier is gated there, not in the sender's pool (#495).
 	CanParticipate(ctx context.Context, accountID uuid.UUID, poolType string) (bool, string, *errx.Error)
 	ApplySpamReport(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, reportType string) (*models.WarmupParticipantHealth, *errx.Error)
 	// RecordSpamPlacement records that a warmup message landed in the
 	// recipient's Junk/Spam folder on arrival. Counted separately from
 	// user complaints so the two signals can drive distinct thresholds.
 	RecordSpamPlacement(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, contentSource, recipientProvider, recipientDomain string) (*models.WarmupParticipantHealth, *errx.Error)
-	ApplyInvalidTokenAttempt(ctx context.Context, accountID uuid.UUID, attemptedToken string, scoreDelta int) (*models.WarmupParticipantHealth, *errx.Error)
 	ApplyRateLimitExceeded(ctx context.Context, accountID uuid.UUID, reason string) (*models.WarmupParticipantHealth, *errx.Error)
 
 	// RecordTampering records that a participant harmed a warmup email (deleted
@@ -213,28 +212,24 @@ func (s *service) EnsurePoolMembershipWithRole(ctx context.Context, accountID uu
 		return errx.New(errx.BadRequest, "invalid warmup participant role")
 	}
 
-	pool, err := s.repo.GetPoolByType(ctx, poolType)
-	if err != nil {
-		return errx.InternalError()
+	// The pools are fixed rows (000156); a missing one fails on the foreign
+	// key and the warmup_pools_missing health check names it.
+	poolID, ok := models.WarmupPoolID(poolType)
+	if !ok {
+		return errx.New(errx.BadRequest, "invalid warmup pool type")
 	}
-	if pool == nil {
-		return errx.New(errx.BadRequest, "warmup pool not found")
-	}
-	if err := s.repo.MoveToPool(ctx, pool.ID, accountID, role); err != nil {
+	if err := s.repo.MoveToPool(ctx, poolID, accountID, role); err != nil {
 		return errx.InternalError()
 	}
 	return nil
 }
 
 func (s *service) MovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) (bool, *errx.Error) {
-	pool, err := s.repo.GetPoolByType(ctx, poolType)
-	if err != nil {
-		return false, errx.InternalError()
+	poolID, ok := models.WarmupPoolID(poolType)
+	if !ok {
+		return false, errx.New(errx.BadRequest, "invalid warmup pool type")
 	}
-	if pool == nil {
-		return false, errx.New(errx.BadRequest, "warmup pool not found")
-	}
-	moved, err := s.repo.MoveExistingToPool(ctx, pool.ID, accountID)
+	moved, err := s.repo.MoveExistingToPool(ctx, poolID, accountID)
 	if err != nil {
 		return false, errx.InternalError()
 	}
@@ -262,7 +257,7 @@ func (s *service) CanParticipate(ctx context.Context, accountID uuid.UUID, poolT
 		// Block period expired. Instead of snapping back to healthy, enter probation
 		// (throttled state with a 3-day window at reduced volume).
 		wasBlocked := health.HealthState == models.WarmupHealthQuarantined || health.HealthState == models.WarmupHealthBlocked
-		health, xerr := s.evaluateAndPersist(ctx, accountID, poolType, health)
+		health, xerr := s.evaluateAndPersist(ctx, health)
 		if xerr != nil {
 			return false, "", xerr
 		}
@@ -273,7 +268,7 @@ func (s *service) CanParticipate(ctx context.Context, accountID uuid.UUID, poolT
 		if wasBlocked && health.HealthState == models.WarmupHealthHealthy {
 			probationEnd := now.Add(warmupThrottleDuration)
 			reason := "re-entry probation after block expiry"
-			if err := s.repo.UpdateParticipantHealth(ctx, accountID, models.WarmupHealthThrottled, &probationEnd, reason, 0); err != nil {
+			if _, err := s.repo.UpdateParticipantHealth(ctx, accountID, models.WarmupHealthThrottled, &probationEnd, reason, 0); err != nil {
 				return false, "", errx.InternalError()
 			}
 			return true, "throttled", nil
@@ -316,9 +311,6 @@ func (s *service) RecordSpamPlacement(ctx context.Context, reporterAccountID, re
 	}
 	if !inserted {
 		return s.getParticipantForAnyPool(ctx, reportedAccountID)
-	}
-	if _, err := s.repo.IncrementSpamScore(ctx, reportedAccountID, 5); err != nil {
-		return nil, errx.InternalError()
 	}
 	// Fan a warmup.placement_in_spam webhook for the sender (best-effort).
 	s.dispatchPlacementInSpam(ctx, reportedAccountID, contentSource, recipientProvider, recipientDomain)
@@ -496,54 +488,24 @@ func (s *service) ApplySpamReport(ctx context.Context, reporterAccountID, report
 		return s.getParticipantForAnyPool(ctx, reportedAccountID)
 	}
 
-	if _, err := s.repo.IncrementSpamScore(ctx, reportedAccountID, 10); err != nil {
-		return nil, errx.InternalError()
-	}
-
 	return s.evaluateAndPersistAnyPool(ctx, reportedAccountID)
-}
-
-func (s *service) ApplyInvalidTokenAttempt(ctx context.Context, accountID uuid.UUID, attemptedToken string, scoreDelta int) (*models.WarmupParticipantHealth, *errx.Error) {
-	if err := s.repo.RecordInvalidTokenAttempt(ctx, accountID, attemptedToken); err != nil {
-		return nil, errx.InternalError()
-	}
-	if scoreDelta > 0 {
-		if _, err := s.repo.IncrementSpamScore(ctx, accountID, scoreDelta); err != nil {
-			return nil, errx.InternalError()
-		}
-	}
-	// The attempt and its score are already persisted, so nothing from here on
-	// may be reported as a failure of the whole call: the caller's degraded path
-	// re-records both, which doubles every count the band then reads (#195).
-	// The evaluation itself already logs its own cause.
-	health, err := s.evaluateAndPersistAnyPool(ctx, accountID)
-	if err != nil {
-		// Best effort: hand back the participant as it stands. If that read
-		// fails too (it runs the same probe that just failed), a nil health is
-		// still the right answer — the caller treats it as "unknown", not as a
-		// reason to record the attempt again.
-		health, _ = s.getParticipantForAnyPool(ctx, accountID)
-	}
-	return health, nil
 }
 
 func (s *service) ApplyRateLimitExceeded(ctx context.Context, accountID uuid.UUID, reason string) (*models.WarmupParticipantHealth, *errx.Error) {
 	blockedUntil := s.now().UTC().Add(warmupBlockDuration)
-	if err := s.repo.UpdateParticipantHealth(ctx, accountID, models.WarmupHealthBlocked, &blockedUntil, reason, 100); err != nil {
+	if _, err := s.repo.UpdateParticipantHealth(ctx, accountID, models.WarmupHealthBlocked, &blockedUntil, reason, 100); err != nil {
 		return nil, errx.InternalError()
 	}
 	return s.getParticipantForAnyPool(ctx, accountID)
 }
 
+// evaluateAndPersistAnyPool reads the row once and judges it; nil when the mailbox is in no pool.
 func (s *service) evaluateAndPersistAnyPool(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, *errx.Error) {
 	health, xerr := s.getParticipantForAnyPool(ctx, accountID)
-	if xerr != nil {
+	if xerr != nil || health == nil {
 		return nil, xerr
 	}
-	if health == nil {
-		return nil, nil
-	}
-	return s.evaluateAndPersist(ctx, accountID, health.PoolType, health)
+	return s.evaluateAndPersist(ctx, health)
 }
 
 // getParticipantForAnyPool reads the row from whichever pool the mailbox is in: one query, not
@@ -560,7 +522,10 @@ func (s *service) getParticipantForAnyPool(ctx context.Context, accountID uuid.U
 	return health, nil
 }
 
-func (s *service) evaluateAndPersist(ctx context.Context, accountID uuid.UUID, poolType string, participant *models.WarmupParticipantHealth) (*models.WarmupParticipantHealth, *errx.Error) {
+// evaluateAndPersist judges the participant row in hand; the mailbox and its
+// pool are read off the row, so a caller cannot pin the wrong pool.
+func (s *service) evaluateAndPersist(ctx context.Context, participant *models.WarmupParticipantHealth) (*models.WarmupParticipantHealth, *errx.Error) {
+	accountID, poolType := participant.EmailAccountID, participant.PoolType
 	// errx.Error carries no cause, so every failure below is logged with the
 	// real error here. Without that the health bands can stop firing entirely
 	// and the only visible symptom is a last_health_evaluated_at that never
@@ -575,42 +540,38 @@ func (s *service) evaluateAndPersist(ctx context.Context, accountID uuid.UUID, p
 		return errx.InternalError()
 	}
 
-	// Signals from before this mailbox was being evaluated are not held against
-	// it (see migration 000096).
-	signalsFrom := time.Time{}
-	priorState := models.WarmupHealthState("")
-	if participant != nil {
-		signalsFrom = participant.HealthSignalsFrom
-		// The prior state is what makes a webhook fire on a real transition
-		// rather than on every sweep.
-		priorState = participant.HealthState
-	}
+	// The prior state is what makes a webhook fire on a real transition
+	// rather than on every sweep.
+	priorState := participant.HealthState
 
-	metrics, err := s.loadMetrics(ctx, accountID, signalsFrom)
+	metrics, err := s.loadMetrics(ctx, accountID, participant)
 	if err != nil {
 		return nil, fail("load_metrics", err)
 	}
 
+	// The floor that keeps a block from being overturned by a fresh reading is
+	// applied by UpdateParticipantHealth against the row as it is at write time.
 	decision := evaluateMetrics(metrics, s.now().UTC())
-	if err := s.repo.UpdateParticipantHealth(ctx, accountID, decision.State, decision.BlockedUntil, decision.Reason, decision.Score); err != nil {
+	health, err := s.repo.UpdateParticipantHealth(ctx, accountID, decision.State, decision.BlockedUntil, decision.Reason, decision.Score)
+	if err != nil {
 		return nil, fail("persist", err)
 	}
-
-	health, err := s.repo.GetParticipantHealth(ctx, accountID, poolType)
-	if err != nil {
-		return nil, fail("read_back", err)
+	if health == nil {
+		// A review-required block is not overturned by a reading; the row stands.
+		return participant, nil
 	}
+	health.PoolType = poolType
 
-	if priorState != "" && health != nil {
+	if priorState != "" {
 		s.dispatchHealthEvent(ctx, accountID, priorState, health.HealthState, decision.Reason)
 	}
 	return health, nil
 }
 
-// loadMetrics counts the signals behind a health decision. No window reaches
-// further back than signalsFrom, so a mailbox is never judged on a period it was
-// not being judged in.
-func (s *service) loadMetrics(ctx context.Context, accountID uuid.UUID, signalsFrom time.Time) (*models.WarmupHealthMetrics, error) {
+// loadMetrics is the one read behind a health decision; no window reaches
+// back past the row's health_signals_from (000096).
+func (s *service) loadMetrics(ctx context.Context, accountID uuid.UUID, participant *models.WarmupParticipantHealth) (*models.WarmupHealthMetrics, error) {
+	signalsFrom := participant.HealthSignalsFrom
 	now := s.now().UTC()
 	since := func(window time.Duration) time.Time {
 		start := now.Add(-window)
@@ -619,55 +580,20 @@ func (s *service) loadMetrics(ctx context.Context, accountID uuid.UUID, signalsF
 		}
 		return start
 	}
-	sentLast7d, err := s.repo.SumWarmupSentSince(ctx, accountID, since(7*24*time.Hour))
+	counts, err := s.repo.HealthMetricCounts(ctx, accountID, since(7*24*time.Hour), since(30*24*time.Hour))
 	if err != nil {
-		return nil, fmt.Errorf("SumWarmupSentSince: %w", err)
+		return nil, fmt.Errorf("HealthMetricCounts: %w", err)
 	}
+	sentLast7d, spamPlacementsLast7d, userComplaintsLast7d := counts.SentLast7d, counts.SpamPlacementsLast7d, counts.UserComplaintsLast7d
+	complaintsLast30d, bouncesLast30d, deliveredLast30d := counts.ComplaintsLast30d, counts.BouncesLast30d, counts.DeliveredLast30d
 
-	// Split the warmup spam signal into placement (provider classifier put
-	// the mail in Junk) vs user complaint (recipient actively flagged it).
-	// These have very different remediation paths so they earn separate
-	// rates instead of one combined ratio.
-	spamPlacementsLast7d, err := s.repo.CountSpamPlacementsSince(ctx, accountID, since(7*24*time.Hour))
-	if err != nil {
-		return nil, fmt.Errorf("CountSpamPlacementsSince: %w", err)
-	}
-	userComplaintsLast7d, err := s.repo.CountUserComplaintsSince(ctx, accountID, since(7*24*time.Hour))
-	if err != nil {
-		return nil, fmt.Errorf("CountUserComplaintsSince: %w", err)
-	}
-
-	invalidAttemptsLast24h, err := s.repo.CountRecentInvalidAttempts(ctx, accountID, since(24*time.Hour))
-	if err != nil {
-		return nil, fmt.Errorf("CountRecentInvalidAttempts: %w", err)
-	}
-
-	spamScore, err := s.repo.GetSpamScore(ctx, accountID)
-	if err != nil {
-		return nil, fmt.Errorf("GetSpamScore: %w", err)
-	}
-
+	// Placement (the provider's classifier) and complaint (the recipient) have
+	// different remediation paths, so they earn separate rates.
 	placementRate := 0.0
 	warmupComplaintRate := 0.0
 	if sentLast7d > 0 {
 		placementRate = float64(spamPlacementsLast7d) / float64(sentLast7d) * 100
 		warmupComplaintRate = float64(userComplaintsLast7d) / float64(sentLast7d) * 100
-	}
-
-	// Load complaint and bounce counts from deliverability events (last 30 days).
-	// These cover external (non-warmup) sends and remain on a separate axis.
-	since30d := since(30 * 24 * time.Hour)
-	complaintsLast30d, err := s.repo.CountDeliverabilityEventsByAccount(ctx, accountID, "complaint", since30d)
-	if err != nil {
-		return nil, fmt.Errorf("CountDeliverabilityEventsByAccount(complaint): %w", err)
-	}
-	bouncesLast30d, err := s.repo.CountDeliverabilityEventsByAccount(ctx, accountID, "bounce", since30d)
-	if err != nil {
-		return nil, fmt.Errorf("CountDeliverabilityEventsByAccount(bounce): %w", err)
-	}
-	deliveredLast30d, err := s.repo.CountDeliveredByAccount(ctx, accountID, since30d)
-	if err != nil {
-		return nil, fmt.Errorf("CountDeliveredByAccount: %w", err)
 	}
 
 	complaintRate := 0.0
@@ -680,19 +606,16 @@ func (s *service) loadMetrics(ctx context.Context, accountID uuid.UUID, signalsF
 	}
 
 	return &models.WarmupHealthMetrics{
-		SentLast7d:            sentLast7d,
-		SpamReportsLast7d:     spamPlacementsLast7d + userComplaintsLast7d,
-		SpamPlacementsLast7d:  spamPlacementsLast7d,
-		SpamPlacementRate:     placementRate,
-		UserComplaintsLast7d:  userComplaintsLast7d,
-		WarmupComplaintRate:   warmupComplaintRate,
-		InvalidAttemptsLast24: invalidAttemptsLast24h,
-		SpamScore:             spamScore,
-		ComplaintsLast30d:     complaintsLast30d,
-		DeliveredLast30d:      deliveredLast30d,
-		ComplaintRate:         complaintRate,
-		BouncesLast30d:        bouncesLast30d,
-		BounceRate:            bounceRate,
+		SentLast7d:           sentLast7d,
+		SpamPlacementsLast7d: spamPlacementsLast7d,
+		SpamPlacementRate:    placementRate,
+		UserComplaintsLast7d: userComplaintsLast7d,
+		WarmupComplaintRate:  warmupComplaintRate,
+		ComplaintsLast30d:    complaintsLast30d,
+		DeliveredLast30d:     deliveredLast30d,
+		ComplaintRate:        complaintRate,
+		BouncesLast30d:       bouncesLast30d,
+		BounceRate:           bounceRate,
 	}, nil
 }
 
@@ -707,16 +630,6 @@ func evaluateMetrics(metrics *models.WarmupHealthMetrics, now time.Time) evaluat
 	decision := evaluationDecision{
 		State: models.WarmupHealthHealthy,
 		Score: metrics.SpamPlacementRate,
-	}
-
-	if metrics.InvalidAttemptsLast24 >= invalidTokenBlockThreshold {
-		until := now.Add(warmupBlockDuration)
-		return evaluationDecision{
-			State:        models.WarmupHealthBlocked,
-			BlockedUntil: &until,
-			Reason:       fmt.Sprintf("invalid warmup token attempts exceeded threshold: %d in 24h", metrics.InvalidAttemptsLast24),
-			Score:        maxFloat(100, metrics.SpamPlacementRate),
-		}
 	}
 
 	// Evaluate complaint rate (requires minimum sample of 100 delivered in 30d)
@@ -865,7 +778,17 @@ func maxFloat(a, b float64) float64 {
 // EvaluateAllParticipants runs a health evaluation sweep across all warmup pool participants.
 // Returns the number evaluated and the number of state changes.
 func (s *service) EvaluateAllParticipants(ctx context.Context) (int, int, *errx.Error) {
-	accountIDs, err := s.repo.GetAllParticipantAccountIDs(ctx)
+	// The standing of a removed mailbox is held against its address for a
+	// fixed window; this is where the window is enforced.
+	if purged, err := s.repo.PurgeExpiredReputationLedger(ctx); err != nil {
+		log.Warn().Err(err).Msg("warmup: could not purge the expired reputation ledger")
+	} else if purged > 0 {
+		log.Info().Int64("purged", purged).Msg("warmup: reputation ledger rows lapsed")
+	}
+
+	// The listing carries the rows, stalest evaluation first, so the loop
+	// reads nothing per mailbox before judging it (#492).
+	participants, err := s.repo.ListParticipantHealth(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("warmup: health sweep could not list participants")
 		return 0, 0, errx.InternalError()
@@ -875,35 +798,25 @@ func (s *service) EvaluateAllParticipants(ctx context.Context) (int, int, *errx.
 	stateChanges := 0
 	skipped := 0
 
-	for _, accountID := range accountIDs {
-		// Get current state before evaluation
-		healthBefore, err := s.repo.GetParticipantHealth(ctx, accountID, "")
-		if err != nil || healthBefore == nil {
-			// Try both pool types
-			for _, poolType := range []string{"premium", "free"} {
-				healthBefore, err = s.repo.GetParticipantHealth(ctx, accountID, poolType)
-				if err == nil && healthBefore != nil {
-					break
-				}
-			}
+	for i := range participants {
+		if ctx.Err() != nil {
+			// Past the deadline every read fails; stop, and say how far it got.
+			log.Error().
+				Int("evaluated", evaluated).
+				Int("remaining", len(participants)-i).
+				Msg("warmup: health sweep cut off by its deadline; the rest is judged first next pass")
+			return evaluated, stateChanges, errx.InternalError()
 		}
-
-		var stateBefore models.WarmupHealthState
-		if healthBefore != nil {
-			stateBefore = healthBefore.HealthState
-		}
-
-		// Evaluate. evaluateAndPersistAnyPool logs the underlying cause; count
-		// the skip here so the sweep can report how much of the pool it failed
-		// to evaluate instead of quietly reporting only what worked.
-		healthAfter, xerr := s.evaluateAndPersistAnyPool(ctx, accountID)
+		before := &participants[i]
+		// The cause of a failure is logged where it happens; it is counted here.
+		after, xerr := s.evaluateAndPersist(ctx, before)
 		if xerr != nil {
 			skipped++
 			continue
 		}
 		evaluated++
 
-		if healthAfter != nil && healthAfter.HealthState != stateBefore {
+		if after.HealthState != before.HealthState {
 			stateChanges++
 		}
 	}
@@ -912,7 +825,7 @@ func (s *service) EvaluateAllParticipants(ctx context.Context) (int, int, *errx.
 		log.Error().
 			Int("skipped", skipped).
 			Int("evaluated", evaluated).
-			Int("participants", len(accountIDs)).
+			Int("participants", len(participants)).
 			Msg("warmup: health sweep could not evaluate every participant; those accounts keep their last known band")
 	}
 
@@ -954,7 +867,7 @@ func (s *service) GetPoolHealthSummary(ctx context.Context) (*models.WarmupPoolH
 	return &models.WarmupPoolHealthSummary{
 		TotalParticipants:       total,
 		ByState:                 counts,
-		AvgSpamScore:            avgScore,
+		AvgHealthScore:          avgScore,
 		AvgSpamPlacement:        placementRate,
 		SpamPlacementByProvider: byProvider,
 		BlockedCount:            blockedCount,

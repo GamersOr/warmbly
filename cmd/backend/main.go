@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -408,6 +409,18 @@ func main() {
 			errs.CaptureFatal(err)
 			log.Fatal(err)
 		}
+		// The brokered store asks the control plane to sign each operation, so
+		// on the control plane it is asking itself. It also cannot enumerate,
+		// which would leave every mailbox erasure stuck with the customer's
+		// mail still in the bucket. Refused here rather than discovered later
+		// as a queue that never drains.
+		//
+		// The empty prefix is a safe probe: every real backend refuses it with
+		// ErrUnsafePrefix before touching anything, and only the brokered one
+		// answers ErrUnsupported.
+		if _, err := s3.DeletePrefix(ctx, ""); errors.Is(err, storage.ErrUnsupported) {
+			log.Fatal("BLOB_PROVIDER=brokered is for fleet nodes, not the backend: it cannot delete a prefix, so mailbox erasure could never complete. Set s3 or filesystem.")
+		}
 		s3ForHandler = s3
 
 		primaryDBEndpoint, err := cfg.LoadPrimaryDBEndpoint(ctx)
@@ -429,6 +442,12 @@ func main() {
 			log.Fatal("Failed to run migrations: ", err)
 		}
 		log.Println("Database migrations completed")
+		// Once, not per warmup tick: the pools are fixed rows, and their absence
+		// (a data-only restore, a manual delete) otherwise fails every tick quietly.
+		if n, perr := instancecheck.CountSeededWarmupPools(ctx, primaryDB.Pool); perr == nil && n != 2 {
+			errs.CaptureException(fmt.Errorf("warmup pools missing: %d of 2 present; see the warmup_pools_missing health check", n))
+			log.Printf("WARNING: only %d of the 2 warmup pools exist; warmup cannot place any mailbox until they are restored", n)
+		}
 
 		primaryRedis, err := cfg.LoadPrimaryRedisEndpoint(ctx)
 		if err != nil {
@@ -761,7 +780,7 @@ func main() {
 		if dailyThrottleService == nil {
 			dailyThrottleService = dailythrottle.NewService(cache)
 		}
-		organizationService = organization.NewService(organizationRepository, subscriptionRepository, userRepostory, dailyThrottleService)
+		organizationService = organization.NewService(organizationRepository, subscriptionRepository, userRepostory, planRepository, dailyThrottleService)
 
 		// Plan-based webhook/integration fan-out throttle. The cap scales with
 		// the org's effective mailbox allowance (see WebhookDispatchLimit) so a
@@ -1648,6 +1667,17 @@ func main() {
 		dangerZoneScheduler := jobs.NewDangerZoneScheduler(dangerZoneJob, 1*time.Hour)
 		go dangerZoneScheduler.Start(ctx)
 
+		// Finish deleting a mailbox: revoke its OAuth grant at Google, and
+		// remove the message bodies it synced from the blob store. Both
+		// outlive the transaction that deleted the rows, so both are queued by
+		// it and worked off here. A minute, because this is the "delete my
+		// data" path and the provider's clock is the one that matters.
+		go jobs.NewMailboxErasureJob(
+			repository.NewMailboxErasureRepository(primaryDB),
+			s3,
+			credEncrypter,
+		).Start(ctx, 1*time.Minute)
+
 		// Workspace archives: export a whole organization to a portable file
 		// and import one back, so a workspace can move between instances.
 		// It needs both key domains — the instance credential key for mailbox
@@ -1810,9 +1840,9 @@ func main() {
 		systemChecker.Add("redis", func(ctx context.Context) error { return cache.Ping(ctx).Err() })
 		switch bus.Name() {
 		case "kafka":
-			systemChecker.Add("kafka", sysstatus.TCPCheck(kafkaBootstrapServers))
+			systemChecker.Add("kafka", sysstatus.TCPCheck(kafkaBootstrapServers, "9092"))
 		case "nats":
-			systemChecker.Add("nats", sysstatus.TCPCheck(strings.TrimPrefix(getenvDefault("NATS_URL", "nats://localhost:4222"), "nats://")))
+			systemChecker.Add("nats", sysstatus.TCPCheck(getenvDefault("NATS_URL", "nats://localhost:4222"), "4222"))
 		}
 		if sr := os.Getenv("SCHEMA_REGISTRY_URL"); sr != "" {
 			systemChecker.Add("schema-registry", sysstatus.HTTPCheck(strings.TrimRight(sr, "/")+"/subjects"))

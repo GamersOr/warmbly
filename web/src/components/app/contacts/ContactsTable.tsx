@@ -28,7 +28,9 @@ import {
     MailOpenIcon,
     MoreHorizontalIcon,
     MousePointerClickIcon,
+    PauseIcon,
     PhoneIcon,
+    PlayIcon,
     PlusIcon,
     RefreshCcwIcon,
     Settings2Icon,
@@ -61,14 +63,18 @@ import {
 import toast from "react-hot-toast";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
+import clippedTitle from "@/lib/helper/clippedTitle";
 import FilterBar from "./filters/FilterBar";
 import { hasNarrowingFilters, isCompleteCustomFilter, scopeSearch } from "./filters/helpers";
 import ContactEdit from "./ContactEdit";
 import type { ContactSlideTab } from "./contact-edit/tabs";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
+import { holdSummary } from "@/lib/api/models/app/contacts/Contact";
 import type { ContactCampaignProgress, LeadEngagement, LeadStatus, VerificationSource, VerificationStatus } from "@/lib/api/models/app/contacts/Contact";
 import type { CampaignLeadCounts } from "@/lib/api/models/app/contacts/SearchContactsResult";
 import ContactsEditBulk from "./ContactsEditBulk";
+import PauseLeadDialog from "./PauseLeadDialog";
+import { useResumeLead } from "@/lib/api/hooks/app/campaigns/useLeadHold";
 import { selectionOf } from "@/lib/api/models/app/contacts/ContactSelection";
 import type ContactSelection from "@/lib/api/models/app/contacts/ContactSelection";
 import * as rowSelection from "./selection";
@@ -434,6 +440,30 @@ export default function ContactsTable({
     }
 
     const embedded = !!current_campaign;
+
+    // Per-lead hold. Pausing opens a dialog (a date, or no end at all);
+    // resuming is one call, so the row acts straight away.
+    const [pauseTarget, setPauseTarget] = React.useState<{ id: string; name: string } | null>(null);
+    const resumeLead = useResumeLead();
+    const resumeOne = React.useCallback(
+        async (contactId: string) => {
+            if (!current_campaign) return;
+            try {
+                await toast.promise(
+                    resumeLead.mutateAsync({ campaignId: current_campaign.id, contactId }),
+                    {
+                        loading: "Resuming lead…",
+                        success: "Lead resumed",
+                        error: (err: AppError) => buildError(err),
+                    },
+                );
+            } catch {
+                /* toast.promise already surfaced it */
+            }
+        },
+        [current_campaign, resumeLead],
+    );
+
     // Leads-view scope chips write straight into the search request, so the
     // rows, the total and pagination all come from the server for that scope.
     // Anything that narrows the list beyond its scope (the campaign or the
@@ -497,6 +527,8 @@ export default function ContactsTable({
                           )
                     : undefined
             }
+            onPauseLead={embedded && campaignWrite.allowed ? (id, name) => setPauseTarget({ id, name }) : undefined}
+            onResumeLead={embedded && campaignWrite.allowed ? resumeOne : undefined}
             emptyTitle={
                 subFilter !== "all"
                     ? `No ${subFilter} contacts`
@@ -740,6 +772,14 @@ export default function ContactsTable({
                     onDone={clearSelection}
                     scope={current_campaign ? { kind: "campaign", name: current_campaign.name } : undefined}
                 />
+                {current_campaign && (
+                    <PauseLeadDialog
+                        open={!!pauseTarget}
+                        onClose={() => setPauseTarget(null)}
+                        campaign={current_campaign}
+                        lead={pauseTarget}
+                    />
+                )}
                 <NewContactDialog open={newOpen} onClose={() => setNewOpen(false)} campaign={current_campaign} />
                 <SyncSourcesPanel
                     open={syncOpen}
@@ -1023,6 +1063,8 @@ function ContactsTableBody({
     onRowClick,
     onDelete,
     onRemoveFromCampaign,
+    onPauseLead,
+    onResumeLead,
     emptyTitle,
     emptyBody,
     emptyCta,
@@ -1069,6 +1111,11 @@ function ContactsTableBody({
     // In a campaign, the row's destructive action detaches the lead instead
     // of deleting the contact from the whole workspace.
     onRemoveFromCampaign?: (id: string) => void;
+    // The per-lead hold, in the campaign Leads view only. Undefined for a
+    // member without campaign write access, which takes the control off the
+    // row rather than offering one that fails.
+    onPauseLead?: (id: string, name: string) => void;
+    onResumeLead?: (id: string) => void;
     emptyTitle: string;
     emptyBody: string;
     emptyCta: React.ReactNode;
@@ -1082,6 +1129,16 @@ function ContactsTableBody({
     loadedCount: number;
     totalCount: number;
 }) {
+    // Name is the only auto-width column, so it takes every pixel the sized
+    // columns leave — under table-fixed a second auto column would split that
+    // slack with it and size the name like a phone number. Which breakpoint each
+    // sized column appears at is then just "does Name still clear ~170px": Leads
+    // carries five campaign columns Contacts does not, so company waits longer
+    // for room there, and a phone number is no part of reading a campaign, so
+    // Leads drops that column and the contact drawer keeps the address.
+    const companyCol = embedded ? "w-40 hidden xl:table-cell" : "w-36 hidden lg:table-cell";
+    const phoneCol = "w-36 hidden xl:table-cell";
+
     if (isLoading) {
         return (
             <div className="divide-y divide-slate-200/60">
@@ -1200,10 +1257,16 @@ function ContactsTableBody({
     return (
         <>
             {banner}
-            <table className="w-full text-left">
+            {/* table-fixed, not auto: under auto layout one long company name
+                sets its column's min-content and widens the table past the
+                panel, which is what put a horizontal scrollbar under the list
+                (issue #461). So every column carries a width and every cell
+                clips; content that overflows a cell still extends the scroll
+                container. */}
+            <table className="w-full table-fixed text-left">
                 <thead className="sticky top-0 bg-white z-[1]">
                     <tr className="border-b border-slate-200">
-                        <th className="pl-5 pr-2 py-2 w-9">
+                        <th className="pl-5 pr-2 py-2 w-11">
                             <input
                                 type="checkbox"
                                 className="w-3.5 h-3.5 rounded accent-sky-600"
@@ -1211,13 +1274,19 @@ function ContactsTableBody({
                                 onChange={onToggleAll}
                             />
                         </th>
-                        <Th className="max-w-0 w-full md:max-w-none md:w-auto">Name</Th>
-                        <Th className="hidden md:table-cell">Company</Th>
-                        <Th className="hidden lg:table-cell">Phone</Th>
-                        <Th className="w-auto md:w-32">{embedded ? "Progress" : "Status"}</Th>
+                        <Th>Name</Th>
+                        <Th className={companyCol}>Company</Th>
+                        {!embedded && <Th className={phoneCol}>Phone</Th>}
+                        <Th className="w-12 sm:w-32">
+                            {/* Below sm the pill is its icon alone, so the column
+                                narrows to it and the label waits for the room —
+                                but never leaves the accessibility tree. */}
+                            <span className="sr-only">{embedded ? "Progress" : "Status"}</span>
+                            <span aria-hidden className="hidden sm:inline">{embedded ? "Progress" : "Status"}</span>
+                        </Th>
                         {embedded && (
                             <>
-                                <Th className="w-16 hidden md:table-cell">
+                                <Th className="w-24 hidden lg:table-cell">
                                     <span className="inline-flex items-center gap-1">
                                         Opened
                                         <span
@@ -1228,14 +1297,14 @@ function ContactsTableBody({
                                         </span>
                                     </span>
                                 </Th>
-                                <Th className="w-16 hidden md:table-cell">Clicked</Th>
-                                <Th className="w-16 hidden md:table-cell">Replied</Th>
+                                <Th className="w-24 hidden lg:table-cell">Clicked</Th>
+                                <Th className="w-24 hidden lg:table-cell">Replied</Th>
                             </>
                         )}
                         {embedded ? (
                             <>
-                                <Th className="w-28 hidden md:table-cell">Current step</Th>
-                                <Th className="w-36 hidden xl:table-cell">
+                                <Th className="w-32 hidden xl:table-cell">Current step</Th>
+                                <Th className="w-36 hidden 2xl:table-cell">
                                     <span className="inline-flex items-center gap-1">
                                         Sender
                                         <span
@@ -1248,10 +1317,12 @@ function ContactsTableBody({
                                 </Th>
                             </>
                         ) : (
-                            <Th className="w-24 text-right hidden md:table-cell">Campaigns</Th>
+                            <Th className="w-28 text-right hidden lg:table-cell">Campaigns</Th>
                         )}
-                        <Th className="w-24 text-right hidden md:table-cell">{embedded ? "Last activity" : "Added"}</Th>
-                        <th className="px-3 py-2 w-12"></th>
+                        <Th className={`text-right ${embedded ? "w-32 hidden 2xl:table-cell" : "w-24 hidden md:table-cell"}`}>
+                            {embedded ? "Last activity" : "Added"}
+                        </Th>
+                        <th className="px-3 py-2 w-[76px]"></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1271,6 +1342,15 @@ function ContactsTableBody({
                             (lead.status === "replied" ||
                                 lead.status === "bounced" ||
                                 lead.status === "unsubscribed");
+                        // A lead routing will never offer again cannot be
+                        // held: pausing it would report success and change
+                        // nothing on the row.
+                        const terminal =
+                            processed ||
+                            (!!lead &&
+                                (lead.status === "failed" ||
+                                    lead.status === "completed" ||
+                                    lead.status === "undeliverable"));
                         const isActiveLead = embedded && lead?.status === "active";
                         return (
                             <tr
@@ -1297,27 +1377,32 @@ function ContactsTableBody({
                                         onChange={() => onToggle(c.id, !isSel)}
                                     />
                                 </td>
-                                <td className="px-3 max-w-0 w-full md:max-w-none md:w-auto">
+                                <td className="px-3 overflow-hidden">
                                     <div className="flex items-center gap-2.5 min-w-0">
                                         <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center shrink-0">
                                             <span className="text-[9.5px] font-semibold text-slate-600">
                                                 {(c.first_name || c.email)?.slice(0, 2).toUpperCase()}
                                             </span>
                                         </div>
-                                        <div className="min-w-0">
+                                        {/* flex-1, not shrink-to-fit: the chip cap below is a
+                                            percentage, so this has to be the column's width and
+                                            not the name's. */}
+                                        <div className="flex-1 min-w-0">
                                             <div className={`text-[12.5px] font-medium truncate leading-tight flex items-center gap-1.5 ${processed ? "text-slate-400" : "text-slate-900"}`}>
-                                                <span className="truncate">{name}</span>
+                                                <span className="truncate" {...clippedTitle}>{name}</span>
+                                                {/* One tag, then a count. The Name column is a fixed width
+                                                    now, and two tags sharing it with a name left each of them
+                                                    about three legible characters. The tags take at most 45%
+                                                    of the line, and the +N tooltip names the rest in full. */}
                                                 {c.categories && c.categories.length > 0 && (
-                                                    <span className="inline-flex items-center gap-0.5 shrink-0">
-                                                        {c.categories.slice(0, 2).map((cat) => (
-                                                            <CategoryChip key={cat.id} category={cat} compact />
-                                                        ))}
-                                                        {c.categories.length > 2 && (
+                                                    <span className="inline-flex items-center gap-0.5 min-w-0 max-w-[45%]">
+                                                        <CategoryChip category={c.categories[0]} compact />
+                                                        {c.categories.length > 1 && (
                                                             <span
-                                                                className="inline-flex items-center h-4 px-1 rounded text-[10px] font-medium bg-slate-100 text-slate-500"
-                                                                title={c.categories.slice(2).map((x) => x.title).join(", ")}
+                                                                className="inline-flex items-center h-4 px-1 shrink-0 rounded text-[10px] font-medium bg-slate-100 text-slate-500"
+                                                                title={c.categories.slice(1).map((x) => x.title).join(", ")}
                                                             >
-                                                                +{c.categories.length - 2}
+                                                                +{c.categories.length - 1}
                                                             </span>
                                                         )}
                                                     </span>
@@ -1325,33 +1410,39 @@ function ContactsTableBody({
                                             </div>
                                             <div className="text-[10.5px] text-slate-400 truncate font-mono leading-tight flex items-center gap-1">
                                                 <MailIcon className="w-2.5 h-2.5 shrink-0" />
-                                                <span className="truncate">{c.email}</span>
+                                                <span className="truncate" {...clippedTitle}>{c.email}</span>
                                                 <VerificationBadge contact={c} />
                                             </div>
                                         </div>
                                     </div>
                                 </td>
-                                <td className="px-3 text-[12px] text-slate-600 truncate hidden md:table-cell">
+                                <td className={`px-3 overflow-hidden text-[12px] text-slate-600 ${companyCol}`}>
                                     {c.company ? (
-                                        <span className="inline-flex items-center gap-1.5">
-                                            <Building2Icon className="w-3 h-3 text-slate-400" />
-                                            {c.company}
-                                        </span>
+                                        <div className="flex items-center gap-1.5 min-w-0">
+                                            <Building2Icon className="w-3 h-3 shrink-0 text-slate-400" />
+                                            <span className="truncate" {...clippedTitle}>
+                                                {c.company}
+                                            </span>
+                                        </div>
                                     ) : (
                                         <span className="text-slate-300">—</span>
                                     )}
                                 </td>
-                                <td className="px-3 text-[12px] text-slate-600 truncate hidden lg:table-cell font-mono">
-                                    {c.phone ? (
-                                        <span className="inline-flex items-center gap-1.5">
-                                            <PhoneIcon className="w-3 h-3 text-slate-400" />
-                                            {c.phone}
-                                        </span>
-                                    ) : (
-                                        <span className="text-slate-300">—</span>
-                                    )}
-                                </td>
-                                <td className="px-3">
+                                {!embedded && (
+                                    <td className={`px-3 overflow-hidden text-[12px] text-slate-600 font-mono ${phoneCol}`}>
+                                        {c.phone ? (
+                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                <PhoneIcon className="w-3 h-3 shrink-0 text-slate-400" />
+                                                <span className="truncate" {...clippedTitle}>
+                                                    {c.phone}
+                                                </span>
+                                            </div>
+                                        ) : (
+                                            <span className="text-slate-300">—</span>
+                                        )}
+                                    </td>
+                                )}
+                                <td className="px-3 overflow-hidden">
                                     {embedded ? (
                                         <LeadStatusPill lead={lead} />
                                     ) : (
@@ -1383,11 +1474,11 @@ function ContactsTableBody({
                                 )}
                                 {embedded ? (
                                     <>
-                                    <td className="px-3 hidden md:table-cell">
+                                    <td className="px-3 overflow-hidden hidden xl:table-cell">
                                         {lead?.current_step ? (
                                             <span
                                                 title={lead.current_step}
-                                                className={`inline-flex items-center h-5 px-1.5 rounded text-[11px] font-medium max-w-[108px] ${
+                                                className={`inline-flex items-center h-5 px-1.5 rounded text-[11px] font-medium max-w-full ${
                                                     processed
                                                         ? "bg-slate-100 text-slate-400"
                                                         : "bg-sky-100 text-sky-700"
@@ -1399,7 +1490,7 @@ function ContactsTableBody({
                                             <span className="text-[11px] text-slate-300">Not started</span>
                                         )}
                                     </td>
-                                    <td className="px-3 hidden xl:table-cell">
+                                    <td className="px-3 overflow-hidden hidden 2xl:table-cell">
                                         {lead?.sender ? (
                                             <span
                                                 title={`Every step of this lead's sequence sends from ${lead.sender}`}
@@ -1413,11 +1504,11 @@ function ContactsTableBody({
                                     </td>
                                     </>
                                 ) : (
-                                    <td className="px-3 text-right font-mono text-[12px] text-slate-600 tabular-nums hidden md:table-cell">
+                                    <td className="px-3 text-right font-mono text-[12px] text-slate-600 tabular-nums hidden lg:table-cell">
                                         {c.campaigns?.length ?? 0}
                                     </td>
                                 )}
-                                <td className="px-3 text-right font-mono text-[11px] text-slate-500 tabular-nums hidden md:table-cell">
+                                <td className={`px-3 text-right font-mono text-[11px] text-slate-500 tabular-nums ${embedded ? "hidden 2xl:table-cell" : "hidden md:table-cell"}`}>
                                     {embedded
                                         ? lead?.last_activity_at
                                             ? new Date(lead.last_activity_at).toLocaleDateString("en-US", {
@@ -1435,6 +1526,27 @@ function ContactsTableBody({
                                 <td className="px-3" onClick={(e) => e.stopPropagation()}>
                                     {/* Touch-safe: always visible on mobile, hover-reveal on desktop. */}
                                     <div className="flex items-center gap-0.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                                        {lead?.hold && onResumeLead ? (
+                                            <button
+                                                type="button"
+                                                aria-label="Resume lead"
+                                                title={`${holdSummary(lead.hold)}. Resume now`}
+                                                onClick={() => onResumeLead(c.id)}
+                                                className="size-6 rounded text-violet-500 hover:text-violet-700 hover:bg-violet-50 flex items-center justify-center transition-colors"
+                                            >
+                                                <PlayIcon className="w-3 h-3" />
+                                            </button>
+                                        ) : onPauseLead && !terminal ? (
+                                            <button
+                                                type="button"
+                                                aria-label="Pause lead"
+                                                title="Pause this lead until a date, without unsubscribing them"
+                                                onClick={() => onPauseLead(c.id, name)}
+                                                className="size-6 rounded text-slate-400 hover:text-violet-600 hover:bg-violet-50 flex items-center justify-center transition-colors"
+                                            >
+                                                <PauseIcon className="w-3 h-3" />
+                                            </button>
+                                        ) : null}
                                         {onRemoveFromCampaign ? (
                                             <button
                                                 type="button"
@@ -1477,7 +1589,7 @@ function ContactsTableBody({
 function Th({ children, className }: { children: React.ReactNode; className?: string }) {
     return (
         <th
-            className={`px-3 py-2 text-[10px] font-medium text-slate-400 uppercase tracking-[0.14em] ${className ?? ""}`}
+            className={`px-3 py-2 text-[10px] font-medium text-slate-400 uppercase tracking-[0.14em] truncate ${className ?? ""}`}
         >
             {children}
         </th>
@@ -1485,18 +1597,23 @@ function Th({ children, className }: { children: React.ReactNode; className?: st
 }
 
 function StatusPill({ subscribed }: { subscribed: boolean }) {
-    if (subscribed) {
-        return (
-            <span className="inline-flex items-center gap-1 text-[10.5px] font-medium text-emerald-700 uppercase tracking-[0.08em]">
-                <span className="size-1.5 rounded-full bg-emerald-500" />
-                <span className="hidden sm:inline">subscribed</span>
-            </span>
-        );
-    }
+    const label = subscribed ? "subscribed" : "unsubscribed";
     return (
-        <span className="inline-flex items-center gap-1 text-[10.5px] font-medium text-slate-500 uppercase tracking-[0.08em]">
-            <span className="size-1.5 rounded-full bg-slate-300" />
-            <span className="hidden sm:inline">unsubscribed</span>
+        <span
+            className={`inline-flex items-center gap-1 max-w-full text-[10.5px] font-medium uppercase tracking-[0.08em] ${
+                subscribed ? "text-emerald-700" : "text-slate-500"
+            }`}
+        >
+            <span
+                className={`size-1.5 shrink-0 rounded-full ${subscribed ? "bg-emerald-500" : "bg-slate-300"}`}
+            />
+            {/* The dot carries the state on its own below sm, so the word stays
+                for screen readers at every width and the visible copy is the
+                one that comes and goes. */}
+            <span className="sr-only">{label}</span>
+            <span aria-hidden className="hidden sm:inline truncate" {...clippedTitle}>
+                {label}
+            </span>
         </span>
     );
 }
@@ -1519,7 +1636,7 @@ function EngagementCell({
     auto?: boolean;
 }) {
     return (
-        <td className="px-3 hidden md:table-cell">
+        <td className="px-3 overflow-hidden hidden lg:table-cell">
             {n > 0 ? (
                 <span
                     className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 tabular-nums"
@@ -1558,6 +1675,7 @@ const LEAD_META: Record<
     bounced: { label: "Bounced", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
     failed: { label: "Failed", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
     unsubscribed: { label: "Unsubscribed", dot: "bg-slate-300", text: "text-slate-400", Icon: BanIcon },
+    paused: { label: "Paused", dot: "bg-violet-400", text: "text-violet-600", Icon: PauseIcon },
     undeliverable: { label: "Undeliverable", dot: "bg-amber-500", text: "text-amber-600", Icon: AlertTriangleIcon },
 };
 
@@ -1572,10 +1690,12 @@ function LeadStatusPill({ lead }: { lead?: ContactCampaignProgress | null }) {
             ? `Could not send: ${lead.failure_reason}`
             : status === "undeliverable"
                 ? "Address verification refused this recipient, so the campaign skips it"
-                : undefined;
+                : lead?.hold
+                    ? holdSummary(lead.hold)
+                    : undefined;
     return (
         <span
-            className={`inline-flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-[0.08em] ${meta.text}`}
+            className={`inline-flex items-center gap-1.5 max-w-full text-[10.5px] font-medium uppercase tracking-[0.08em] ${meta.text}`}
             title={title}
         >
             {status === "active" ? (
@@ -1583,7 +1703,13 @@ function LeadStatusPill({ lead }: { lead?: ContactCampaignProgress | null }) {
             ) : (
                 <Icon className="w-3 h-3 shrink-0" />
             )}
-            <span className="hidden sm:inline">{meta.label}</span>
+            <span className="sr-only">{meta.label}</span>
+            {/* The reason, when there is one, is worth more than the word it
+                covers — and React owning the attribute is what clears any word
+                the tooltip helper left here before the lead changed state. */}
+            <span aria-hidden className="hidden sm:inline truncate" title={title} {...(title ? {} : clippedTitle)}>
+                {meta.label}
+            </span>
         </span>
     );
 }
@@ -1625,6 +1751,7 @@ function LeadProgressStrip({
                 bounced: serverCounts.bounced,
                 failed: serverCounts.failed,
                 unsubscribed: serverCounts.unsubscribed,
+                paused: serverCounts.paused ?? 0,
                 undeliverable: serverCounts.undeliverable ?? 0,
             } satisfies Record<LeadStatus, number>;
         }
@@ -1636,6 +1763,7 @@ function LeadProgressStrip({
             bounced: 0,
             failed: 0,
             unsubscribed: 0,
+            paused: 0,
             undeliverable: 0,
         };
         for (const ct of contacts) c[ct.campaign_lead?.status ?? "pending"]++;
@@ -1676,6 +1804,7 @@ function LeadProgressStrip({
         { key: "pending", color: "bg-slate-300" },
         { key: "bounced", color: "bg-rose-400" },
         { key: "failed", color: "bg-rose-500" },
+        { key: "paused", color: "bg-violet-400" },
         { key: "unsubscribed", color: "bg-slate-200" },
         { key: "undeliverable", color: "bg-amber-500" },
     ];
@@ -1703,6 +1832,9 @@ function LeadProgressStrip({
                 <StripChip dot="bg-rose-400" label="Bounced" n={counts.bounced} {...status("bounced")} />
                 {(counts.failed > 0 || leadStatus === "failed") && (
                     <StripChip dot="bg-rose-500" label="Failed" n={counts.failed} {...status("failed")} />
+                )}
+                {(counts.paused > 0 || leadStatus === "paused") && (
+                    <StripChip dot="bg-violet-400" label="Paused" n={counts.paused} {...status("paused")} />
                 )}
                 {(counts.undeliverable > 0 || leadStatus === "undeliverable") && (
                     <StripChip dot="bg-amber-500" label="Undeliverable" n={counts.undeliverable} {...status("undeliverable")} />

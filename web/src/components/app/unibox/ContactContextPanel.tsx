@@ -44,6 +44,8 @@ import useContact from "@/lib/api/hooks/app/contacts/useContact";
 import useContactDeals from "@/lib/api/hooks/app/contacts/useContactDeals";
 import useContactNotes from "@/lib/api/hooks/app/contacts/useContactNotes";
 import useCreateContactNote from "@/lib/api/hooks/app/contacts/useCreateContactNote";
+import useAddContacts from "@/lib/api/hooks/app/contacts/useAddContacts";
+import { useQueryClient } from "@tanstack/react-query";
 import useCRMTasks from "@/lib/api/hooks/app/crm/tasks/useCRMTasks";
 import useCreateCRMTask from "@/lib/api/hooks/app/crm/tasks/useCreateCRMTask";
 import useCreateDeal from "@/lib/api/hooks/app/crm/deals/useCreateDeal";
@@ -77,10 +79,14 @@ const PRIORITY_OPTS: { id: CRMTask["priority"]; label: string }[] = [
 
 export default function ContactContextPanel({
     email,
+    name: fromName,
     mailboxId,
     onClose,
 }: {
     email?: string;
+    // Display name from the message's From header, used when adding the
+    // sender as a contact.
+    name?: string;
     mailboxId?: string;
     onClose?: () => void;
 }) {
@@ -115,17 +121,14 @@ export default function ContactContextPanel({
                 onClick={onClose}
                 aria-hidden
             />
-            <aside className="fixed inset-y-0 right-0 z-[60] flex w-[min(20rem,90vw)] shrink-0 flex-col border-l border-slate-200 bg-white min-h-0 shadow-xl lg:static lg:z-auto lg:w-80 lg:bg-slate-50/40 lg:shadow-none">
-            <div className="h-12 px-3 border-b border-slate-200 flex items-center gap-2 shrink-0 bg-white">
-                <UserIcon className="w-3.5 h-3.5 text-slate-400" />
-                <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">
-                    Contact
-                </span>
+            <aside className="fixed inset-y-0 right-0 z-[60] flex w-[min(20rem,90vw)] shrink-0 flex-col border-l border-slate-200 bg-white min-h-0 shadow-xl lg:static lg:z-auto lg:w-80 lg:shadow-none">
+            <div className="h-12 px-4 border-b border-slate-200 flex items-center gap-2 shrink-0 bg-white">
+                <span className="text-[12.5px] font-semibold text-slate-900">Contact</span>
                 {onClose && (
                     <button
                         type="button"
                         onClick={onClose}
-                        aria-label="Hide contact panel"
+                        aria-label="Close contact panel"
                         className="ml-auto size-7 rounded-md text-slate-400 hover:text-slate-900 hover:bg-slate-100 inline-flex items-center justify-center transition-colors"
                     >
                         <XIcon className="w-3.5 h-3.5" />
@@ -140,11 +143,11 @@ export default function ContactContextPanel({
                         Resolving contact…
                     </div>
                 ) : !contact ? (
-                    <NotAContact email={email} />
+                    <NotAContact email={email} name={fromName} />
                 ) : (
                     <div className="divide-y divide-slate-200/70">
                         {/* Identity */}
-                        <div className="px-3 py-3">
+                        <div className="px-4 py-3">
                             <div className="flex items-start gap-2.5">
                                 <div className="size-8 rounded-full bg-sky-100 text-sky-700 flex items-center justify-center text-[12px] font-semibold shrink-0">
                                     {initials(name)}
@@ -713,9 +716,9 @@ function Section({
     children?: React.ReactNode;
 }) {
     return (
-        <div className="px-3 py-3">
+        <div className="px-4 py-3">
             <div className="flex items-center gap-2 mb-2">
-                <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">{label}</span>
+                <span className="text-[10.5px] uppercase tracking-[0.12em] text-slate-400 font-medium">{label}</span>
                 {action && <span className="ml-auto">{action}</span>}
             </div>
             {hint ? <p className="text-[11px] text-slate-400">{hint}</p> : children}
@@ -788,21 +791,53 @@ function RowSkeleton() {
     );
 }
 
-function NotAContact({ email }: { email?: string }) {
+// A reply from someone outside the CRM. One click creates the contact from
+// the From header; the by-email lookup is invalidated so this panel flips to
+// the full contact view where the rest can be edited.
+function NotAContact({ email, name }: { email?: string; name?: string }) {
+    const add = useAddContacts();
+    const queryClient = useQueryClient();
+
+    async function onAdd() {
+        if (!email) return;
+        const parts = (name ?? "").trim().split(/\s+/).filter(Boolean);
+        const first_name = parts[0] ?? "";
+        const last_name = parts.slice(1).join(" ");
+        try {
+            await toast.promise(
+                add.mutateAsync([{ first_name, last_name, email, company: "", phone: "", campaigns: [], custom_fields: {}, source: "manual" }]),
+                { loading: "Adding contact…", success: "Contact added", error: "Couldn't add contact" },
+            );
+            await queryClient.invalidateQueries({ queryKey: ["contacts", "by-email", email] });
+        } catch {
+            /* surfaced */
+        }
+    }
+
     return (
-        <div className="px-3 py-8 text-center">
-            <div className="mx-auto size-9 rounded-md bg-white border border-slate-200 flex items-center justify-center mb-2.5">
-                <UserIcon className="w-4 h-4 text-slate-400" />
-            </div>
+        <div className="px-4 py-8 text-center">
+            <UserIcon className="w-5 h-5 text-slate-300 mx-auto mb-2.5" strokeWidth={1.5} />
             <p className="text-[12px] font-medium text-slate-700 mb-0.5">Not a known contact</p>
             {email && <p className="text-[11px] text-slate-400 break-all mb-3">{email}</p>}
-            <Link
-                to="/app/contacts"
-                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-slate-200 hover:border-slate-300 text-[11.5px] text-slate-700 hover:text-slate-900 transition-colors"
-            >
-                <PlusIcon className="w-3 h-3" />
-                Manage contacts
-            </Link>
+            <div className="flex items-center justify-center gap-1.5">
+                {email && (
+                    <button
+                        type="button"
+                        onClick={onAdd}
+                        disabled={add.isPending}
+                        className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[11.5px] font-medium transition-colors disabled:opacity-60"
+                    >
+                        {add.isPending ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <PlusIcon className="w-3 h-3" />}
+                        Add as contact
+                    </button>
+                )}
+                <Link
+                    to="/app/contacts"
+                    className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-slate-200 hover:border-slate-300 text-[11.5px] text-slate-700 hover:text-slate-900 transition-colors"
+                >
+                    Manage contacts
+                </Link>
+            </div>
         </div>
     );
 }

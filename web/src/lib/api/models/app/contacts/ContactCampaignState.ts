@@ -1,4 +1,4 @@
-import type { LeadStatus } from "./Contact";
+import type { LeadHold, LeadStatus } from "./Contact";
 
 // One campaign a contact belongs to, as the Activity tab's campaign panel
 // shows it: the flow with this contact's progress, the derived lead status,
@@ -20,9 +20,9 @@ export interface ContactCampaignStep {
     in_flight?: boolean;
 }
 
-// due: the step is due and the scheduler produced a slot for it.
+// due: the step is due; scheduled_at is when the campaign next works its queue.
 // waiting: a hard constraint holds it back; not_before is the earliest.
-// paused: the campaign is not active.
+// paused: the lead's own flow is held, or the campaign is not active.
 // blocked: the campaign cannot send at all right now.
 export type ContactNextActionState = "due" | "waiting" | "paused" | "blocked";
 
@@ -35,7 +35,9 @@ export interface ContactNextAction {
     subject?: string;
 
     state: ContactNextActionState;
-    // Only when due now; contacts ahead in the queue can still push it later.
+    // Only when due now, and then it is the campaign chain's own next wakeup,
+    // not a slot reserved for this contact: leads queued ahead can still push
+    // this step to a later pass. Absent while the chain is being re-seeded.
     scheduled_at?: string | null;
     not_before?: string | null;
     constraint?: string;
@@ -61,6 +63,10 @@ export default interface ContactCampaignState {
     current_step?: ContactCampaignStep | null;
     last_action?: string;
     last_action_at?: string | null;
+
+    // The live per-lead hold: an out-of-office auto-reply parked the contact,
+    // or a member paused them. Absent when the lead is not held.
+    hold?: LeadHold | null;
 
     next?: ContactNextAction | null;
     ended_reason?: string;

@@ -33,13 +33,6 @@ func (h *Handler) gateUnibox(c *gin.Context) bool {
 }
 
 func (h *Handler) GetUniboxIncoming(c *gin.Context) {
-	userID := middleware.GetUserID(c)
-	uid, err := uuid.Parse(userID)
-	if err != nil {
-		errx.Handle(c, errx.ErrUser)
-		return
-	}
-
 	orgID := middleware.GetOrganizationID(c)
 	if orgID == nil {
 		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
@@ -187,7 +180,7 @@ func (h *Handler) GetUniboxIncoming(c *gin.Context) {
 		}
 	}
 
-	resp, xerr := h.UniboxService.Search(c.Request.Context(), *orgID, uid, params)
+	resp, xerr := h.UniboxService.Search(c.Request.Context(), *orgID, params)
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -302,10 +295,9 @@ func (h *Handler) GetUniboxThreadLabels(c *gin.Context) {
 	if !h.gateUnibox(c) {
 		return
 	}
-	userID := middleware.GetUserID(c)
-	uid, err := uuid.Parse(userID)
-	if err != nil {
-		errx.Handle(c, errx.ErrUser)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
 		return
 	}
 
@@ -318,7 +310,7 @@ func (h *Handler) GetUniboxThreadLabels(c *gin.Context) {
 		return
 	}
 
-	labels, xerr := h.UniboxService.ListThreadLabels(c.Request.Context(), uid, threadID)
+	labels, xerr := h.UniboxService.ListThreadLabels(c.Request.Context(), *orgID, threadID)
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -328,19 +320,20 @@ func (h *Handler) GetUniboxThreadLabels(c *gin.Context) {
 
 // SetUniboxThreadLabels replaces the full conversation-label set on a
 // thread. Idempotent (PUT semantics): the body's category_ids is the
-// desired set, so retries are naturally safe. Only the user's own
+// desired set, so retries are naturally safe. Only the workspace's own
 // categories are attached.
 // PUT /unibox/thread/labels
 func (h *Handler) SetUniboxThreadLabels(c *gin.Context) {
 	if !h.gateUnibox(c) {
 		return
 	}
-	userID := middleware.GetUserID(c)
-	uid, err := uuid.Parse(userID)
-	if err != nil {
-		errx.Handle(c, errx.ErrUser)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
 		return
 	}
+	// Attribution only; a label an API key applies has no human behind it.
+	uid, _ := middleware.GetUserUUID(c)
 
 	var req models.UniboxThreadLabels
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -348,7 +341,7 @@ func (h *Handler) SetUniboxThreadLabels(c *gin.Context) {
 		return
 	}
 
-	labels, xerr := h.UniboxService.SetThreadLabels(c.Request.Context(), uid, req.ThreadID, req.CategoryIDs)
+	labels, xerr := h.UniboxService.SetThreadLabels(c.Request.Context(), *orgID, uid, req.ThreadID, req.CategoryIDs)
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -383,6 +376,44 @@ func (h *Handler) UniboxMarkSeen(c *gin.Context) {
 		errx.Handle(c, xerr)
 		return
 	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// UniboxMoveFolder re-files messages (Archive = archive, Delete = trash,
+// Move to inbox = inbox). Org-scoped like /seen: the inbox is shared, so any
+// member with unibox access may file it. Naturally idempotent, so no
+// Idempotency-Key: the body names the destination, not a delta.
+// PATCH /unibox/folder
+func (h *Handler) UniboxMoveFolder(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	var data models.MoveFolder
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.Handle(c, errx.ErrInvalid)
+		return
+	}
+
+	resp, xerr := h.UniboxService.MoveFolderBulk(c.Request.Context(), *orgID, &data)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	// Audited so the spine broadcasts it: a teammate looking at the same list
+	// has to lose the thread too, and there is no sync event behind this one.
+	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityUnibox, nil, nil, map[string]string{
+		"action":   "move_folder",
+		"folder":   data.Folder,
+		"messages": strconv.Itoa(len(data.EmailIDs)),
+	})
 
 	c.JSON(http.StatusOK, resp)
 }

@@ -177,7 +177,7 @@ Create a campaign. Only `name` is required, every other field is optional and ap
 | `schedule_windows` | array | no | Per-day sending windows, 7 arrays indexed by weekday (Sunday = 0) of `{start, end}` minute-of-day intervals. When non-empty it supersedes `days`, `start_time` and `end_time`. |
 | `email_tag_ids` | string[] | no | Mailbox tag ids that resolve the sender pool (tags strategy). |
 | `folder_ids` | string[] | no | Folder ids to file the campaign under. |
-| `sender_strategy` | string | no | `tags` (default) or `explicit`. |
+| `sender_strategy` | string | no | `tags` (default) or `explicit`. `tags` resolves the pool from `email_tag_ids`, and falls back to every active mailbox in the workspace when no tag and no explicit sender is set. `explicit` sends from the mailboxes in `senders`, plus any `email_tag_ids` set alongside them. It never falls back to every active mailbox, so a pool that empties out parks the campaign at `paused_no_accounts` instead of widening to the whole workspace. |
 | `rotation_mode` | string | no | How volume spreads across the chosen mailboxes. |
 | `senders` | object[] | no | Explicit-strategy mailbox pool (see sender input below). |
 | `ramp_enabled` | boolean | no | Enable per-campaign daily ramp-up. |
@@ -190,7 +190,7 @@ Create a campaign. Only `name` is required, every other field is optional and ap
 | `entry_delay_minutes` | integer | no | Hold a contact's first email this long after they entered the campaign. `0` (the default) sends it as soon as the schedule and mailbox limits allow; the maximum is `129600` (90 days). Follow-up spacing is unaffected: that is each step's `wait_after`. |
 | `continuous` | boolean | no | Keep running for new leads: out of leads, the campaign stays `active` and waits instead of finishing. Linking a segment, a form or an automation that enrols leads turns it on, and so does starting a campaign whose every lead has finished. Default `false`. |
 | `tracking_domain` | string | no | Campaign-scoped tracking domain (honored only once verified). |
-| `steps` | object[] | no | Initial sequence steps in order (see create sequence input below). They are connected in order: each step routes unconditionally to the next, waiting that step's `wait_after` days. The first step's `wait_after` defaults to `0`, follow-ups to `3`. |
+| `steps` | object[] | no | Initial sequence steps in order (see create sequence input below). They are connected in order: each step routes unconditionally to the next, waiting that step's `wait_after` days. The first step's `wait_after` defaults to `0`, follow-ups to `3`. A step given no `subject`, or the same one as the conversation so far, defaults to `thread_reply: true` and is sent as a reply carrying that conversation's subject; a step with a subject of its own defaults to `false` and opens a new conversation. Set `thread_reply` explicitly to override either. |
 | `variants` | object[] | no | A/B variants for the first step (same shape as create A/B variant). |
 | `advanced_overrides` | object | no | Advanced outreach overrides, see [advanced settings](#get-advanced-settings). |
 
@@ -354,7 +354,9 @@ A `CampaignAdvancedSettings` object: the campaign id, the `overrides` block, and
       "question_keywords": ["?", "how", "price"],
       "auto_create_crm_task": true,
       "auto_pause_on_negative": false,
-      "auto_suppress_on_unsubscribe_keyword": true
+      "auto_suppress_on_unsubscribe_keyword": true,
+      "hold_on_out_of_office": true,
+      "out_of_office_hold_days": 7
     },
     "send_time_optimization": {
       "enabled": false,
@@ -401,7 +403,7 @@ Replace the campaign's advanced overrides. **Scope** `WRITE_CAMPAIGNS` · **Org 
     "bounce_pipeline": { "enabled": true, "auto_suppress_on_bounce": true, "auto_suppress_on_complaint": true, "auto_suppress_on_unsubscribe": true, "auto_pause_campaign_on_spike": true, "pause_bounce_rate_threshold": 8, "pause_complaint_rate_threshold": 1.5 },
     "task_reliability": { "enabled": true, "dlq_enabled": true, "max_attempts": 5, "execution_window_seconds": 300 },
     "ab_testing": { "enabled": true, "default_winning_rule": "reply_rate", "auto_promote_winner": false, "min_sample_size": 30 },
-    "reply_intent": { "enabled": true, "positive_keywords": [], "negative_keywords": [], "out_of_office_keywords": [], "question_keywords": [], "auto_create_crm_task": true, "auto_pause_on_negative": false, "auto_suppress_on_unsubscribe_keyword": true },
+    "reply_intent": { "enabled": true, "positive_keywords": [], "negative_keywords": [], "out_of_office_keywords": [], "question_keywords": [], "auto_create_crm_task": true, "auto_pause_on_negative": false, "auto_suppress_on_unsubscribe_keyword": true, "hold_on_out_of_office": true, "out_of_office_hold_days": 7 },
     "send_time_optimization": { "enabled": true, "use_contact_timezone": true, "default_contact_timezone": "UTC", "preferred_hours": [9, 14], "weekend_weight_multiplier": 0.5 },
     "preflight": { "enabled": true, "check_tracking_domain": true, "check_unsubscribe_header": true, "check_ab_variant_configured": false, "check_daily_limit": true, "check_schedule_window": true, "check_content_score": true, "min_content_score": 60 },
     "dashboard": { "enabled": true, "show_suppression_log": true, "show_intent_summary": true, "show_dlq_stats": true }
@@ -732,6 +734,8 @@ Start (activate) the campaign so it begins sending real mail. Works from `draft`
 
 A start refused because every remaining lead was refused by address verification answers `leads_undeliverable` and parks the campaign at `paused_undeliverable`; re-verify the leads or mark them deliverable with [`POST /contacts/verification`](/api/reference/contacts/#verify-or-override-contacts), which resumes it.
 
+A campaign whose email step has nothing in either body is refused with `empty_step_body` rather than started, because it would send a blank message to every lead it reached.
+
 ### Response
 
 ```json
@@ -755,6 +759,102 @@ Stop (pause) an active campaign. **Scope** `SEND_CAMPAIGNS` · **Org permission*
 ```json
 { "status": "stopped" }
 ```
+
+## Get a lead's hold
+
+`GET /campaigns/:id/leads/:contact_id/hold`
+
+Read whether one contact's flow inside this campaign is currently held. A hold parks the lead's next step without unsubscribing the contact and without removing them from the campaign; the two things that write one are an out-of-office auto-reply and a member pausing the lead by hand. **Scope** `READ_CAMPAIGNS` · **Org permission** `view_campaigns`.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Campaign id. |
+| `contact_id` | path | uuid | Contact id. Must already be a lead of the campaign. |
+
+### Response
+
+```json
+{
+  "campaign_id": "8f1d6b2e-2b7a-4c9e-9a1f-0e6d4c3b2a10",
+  "contact_id": "3a5e9c71-4f2b-4d88-9a0c-1b7e5d2f6c34",
+  "hold": {
+    "since": "2026-09-07T09:14:00Z",
+    "until": "2026-09-09T00:00:00Z",
+    "reason": "back 8 Sep 2026",
+    "source": "out_of_office"
+  }
+}
+```
+
+`hold` is absent when the lead is not held, including for a dated hold that has since expired. `until` is absent when the hold has no end, in which case only a resume lifts it. `source` is `out_of_office` or `manual`.
+
+### Errors
+
+| Status | Code | When |
+| --- | --- | --- |
+| `404` | `not_found` | The campaign is not the caller's organization's, or the contact is not a lead of it. |
+
+## Pause a lead
+
+`POST /campaigns/:id/leads/:contact_id/pause`
+
+Hold one contact's flow inside one campaign. The contact stays subscribed and stays a lead; the sequence picks up where it stopped when the hold lifts. This is the per-contact lever between leaving a lead alone and the two permanent ones, unsubscribing the contact and adding the address to the suppression list. **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`.
+
+The request states an absolute hold rather than applying a delta, and replacing a hold that is still live keeps its original start, so a retry lands on exactly the same row and no `Idempotency-Key` is needed.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Campaign id. |
+| `contact_id` | path | uuid | Contact id. Must already be a lead of the campaign. |
+| `until` | body | string | RFC 3339 timestamp the hold lifts at. Must be in the future and within a year. Omit or send `null` for a hold with no end, which only a resume lifts. |
+| `reason` | body | string | Optional note shown next to the hold in the dashboard. Trimmed and capped at 200 characters. |
+
+A manual pause always wins: it replaces a hold an out-of-office auto-reply wrote, and a later auto-reply never shortens it or takes it over.
+
+### Request body
+
+```json
+{ "until": "2026-09-21T17:00:00Z", "reason": "On holiday, asked to follow up later" }
+```
+
+### Response
+
+Same shape as [get a lead's hold](#get-a-leads-hold).
+
+### Errors
+
+| Status | Code | When |
+| --- | --- | --- |
+| `400` | `bad_request` | `until` is in the past, or more than a year away. |
+| `404` | `not_found` | The campaign is not the caller's organization's, or the contact is not a lead of it. |
+
+## Resume a lead
+
+`POST /campaigns/:id/leads/:contact_id/resume`
+
+Lift the hold now. The held time is dropped rather than carried, so the step returns to the schedule it would have had without the hold: the campaign's next pass when that moment has already passed, otherwise when the step's own wait elapses. The campaign's own wakeup is pulled forward with it, and a campaign that had finished while the lead was held is restarted through the usual launch checks. **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_campaigns`.
+
+Resuming a lead that is not held succeeds and changes nothing, so a retry is safe.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Campaign id. |
+| `contact_id` | path | uuid | Contact id. |
+
+### Response
+
+```json
+{
+  "campaign_id": "8f1d6b2e-2b7a-4c9e-9a1f-0e6d4c3b2a10",
+  "contact_id": "3a5e9c71-4f2b-4d88-9a0c-1b7e5d2f6c34"
+}
+```
+
+### Errors
+
+| Status | Code | When |
+| --- | --- | --- |
+| `404` | `not_found` | The campaign is not the caller's organization's, or the contact is not a lead of it. |
 
 ## Get campaign logs
 
@@ -832,7 +932,7 @@ Atomically replace the campaign's explicit sender pool with the supplied list. *
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `senders` | object[] | yes | The full new sender pool. Each item: `email_account_id` (uuid, required), `weight` (integer, optional), `enabled` (boolean, optional). |
+| `senders` | object[] | yes | The full new sender pool. Each item: `email_account_id` (uuid, required), `weight` (integer, optional), `enabled` (boolean, optional). An empty array clears the pool. What that means depends on the campaign's `sender_strategy`: a `tags` campaign falls back to its tags or to every active mailbox, while an `explicit` one falls back to its tags only, and with none it is left with no mailbox to send from and parks itself at `paused_no_accounts`. |
 
 ```json
 {
@@ -977,6 +1077,7 @@ A bare array of `Sequence` objects (no envelope).
     "body_code": false,
     "wait_after": 0,
     "position": 0,
+    "thread_reply": true,
     "kind": "email",
     "updated_at": "2026-06-02T10:00:00Z",
     "created_at": "2026-06-02T10:00:00Z"
@@ -1020,10 +1121,11 @@ All fields optional.
 | `name` | string | no | Step label. |
 | `subject` | string | no | Subject template. |
 | `body_plain` | string | no | Plain-text body template. Leave it empty and the send path renders one from `body_html`, keeping list bullets, table rows and link destinations, and leaving out the stylesheet. |
-| `body_html` | string | no | HTML body template. Sent as written, including a whole document with its own `<head>`. Any `<style>` block is inlined onto the elements it matches at send time; see [the sequences guide](/guides/sequences/). |
+| `body_html` | string | no | HTML body template. Sent as written, including a whole document with its own `<head>`. Any `<style>` block is inlined onto the elements it matches at send time; see [the sequences guide](/guides/sequences/). Send `body_plain` on its own and the HTML part is rendered from it, because a step with a plain body and an empty HTML one would otherwise arrive blank: every modern client prefers the HTML alternative. A step that already has an HTML body is never overwritten. |
 | `body_sync` | boolean | no | Keep plain and HTML bodies in sync. |
 | `body_code` | boolean | no | The body is authored as raw HTML. The dashboard editor opens it as markup instead of parsing it into the visual editor, which keeps only what its schema can represent. It does not change what is sent. |
 | `wait_after` | integer | no | Days to wait before this step, counted from the contact's previous step (`0` to `60`). Spacing belongs to the target step, so there is no standalone wait node for email steps. |
+| `thread_reply` | boolean | no | Send this step as a reply on the conversation the contact is already in, rather than as a new email. Default `true`. A threading step carries the conversation's subject, so its own `subject` is only used once it is turned off. It has no effect on a contact's first email, which has nothing to reply to. |
 | `conditions` | object | no | The connections out of this step (`{branches: [...]}`), evaluated in order; a branch with no `conditions` is a plain "go there next" link. Routing follows connections only: a step with `{}` or no branches has no outgoing path and ends the flow for the contact. |
 | `kind` | string | no | `email` (default), `action`, or `wait`. |
 | `action` | object | no | Typed config for non-email nodes. `type` is the switch (`wait`, `add_tag`, `remove_tag`, `add_to_segment`, `remove_from_segment` (each with a `segment_id`), `unsubscribe`, `notify`, `create_task`, `create_deal`, `move_deal_stage`, `run_automation`, `end`), the remaining fields are type-scoped. |

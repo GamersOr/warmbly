@@ -66,6 +66,9 @@ All paths below are relative to the versioned base URL `https://api.warmbly.com/
 | POST | `/campaigns/:id/test-email` | `SEND_CAMPAIGNS` |
 | POST | `/campaigns/:id/start` | `SEND_CAMPAIGNS` |
 | POST | `/campaigns/:id/stop` | `SEND_CAMPAIGNS` |
+| GET | `/campaigns/:id/leads/:contactId/hold` | `READ_CAMPAIGNS` |
+| POST | `/campaigns/:id/leads/:contactId/pause` | `WRITE_CAMPAIGNS` |
+| POST | `/campaigns/:id/leads/:contactId/resume` | `WRITE_CAMPAIGNS` |
 | GET | `/campaigns/:id/logs` | `READ_CAMPAIGNS` |
 | GET | `/campaigns/:id/forms` | `READ_CAMPAIGNS` |
 | GET/POST/PATCH/DELETE | `/campaigns/:id/steps[/:sid]` | `READ_CAMPAIGNS` for GET, `WRITE_CAMPAIGNS` otherwise |
@@ -76,6 +79,8 @@ All paths below are relative to the versioned base URL `https://api.warmbly.com/
 | GET | `/email-images` | `READ_CAMPAIGNS` |
 | POST | `/email-images` | `WRITE_CAMPAIGNS` |
 | DELETE | `/email-images/:id` | `WRITE_CAMPAIGNS` |
+
+The three `/campaigns/:id/leads/:contactId/…` calls hold one contact's flow inside one campaign: an out-of-office auto-reply writes one automatically, and a member can write one by hand. The contact stays subscribed and stays a lead, so this is not an unsubscribe and not a suppression. Both writes state an absolute hold rather than applying a delta, and replacing a live hold keeps its original start, so a retry lands on the same row and neither needs an `Idempotency-Key`. See [pause a lead](/api/reference/campaigns/#pause-a-lead).
 
 `GET /campaigns/:id/forms` reports the forms this campaign links to and what its recipients did with them: personalized links handed out, who opened one, who started filling it in and who submitted. See the [forms guide](/guides/forms/).
 
@@ -185,6 +190,7 @@ A source's `column_mapping` is validated when the source is written, not on its 
 | GET | `/unibox/thread` | `READ_UNIBOX` |
 | GET | `/unibox/:id` | `READ_UNIBOX` |
 | PATCH | `/unibox/seen` | `WRITE_UNIBOX` |
+| PATCH | `/unibox/folder` | `WRITE_UNIBOX` |
 | POST | `/unibox/reply` | `WRITE_UNIBOX` |
 | POST | `/unibox/reply/draft` | `READ_UNIBOX` |
 | GET | `/unibox/compose/candidates` | `READ_UNIBOX` |
@@ -196,6 +202,8 @@ A source's `column_mapping` is validated when the source is written, not on its 
 | GET | `/unibox/agent-drafts` | `READ_UNIBOX` |
 | POST | `/unibox/agent-drafts/:id/approve` | `WRITE_UNIBOX` |
 | POST | `/unibox/agent-drafts/:id/discard` | `WRITE_UNIBOX` |
+
+`PATCH /unibox/folder` re-files up to 500 messages into `inbox`, `archive` or `trash` at once. The move is Warmbly's own: the copy at the mail provider stays where it is, and the next sync will not undo it, because the provider's placement is tracked separately and followed only when the provider itself moves the message. `sent`, `drafts` and `spam` are placements a provider reaches rather than somewhere a person files mail, so they are rejected with a `400`. See [filing a conversation](/guides/unibox/#filing-a-conversation).
 
 `POST /unibox/reply/draft` returns an AI-drafted reply (it never sends) grounded in the thread, the contact, and your [voice profile](/guides/unibox/#ai-reply-drafts). It charges AI credits; see [AI credits](/guides/ai-credits/).
 
@@ -333,6 +341,27 @@ Mutating API requests may include an `Idempotency-Key` header. Warmbly stores th
 
 `GET /me` returns who the active credential belongs to: `user_id`, `email`, `name`, `organization_id`, `organization_name`, `auth_type` (`api_key`, `oauth`, or `jwt`), and the granted `scopes`. It requires no specific permission, so it is the right call for validating a connection and rendering a human-readable label. Unlike `/auth/me` (JWT only), it is reachable by API keys and OAuth tokens.
 
+### Labels
+
+Folders (on campaigns), tags (on mailboxes) and categories (on contacts and inbox conversations) are three registries with the same shape. Each belongs to the **workspace**, not to whoever created it. Every member sees the same set, whoever created it, and reads it from `GET /auth/me`, which returns `folders`, `tags` and `categories` for the session's selected workspace; there is no separate list endpoint and no read scope of its own. Changing a registry is gated like the records it labels, so it takes the API permission in the table below, or the matching JWT permission `MANAGE_CAMPAIGNS`, `MANAGE_EMAILS` or `MANAGE_CONTACTS`. Membership alone is read-only.
+
+`position` is the order within its own registry, `0`-based and contiguous. A move returns the full new ordering. A registry holds at most `100` entries.
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| POST | `/folders` | `WRITE_CAMPAIGNS` |
+| PATCH | `/folders/:id` | `WRITE_CAMPAIGNS` |
+| PATCH | `/folders/:id/move` | `WRITE_CAMPAIGNS` |
+| DELETE | `/folders/:id` | `WRITE_CAMPAIGNS` |
+| POST | `/tags` | `WRITE_EMAILS` |
+| PATCH | `/tags/:id` | `WRITE_EMAILS` |
+| PATCH | `/tags/:id/move` | `WRITE_EMAILS` |
+| DELETE | `/tags/:id` | `WRITE_EMAILS` |
+| POST | `/categories` | `WRITE_CONTACTS` |
+| PATCH | `/categories/:id` | `WRITE_CONTACTS` |
+| PATCH | `/categories/:id/move` | `WRITE_CONTACTS` |
+| DELETE | `/categories/:id` | `WRITE_CONTACTS` |
+
 ### Reference data
 
 | Method | Path | API Permission |
@@ -377,7 +406,7 @@ Alongside them, `api_url` is this API's own public base (for a copyable example 
 - `GET /website-tracking/settings`, `PATCH /website-tracking/settings`, `POST /website-tracking/settings/rotate-key` (the [website tracking](/guides/website-tracking/) snippet's consent mode, location precision, allowed hosts and retention; JWT permission `MANAGE_SETTINGS`. The rotate is bodyless and safe to repeat, each call issues a new key)
 - All of `/subscription/*` (checkout, portal, cancel, change-plan, preview-change, enterprise-inquiry, discounts, referrals, etc.)
 - All of `/auth/cli/*` except the two handshake routes below (`GET /auth/cli/codes/:code`, `POST /auth/cli/codes/:code/approve`, `POST /auth/cli/codes/:code/deny`: the browser half of `warmbly auth login`, where a signed-in member reviews the code a CLI is showing and authorizes it. Approving mints an ordinary API key, so it requires the `MANAGE_API_KEYS` organization permission and is session-only: an API key must not be able to mint another one this way)
-- All of `/pool-link/*` and `/cloud-link/*` (the self-hosted warmup pool link: approving an instance's code, listing and unlinking instances, and on a self-hosted instance the connect flow and mailbox enrollment). `POST /pool-link/codes` and `POST /pool-link/poll` are public and per-IP rate limited: they are the device-code handshake an instance uses before it has a token, and `/pool-link/instance/*` accepts only an instance token. `/pool-link/instance/oauth/*`, `/pool-link/instance/mailboxes/:id/token`, `/pool-link/instance/workspace-mailboxes` and `/pool-link/instance/mailboxes/adopt` are the cloud-managed mailbox surface (Google and Microsoft sign-in on Warmbly's OAuth apps, brokered access tokens); their instance-side counterparts are `/cloud-link/oauth/*` and `/cloud-link/workspace-mailboxes/*`
+- All of `/pool-link/*` and `/cloud-link/*` (the self-hosted warmup pool link: approving an instance's code, listing and unlinking instances, reading the pool plan's price and opening its checkout, and on a self-hosted instance the connect flow and mailbox enrollment). `POST /pool-link/codes` and `POST /pool-link/poll` are public and per-IP rate limited: they are the device-code handshake an instance uses before it has a token, and `/pool-link/instance/*` accepts only an instance token. `/pool-link/instance/oauth/*`, `/pool-link/instance/mailboxes/:id/token`, `/pool-link/instance/workspace-mailboxes` and `/pool-link/instance/mailboxes/adopt` are the cloud-managed mailbox surface (Google and Microsoft sign-in on Warmbly's OAuth apps, brokered access tokens); their instance-side counterparts are `/cloud-link/oauth/*` and `/cloud-link/workspace-mailboxes/*`
 - All of `/admin/*`
 
 ### Referrals and discounts

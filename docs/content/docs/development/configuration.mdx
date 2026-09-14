@@ -57,7 +57,7 @@ Five values protect the whole instance. Compose ships a working default for each
 |---|---|---|---|
 | `AUTH_SECRET` | 32 characters or more | JWT and session signing. The realtime service reads the same value as `JWT_SECRET` | yes |
 | `INTERNAL_API_TOKEN` | any random string | The backend's `/api/v1/internal/` routes, which workers and the tracking service authenticate against | yes |
-| `NODE_BROKER_TOKEN` | any random string | The two routes that perform a privileged operation for the caller: opening a sealed data key and signing a blob operation. Optional, and falls back to `INTERNAL_API_TOKEN`. Worth setting in a split deployment, where the tracking and forms services are internet-facing and hold the shared token | yes |
+| `NODE_BROKER_TOKEN` | any random string | The routes that perform a privileged operation for the caller: opening a sealed data key, signing a blob operation, and minting a provider access token for a mailbox Warmbly Cloud manages. Optional, and falls back to `INTERNAL_API_TOKEN`. The same value has to be set on the control plane and on every node that calls those routes, or they answer 401. Worth setting in a split deployment, where the tracking and forms services are internet-facing and hold the shared token | yes |
 | `SECRET_KEY_BASE` | 64 characters or more | Phoenix session signing in the realtime service | yes |
 | `KMS_LOCAL_MASTER_KEY` | base64, exactly 32 bytes | The root key that seals every per-organization data key | yes |
 | `CREDENTIALS_ENCRYPTION_KEY` | exactly 64 hex characters | Mailbox credentials at rest: SMTP and IMAP passwords, and Gmail and Outlook OAuth access and refresh tokens | yes |
@@ -167,6 +167,24 @@ TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
 
 Full behavior, including what each registration mode does to the sign-up form, is on [accounts and access](/development/accounts-and-access/).
 
+### Proxying PostHog
+
+<Callout title="Set the UI host whenever you proxy">
+`POSTHOG_HOST` is where events are sent; `POSTHOG_UI_HOST` is where PostHog's own app lives. They are the same thing only when you are not proxying. Point the first at your proxy and leave the second at `https://us.posthog.com` (or `https://eu.posthog.com`), or the SDK builds toolbar and session-replay links against the proxy, which does not serve the app.
+</Callout>
+
+
+Content blockers drop requests to `posthog.com`, so analytics and error reporting quietly stop for a large share of visitors. The backend serves a reverse proxy at `/ingest` for this. Point each frontend at it:
+
+| Tree | Setting | Value |
+|---|---|---|
+| dashboard, admin | `POSTHOG_HOST` | `https://api.example.com/ingest` |
+| marketing site | `PUBLIC_POSTHOG_HOST` | `https://api.example.com/ingest` |
+
+Nothing else changes: the key stays the same, and the proxy forwards the payload untouched. It is on the backend rather than in each frontend because there are three of them, and a proxy copied three times drifts three ways.
+
+The proxy forwards only what PostHog needs to read the request. Cookies and `Authorization` stay on this side, so a session for your instance is never handed to a third party, and the caller's address goes in `X-Forwarded-For` so visitors are geolocated rather than your server.
+
 ## Captcha
 
 | Variable | What it does | Default | Restart needed |
@@ -174,6 +192,7 @@ Full behavior, including what each registration mode does to the sign-up form, i
 | `CAPTCHA_PROVIDER` | `none` or `turnstile` | derived, see below | yes |
 | `TURNSTILE_SECRET` | Cloudflare Turnstile secret, read by the backend | unset | yes |
 | `WARMBLY_TURNSTILE_KEY` | The Turnstile site key, read by the dashboard and admin panel at container start | a test key under compose | yes (container start) |
+| `WARMBLY_BETA_NOTICE` | One sentence shown to everyone in the dashboard: once in a dialog on first visit, then as a `Beta` pill in the header that reopens it. Empty renders nothing, so a production deployment needs nothing set. Written into `config.js` when the container starts (or when the Pages build runs), so a change needs a restart or a rebuild rather than a reload | unset | yes |
 | `WARMBLY_CONFIG_OUT` | Where the dashboard and admin panel write their runtime `config.js`. Defaults to the path nginx serves; a static host sets it to the build output so the same script renders the file at build time instead of container start | the nginx path | yes (build or container start) |
 | `TURNSTILE_BYPASS_TOKEN` | A token that skips verification. Only honoured when `APP_ENV=dev` | unset | yes |
 | `TURNSTILE_SITE_KEY` | The public Turnstile widget key. The backend hands it to the forms service, which renders it on hosted form pages that enable spam protection. The frontends carry their own copy in `WARMBLY_TURNSTILE_KEY` | unset | no (read per request) |
@@ -271,8 +290,12 @@ On `filesystem`, a remote worker writes blobs to its own disk rather than a volu
 
 | Variable | What it does | Default | Restart needed |
 |---|---|---|---|
-| `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs images built with `GO_TAGS=kafka` | `nats` under compose, `kafka` for a bare binary | yes |
+| `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs the `-kafka` images, or a build with `GO_TAGS=kafka` | `nats` under compose, `kafka` for a bare binary | yes |
+| `FLEET_IMAGE_VARIANT` | Tag suffix appended to the version handed to fleet nodes, so they pull a build that can talk to this instance's event bus. Defaults to `-kafka` when `EVENTBUS_PROVIDER=kafka` and nothing otherwise; set it empty to turn it off | derived from `EVENTBUS_PROVIDER` | no |
 | `NATS_URL` | JetStream address. Credentials in the URL are honored by every service, including the Rust tracking publisher: `nats://user:pass@host:4222` for a user, `nats://token@host:4222` for a token, `tls://` for TLS | `nats://nats:4222` | yes |
+| `NATS_CREDS` | Path to a NATS credentials file (user JWT plus nkey seed), for a bus that authenticates with JWT rather than a token. Synadia Cloud and any nsc-managed account issue one | unset | yes |
+| `NATS_CREDS_B64` | The same file, base64 encoded, as a single line. This is the form the fleet uses: a node receives environment variables rather than files, and the env file docker reads cannot express a multi-line value. Takes precedence over `NATS_CREDS` | unset | yes |
+| `NATS_MAX_BYTES` | Ceiling on the stream's size on disk. Accepts a plain byte count or a size (`2GiB`, `512MB`, `1G`). Unset leaves the stream bounded only by `NATS_STREAM_MAX_AGE` and the account's own quota, which a managed bus may refuse: Synadia's "Max Bytes Required" rejects any stream created without one | unset (unlimited) | yes |
 | `NATS_STREAM_NAME`, `NATS_SUBJECT_PREFIX` | Stream and subject naming | `warmbly` | yes |
 | `KAFKA_BOOTSTRAP_SERVERS` | Broker list when `EVENTBUS_PROVIDER=kafka` | unset | yes |
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | Broker credentials | unset | yes |
@@ -281,6 +304,11 @@ On `filesystem`, a remote worker writes blobs to its own disk rather than a volu
 | `EVENTBUS_HANDLER_TIMEOUT` | How long one handler may take before the delivery is abandoned | `30s` | yes |
 | `PUBSUB_ENABLED` | `false` uses the Redis bridge for realtime fanout, `true` uses Google Pub/Sub | `false` | yes |
 | `GCP_PROJECT_ID` | Project when `PUBSUB_ENABLED=true` | unset | yes |
+
+<Callout title="Topics are created by the bus, not by hand">
+A worker's command topic is named after the node id issued when it joined, so the set of topics is not knowable in advance. The Kafka backend creates what it uses, once per topic per process, rather than depending on the broker's `auto.create.topics.enable` — which is off by default on Confluent Cloud and configurable only on Dedicated clusters, not on Basic, Standard, Enterprise or Freight. The credential therefore needs `CREATE` on topics as well as read and write.
+</Callout>
+
 
 `CODEC_PROVIDER=json` is required wherever workers run: the worker command and result envelopes carry untyped bodies Avro cannot serialize, so any other value makes every worker command fail to encode. `PUBSUB_ENABLED` must agree across backend, consumer and realtime.
 
@@ -293,9 +321,11 @@ On `filesystem`, a remote worker writes blobs to its own disk rather than a volu
 | Variable | What it does | Default | Restart needed |
 |---|---|---|---|
 | `PRIMARY_DB` | PostgreSQL connection string. Carries inline credentials, so it is never returned by any API | the compose postgres | yes |
+| `PGSSLROOTCERT` | Certificate bundle used to verify the database's TLS certificate, read by the Postgres driver. Amazon RDS chains to a root in no public trust store, so `sslmode=verify-full` against it needs AWS's bundle; the backend and consumer images ship it at `/etc/ssl/rds/global-bundle.pem`. Prefer `sslrootcert=` in the DSN so the setting travels with the connection it applies to | unset (system trust store) | yes |
 | `DATABASE_URL` | The realtime service's own name for the same database | the compose postgres | yes |
 | `DATABASE_POOL_SIZE` | Maximum pooled connections **for the realtime service only**. The Go services use the driver default and do not read it | `10` | yes |
 | `DATABASE_SSL` | Whether the realtime service connects to Postgres over TLS | `true`, and `false` under compose | yes |
+| `DATABASE_SSL_CA_FILE` | CA bundle the realtime service verifies Postgres against. Unset verifies against the system store, which has no Amazon RDS root in it, so an RDS database needs this set to `/etc/ssl/rds/global-bundle.pem` (shipped in the image) | unset | yes |
 
 Migrations are embedded in the backend binary and applied on boot. There is no separate migration step, and a standalone `/app/migrate` binary ships in the image for the cases where you want one.
 
@@ -324,7 +354,6 @@ The variable must be set on the backend in every environment. The file itself is
 | `WORKER_BIND_IP` | Source address to bind outbound connections to, and the seed for a derived `WORKER_ID` | unset | yes |
 | `WORKER_PUBLIC_IP` | The address the worker reports to the control plane | detected | yes |
 | `WARMBLY_NODE_REGION` | Free-form label for where this node egresses from, e.g. `eu-central`. Placement prefers a worker near where a mailbox's provider expects sign-ins; unset scores neutral. Written by the join script from `--region` | unset | yes |
-| `WORKER_IMAGE` | Image the remote installer pulls. The built-in default does not match what CI publishes, so set it | built-in | yes |
 | `ENCRYPTED_KEYS_BACKEND_URL` | Backend base the worker fetches organization keys from | unset | yes |
 | `ENCRYPTED_KEYS_WORKER_TOKEN` | The worker's copy of `INTERNAL_API_TOKEN` | unset | yes |
 | `MAIL_TLS_INSECURE` | Skips certificate verification on mailbox connections | `false` | yes |
@@ -387,6 +416,8 @@ Plain SMTP and IMAP mailboxes need none of this. If a worker is missing these va
 An empty `AI_PROVIDER` with a set `AI_API_KEY` falls back to `api.openai.com`, so the key goes to OpenAI. Set both or neither.
 </Callout>
 
+Model compatibility needs no configuration. Backends disagree about the request shape: newer OpenAI models want `max_completion_tokens` rather than `max_tokens`, refuse any temperature but the default, and some refuse function tools unless reasoning is switched off, while most OpenAI compatible backends only know the older shape. The provider learns this from the first rejection of each parameter and remembers it, so a model is walked to a working shape on its first call and every later call starts there.
+
 Set these on the backend and the consumer.
 
 ## Tasks and billing
@@ -416,6 +447,9 @@ Set both and every error goes to both. Each variable is read by one process, so 
 | Variable | Read by | What it does | Default |
 |---|---|---|---|
 | `POSTHOG_KEY` | backend, consumer, worker | Server-side error tracking, and the server-side product events below | unset |
+| `WARMBLY_POSTHOG_UI_HOST` / `PUBLIC_POSTHOG_UI_HOST` | Where PostHog's own app is, used for toolbar and session-replay links. Only differs from the host above when you proxy, and it must when you do | `https://us.posthog.com` | yes (build or container start) |
+| `POSTHOG_PROXY_INGEST` | Upstream the `/ingest` reverse proxy forwards capture traffic to. The frontends are pointed at `https://<api host>/ingest` so content blockers, which drop requests to posthog.com, do not silently remove your analytics and error reporting | `https://us.i.posthog.com` | yes |
+| `POSTHOG_PROXY_ASSETS` | Upstream for `/ingest/static/*`. PostHog serves its browser bundle from a different host than it ingests on, and sending one to the other 404s | `https://us-assets.i.posthog.com` | yes |
 | `POSTHOG_KEY` | forms service | The forms service's own errors. It reads its own environment, like tracking | unset |
 | `POSTHOG_KEY` | tracking service | Rust errors and panics, posted to the capture endpoint directly | unset |
 | `POSTHOG_KEY` | realtime service | Elixir exceptions, with the stack trace the rescue site caught | unset |
@@ -425,10 +459,11 @@ Set both and every error goes to both. Each variable is read by one process, so 
 | `SENTRY_DSN` | forms service | The forms service's own errors | unset |
 | `SENTRY_DSN` | tracking service | Rust errors and panics. An invalid DSN disables reporting with a log line rather than stopping the service | unset |
 | `SENTRY_DSN` | realtime service | An empty string is treated as unset on purpose, because the library rejects `""` hard enough to take the node down | unset |
-| `WARMBLY_POSTHOG_KEY` | web, admin containers | Browser error tracking, read at container start like the other `WARMBLY_*` values. On the dashboard the same key also carries the product analytics below; the admin panel reports only exceptions | unset |
-| `WARMBLY_POSTHOG_KEY` | forms service | Stamped into the public form page for the form app's browser errors. Separate from the forms service's own `POSTHOG_KEY`: one is a Go process, the other is a page a stranger loads | unset |
+| `WARMBLY_POSTHOG_KEY` | web, admin containers | Browser error tracking, read at container start like the other `WARMBLY_*` values. The same key carries the product analytics and session replay below | unset |
+| `WARMBLY_POSTHOG_KEY` | forms service | Stamped into the public form page for the form app's pageviews, web vitals and browser errors. Separate from the forms service's own `POSTHOG_KEY`: one is a Go process, the other is a page a stranger loads | unset |
 | `WARMBLY_POSTHOG_HOST` | web, admin containers, forms service | Capture host for the browser | `https://us.i.posthog.com` |
-| `WARMBLY_POSTHOG_ERROR_TRACKING` | web, admin containers, forms service | `false` reports no browser exceptions to PostHog anywhere, including the form pages the forms service stamps. The dashboard keeps sending product analytics | `true` |
+| `WARMBLY_POSTHOG_ERROR_TRACKING` | web, admin containers, forms service | `false` reports no browser exceptions to PostHog anywhere, including the form pages the forms service stamps. Everything else the key turns on keeps running | `true` |
+| `WARMBLY_POSTHOG_SESSION_REPLAY` | web, admin containers | `false` records no sessions and keeps everything else. Form pages never record, whatever this says | `true` |
 | `WARMBLY_SENTRY_DSN` | web, admin containers | The Sentry half of the same thing. Unset means the SDK is never fetched and no host is contacted | unset |
 | `WARMBLY_SENTRY_DSN` | forms service | Stamped into the public form page, along with the service's `APP_ENV` as the environment | unset |
 | `WARMBLY_SENTRY_ENVIRONMENT` | web, admin containers | The environment label browser events carry, whichever backend receives them. Defaults to the build mode. Form pages do not read it: the forms service stamps its own `APP_ENV` into the page instead | unset |
@@ -439,18 +474,18 @@ Configuring neither backend means nothing leaves the process and no host is cont
 
 A PostHog key can name PostHog Cloud (US or EU) or your own PostHog through `POSTHOG_HOST`. A Sentry DSN can point at Sentry Cloud, a self-hosted Sentry, or any Sentry-compatible server such as GlitchTip; nothing in Warmbly assumes sentry.io.
 
-The distinct id on a PostHog exception names the process that raised it (`warmbly-backend`, `warmbly-worker`), person profiles are switched off per event, and IP geolocation is disabled. Nothing here calls `identify` and nothing is stored in a visitor's browser.
+The distinct id on a server-side PostHog exception names the process that raised it (`warmbly-backend`, `warmbly-worker`), person profiles are switched off per event, and IP geolocation is disabled, since the address would be the server's. A browser exception belongs to the signed-in person the app identified, so it sits next to that person's session replay.
 
 Exceptions still carry the context that makes them answerable, as searchable properties:
 
 | Property | On | What it is for |
 |---|---|---|
-| `organization_id`, `user_id` | browser and request-scoped server exceptions | "Show me every error this workspace hit." Set on exception events only; product analytics stays anonymous |
+| `organization_id`, `user_id` | browser and request-scoped server exceptions | "Show me every error this workspace hit." Flat properties, so one filter finds them on the server side too, where no person is identified |
 | `request_id` | server panics, and browser exceptions whose trail includes a failed call | The id the API already returns in its error envelope, so one incident is findable in PostHog and in the backend's logs |
 | `http_route`, `http_method` | server panics | The route pattern, never the raw path: one issue per route instead of one per record, and a probe for `/wp-admin` cannot mint issues |
 | `service`, `environment`, `release` | everything | Which process, which deployment, which build |
 
-Browser exceptions also carry a trail of steps: the routes visited and the API calls that failed just before, each with its method, route, status and request id. Record ids in a path are masked to `:id` before anything is sent. There is no session recording anywhere; the dashboard renders mailboxes and contacts.
+Browser exceptions also carry a trail of steps: the routes visited and the API calls that failed just before, each with its method, path, status and request id. In the dashboard and the admin panel the exception also sits next to the session replay it happened in, when `WARMBLY_POSTHOG_SESSION_REPLAY` is on; see the analytics section below for what those two surfaces record.
 
 The `admin` panel and the dashboard also tag events with the build they were served from. That value is baked at image build time, because it has to match the release the source maps were uploaded under, so it cannot be changed by a container variable afterwards.
 
@@ -460,26 +495,38 @@ A browser stack trace is minified without them. Uploading them is optional and o
 
 | Build variable | Backend | What it does |
 |---|---|---|
-| `POSTHOG_CLI_API_KEY`, `POSTHOG_CLI_PROJECT_ID` | PostHog | Both set makes the image build run `pnpm sourcemaps:posthog` after `vite build`, which injects a chunk id, uploads, and deletes the `.map` files it sent |
+| `POSTHOG_CLI_API_KEY`, `POSTHOG_CLI_PROJECT_ID` | PostHog | Both set makes the image build run `pnpm sourcemaps:posthog` after `vite build`, which injects a chunk id, uploads, and deletes the `.map` files it sent. The `web`, `admin` and `forms` images all do this, so a form page's stack trace is readable too |
 | `POSTHOG_CLI_HOST` | PostHog | The instance to upload to, for PostHog EU or a self-hosted one |
 | `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` | Sentry | All three set puts the Sentry Vite plugin in the build |
 
-In this repository's release workflow the two project ids are repository variables and the two keys are repository secrets, passed to the image build as build secrets.
+In this repository's release workflow the two project ids are repository variables and the two keys are repository secrets, passed to the image build as build secrets. Nothing in the app has to match a release name: PostHog pairs a stack frame with its map through the chunk id the CLI injected into the served file, so an event from any build resolves as long as that build's maps were uploaded.
 
-### Product analytics
+### Product analytics and session replay
 
-These are the same two keys as the error tracking above, and they exist for the hosted service. A self-hosted instance that sets no key loads no analytics and sends no usage data: the installer never asks about them, and a build with none of them set contains no analytics script to block. An instance that does set a key for error tracking also gets the handful of product events listed here, which are counts of things happening and never carry an identifier.
+These are the same two keys as the error tracking above, and they exist for the hosted service. A self-hosted instance that sets no key loads no analytics and sends no usage data: the installer never asks about them, and a build with none of them set contains no analytics script to block. An instance that does set a key gets everything below.
 
 | Variable | Read by | What it does | Default |
 |---|---|---|---|
-| `POSTHOG_KEY` | backend | Server-side product events (a completed signup, a started subscription). Unset means no client is built and nothing is sent | unset |
+| `POSTHOG_KEY` | backend | Server-side product events (a completed signup, a started trial, a started subscription), under the account id of the person they happened to, with the workspace as a group | unset |
 | `POSTHOG_HOST` | backend | Capture host. Point it at a self-hosted PostHog if you run one | `https://us.i.posthog.com` |
-| `WARMBLY_POSTHOG_KEY` | web container | Browser analytics for the dashboard, read at container start. Unset means the SDK chunk is never fetched | unset |
-| `WARMBLY_POSTHOG_HOST` | web container | Capture host for the browser | `https://us.i.posthog.com` |
+| `WARMBLY_POSTHOG_KEY` | web, admin containers | Browser analytics and session replay, read at container start. Unset means the SDK chunk is never fetched | unset |
+| `WARMBLY_POSTHOG_HOST` | web, admin containers | Capture host for the browser | `https://us.i.posthog.com` |
+| `WARMBLY_POSTHOG_SESSION_REPLAY` | web, admin containers | `false` keeps the analytics and records no sessions | `true` |
 | `PUBLIC_POSTHOG_KEY` | `site/` build | Marketing site analytics. Build-time: unset produces a site with no analytics code in it at all | unset |
 | `PUBLIC_POSTHOG_HOST` | `site/` build | Capture host for the site | `https://us.i.posthog.com` |
 
-Everything runs in PostHog's cookieless mode: nothing is stored in the visitor's browser, no `identify` is ever called, and no event property carries a user id, an organization id or an email. The admin panel gets none of it and never will; it is the operator surface and it ships to self-hosters, so it reports exceptions and measures nothing.
+What each surface sends, with a key set:
+
+| Surface | Identity | Captured |
+|---|---|---|
+| Dashboard | The signed-in account (`identify` with email and name) and its workspace as an `organization` group | Pageviews and pageleaves, autocapture of every click, heatmaps, rage and dead clicks, web vitals and network timing, session replay with console logs, surveys, exceptions, and the named events `mailbox_connected` and `campaign_launched` |
+| Admin panel | The signed-in operator | The same set, so a slow screen or a broken action in the operator surface is findable the same way |
+| Marketing site | Nobody. Cookieless: nothing is stored in the browser and no person is ever created | Pageviews and pageleaves with scroll depth, autocapture, heatmaps, rage and dead clicks, web vitals, exceptions. No session replay: the SDK has no session in cookieless mode, and one would need a consent banner |
+| Public form pages | Nobody. Cookieless, for the stranger filling in a customer's form | Pageviews, autocapture, heatmaps, web vitals, exceptions and the funnel events `form_viewed`, `form_started` and `form_submitted`, each carrying the form's public id. Never recorded |
+
+The person in the dashboard and the person on a server-side event are the same account id, so a signup counted by the backend, the session that led to it and the subscription the Stripe webhook later reports are one funnel. The acquisition parameters the marketing site carries into the signup link land on that person write-once at signup. Countries come from PostHog's own GeoIP on the address the event arrived from; the `/ingest` proxy above forwards the visitor's address for exactly this, and the server-side events send the signup request's address along.
+
+Session replay masks what is typed into a password field in the browser, before anything is sent. Every other input and every screen is recorded, which is what makes a replay answer "what exactly happened", and it is also why the hosted service's privacy page describes it in those words.
 
 ### Push
 
@@ -532,12 +579,13 @@ The Rust open and click service. It reads its own environment, so these have to 
 | `TRACKING_TRUSTED_PROXIES` | CIDRs the tracking service accepts a forwarded client address from. Empty trusts nothing and uses the socket peer, which is correct for a directly exposed service; set it behind a reverse proxy or the per-source rate limits and the location stored with page views are caller-controlled. Same convention as the backend's `TRUSTED_PROXIES` | empty |
 | `TRACKING_IP_HASH_KEY` | Secret the source-address token in tracking events is keyed with. The token names one source for deduplication, rate limits and the click burst rule; keyed, it cannot be turned back into the address by enumeration | `INTERNAL_API_TOKEN` |
 | `TRACKING_CLIENT_IP_HEADER` | The one header a trusted proxy sets with the client address. No other header is read, so a caller cannot smuggle an address past a generic proxy in `CF-Connecting-IP`. For `x-forwarded-for` the proxy-appended last entry is used; set `cf-connecting-ip` behind Cloudflare | `x-forwarded-for` |
-| `TRACKING_SCANNER_BUILTINS` | Whether the known-scanner catalogue shipped with Warmbly is loaded. `false` leaves only your own entries | `true` |
+| `TRACKING_SCANNER_BUILTINS` | Whether the known-scanner catalogue shipped with Warmbly is loaded: Microsoft 365's Exchange Online Protection ranges and Barracuda's Email Gateway Defense blocks. `false` leaves only your own entries | `true` |
 | `TRACKING_SCANNER_NETWORKS` | Extra scanner sources, comma separated, each a CIDR or `asn:<number>` with an optional label. For sources that never carry a person's own request, so their pixel fetches and their clicks are both treated as automated | empty |
 | `TRACKING_SCANNER_CLICK_NETWORKS` | The same, for sources that also proxy a mail client's own image fetches. Only their click tickets are treated as automated, because their pixel fetches are genuine opens | empty |
 | `TRACKING_SCANNER_ASN_HEADER` | Header a trusted proxy sets with the source ASN, which is what makes `asn:` entries match. Read only from a proxy in `TRACKING_TRUSTED_PROXIES`. On Cloudflare, a transform rule writing `ip.src.asnum`. Empty disables ASN matching | empty |
-| `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs an image built with `CARGO_FEATURES=kafka` | `nats` |
+| `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs the `tracking:*-kafka` image, or a build with `CARGO_FEATURES=kafka` | `nats` |
 | `NATS_URL`, `NATS_SUBJECT_PREFIX` | JetStream address and subject prefix. The publish subject is `<prefix>.<topic>` | `nats://localhost:4222`, `warmbly` |
+| `CODEC_PROVIDER` | `json` or `avro`, and it has to match the consumer's. `avro` is refused at boot without `SCHEMA_REGISTRY_URL` | `json` |
 | `KAFKA_TRACKING_TOPIC` | Event topic, read by the Rust publisher **and** the Go subscriber | `tracking-events` |
 | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | Broker transport when `EVENTBUS_PROVIDER=kafka` | unset |
 | `SCHEMA_REGISTRY_URL`, `SCHEMA_REGISTRY_KEY`, `SCHEMA_REGISTRY_SECRET` | Registry for the Avro codec | unset |
@@ -546,6 +594,8 @@ The Rust open and click service. It reads its own environment, so these have to 
 | `POSTHOG_KEY`, `POSTHOG_HOST`, `POSTHOG_ERROR_TRACKING` | Error and panic reporting. Unset means none | unset |
 | `SENTRY_DSN` | The same through Sentry. An invalid value logs and disables it rather than stopping the service | unset |
 | `WARMBLY_RELEASE` | The build reported errors are tagged with | `dev` |
+
+The shipped catalogue also carries Proofpoint, Mimecast and Cisco Secure Email by ASN, and the rest of Microsoft's and Google's networks, all commented out. The file (`tracking/scanner-networks.txt`) explains each one; the short version is that a whole network is only safe to treat as a scanner when no recipient can be behind it, and these fail that test in two different ways. Microsoft's and Google's clouds carry ordinary browsing, so a recipient on Windows 365 or a corporate NAT gateway sits inside them. Proofpoint Isolation and Mimecast Browser Isolation render a clicked page in the vendor's own cloud and stream it to the recipient, so when a policy sends a link to isolation the click on your ticket comes from the vendor's network with a person on the other end. Isolation is usually scoped to uncategorised URLs, which is what a new outreach domain looks like. Enable these when your recipients' scanner noise costs you more than the clicks and automations they will take with them, and prefer leaving the automated-engagement windows to catch the delivery-time half.
 
 ## Realtime service
 
@@ -593,6 +643,8 @@ These are the only settings a browser can change, and no environment variable ow
 | `retention.engagement_event_days` | integer, 1 to 3650 | `365` | How long the per-event open and click logs (client, device, approximate location) are kept. Campaign progress keeps its own summary that outlives them, so counts, filters and branching never change |
 | `retention.form_event_days` | integer, 1 to 3650 | `180` | How long form funnel events (views, starts, field-level drop-off) are kept. Funnel reports range up to 90 days, so anything shorter shortens the report too |
 | `retention.audit_log_days` | integer, 1 to 3650 | `90` | How long the audit trail is kept. It carries IP addresses, user agents and change payloads, so this is also how long that data is held |
+| `tracking.machine_window_open_seconds` | integer, 1 to 900 | `60` | How soon after a send was dispatched an open is recorded as automated rather than a person's. The clock starts when the send is handed to a worker, so this window also covers the sending provider's queue and the transit to the recipient, not just reading time. Raise it when delivery-time scanners are being counted as opens; lower it when recipients who read immediately are being missed. A change applies within a minute and only to events recorded after it |
+| `tracking.machine_window_click_seconds` | integer, 1 to 900 | `30` | The same window for click tickets. Kept separate because the two mistakes cost different things: a misjudged open loses a metric, a misjudged click loses the automation behind an interested lead |
 | `deliverability.enforce_domain_auth` | boolean | `true` | Whether a sending domain that fails SPF or DMARC stops cold campaign sending and warmup sending from every mailbox on it. Off keeps the check running and still shows the state and the Advisor card, it just never blocks |
 | `deliverability.auth_grace_hours` | integer, 1 to 720 | `72` | How long a domain must stay failing before the gate applies. The clock starts when the background check first sees the failure, so this is also how much warning the owner gets |
 

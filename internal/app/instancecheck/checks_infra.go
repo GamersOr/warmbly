@@ -3,11 +3,13 @@ package instancecheck
 import (
 	"context"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/warmbly/warmbly/internal/config"
+	"github.com/warmbly/warmbly/internal/models"
 )
 
 const (
@@ -27,6 +29,7 @@ func infraChecks() []check {
 		{id: "no_worker_heartbeat", run: checkNoWorkerHeartbeat},
 		{id: "codec_not_json", run: checkCodecNotJSON},
 		{id: "migrations_dirty", run: checkMigrationsDirty},
+		{id: "warmup_pools_missing", run: checkWarmupPoolsMissing},
 		{id: "blob_root_missing", run: checkBlobRootMissing},
 		{id: "redis_unreachable", run: checkRedisUnreachable},
 	}
@@ -95,6 +98,31 @@ func checkMigrationsDirty(ctx context.Context, d Deps, in Input) *Finding {
 	return result(CategoryData, SeverityError, "The database schema is dirty",
 		fmt.Sprintf("The database schema is dirty at version %d. The backend applies migrations at boot; "+
 			"a dirty row means one failed halfway and must be resolved before this instance is used.", version),
+		docsHealthDB)
+}
+
+// checkWarmupPoolsMissing: without both pools every warmup tick ends on
+// "warmup pool not found" and nothing else says why.
+// CountSeededWarmupPools reports how many of the two pools migration 000156
+// seeds are present; the backend asserts on it once at boot as well.
+func CountSeededWarmupPools(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	var n int
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM warmup_pools WHERE id IN ($1, $2)`,
+		models.WarmupPoolFreeID, models.WarmupPoolPremiumID).Scan(&n)
+	return n, err
+}
+
+func checkWarmupPoolsMissing(ctx context.Context, d Deps, in Input) *Finding {
+	if d.DB == nil {
+		return nil
+	}
+	pools, err := CountSeededWarmupPools(ctx, d.DB)
+	if err != nil || pools == 2 {
+		return nil
+	}
+	return result(CategoryData, SeverityError, "Warmup pools are missing",
+		fmt.Sprintf("Only %d of the 2 warmup pools exist, so warmup cannot place any mailbox. "+
+			"Migration 000156 created them and will not run again; restore the two rows under their fixed ids (the docs page has the statement).", pools),
 		docsHealthDB)
 }
 

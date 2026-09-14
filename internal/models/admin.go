@@ -192,7 +192,6 @@ type AdminWorkerEmail struct {
 	RiskBand        string     `json:"risk_band"` // clean | risky | quarantine
 	RiskEvaluatedAt *time.Time `json:"risk_evaluated_at,omitempty"`
 	WarmupHealth    string     `json:"warmup_health,omitempty"` // worst warmup health_state, "" if not in a pool
-	SpamScore       *int       `json:"spam_score,omitempty"`
 	BlockedUntil    *time.Time `json:"blocked_until,omitempty"`
 }
 
@@ -620,15 +619,14 @@ type WarmupPoolInfo struct {
 
 // WarmupPoolParticipant represents a participant in a warmup pool
 type WarmupPoolParticipant struct {
-	ID              uuid.UUID  `json:"id"`
-	Email           string     `json:"email"`
-	UserID          uuid.UUID  `json:"user_id"`
-	JoinedAt        time.Time  `json:"joined_at"`
-	EmailsSent      int64      `json:"emails_sent"`
-	EmailsReceived  int64      `json:"emails_received"`
-	ReputationScore float64    `json:"reputation_score"`
-	IsBlocked       bool       `json:"is_blocked"`
-	BlockedAt       *time.Time `json:"blocked_at,omitempty"`
+	ID             uuid.UUID  `json:"id"`
+	Email          string     `json:"email"`
+	UserID         uuid.UUID  `json:"user_id"`
+	JoinedAt       time.Time  `json:"joined_at"`
+	EmailsSent     int64      `json:"emails_sent"`
+	EmailsReceived int64      `json:"emails_received"`
+	IsBlocked      bool       `json:"is_blocked"`
+	BlockedAt      *time.Time `json:"blocked_at,omitempty"`
 
 	// Joined data
 	User *AdminUserSummary `json:"user,omitempty"`
@@ -662,6 +660,7 @@ type AdminOrgSearch struct {
 	RiskState      string     `form:"risk_state"`      // exact posture: trusted|watch|restricted|suspended
 	RiskFlagged    bool       `form:"risk_flagged"`    // any posture other than trusted
 	Enterprise     bool       `form:"enterprise"`      // has an enterprise subscription
+	ManagedPlan    bool       `form:"managed_plan"`    // plan granted by an operator, not Stripe
 
 	// Subscription state
 	SubscriptionStatus    string `form:"subscription_status"`
@@ -751,6 +750,16 @@ type AdminOrgListItem struct {
 	PlanName     *string `json:"plan_name,omitempty"`
 	PlanPublic   *bool   `json:"plan_public,omitempty"`
 	IsEnterprise bool    `json:"is_enterprise"`
+
+	// ManagedPlan marks a plan an operator granted rather than Stripe, so the
+	// table can answer "which workspaces are paid because we said so" without
+	// a call per row. ManagedPlanExpired is a grant that lapsed, which is
+	// deliberately distinct: the workspace is back on free and the reason is
+	// still on file.
+	ManagedPlan        bool       `json:"managed_plan"`
+	ManagedPlanExpired bool       `json:"managed_plan_expired"`
+	ManagedPlanReason  *string    `json:"managed_plan_reason,omitempty"`
+	ManagedPlanUntil   *time.Time `json:"managed_plan_until,omitempty"`
 }
 
 // AdminOrgsResult is the paginated response for the admin org listing.

@@ -37,6 +37,8 @@ Pick mailboxes in **Sending accounts** three ways, and the first two combine:
 - **Individually**: specific mailboxes by hand.
 - **All active mailboxes**: the default when you pick neither.
 
+A campaign set through the API to `sender_strategy: "explicit"` is the exception to the third line: it never falls back to every active mailbox. If its list empties out, because the mailboxes were disconnected or the list was replaced with nothing, it uses any tags it also has, and with none it pauses itself rather than widening to every mailbox in the workspace. See [replace senders](/api/reference/campaigns/#replace-senders).
+
 Sending accounts always resolve inside the campaign's own workspace. If you belong to more than one workspace, a tag you reuse across them still only picks up mailboxes belonging to the workspace that owns the campaign, so one workspace's sending reputation, daily caps, and warmup are never spent on another's traffic.
 
 <Callout type="info" title="Follow-ups stay on the same mailbox">
@@ -53,7 +55,7 @@ Whichever mode you pick, it decides which mailbox **starts** a lead. Every mailb
 
 The Leads tab shows each lead's mailbox in its **Sender** column, and a contact's Activity tab shows it beside their progress. A lead has none until its first email goes out.
 
-**ESP matching** optionally aligns sender and recipient providers (Gmail to Gmail). **Prefer same** falls back to any mailbox when no same-provider one is free; **Strict same** makes the contact wait instead. An unknown recipient provider never blocks a send. Like rotation, it applies to a lead's first email: a follow-up goes out from the mailbox the contact already knows.
+**ESP matching** optionally aligns sender and recipient providers (Gmail to Gmail). **Prefer same** falls back to any mailbox when no same-provider one is free; **Strict same** makes the contact wait instead. A contact left waiting this way waits alone: the campaign moves on to the next lead in the queue rather than stopping, and comes back to them when a matching mailbox is free. An unknown recipient provider never blocks a send. Like rotation, it applies to a lead's first email: a follow-up goes out from the mailbox the contact already knows.
 
 ### When a lead's mailbox is busy, or gone
 
@@ -76,7 +78,7 @@ Warmbly is mailbox-first: safe volume is the sum of each mailbox's budget, not o
 
 The campaign daily limit applies as a minimum against the cold cap, so it can lower a mailbox's volume but never raise it above the mailbox's own daily cap (default `50`/day).
 
-Only an email actually handed to a sending worker counts against a mailbox's daily budget and its minimum gap. The scheduler's own wake-ups, a step it deferred because its slot was not due yet, and action or wait steps never do, so a campaign started outside its sending window still has its whole budget when the window opens. When every mailbox on a campaign has used its budget for the day, the campaign stays active and waits for the next day; the activity log notes it once per day. It also waits, rather than pausing, when every mailbox is outside its own hours, resting, or held back by warmup health.
+Only an email actually handed to a sending worker counts against a mailbox's daily budget and its minimum gap. The scheduler's own wake-ups, a step it deferred because its slot was not due yet, and action or wait steps never do, so a campaign started outside its sending window still has its whole budget when the window opens. When every mailbox on a campaign has used its budget for the day, the campaign stays active and waits for the next day; the activity log notes it once per day. It also waits, rather than pausing, when every mailbox is outside its own hours, resting, or held back by warmup health. A pool that is part spent and part asleep says so too, naming how many of each, because that campaign resumes when the sleeping mailbox reopens rather than tomorrow.
 
 <Callout type="warn" title="Don't push past the defaults casually">
 Anything above `50`/day per cold mailbox needs positive reputation signals and a low complaint rate behind it. Adding mailboxes is safer than forcing a few to send more.
@@ -110,17 +112,32 @@ A lead can also be taken out again: the remove button on a lead's row, or **Remo
 | Replied | Contact replied; sending stops |
 | Bounced | A send hard-bounced |
 | Failed | A step could not be sent after every retry; hover the status for the reason |
+| Paused | The lead's flow is held, by an out-of-office auto-reply or by hand; hover the status for why and until when |
 | Unsubscribed | Unsubscribed or suppressed |
 
 A lead is **Processing** only while steps remain, so a finished campaign reads as done rather than stuck mid-flight.
 
+### Out of office and pausing one lead
+
+When a recipient's mailbox answers a step with an away message, that is not a reply: Warmbly never counts an auto-reply as a human one, so stop on reply does not fire and, left alone, the next step would go out on schedule to an empty desk. Warmbly holds the lead instead.
+
+The hold reads the return date out of the away message when it can. English, German, French, Spanish, Portuguese, Italian and Dutch phrasings are recognised (`back on 8 September`, `zurück am 09.09.2026`, `ab dem 10.9.`, `jusqu'au 12 septembre`), in ISO and day-dot-month form as well as written months. Two kinds of date are deliberately not read, because a wrong one parks a live lead for weeks: slash dates, since `9/8/2026` means two different days on two sides of the Atlantic, and a month with no day (`until October`), since there is no way to tell which day in it was meant. The lead resumes one working day after the date it found, so the follow-up does not land in the backlog of their first morning back. When no date can be read, the hold is the workspace's fallback, `7` days by default, set under **Settings > Sending > Out of office**. The same section turns the whole behaviour off.
+
+A hold does not spend the step's wait. A follow-up three days behind its step, held for a week, goes out three days after the contact is back rather than the moment they return, so the sequence keeps its pacing instead of arriving all at once. Only the part of the hold that overlapped that wait counts, so a hold the lead has already served is never charged to a later step. A campaign whose remaining leads are all paused does not finish: it stays active and waits for them, and its activity log says so once rather than every pass. Resuming any of them puts the campaign straight back to work.
+
+The same hold is available by hand, and it is the missing middle between leaving a lead alone and the two permanent levers. The **Subscribed** toggle takes the contact out of every campaign for good and the suppression list blocks the address workspace-wide; neither is the right answer to "they are on holiday for a week". The pause button on a lead's row holds that one contact in that one campaign, until a date or until you resume them. They stay subscribed, they stay a lead, and the flow picks up where it stopped.
+
+An away message is recognised by the subject line the recipient's mail provider writes (`Automatic reply:`, `Automatische Antwort:`, `Abwesenheitsnotiz`, `Réponse automatique`, and the same conventions in Spanish, Portuguese, Italian, Dutch, the Nordic languages and Polish) or by the RFC 3834 and vendor headers it carries. It is matched at the START of the subject only, never inside it: a reply from a person carries your own subject back, so a campaign about annual leave or working out of the office still has every human reply read as a reply.
+
+A held lead reads **Paused** in the list and carries its reason on hover. Open the contact's **Activity** tab and the campaign panel shows the hold with **Resume now** next to it, and **Stop**, which converts a dated hold into one with no end. Resume drops the held time rather than carrying it, so the step goes back to the schedule it would have had if the hold had never happened: on the campaign's next pass when that moment has already passed, otherwise when the step's own wait elapses. It lifts the hold, it does not skip the sequence's pacing. Pausing and resuming are audited, and every teammate's list updates live.
+
 ### Who opened, clicked and replied
 
-Next to each lead's status, the Leads list shows three engagement columns: **Opened**, **Clicked** and **Replied**, each with the number of emails in the sequence the person engaged with. A dash means the lead was emailed and has not engaged; the cell is blank for a lead not emailed yet. An open counts when a person opened the email, or clicked a link in it. Mail clients that fetch every image automatically (Apple Mail Privacy Protection, for example) show as **auto** instead, the same opens the campaign overview reports as automatic, so they never pass for engagement. Clicks are held to the same standard: a link followed from a known mail security network, within ten seconds of the send, or several links of one email followed within a few seconds of each other, is a security gateway scanning the message, not the recipient. Those clicks are kept on the contact's activity marked **auto**, counted apart on the campaign overview, and never make a lead **Clicked**, never fire a clicked branch or automation, and never send a webhook. See [Link tracking and UTM parameters](#link-tracking-and-utm-parameters).
+Next to each lead's status, the Leads list shows three engagement columns: **Opened**, **Clicked** and **Replied**, each with the number of emails in the sequence the person engaged with. A dash means the lead was emailed and has not engaged; the cell is blank for a lead not emailed yet. An open counts when a person opened the email, or clicked a link in it. Mail clients that fetch every image automatically (Apple Mail Privacy Protection, for example) show as **auto** instead, the same opens the campaign overview reports as automatic, so they never pass for engagement. Clicks are held to the same standard: a link followed from a known mail security network, within the instance's automated-click window after the send (thirty seconds by default), or several links of one email followed within a few seconds of each other, is a security gateway scanning the message, not the recipient. Those clicks are kept on the contact's activity marked **auto**, counted apart on the campaign overview, and never make a lead **Clicked**, never fire a clicked branch or automation, and never send a webhook. See [Link tracking and UTM parameters](#link-tracking-and-utm-parameters).
 
 Opens depend on the recipient's mail client loading images. Outlook, many corporate setups and some privacy-minded clients block them, so a person can read an email and still show no open; the info icon on the column says as much. A click is stronger evidence, so a click by the person always counts as an open too. Open the contact's Activity tab to see each open and click with the mail client and location it came from.
 
-The chips above the list are filters. Click a status chip (**Processing**, **Done**, **Replied**, **Queued**, **Bounced**, **Unsub**) or an engagement chip (**Opened**, **Not opened**, **Clicked**, **Not clicked**, **Replied**, **Not replied**) to show only those leads; click it again to clear. One status and one engagement chip can be active at once and both must match. The numbers on the chips are campaign-wide totals, and filtering happens on the server, so a scope shows every matching lead however long the list is. **Not opened**, **Not clicked** and **Not replied** only cover leads that have been sent at least one email: a queued lead has not had the chance. The same filters live in the **Filters** sheet under **Lead status** and **Engagement**.
+The chips above the list are filters. Click a status chip (**Processing**, **Done**, **Replied**, **Queued**, **Bounced**, **Paused**, **Unsub**) or an engagement chip (**Opened**, **Not opened**, **Clicked**, **Not clicked**, **Replied**, **Not replied**) to show only those leads; click it again to clear. One status and one engagement chip can be active at once and both must match. The numbers on the chips are campaign-wide totals, and filtering happens on the server, so a scope shows every matching lead however long the list is. **Not opened**, **Not clicked** and **Not replied** only cover leads that have been sent at least one email: a queued lead has not had the chance. The same filters live in the **Filters** sheet under **Lead status** and **Engagement**.
 
 Engagement updates live as opens, clicks and replies arrive; no refresh is needed. **Export** from the Leads tab offers four extra columns (**Lead status**, **Opened**, **Clicked**, **Replied**), whether you export the current scope or selected rows.
 
@@ -128,16 +145,18 @@ Engagement updates live as opens, clicks and replies arrive; no refresh is neede
 
 Open a contact and go to **Activity**: the panel at the top lists every campaign the contact is in, with the flow drawn step by step (sent, opened, clicked, replied, bounced or failed on each), the lead status, the last thing that happened, and the next action.
 
-The next action is worked out on the spot by the scheduler, through the same rules a real send goes through: the delay before the first email, the step's wait, the campaign's start date and sending windows, each mailbox's daily cap and spacing, and the new-lead limit. Nothing is stored per contact, because a campaign is a single task that picks the next lead each time it runs. So the panel shows one of:
+The next action is worked out on the spot by the scheduler, through the same rules a real send goes through: the delay before the first email, the step's wait, the campaign's start date and sending windows, each mailbox's daily cap and spacing, and the new-lead limit. Nothing is stored per contact, because a campaign is a single task that picks the next lead each time it runs. The times it shows are the constraints themselves, never the send spacing, so reading the panel twice gives the same answer twice. So the panel shows one of:
 
 | State | Meaning |
 |-------|---------|
-| Due | The step is due now. The time shown is the slot the scheduler would give it on the next pass; leads queued ahead of this one can still push it later |
+| Due | The step is due now. The time shown is when the campaign next works through its queue, not a slot held for this contact; leads queued ahead of this one can still push it to a later pass |
 | Waiting | A hard constraint holds the step back. The panel names it (`Waiting 2 days before the first email`, `Waiting 3 days after Email 1`, `Outside the campaign's sending window`, `Today's new-lead limit is reached`) and shows the earliest the step can go, not a promised time |
-| Paused | The campaign is not running, so nothing is scheduled |
+| Paused | This lead is held (out of office, or paused by hand), or the campaign is not running. The panel says which, and a held lead carries **Resume now** |
 | Blocked | The campaign cannot send at all right now: no mailbox attached, every sending domain failing authentication, or past its end date |
 
 When a step's branches are still undecided (`if they open within 3 days`), the panel says the next step depends on their response and when that window closes. A lead that has finished, replied, bounced, failed or unsubscribed shows why the flow ended instead.
+
+One lead that cannot be sent right now never holds up the campaign. Each pass walks the queue in order and sends the first lead it can place, so a contact waiting for a same-provider mailbox, for the mailbox their conversation belongs to, or for their own working hours is skipped for that pass while the leads behind them go out. The campaign only waits when every lead in the queue is waiting, and it comes back and looks again within fifteen minutes.
 
 A step counts as sent only once the sending worker has handed it to the mailbox provider. If the worker cannot send (the mailbox was still loading, the provider refused the message, a storage hiccup), the step goes back to the queue, the failure appears in **Needs attention** with the reason, and the next pass retries it. After five failed attempts the lead is marked **Failed** and dropped from the campaign, so a mailbox that can never send does not loop forever. A recipient the mail server refuses outright is not retried: it is recorded as a **Bounced** lead straight away and goes through the same bounce handling (suppression, guardrails, webhooks) as a bounce notice. A campaign that finished while a send was still in flight reopens to retry it.
 
@@ -162,6 +181,8 @@ A link that already carries one of these keeps the hand-written value; only the 
 
 Campaigns send only inside the **weekly sending windows** you define, in the campaign's timezone. Each day is independent, with different hours or several windows per day, set from presets like `Mon-Fri 9-5` or by dragging on the grid (which is Monday-first).
 
+A step whose turn comes while the window is shut waits for the next one; it is never sent late to catch up. That holds however overdue it is, so a follow-up whose wait elapsed at two in the afternoon does not go out at eleven at night because the campaign happened to look at it then. The step keeps its place in the queue and leaves in the next window that has mailbox capacity.
+
 Within a window Warmbly spreads the day's emails evenly, adds random jitter, and rounds to natural send times so nothing arrives in obvious bursts. A mailbox with its own timezone is also kept inside its local business hours (`8am` to `8pm`).
 
 The spread covers every mailbox on the campaign, not one at a time: the day's remaining capacity across the whole sending pool is paced across the hours left in the window. Adding a second healthy mailbox roughly doubles how fast a campaign works through its leads, while each mailbox still stays inside its own daily cap, hourly ceiling and minimum gap.
@@ -176,13 +197,15 @@ The delay counts from when that contact entered the campaign, not from when the 
 
 Follow-up spacing is separate and unaffected: that is each step's own wait, set on the connection into it (see [Sequences](/guides/sequences/#wait-and-spacing)). Every lead carries the moment it was enrolled, so turning a delay on does not re-delay people who joined weeks ago: their wait is already long past. Leads enrolled before this setting existed have no recorded moment and fall back to the campaign's creation date, which has the same effect. Changing the delay on a running campaign takes effect on save.
 
-Optional **campaign dates** bound when it may send. Leave both blank to run open-ended. Picking today as the start date means "start now", and clearing a start date on a running campaign removes the wait entirely. Schedule changes on an active campaign take effect immediately: the next send is recomputed on save, so a campaign waiting on a future start date starts sending as soon as you clear or shorten it.
+Optional **campaign dates** bound when it may send. Leave both blank to run open-ended. Picking today as the start date means "start now", and clearing a start date on a running campaign removes the wait entirely. Schedule changes on an active campaign take effect immediately: the next send is recomputed on save, so a campaign waiting on a future start date starts sending as soon as you clear or shorten it. Past the end date nothing goes out at all, including a follow-up that came due before it: the campaign finishes instead, and its activity log says it reached its end date.
 
 ## Start and stop
 
 The play and pause buttons work from the list row or the detail view. Starting moves the campaign to **active** and begins scheduling inside your windows and limits; pausing stops new scheduling immediately and resumes from where it left off.
 
 A campaign can pause itself: **paused, no accounts** when it loses every sender or no sender can send under its settings (a sending behaviour profile with no working days), **paused, trial expired** when a trial ends, **auto-paused** when a guardrail trips, **needs verification** when address verification has refused every remaining lead (the campaign offers to re-verify them or send anyway; see [address verification](/guides/deliverability/#address-verification)), and plain **paused** if it ever loses its workspace, because unsubscribes, bounces and complaints are checked per workspace and cannot be honoured without one. It moves to **finished** once every contact completes the sequence or its end date passes, unless **Keep running for new leads** is on: then it stays active and shows **waiting for leads** until the next lead arrives, and only its end date finishes it. Configured to do so, it also stops following up with a contact the moment they reply.
+
+An auto-pause is never silent. It writes a red entry to the campaign's activity log saying which of the several possible causes it was, and every teammate's campaign list moves to the paused status live, so a campaign that stops sending overnight is visible the moment anyone looks at it rather than hours later.
 
 A finished campaign starts again on its own when a lead is added to it, whether by a linked segment, the API, a form, an integration or an automation, through the same launch checks as pressing play. If a check refuses the restart (the list is a bounce risk, the plan cannot send, too many campaigns are active), the activity log says so and the new leads wait until you fix the cause and press play. Pressing play also works after extending or clearing the end date. If there is genuinely nothing left to send, pressing play turns on **Keep running for new leads** and the campaign stays active, **waiting for leads**, so it never dead-ends on a campaign that only ran out of people to write to; the activity log notes the switch.
 

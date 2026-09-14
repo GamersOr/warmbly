@@ -125,6 +125,25 @@ const (
 	// follow-up early; a task that fired on time always passes.
 	CampaignNotDueGraceSeconds = 60
 
+	// CampaignPlacementCandidates is how many due leads one scheduling pass
+	// routes and tries to place before it gives up and defers the campaign.
+	// Placement can refuse a single lead for a reason that is entirely that
+	// lead's (ESP-strict has no mailbox for their provider, their own mailbox
+	// is busy, their preferred hours are hours away); the leads behind them are
+	// still sendable, so the pass moves on instead of parking the campaign on
+	// the first refusal (issue #437). Every extra candidate costs a handful of
+	// reads and only on a pass that is being refused, so this is deliberately
+	// generous — but bounded, because a campaign whose every lead is refused
+	// must still end the pass rather than walk a million-row list.
+	CampaignPlacementCandidates = 25
+
+	// WarmupReputationLedgerDays is how long the standing of a removed mailbox
+	// is held against its address, counted from the later of its removal and
+	// the end of its block. Long enough that removing and re-adding a mailbox
+	// is never a shortcut past a block, short enough that the address of a
+	// mailbox nobody re-added is not kept indefinitely. Fixed, not a setting.
+	WarmupReputationLedgerDays = 90
+
 	// CampaignMaxDeferMinutes bounds how far ahead a DEFERRED campaign tick may
 	// park its successor. A deferral means "nothing is sendable right now", and
 	// the reasons it says that (no lead is due, the new-lead cap is spent, no
@@ -162,13 +181,31 @@ const (
 	// it must stay well clear of a slow provider handshake.
 	CampaignSendReclaimAfterMinutes = 30
 
-	// TrackingMachineWindowSeconds is how soon after a step was dispatched an
-	// open or click is treated as automated rather than a person. The clock
-	// starts when the send is handed to the worker, before the provider has
-	// even accepted the message, so a person cannot plausibly have read and
-	// acted on it inside this window; security gateways that detonate every
-	// link at delivery time routinely do.
-	TrackingMachineWindowSeconds = 10
+	// TrackingMachineWindowOpenSecondsDefault and
+	// TrackingMachineWindowClickSecondsDefault are how soon after a step was
+	// dispatched an open or a click is treated as automated rather than a
+	// person. Operator-editable under Instance settings.
+	//
+	// The clock starts when the send is handed to the worker, NOT when the
+	// recipient's server received it, so the window has to absorb the worker's
+	// SMTP handshake, the sending provider's outbound queue and the transit to
+	// the recipient's MX before the gateway that scans on arrival even starts.
+	// That is why these are not the "no human could read this fast" numbers
+	// they look like: against this anchor, ten seconds routinely expired before
+	// the scan it was meant to catch.
+	//
+	// Opens get the longer window. The two failure modes are not symmetric: a
+	// misjudged open costs a metric and an open-triggered branch, while a
+	// misjudged click costs an interested lead the automation behind it, and
+	// clicks have the scanner-network catalogue covering them as well.
+	TrackingMachineWindowOpenSecondsDefault  = 60
+	TrackingMachineWindowClickSecondsDefault = 30
+
+	// Bounds on both windows. One second is the floor rather than zero because
+	// it is effectively "off" while still keeping the rule's shape, and 15
+	// minutes is past any plausible delivery lag.
+	TrackingMachineWindowSecondsMin = 1
+	TrackingMachineWindowSecondsMax = 900
 
 	// TrackingClickBurstSeconds is the window inside which clicks on two
 	// different links of the same email from the same source are treated as
@@ -252,6 +289,11 @@ const (
 	VerificationProbeConcurrency = 4
 	// VerificationProviderConcurrency bounds parallel paid-provider lookups.
 	VerificationProviderConcurrency = 8
+	// VerificationExhaustedCooldownMinutes is how long an out-of-allowance
+	// account is left alone when its provider publishes no balance endpoint.
+	// Nothing but a billable check can tell such an account has been topped up,
+	// so retrying sooner only re-runs the batch that found it empty.
+	VerificationExhaustedCooldownMinutes = 15
 	// VerificationBreakerWindow and VerificationBreakerInvalidPct are the
 	// in-house probe's self-check: when this share of the last window of
 	// probe verdicts is "invalid", the probe itself is suspect (issue #200,
@@ -322,8 +364,8 @@ const (
 	PoolLinkPollIntervalSeconds  = 3
 	PoolLinkPlanID               = "00000000-0000-0000-0000-000000000002"
 	PoolLinkPlanPriceUSD         = 15
-	WarmupPoolTierFallbackFloor  = 25 // below this many same-tier recipients, healthy other-tier mailboxes fill in
-	WarmupPoolFallbackMinAgeDays = 3  // other-tier mailboxes must be this old before they fill in
+	WarmupPoolTierFallbackFloor  = 25 // below this many own-tier recipients, a premium tier borrows up to this many proven free mailboxes
+	WarmupPoolFallbackMinAgeDays = 3  // a free mailbox must have been a pool member this long before premium may borrow it
 	DailyThrottleNewOrgs         = 3  // new workspaces per owner per day
 
 	// CLI sign-in handshake (`warmbly auth login`). Shorter-lived than the pool

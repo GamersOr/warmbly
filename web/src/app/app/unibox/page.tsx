@@ -1,16 +1,13 @@
-// Unibox — three-column overview layout.
+// Unibox: three columns, nothing above them.
 //
-//   ┌── Top metric strip ─────────────────────────────────────────┐
-//   │ Inbox · [scope chip] · unread · awaiting · today · week · …│
-//   ├──────────┬────────────────────────┬─────────────────────────┤
+//   ┌──────────┬────────────────────────┬─────────────────────────┐
 //   │  Scope   │ Conversation list      │ Thread (live fetch)     │
-//   │  rail    │ (search + dense rows)  │ (deep-linkable URL)     │
-//   │ (220px)  │       (360px)          │  flex-1                 │
+//   │  rail    │ (title, search, rows)  │ (deep-linkable URL)     │
+//   │ (220px)  │  (drag-resizable)      │  flex-1                 │
 //   └──────────┴────────────────────────┴─────────────────────────┘
 //
-// All counts in the rail and strip come from /unibox/overview in one
-// round trip — server truth, no client guesswork. Snoozed and
-// Awaiting reply are real backend scopes, not "soon" placeholders.
+// Every count in the rail comes from /unibox/overview in one round trip,
+// so there is no metric strip: the numbers live where the clicks are.
 
 import React from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -21,12 +18,19 @@ import { ScheduledList } from "@/components/app/unibox/ScheduledList";
 import { ThreadView } from "@/components/app/unibox/ThreadView";
 import { ScopeRail, scopeKey, type UniboxScope } from "@/components/app/unibox/ScopeRail";
 import { ScopeSheet } from "@/components/app/unibox/ScopeSheet";
-import { UniboxHeader } from "@/components/app/unibox/UniboxHeader";
 import useFeatureAccess from "@/hooks/useFeatureAccess";
 import { LockedSurface } from "@/components/layout/LockedSurface";
 import { NoAccess } from "@/components/layout/NoAccess";
 import { usePermission } from "@/hooks/usePermission";
-import { useAppStore } from "@/stores";
+import {
+  useAppStore,
+  UNIBOX_LIST_DEFAULT_WIDTH,
+  UNIBOX_LIST_MAX_WIDTH,
+  UNIBOX_LIST_MIN_WIDTH,
+} from "@/stores";
+import { uniboxListMaxWidth, uniboxThreadReserve } from "@/lib/uniboxLayout";
+import { useResizablePane } from "@/hooks/useResizablePane";
+import { useMediaQuery, LG_QUERY } from "@/hooks/useMediaQuery";
 import useUniboxOverview from "@/lib/api/hooks/app/unibox/useUniboxOverview";
 import { cn } from "@/lib/utils";
 import type { UniboxSearchParams } from "@/lib/api/models/app/unibox/UniboxSearch";
@@ -52,6 +56,21 @@ export default function UniboxPage() {
   const navigate = useNavigate();
   const [scopeSheetOpen, setScopeSheetOpen] = React.useState(false);
 
+  // ── Pane widths ────────────────────────────────────────────────
+  // The list column is drag-resizable against the thread pane and the width is
+  // persisted (warmbly-storage). Two separate bounds apply: the preference's
+  // own 280-620 (clamped in the store) and what the viewport can actually give
+  // it right now, measured below. The rendered width is the smaller of the two,
+  // and that is the number ARIA reports, so the splitter never announces a
+  // width the column does not have.
+  const listWidth = useAppStore((s) => s.uniboxListWidth);
+  const setListWidth = useAppStore((s) => s.setUniboxListWidth);
+  const contactRailOpen = useAppStore((s) => s.uniboxContactRailOpen);
+  const isWide = useMediaQuery(LG_QUERY);
+  const rowRef = React.useRef<HTMLDivElement>(null);
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const [maxWidth, setMaxWidth] = React.useState(UNIBOX_LIST_MAX_WIDTH);
+
   // ── URL state ──────────────────────────────────────────────────
   // Readable, path-based URLs: /app/unibox/<scope>[/<threadId>]. The scope is a
   // path segment (all, unread, today, week, awaiting, snoozed, scheduled, or a
@@ -62,6 +81,52 @@ export default function UniboxPage() {
   const urlScope = routeParams.scope ?? "all";
   const urlThread = routeParams.threadId ?? null;
   const urlScopeRef = searchParams.get("ref");
+
+  // The contact rail is a flex sibling inside the thread pane, so the thread's
+  // reserve has to include it whenever it is actually showing.
+  const threadReserve = uniboxThreadReserve(
+    !!urlThread && isWide && contactRailOpen,
+  );
+
+  const measureMax = React.useCallback(() => {
+    const row = rowRef.current;
+    const list = listRef.current;
+    if (!row || !list) return UNIBOX_LIST_MAX_WIDTH;
+    return uniboxListMaxWidth({
+      rowRight: row.getBoundingClientRect().right,
+      listLeft: list.getBoundingClientRect().left,
+      reservedForThread: threadReserve,
+    });
+  }, [threadReserve]);
+
+  // Re-measure on any layout change, not just window resize: collapsing the app
+  // nav or opening the contact rail moves the same edges.
+  React.useLayoutEffect(() => {
+    const row = rowRef.current;
+    if (!row) return;
+    const sync = () => setMaxWidth(measureMax());
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(row);
+    return () => ro.disconnect();
+  }, [measureMax]);
+
+  // The splitter itself: pointer capture, the body lock, the window-splitter
+  // keys and the ARIA bundle all live in the shared hook, which the assistant
+  // panel's edge handle uses too.
+  const { width: renderedWidth, separatorProps } = useResizablePane({
+    value: listWidth,
+    onChange: setListWidth,
+    min: UNIBOX_LIST_MIN_WIDTH,
+    max: maxWidth,
+    defaultValue: UNIBOX_LIST_DEFAULT_WIDTH,
+    measureMax,
+    paneRef: listRef,
+    cssVar: "--unibox-list-w",
+    label: "Resize the conversation list",
+    controls: "unibox-conversation-list",
+    valueText: (w) => `Conversation list ${w} pixels`,
+  });
 
   // goTo writes the URL by merging the requested changes over the current path
   // (an omitted field keeps its current value; pass null to clear).
@@ -235,6 +300,12 @@ export default function UniboxPage() {
   const [params, setParams] = React.useState<UniboxSearchParams>(() =>
     paramsForScope("newest"),
   );
+  // What the scope alone would query. The list compares against it to tell
+  // a user-added filter from the scope's own parameters.
+  const baseParams = React.useMemo(
+    () => paramsForScope(params.sortBy),
+    [paramsForScope, params.sortBy],
+  );
   // Reset filters when the scope changes (or a tag scope re-resolves as
   // the mailbox directory loads), keeping only the sort. Setting state
   // during render re-renders before commit, so the stale params never
@@ -272,16 +343,16 @@ export default function UniboxPage() {
       }
       case "tag": {
         const t = overviewData?.tags.find((x) => x.id === scope.tagId);
-        return t ? `Tag · ${t.title}` : "Tag";
+        return t ? t.title : "Tag";
       }
       case "category": {
         const c = overviewData?.categories?.find(
           (x) => x.id === scope.categoryId,
         );
-        return c ? `Label · ${c.title}` : "Label";
+        return c ? c.title : "Label";
       }
       default:
-        return "All";
+        return "All mail";
     }
   }, [scope, overviewData]);
 
@@ -296,19 +367,13 @@ export default function UniboxPage() {
       blurb="Read and reply to every inbound message across every connected mailbox from one place — searchable, filterable, with realtime updates."
       minPlan="starter"
       bullets={[
-        "Live overview: unread, awaiting reply, snoozed, today, week",
-        "Scope rail with per-mailbox + per-tag unread counts",
+        "Inbox, unread, awaiting reply and snoozed views with live counts",
+        "Per-mailbox, per-label and per-tag views in one rail",
         "Deep-linkable threads as a clean URL path",
         "Snooze any thread to clear it from the inbox until later",
       ]}
     >
       <div className="flex flex-col h-full bg-white">
-        <UniboxHeader
-          scopeLabel={scopeLabel}
-          onClearScope={() => setScope({ kind: "all" })}
-          onOpenScopeSheet={() => setScopeSheetOpen(true)}
-        />
-
         <ScopeSheet
           open={scopeSheetOpen}
           setOpen={setScopeSheetOpen}
@@ -316,7 +381,7 @@ export default function UniboxPage() {
           onChange={setScope}
         />
 
-        <div className="flex-1 min-h-0 flex">
+        <div ref={rowRef} className="flex-1 min-h-0 flex">
           <aside className="hidden lg:flex w-[220px] shrink-0 h-full">
             <ScopeRail scope={scope} onChange={setScope} />
           </aside>
@@ -324,14 +389,20 @@ export default function UniboxPage() {
           {scope.kind === "scheduled" ? (
             // Scheduled scope takes the full right side — a
             // queued send has no thread context to load.
-            <div className="flex-1 min-w-0 flex flex-col overflow-hidden border-l border-slate-200">
-              <ScheduledList />
+            <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+              <ScheduledList onOpenScopeSheet={() => setScopeSheetOpen(true)} />
             </div>
           ) : (
             <>
               <div
+                ref={listRef}
+                id="unibox-conversation-list"
+                // The width only applies from md up; below it the list is the
+                // whole screen and the thread replaces it. Already measured
+                // against the viewport, so no CSS cap is needed on top.
+                style={{ "--unibox-list-w": `${renderedWidth}px` } as React.CSSProperties}
                 className={cn(
-                  "w-full md:w-[360px] shrink-0 border-r border-slate-200 overflow-hidden flex-col",
+                  "w-full shrink-0 overflow-hidden flex-col md:w-[var(--unibox-list-w)]",
                   urlThread ? "hidden md:flex" : "flex",
                 )}
               >
@@ -339,8 +410,22 @@ export default function UniboxPage() {
                   scopeKey={scopeKey(scope)}
                   scopeLabel={scopeLabel}
                   params={params}
+                  baseParams={baseParams}
                   setParams={setParams}
+                  onOpenScopeSheet={() => setScopeSheetOpen(true)}
                 />
+              </div>
+
+              {/* The divider IS the drag handle: a 6px column with the
+                  hairline centred in it, so the grab area never overlaps
+                  either pane's scrollbar. */}
+              <div
+                {...separatorProps}
+                className="group hidden md:flex w-1.5 shrink-0 cursor-col-resize items-stretch justify-center outline-none"
+              >
+                {/* The hairline is the whole control, so focus has to thicken
+                    and colour it: there is no outline to fall back on. */}
+                <span className="w-px bg-slate-200 transition-[background-color,width] group-hover:bg-sky-400 group-active:bg-sky-500 group-focus-visible:w-0.5 group-focus-visible:bg-sky-500" />
               </div>
 
               <div
@@ -354,7 +439,7 @@ export default function UniboxPage() {
                     <button
                       type="button"
                       onClick={() => goTo({ threadId: null })}
-                      className="md:hidden flex items-center gap-1 px-3 h-10 shrink-0 border-b border-slate-200 text-[13px] font-medium text-slate-600 hover:text-slate-900 active:bg-slate-50"
+                      className="md:hidden flex items-center gap-1 px-3 h-10 shrink-0 border-b border-slate-200 text-[12.5px] font-medium text-slate-600 hover:text-slate-900 active:bg-slate-50"
                     >
                       <ChevronLeftIcon className="w-4 h-4" />
                       Inbox
@@ -370,15 +455,13 @@ export default function UniboxPage() {
                 ) : (
                   <div className="flex-1 flex items-center justify-center">
                     <div className="text-center px-5">
-                      <div className="w-8 h-8 rounded-md bg-slate-100 flex items-center justify-center mx-auto mb-3 text-slate-400">
-                        <InboxIcon className="w-4 h-4" />
-                      </div>
-                      <p className="text-[12.5px] font-medium text-slate-700">
-                        Select a conversation
+                      <InboxIcon className="w-5 h-5 text-slate-300 mx-auto mb-2.5" strokeWidth={1.5} />
+                      <p className="text-[12.5px] font-medium text-slate-600">
+                        No conversation open
                       </p>
-                      <p className="text-[11.5px] text-slate-400 mt-1 max-w-[34ch] leading-relaxed">
-                        Pick a thread from the list. It opens in the URL path so
-                        you can share or refresh.
+                      <p className="text-[11.5px] text-slate-400 mt-1">
+                        Pick one from the list, or press{" "}
+                        <kbd className="inline-flex h-4 px-1 items-center rounded border border-slate-200 bg-slate-50 font-mono text-[10px] text-slate-500">j</kbd>
                       </p>
                     </div>
                   </div>

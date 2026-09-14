@@ -59,10 +59,17 @@ export interface CreateCampaignInput {
         name: string;
         subject: string;
         body_plain: string;
-        body_html: string;
+        // Optional: leave it off for a plain-text step and the backend renders
+        // the HTML part from body_plain, keeping the line structure and turning
+        // bare URLs into links so click tracking has hrefs to wrap.
+        body_html?: string;
         body_sync?: boolean;
         body_code?: boolean;
         wait_after?: number;
+        // Reply in the contact's existing conversation instead of starting a
+        // new one. Defaults to true, which is what makes a follow-up a
+        // follow-up.
+        thread_reply?: boolean;
     }>;
 
     // A/B variants for the first step

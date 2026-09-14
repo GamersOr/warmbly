@@ -41,10 +41,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/warmbly/warmbly/internal/infrastructure/db"
+	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/argon2"
+	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/seed"
 )
 
@@ -450,12 +453,13 @@ func joinWarmupPool(ctx context.Context, pool *pgxpool.Pool, accountID uuid.UUID
 	if poolType == "" {
 		return nil
 	}
-	_, err := pool.Exec(ctx, `
-		INSERT INTO warmup_pool_participants (pool_id, email_account_id)
-		SELECT id, $1 FROM warmup_pools WHERE pool_type = $2::warmup_pool_type
-		ON CONFLICT DO NOTHING`,
-		accountID, poolType)
-	return err
+	poolID, ok := models.WarmupPoolID(poolType)
+	if !ok {
+		return fmt.Errorf("unknown warmup pool type %q", poolType)
+	}
+	// MoveToPool moves a mailbox that sits in the other pool rather than
+	// skipping it, which the one-membership-per-mailbox index requires.
+	return repository.NewWarmupRepository(pool).MoveToPool(ctx, poolID, accountID, "sender_receiver")
 }
 
 func upsertDevTrialSubscription(ctx context.Context, pool *pgxpool.Pool) error {

@@ -181,6 +181,15 @@ type PoolLinkWorkspaceMailbox struct {
 	Status   string    `json:"status"`
 }
 
+// PoolLinkWarmupDeliveryQuery asks the cloud whether one message that arrived
+// in a mailbox it warms is its own warmup mail. The verify header does not
+// survive every provider, so the instance cannot always tell on its own.
+type PoolLinkWarmupDeliveryQuery struct {
+	Sender    string `json:"sender"`
+	MessageID string `json:"message_id"`
+	Subject   string `json:"subject"`
+}
+
 // PoolLinkMailboxState is the per-mailbox view shown in both dashboards.
 type PoolLinkMailboxState struct {
 	RemoteID       uuid.UUID              `json:"remote_id"`
@@ -261,4 +270,15 @@ type CloudLinkMailboxRow struct {
 	EnrolledAt *time.Time            `json:"enrolled_at,omitempty"`
 	Managed    bool                  `json:"managed"`
 	Cloud      *PoolLinkMailboxState `json:"cloud,omitempty"`
+}
+
+// PoolLinkOffer is the self-hosted pool plan as an upgrade prompt sees it:
+// what it costs, and whether it can actually be bought here.
+type PoolLinkOffer struct {
+	Available        bool    `json:"available"`
+	MonthlyAvailable bool    `json:"monthly_available"`
+	YearlyAvailable  bool    `json:"yearly_available"`
+	MonthlyUSD       float32 `json:"monthly_usd"`
+	YearlyUSD        float32 `json:"yearly_usd"`
+	Currency         string  `json:"currency"`
 }

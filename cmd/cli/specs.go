@@ -137,7 +137,7 @@ ask before they do it.`,
 				Method: http.MethodGet, Path: "/campaigns/{id}/steps",
 				Args: []argSpec{{Name: "id", Help: "The campaign's id"}},
 				Table: output.Table{Root: "data", Columns: []output.Column{
-					col("ID", "id"), colt("SUBJECT", "subject", 44), col("WAIT", "wait_after"), col("POSITION", "position"),
+					col("ID", "id"), colt("SUBJECT", "subject", 40), col("WAIT", "wait_after"), col("POSITION", "position"), col("IN THREAD", "thread_reply"),
 				}, Empty: "This campaign has no steps yet."},
 			},
 			{
@@ -161,6 +161,7 @@ ask before they do it.`,
 					{Name: "body-html", Help: "HTML body"},
 					{Name: "body-plain", Help: "Plain text body"},
 					{Name: "wait-after", Help: "Days to wait before this step", Kind: flagInt},
+					{Name: "thread-reply", Help: "Reply in the contact's existing thread (on by default; a threading step carries that conversation's subject)", Kind: flagBool},
 				},
 				Success: "Step updated.",
 			},
@@ -266,6 +267,46 @@ report what would stop it. Nothing is sent.`,
 				Method: http.MethodPost, Path: "/campaigns/{id}/stop", Body: bodyOptional,
 				Args:    []argSpec{{Name: "id", Help: "The campaign's id"}},
 				Success: "Campaign stopped.",
+			},
+			{
+				Name: "pause-lead", Short: "Hold one lead's flow in this campaign",
+				Long: `Park ONE contact's flow inside ONE campaign, until a date or until you
+resume them. The contact stays subscribed and stays a lead; the sequence picks
+up where it stopped. This is not an unsubscribe and not a suppression.
+
+Warmbly writes the same hold by itself when a recipient answers with an
+out-of-office auto-reply.`,
+				Example: "warmbly campaign pause-lead CAMPAIGN_ID CONTACT_ID --until 2026-09-21T17:00:00Z --reason \"On holiday\"",
+				Method:  http.MethodPost, Path: "/campaigns/{id}/leads/{contact}/pause", Body: bodyOptional,
+				Args: []argSpec{
+					{Name: "id", Help: "The campaign's id"},
+					{Name: "contact", Help: "The contact's id"},
+				},
+				Flag: []flagSpec{
+					{Name: "until", Help: "When the hold lifts (RFC 3339). Omit for a hold only a resume lifts"},
+					{Name: "reason", Help: "Note shown next to the hold in the dashboard"},
+				},
+				Success: "Lead paused.",
+			},
+			{
+				Name: "resume-lead", Short: "Lift a lead's hold now",
+				Long: `Lift the hold and let the sequence continue. The held time is dropped rather
+than carried, so the next step returns to the schedule it would have had without
+the hold. Resuming a lead that is not held succeeds and changes nothing.`,
+				Method: http.MethodPost, Path: "/campaigns/{id}/leads/{contact}/resume", Body: bodyOptional,
+				Args: []argSpec{
+					{Name: "id", Help: "The campaign's id"},
+					{Name: "contact", Help: "The contact's id"},
+				},
+				Success: "Lead resumed.",
+			},
+			{
+				Name: "lead-hold", Short: "Whether one lead's flow is held",
+				Method: http.MethodGet, Path: "/campaigns/{id}/leads/{contact}/hold",
+				Args: []argSpec{
+					{Name: "id", Help: "The campaign's id"},
+					{Name: "contact", Help: "The contact's id"},
+				},
 			},
 			{
 				Name: "logs", Short: "The campaign's send log",
@@ -544,10 +585,21 @@ dashboard warns, and it should.`,
 				Success: "Mailbox updated.",
 			},
 			{
-				Name: "remove", Aliases: []string{"rm", "delete"}, Short: "Disconnect a mailbox",
+				Name: "remove", Aliases: []string{"rm", "delete"}, Short: "Disconnect a mailbox and erase its data",
 				Method: http.MethodDelete, Path: "/emails/{id}",
-				Args:    []argSpec{{Name: "id", Help: "The mailbox's id"}},
-				Success: "Mailbox disconnected.",
+				Args: []argSpec{{Name: "id", Help: "The mailbox's id"}},
+				Long: `Disconnect a mailbox and delete everything derived from it.
+
+This is not reversible. The mailbox's imported mail, warmup history,
+credentials and scheduled sends go with it, the stored message bodies are
+deleted from object storage, and for a Gmail mailbox the OAuth grant is handed
+back to Google so Warmbly disappears from the account's third-party access
+list. Microsoft publishes no such endpoint, so an Outlook mailbox's tokens are
+destroyed here and the app is removed by the account owner.
+
+To stop a mailbox sending without losing anything, set it inactive instead:
+` + "`warmbly mailbox edit MAILBOX_ID --input '{\"status\":\"inactive\"}'`" + `.`,
+				Success: "Mailbox disconnected. Its stored mail is being erased and its stored credentials destroyed; a Gmail mailbox's access is also revoked with Google.",
 			},
 			{
 				Name: "check", Aliases: []string{"auth-check"}, Short: "Show the mailbox's SPF, DKIM and DMARC",

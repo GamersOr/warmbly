@@ -2710,6 +2710,7 @@ dependencies = [
  "libc",
  "libz-sys",
  "num_enum",
+ "openssl-sys",
  "pkg-config",
 ]
 
@@ -3967,6 +3968,7 @@ dependencies = [
  "moka",
  "rdkafka",
  "reqwest 0.11.27",
+ "rustls 0.23.36",
  "schema_registry_converter",
  "sentry",
  "serde",

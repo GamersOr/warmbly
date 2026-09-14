@@ -108,21 +108,21 @@ type Service interface {
 	// just because a deal hasn't been created yet.
 	MoveContactDealStage(ctx context.Context, orgID, contactID, pipelineID, stageID uuid.UUID) (*models.Deal, *errx.Error)
 
-	// LabelThread additively applies unibox conversation labels (categories owned
-	// by userID) to a thread, for the "label_email" automation action. No-op on
-	// empty input; categories not owned by userID are silently ignored.
-	LabelThread(ctx context.Context, userID uuid.UUID, threadID string, categoryIDs []uuid.UUID) error
+	// LabelThread additively applies unibox conversation labels (categories the
+	// workspace owns) to a thread, for the "label_email" automation action.
+	// No-op on empty input; foreign categories are silently ignored.
+	LabelThread(ctx context.Context, orgID uuid.UUID, threadID string, categoryIDs []uuid.UUID) error
 	// LabelLatestThreadForContact finds the contact's most recent conversation in
-	// userID's unibox and labels it, for the "label_email" campaign step action
-	// (which knows the contact but not the thread id). Returns the labeled thread
-	// id, or "" when the contact has no conversation yet.
-	LabelLatestThreadForContact(ctx context.Context, userID uuid.UUID, contactEmail string, categoryIDs []uuid.UUID) (string, error)
+	// the workspace's unibox and labels it, for the "label_email" campaign step
+	// action (which knows the contact but not the thread id). Returns the
+	// labeled thread id, or "" when the contact has no conversation yet.
+	LabelLatestThreadForContact(ctx context.Context, orgID uuid.UUID, contactEmail string, categoryIDs []uuid.UUID) (string, error)
 	// LatestInboundFromContact returns the subject + snippet of the newest email
 	// received from the contact ("" when none). Backs the campaign AI step's
 	// incoming-email context.
 	LatestInboundFromContact(ctx context.Context, userID uuid.UUID, contactEmail string) (string, string, error)
 
-	// ListCategories returns the user's contact categories, which double as
+	// ListCategories returns the workspace's contact categories, which double as
 	// unibox conversation labels (same registry). An AI agent step offers these
 	// by name and resolves the model's pick to an id. CreateCategory mints a new
 	// one for the agent's create-on-the-fly path (opt-in per step).
@@ -492,12 +492,13 @@ func (s *service) MoveContactDealStage(ctx context.Context, orgID, contactID, pi
 	return updated, nil
 }
 
-// ListCategories returns the user's categories (contact tags == unibox labels).
-func (s *service) ListCategories(ctx context.Context, userID uuid.UUID) ([]models.MiniCategory, error) {
+// ListCategories returns the workspace's categories (contact tags == unibox
+// labels).
+func (s *service) ListCategories(ctx context.Context, orgID uuid.UUID) ([]models.MiniCategory, error) {
 	if s.categoryRepo == nil {
 		return nil, nil
 	}
-	groups, err := s.categoryRepo.List(ctx, userID)
+	groups, err := s.categoryRepo.List(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -510,15 +511,16 @@ func (s *service) ListCategories(ctx context.Context, userID uuid.UUID) ([]model
 
 // CreateCategory mints a new category (tag/label) for the agent's opt-in
 // create-on-the-fly path. GroupRepository.Create validates the title (1-50) and
-// enforces the per-user cap; color defaults to slate when blank.
-func (s *service) CreateCategory(ctx context.Context, userID uuid.UUID, title, color string) (models.MiniCategory, error) {
+// enforces the per-workspace cap; color defaults to slate when blank. The
+// creator is nil: an automation has no human behind it.
+func (s *service) CreateCategory(ctx context.Context, orgID uuid.UUID, title, color string) (models.MiniCategory, error) {
 	if s.categoryRepo == nil {
 		return models.MiniCategory{}, errx.New(errx.BadRequest, "categories are not available")
 	}
 	if strings.TrimSpace(color) == "" {
 		color = "#64748b"
 	}
-	g, err := s.categoryRepo.Create(ctx, userID, &models.GroupCreate{Title: strings.TrimSpace(title), Color: color})
+	g, err := s.categoryRepo.Create(ctx, orgID, uuid.Nil, &models.GroupCreate{Title: strings.TrimSpace(title), Color: color})
 	if err != nil {
 		return models.MiniCategory{}, err
 	}
@@ -1025,12 +1027,14 @@ func (s *service) ProcessIncomingReply(ctx context.Context, emailAccountID uuid.
 
 	text := strings.TrimSpace(msg.Snippet)
 	text = strings.TrimSpace(text + "\n" + msg.Subject)
-	intent, confidence := classifyReply(text, settings.ReplyIntent)
 
 	// Layered reply classification (header -> lexicon -> optional model) is run
 	// further down, once the campaign context is known to store it on. Classifying
 	// only inside that block means a reply with no campaign match never spends a
-	// model call.
+	// model call. replyClass is what it decided, read after the block; held is
+	// when an out-of-office hold lifts, for the notification to name.
+	var replyClass string
+	var held *time.Time
 
 	var campaignID *uuid.UUID
 	var sequenceID *uuid.UUID
@@ -1104,7 +1108,17 @@ func (s *service) ProcessIncomingReply(ctx context.Context, emailAccountID uuid.
 		// it (including reply_automated for OOO / autoresponders). Layers 1-2 run
 		// for every reply, so OOO/unsubscribe stay correct even when the gate
 		// skipped the model.
+		replyClass = replyResult.Class
 		_ = s.campaignProgressRepo.RecordReplyClassification(ctx, cID, ctID, sID, replyResult.Class, replyResult.Source, replyResult.Confidence)
+
+		// Out of office: park the contact's next step until they are back
+		// rather than writing to an empty desk. An automated reply never
+		// stamps replied_at, so without this the follow-up goes out on
+		// schedule and the sequence is over before they read any of it
+		// (issue #470).
+		if replyResult.Class == replyclassify.ClassOutOfOffice && settings.ReplyIntent.HoldOnOutOfOffice {
+			held = s.holdForOutOfOffice(ctx, cID, ctID, settings.ReplyIntent, msg)
+		}
 
 		// OOO trap fix: only a HUMAN reply stamps replied_at. An auto_reply /
 		// out_of_office must NOT count as a reply, or it would (a) trip
@@ -1164,6 +1178,15 @@ func (s *service) ProcessIncomingReply(ctx context.Context, emailAccountID uuid.
 		// just-classified reply_class and (human-only) replied_at have already been
 		// persisted above, so the matcher reads them off the loaded progress row.
 		s.fireInstantActions(ctx, cID, ctID, sID, "reply")
+	}
+
+	intent, confidence := classifyReply(text, settings.ReplyIntent)
+	// The layered classifier reads auto-reply headers and a multilingual
+	// out-of-office vocabulary the workspace's own keyword list does not, so
+	// its verdict settles the case the keywords missed. Only the automated
+	// classes are folded in: sentiment stays the keyword list's call.
+	if replyClass == replyclassify.ClassOutOfOffice {
+		intent, confidence = models.ReplyIntentOutOfOffice, 0.95
 	}
 
 	actionTaken := ""
@@ -1275,14 +1298,64 @@ func (s *service) ProcessIncomingReply(ctx context.Context, emailAccountID uuid.
 	if uid, perr := uuid.Parse(account.UserID); perr == nil {
 		cat := models.NotifInboundReply
 		title := "New reply from " + sender
+		body := msg.Subject
 		if intent == models.ReplyIntentOutOfOffice {
 			cat = models.NotifInboundOOO
 			title = "Out-of-office from " + sender
+			// Say what happened to their sequence, not only that mail arrived.
+			if held != nil {
+				body = "Held until " + held.Format("2 Jan") + " · " + msg.Subject
+			}
 		}
-		s.notify(uid, account.OrganizationID, cat, title, msg.Subject, "/app/unibox", map[string]any{"intent": string(intent)})
+		s.notify(uid, account.OrganizationID, cat, title, body, "/app/unibox", map[string]any{"intent": string(intent)})
 	}
 
 	return nil
+}
+
+// holdForOutOfOffice parks the contact's next step until they are back: the
+// return date the auto-reply names plus a business day, else the workspace's
+// fallback. Best-effort; a hold that cannot be written must never fail the
+// reply ingest behind it. Returns when the hold lifts, or nil if none was set.
+func (s *service) holdForOutOfOffice(ctx context.Context, campaignID, contactID uuid.UUID, cfg models.ReplyIntentSettings, msg *models.EmailMessageStoreData) *time.Time {
+	if s.campaignProgressRepo == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	body := firstNonEmpty(msg.BodyText, msg.Snippet)
+	// Clamped here as well as in Normalize: a value written straight into the
+	// settings row has never been through it, and a zero would resume into the
+	// away message that triggered the hold.
+	days := min(max(cfg.OutOfOfficeHoldDays, models.OOOHoldDaysMin), models.OOOHoldDaysMax)
+	fallback := func() (time.Time, string) {
+		return now.AddDate(0, 0, days), "auto-reply, no return date"
+	}
+	until, reason := fallback()
+	if back, ok := replyclassify.ParseReturnDate(msg.Subject, body, now); ok {
+		until, reason = replyclassify.NextBusinessDay(back), "back "+back.Format("2 Jan 2006")
+	}
+	// A return date already behind us (a stale auto-reply, a clock skew) would
+	// hold nothing; the fallback is the honest answer.
+	if !until.After(now) {
+		until, reason = fallback()
+	}
+	hold, err := s.campaignProgressRepo.HoldLead(ctx, campaignID, contactID, &until, reason, models.LeadHoldSourceOutOfOffice)
+	if err != nil {
+		log.Warn().Err(err).
+			Str("campaign_id", campaignID.String()).Str("contact_id", contactID.String()).
+			Msg("out-of-office hold could not be written; the follow-up keeps its schedule")
+		return nil
+	}
+	if hold == nil {
+		// Left alone on purpose: a member's own pause, or a longer hold this
+		// auto-reply would have cut short.
+		return nil
+	}
+	log.Info().
+		Str("campaign_id", campaignID.String()).Str("contact_id", contactID.String()).
+		Time("until", until).Str("reason", reason).
+		Msg("out-of-office auto-reply: lead held until the contact is back")
+	return hold.Until
 }
 
 func ptrTime(t time.Time) *time.Time {
@@ -2029,7 +2102,7 @@ func (s *service) ProcessRetryableDeadLetters(ctx context.Context) (int, *errx.E
 // step now that a file can be scoped to one.
 func worstStepContentScore(seqs []models.Sequence, attachmentsFor func(models.Sequence) int) (worst, worstStep int, issue string, scored int) {
 	worst = 101
-	for _, seq := range seqs {
+	for i, seq := range seqs {
 		if seq.Kind != "" && seq.Kind != "email" {
 			continue
 		}
@@ -2038,7 +2111,10 @@ func worstStepContentScore(seqs []models.Sequence, attachmentsFor func(models.Se
 		if attachmentsFor != nil {
 			attachments = attachmentsFor(seq)
 		}
-		r := warmlint.ScoreWithAttachments(seq.Subject, seq.BodyHTML, seq.BodyPlain, attachments)
+		// A step that replies in the thread carries the conversation's
+		// subject, so scoring its own (blank, by design) would report every
+		// follow-up as having no subject line.
+		r := warmlint.ScoreWithAttachments(models.StepSubject(seqs, i), seq.BodyHTML, seq.BodyPlain, attachments)
 		if r.Score >= worst {
 			continue
 		}
