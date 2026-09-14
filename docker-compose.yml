@@ -573,7 +573,7 @@ services:
   # use `make app` / docker-compose.dev.yml instead.
   web:
     restart: unless-stopped
-    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/web:${WARMBLY_TAG:-prod}
+    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/web:${WARMBLY_WEB_TAG:-prod}
     # ports: ["5173:80"]
     environment:
       WARMBLY_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
@@ -597,7 +597,7 @@ services:
 
   admin:
     restart: unless-stopped
-    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/admin:${WARMBLY_TAG:-prod}
+    image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/admin:${WARMBLY_ADMIN_TAG:-prod}
     # ports: ["5174:80"]
     environment:
       WARMBLY_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
