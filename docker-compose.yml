@@ -330,13 +330,6 @@ services:
   backend:
     restart: unless-stopped
     image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/backend:${WARMBLY_TAG:-prod}
-    build:
-      context: .
-      dockerfile: deploy/docker/backend.Dockerfile
-      args:
-        VERSION: ${WARMBLY_BUILD_VERSION:-}
-        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
-        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     # ports: ["8080:8080"]
     environment:
       <<: *selfhost-env
@@ -410,13 +403,6 @@ services:
   forms:
     restart: unless-stopped
     image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/forms:${WARMBLY_TAG:-prod}
-    build:
-      context: .
-      dockerfile: deploy/docker/forms.Dockerfile
-      args:
-        VERSION: ${WARMBLY_BUILD_VERSION:-}
-        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
-        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     # ports: ["${FORMS_PORT:-8090}:8090"]
     environment:
       GIN_MODE: release
@@ -454,13 +440,6 @@ services:
   consumer:
     restart: unless-stopped
     image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/consumer:${WARMBLY_TAG:-prod}
-    build:
-      context: .
-      dockerfile: deploy/docker/consumer.Dockerfile
-      args:
-        VERSION: ${WARMBLY_BUILD_VERSION:-}
-        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
-        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     environment:
       <<: *selfhost-env
       ENCRYPTED_KEYS_PROVIDER: postgres
@@ -479,13 +458,6 @@ services:
   worker:
     restart: unless-stopped
     image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/worker:${WARMBLY_TAG:-prod}
-    build:
-      context: .
-      dockerfile: deploy/docker/worker.Dockerfile
-      args:
-        VERSION: ${WARMBLY_BUILD_VERSION:-}
-        COMMIT: ${WARMBLY_BUILD_COMMIT:-}
-        BUILT_AT: ${WARMBLY_BUILD_TIME:-}
     environment:
       <<: *selfhost-env
       # Dovecot in the sandbox profile uses a self-signed cert. Set
@@ -602,9 +574,6 @@ services:
   web:
     restart: unless-stopped
     image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/web:${WARMBLY_TAG:-prod}
-    build:
-      context: ./web
-      dockerfile: Dockerfile
     # ports: ["5173:80"]
     environment:
       WARMBLY_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
@@ -629,9 +598,6 @@ services:
   admin:
     restart: unless-stopped
     image: ${WARMBLY_IMAGE_PREFIX:-ghcr.io/warmbly/warmbly}/admin:${WARMBLY_TAG:-prod}
-    build:
-      context: ./admin
-      dockerfile: Dockerfile
     # ports: ["5174:80"]
     environment:
       WARMBLY_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
