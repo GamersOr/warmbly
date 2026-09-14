@@ -27981,12 +27981,14 @@
           "score": {
             "type": "integer"
           },
-          "spam_score": {
-            "type": "integer"
-          },
           "evaluated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "spam_score": {
+            "type": "integer",
+            "deprecated": true,
+            "description": "Always 0. The accumulating warmup spam score was retired; read score and reason. Removed at the next API version."
           }
         }
       },
