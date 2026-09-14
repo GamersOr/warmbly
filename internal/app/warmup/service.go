@@ -75,6 +75,8 @@ type Service interface {
 	// RemoveFromAllPools takes the mailbox out of warmup; a caller that knows it is not entitled
 	// does not know which pool it is in.
 	RemoveFromAllPools(ctx context.Context, accountID uuid.UUID) *errx.Error
+	// CanParticipate is pinned to the pool the caller drew the row from; a
+	// partner borrowed from the other tier is gated there, not in the sender's pool (#495).
 	CanParticipate(ctx context.Context, accountID uuid.UUID, poolType string) (bool, string, *errx.Error)
 	ApplySpamReport(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, reportType string) (*models.WarmupParticipantHealth, *errx.Error)
 	// RecordSpamPlacement records that a warmup message landed in the
