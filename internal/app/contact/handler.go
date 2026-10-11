@@ -3,6 +3,7 @@ package contact
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/mailhost"
+	"github.com/warmbly/warmbly/internal/utils"
 	"github.com/warmbly/warmbly/internal/utils/paging"
 	"github.com/warmbly/warmbly/internal/utils/validate"
 )
@@ -69,7 +72,7 @@ func (s *contactService) Add(ctx context.Context, userID string, orgID uuid.UUID
 		return nil, xerr
 	}
 
-	s.publishContactsReload(ctx, userID, "contacts:add")
+	s.publishContactsReload(ctx, userID, "contacts:add", orgID)
 	var attached []string
 	for i := range contacts {
 		attached = append(attached, contacts[i].Campaigns...)
@@ -114,8 +117,39 @@ func (s *contactService) Search(ctx context.Context, orgID, cursor, category, li
 	if err := validateLeadFilters(filters); err != nil {
 		return nil, err
 	}
+	if err := validateSort(filters); err != nil {
+		return nil, err
+	}
+	if err := validateMailHosts(filters); err != nil {
+		return nil, err
+	}
 
 	return s.contactRepository.Search(ctx, orgID, categoryId, cursorPos, filters, limitN)
+}
+
+// validateSort rejects a custom-field sort whose key could never name a field.
+// A bare column name that is unknown still falls back to created_at, which is
+// the published behaviour; the custom form is new and can be strict.
+func validateSort(filters models.SearchContacts) *errx.Error {
+	key, ok := models.ContactSortCustomField(filters.SortBy)
+	if !ok {
+		return nil
+	}
+	if !utils.IsValidJSONKey(key) {
+		return errx.NewWithIdentifier(errx.BadRequest, "invalid_sort_by", "invalid sort_by: custom field name must "+utils.JSONKeyRules)
+	}
+	return nil
+}
+
+// validateMailHosts refuses a provider filter naming no known host; "" is
+// allowed and matches contacts the provider sweep has not reached yet.
+func validateMailHosts(filters models.SearchContacts) *errx.Error {
+	for _, h := range filters.MailHosts {
+		if !mailhost.Valid(h) {
+			return errx.NewWithIdentifier(errx.BadRequest, "invalid_mail_host", "invalid mail_hosts: unknown provider "+strconv.Quote(h))
+		}
+	}
+	return nil
 }
 
 // validateLeadFilters gates the single-campaign Leads-view filters: an unknown
@@ -159,7 +193,7 @@ func (s *contactService) BulkUpdate(ctx context.Context, userID string, orgID uu
 		return nil, xerr
 	}
 
-	s.publishContactsReload(ctx, userID, "contacts:bulk_update")
+	s.publishContactsReload(ctx, userID, "contacts:bulk_update", orgID)
 	s.wakeCampaigns(ctx, orgID, data.AddCampaigns)
 	s.syncSegmentCampaigns(ctx, orgID)
 	return updated, nil
@@ -171,7 +205,7 @@ func (s *contactService) Update(ctx context.Context, userID, contactID string, o
 		return nil, xerr
 	}
 
-	s.publishContactsReload(ctx, userID, "contacts:update:"+contactID)
+	s.publishContactsReload(ctx, userID, "contacts:update:"+contactID, orgID)
 	s.wakeCampaigns(ctx, orgID, data.Campaigns)
 	s.syncSegmentCampaigns(ctx, orgID)
 	return updated, nil
@@ -182,7 +216,7 @@ func (s *contactService) BulkDelete(ctx context.Context, userID string, orgID uu
 		return xerr
 	}
 
-	s.publishContactsReload(ctx, userID, "contacts:bulk_delete")
+	s.publishContactsReload(ctx, userID, "contacts:bulk_delete", orgID)
 	return nil
 }
 
@@ -191,7 +225,7 @@ func (s *contactService) Delete(ctx context.Context, userID string, orgID uuid.U
 		return xerr
 	}
 
-	s.publishContactsReload(ctx, userID, "contacts:delete:"+contactID)
+	s.publishContactsReload(ctx, userID, "contacts:delete:"+contactID, orgID)
 	return nil
 }
 
@@ -215,10 +249,35 @@ func (s *contactService) GetByEmail(ctx context.Context, orgID *uuid.UUID, email
 	return s.contactRepository.GetByEmailAndOrganization(ctx, *orgID, email)
 }
 
-func (s *contactService) ListSentEmails(ctx context.Context, userID, contactID uuid.UUID, limit int, beforeSentAt *time.Time, beforeTaskID *uuid.UUID) (*models.ContactSentEmailsResult, *errx.Error) {
-	return s.contactRepository.ListSentEmails(ctx, userID, contactID, limit, beforeSentAt, beforeTaskID)
+func (s *contactService) LookupSender(ctx context.Context, orgID *uuid.UUID, email string, thread models.ContactLookupThread) (*models.ContactLookup, *errx.Error) {
+	out := &models.ContactLookup{}
+	if orgID == nil {
+		return out, nil
+	}
+	if strings.TrimSpace(email) != "" {
+		contact, xerr := s.contactRepository.GetByEmailAndOrganization(ctx, *orgID, email)
+		if xerr != nil {
+			return nil, xerr
+		}
+		if contact != nil {
+			out.Contact, out.Match = contact, models.ContactLookupMatchEmail
+			return out, nil
+		}
+	}
+	contact, xerr := s.contactRepository.GetByThreadAndOrganization(ctx, *orgID, thread)
+	if xerr != nil {
+		return nil, xerr
+	}
+	if contact != nil {
+		out.Contact, out.Match = contact, models.ContactLookupMatchThread
+	}
+	return out, nil
 }
 
-func (s *contactService) ListTimeline(ctx context.Context, userID uuid.UUID, orgID *uuid.UUID, contactID uuid.UUID, limit int, cursor *models.ContactTimelineKey) (*models.ContactTimelineResult, *errx.Error) {
-	return s.contactRepository.ListTimeline(ctx, userID, orgID, contactID, limit, cursor)
+func (s *contactService) ListSentEmails(ctx context.Context, orgID, contactID uuid.UUID, limit int, beforeSentAt *time.Time, beforeTaskID *uuid.UUID) (*models.ContactSentEmailsResult, *errx.Error) {
+	return s.contactRepository.ListSentEmails(ctx, orgID, contactID, limit, beforeSentAt, beforeTaskID)
+}
+
+func (s *contactService) ListTimeline(ctx context.Context, orgID, contactID uuid.UUID, limit int, cursor *models.ContactTimelineKey) (*models.ContactTimelineResult, *errx.Error) {
+	return s.contactRepository.ListTimeline(ctx, orgID, contactID, limit, cursor)
 }

@@ -18,6 +18,7 @@ package bootstrap
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -36,6 +37,7 @@ import (
 	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/pkg/argon2"
 	"github.com/warmbly/warmbly/internal/pkg/crypt"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -108,27 +110,37 @@ func (s *Service) createOwner(ctx context.Context, address string) error {
 		if plain == "" {
 			return fmt.Errorf("bootstrap: WARMBLY_BOOTSTRAP_EMAIL is set but neither WARMBLY_BOOTSTRAP_PASSWORD_HASH nor WARMBLY_BOOTSTRAP_PASSWORD is")
 		}
+		if perr := crypt.PasswordError(plain); perr != nil {
+			return fmt.Errorf("bootstrap: WARMBLY_BOOTSTRAP_PASSWORD is refused: %s", perr.Message)
+		}
 		log.Printf("Warning: WARMBLY_BOOTSTRAP_PASSWORD is a plaintext password in an environment variable. Prefer WARMBLY_BOOTSTRAP_PASSWORD_HASH.")
 		hashed, herr := argon2.Hash(plain)
 		if herr != nil {
 			return fmt.Errorf("bootstrap: hashing the password: %w", herr)
 		}
 		hash = hashed
+	} else if herr := argon2.CheckParams(hash); herr != nil {
+		return fmt.Errorf("bootstrap: WARMBLY_BOOTSTRAP_PASSWORD_HASH is refused (%v); generate one with `warmblyctl hash-password`", herr)
 	}
 
 	u, uerr := s.users.CreateUser(ctx, parsed, hash)
 	if uerr != nil {
 		return fmt.Errorf("bootstrap: creating the owner: %w", uerr)
 	}
+	// Provisioned from the environment, so nobody is at a browser to answer the wizard.
+	// Not fatal: the user row now exists, so a later boot would never retry the
+	// org and admin steps below; the wizard showing once is the lesser cost.
+	if at, merr := s.users.MarkOnboarded(ctx, u.ID); merr != nil {
+		log.Printf("Warning: bootstrap could not mark %s onboarded, the dashboard will show the setup wizard first: %v", parsed.Address, merr)
+	} else {
+		u.OnboardingCompletedAt = &at
+	}
 	if err := s.userSvc.SaveUser(ctx, u); err != nil {
 		return fmt.Errorf("bootstrap: saving the owner: %w", err)
 	}
 
-	orgName := strings.TrimSpace(os.Getenv("WARMBLY_BOOTSTRAP_ORG"))
-	if orgName == "" {
-		orgName = defaultOrgName(u.FirstName)
-	}
-	org, orgErr := s.orgSvc.Create(ctx, u.ID, orgName)
+	orgName := bootstrapOrgName(u.FirstName)
+	org, orgErr := s.orgSvc.Create(ctx, u.ID, orgName, "")
 	if orgErr != nil {
 		return fmt.Errorf("bootstrap: creating the organization: %w", orgErr)
 	}
@@ -261,8 +273,16 @@ func (s *Service) Claim(ctx context.Context, token, address, password, firstName
 	if perr != nil {
 		return nil, errx.ErrEmail
 	}
-	if !crypt.ValidatePassword(password) {
-		return nil, errx.ErrPassword
+	if perr := crypt.PasswordError(password); perr != nil {
+		return nil, perr
+	}
+	firstName, nerr := displayname.Validate("Name", firstName, displayname.Person, true)
+	if nerr != nil {
+		return nil, nerr
+	}
+	lastName, nerr = displayname.Validate("Last name", lastName, displayname.Person, true)
+	if nerr != nil {
+		return nil, nerr
 	}
 
 	// Refuse on an instance that already has accounts, even with a valid
@@ -283,11 +303,12 @@ func (s *Service) Claim(ctx context.Context, token, address, password, firstName
 	remaining, _ := s.cache.PTTL(ctx, setupTokenKey).Result()
 
 	stored, gerr := s.cache.GetDel(ctx, setupTokenKey).Result()
-	if gerr != nil || stored == "" || stored != hashToken(token) {
+	matches := subtle.ConstantTimeCompare([]byte(stored), []byte(hashToken(token))) == 1
+	if gerr != nil || stored == "" || !matches {
 		// Put a valid-but-losing token back only when the value did not match,
 		// so a typo does not burn the real one, and only for the time it had
 		// left.
-		if gerr == nil && stored != "" && stored != hashToken(token) && remaining > 0 {
+		if gerr == nil && stored != "" && !matches && remaining > 0 {
 			_ = s.cache.SetEx(ctx, setupTokenKey, stored, remaining).Err()
 		}
 		return nil, errx.ErrSetupToken
@@ -313,11 +334,8 @@ func (s *Service) Claim(ctx context.Context, token, address, password, firstName
 		return nil, err
 	}
 
-	orgName := strings.TrimSpace(os.Getenv("WARMBLY_BOOTSTRAP_ORG"))
-	if orgName == "" {
-		orgName = defaultOrgName(u.FirstName)
-	}
-	org, orgErr := s.orgSvc.Create(ctx, u.ID, orgName)
+	orgName := bootstrapOrgName(u.FirstName)
+	org, orgErr := s.orgSvc.Create(ctx, u.ID, orgName, "")
 	if orgErr != nil {
 		errs.CaptureException(orgErr)
 		return nil, errx.InternalError()
@@ -335,11 +353,16 @@ func (s *Service) Claim(ctx context.Context, token, address, password, firstName
 	return u, nil
 }
 
-func defaultOrgName(firstName string) string {
-	if firstName == "" {
-		return "My Organization"
+// bootstrapOrgName is WARMBLY_BOOTSTRAP_ORG when it is a valid workspace name.
+func bootstrapOrgName(firstName string) string {
+	env := os.Getenv("WARMBLY_BOOTSTRAP_ORG")
+	if name := displayname.Clean(env, displayname.Workspace); name != "" {
+		return name
 	}
-	return firstName + "'s Organization"
+	if strings.TrimSpace(env) != "" {
+		log.Printf("Warning: WARMBLY_BOOTSTRAP_ORG is not a valid workspace name; using the default.")
+	}
+	return displayname.DefaultWorkspace(firstName)
 }
 
 func hashToken(token string) string {

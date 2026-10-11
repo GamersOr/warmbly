@@ -1,3 +1,5 @@
+import { DashboardImage } from "@/components/ui/dashboard-image";
+
 // Image insertion and editing for the campaign body editor (issue #380).
 //
 // Two surfaces: a toolbar menu that uploads, takes a URL, or picks from the
@@ -20,7 +22,7 @@ import {
     Trash2Icon,
     UploadCloudIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import type { Editor } from "@tiptap/react";
 import useClickOutside from "@/hooks/useClickOutside";
 import { useAnchoredFloating } from "@/hooks/useAnchoredFloating";
@@ -44,7 +46,7 @@ export function ImageMenu({ editor }: { editor: Editor }) {
     const [dragging, setDragging] = React.useState(false);
     const ref = React.useRef<HTMLDivElement>(null);
     const fileRef = React.useRef<HTMLInputElement>(null);
-    useClickOutside(ref, () => setOpen(false));
+    useClickOutside(open, () => setOpen(false), ref);
     const { setReference, setFloating, floatingStyle } = useAnchoredFloating(open, {
         placement: "bottom-start",
         gap: 6,
@@ -58,20 +60,6 @@ export function ImageMenu({ editor }: { editor: Editor }) {
     const { run: upload, isUploading } = useImageUpload();
     const del = useDeleteEmailImage();
     const confirm = useConfirm();
-
-    React.useEffect(() => {
-        if (!open) return;
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key !== "Escape") return;
-            // The delete confirmation sits above this menu, so Escape belongs
-            // to it first: only the innermost layer closes.
-            if (document.querySelector("[role='alertdialog']")) return;
-            e.stopPropagation();
-            setOpen(false);
-        };
-        document.addEventListener("keydown", onKey, true);
-        return () => document.removeEventListener("keydown", onKey, true);
-    }, [open]);
 
     const pick = async (files: FileList | File[] | null) => {
         const file = Array.from(files ?? [])[0];
@@ -132,7 +120,7 @@ export function ImageMenu({ editor }: { editor: Editor }) {
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
                                 transition={{ duration: 0.12 }}
-                                className="z-[60] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-md border border-slate-200 bg-white shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)]"
+                                className="z-[150] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-md border border-slate-200 bg-white shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)]"
                             >
                                 <div className="border-b border-slate-100 px-3 py-2">
                                     <p className="text-[12px] font-medium text-slate-800">Insert an image</p>
@@ -239,7 +227,7 @@ export function ImageMenu({ editor }: { editor: Editor }) {
                                                         }}
                                                         className="block aspect-square w-full overflow-hidden rounded-md border border-slate-200 bg-slate-50 transition-colors hover:border-sky-300"
                                                     >
-                                                        <img
+                                                        <DashboardImage
                                                             src={img.url}
                                                             alt={img.filename}
                                                             loading="lazy"

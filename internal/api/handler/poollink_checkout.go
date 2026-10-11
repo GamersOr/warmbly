@@ -12,10 +12,11 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 )
 
-// The self-hosted pool plan is deliberately not public, so it never appears in
-// the plans grid: it is not an alternative to Starter or Business, it buys pool
-// access for an instance the customer runs themselves. That is why it gets its
-// own offer and its own checkout instead of a card alongside the others.
+// The warmup plan is deliberately not public, so it never appears in the plans
+// grid: it is not an alternative to Starter or Business, it buys unlimited
+// mailboxes in the premium pool for a workspace that only warms, whether its
+// mailboxes are connected here or through a linked instance. That is why it
+// gets its own offer and its own checkout instead of a card alongside the others.
 
 // PoolLinkOffer is what the upgrade prompt renders. Available is false when
 // billing is off or no Stripe price has been attached to the plan, and the
@@ -87,19 +88,19 @@ func (h *Handler) PoolLinkCheckout(c *gin.Context) {
 		return
 	}
 	if plan == nil {
-		errx.JSON(c, errx.New(errx.NotFound, "the self-hosted pool plan is not configured on this instance"))
+		errx.JSON(c, errx.New(errx.NotFound, "the warmup plan is not configured on this instance"))
 		return
 	}
 
 	priceID := poolPriceFor(plan, interval)
 	if priceID == "" {
-		errx.JSON(c, errx.New(errx.ServiceUnavailable, "the self-hosted pool plan has no price for that billing period yet"))
+		errx.JSON(c, errx.New(errx.ServiceUnavailable, "the warmup plan has no price for that billing period yet"))
 		return
 	}
 
 	// Built here, not accepted from the caller: a checkout return URL is a
 	// redirect the customer follows after paying.
-	base := config.AppBaseURL()
+	base := config.DashboardBaseURL(c.Request.Context())
 	session, xerr := h.StripeService.CreateCheckoutSession(c.Request.Context(), uid, *orgID, priceID,
 		base+"/app/settings/billing?pool=done", base+"/app/settings/billing?pool=1", "")
 	if xerr != nil {

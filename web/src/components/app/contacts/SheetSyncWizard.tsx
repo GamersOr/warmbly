@@ -28,9 +28,10 @@ import {
     SheetIcon,
     XIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
-import { MapStep, ResultStep } from "./ImportWizard";
+import MapStep from "./import/MapStep";
+import ResultStep from "./import/ResultStep";
 import { DEDUP_OPTIONS, announceResult, describeError, mappingProblem } from "./importShared";
 import CategoryPicker from "./CategoryPicker";
 import { Label, TextInput } from "@/components/ui/field";
@@ -46,7 +47,7 @@ import {
     useFinishIntegrationOAuth,
     useStartIntegrationOAuth,
 } from "@/lib/api/hooks/app/integrations/useIntegrationOAuth";
-import { openOAuthPopup } from "@/lib/integrations/oauthPopup";
+import { authorizeInPopup } from "@/lib/integrations/oauthPopup";
 import CampaignPicker from "@/components/app/campaigns/CampaignPicker";
 import { SegmentMultiPicker } from "@/components/app/segments/SegmentPickers";
 import useGoogleConnection from "@/lib/api/hooks/app/leadsync/useGoogleConnection";
@@ -142,11 +143,9 @@ export default function SheetSyncWizard({ open, onClose, lockedCampaign, lockedS
     async function runConnect() {
         setBusy(true);
         try {
-            const { url } = await startOAuth.mutateAsync({
-                provider: "google_sheets",
-                label: "Google Sheets",
-            });
-            const { code, state } = await openOAuthPopup(url);
+            const { code, state } = await authorizeInPopup(
+                async () => (await startOAuth.mutateAsync({ provider: "google_sheets", label: "Google Sheets" })).url,
+            );
             await finishOAuth.mutateAsync({ code, state });
             await connection.refetch();
             await queryClient.invalidateQueries({ queryKey: ["lead-sync", "google", "connection"] });
@@ -325,6 +324,7 @@ export default function SheetSyncWizard({ open, onClose, lockedCampaign, lockedS
                             )}
                             {step === "map" && preview && (
                                 <MapStep
+                                    importId={`sheet:${connectionId}:${sheetId}:${tabTitle}`}
                                     preview={preview}
                                     mapping={mapping}
                                     setMapping={setMapping}
@@ -688,10 +688,10 @@ function OptionsStep({
 
             <section>
                 <h2 className="text-[10px] uppercase tracking-[0.14em] font-semibold text-slate-500 mb-2">
-                    Apply categories
+                    Apply labels
                 </h2>
                 <p className="text-[11px] text-slate-400 leading-tight mb-2">
-                    Every synced contact gets these categories. Skip to leave them untagged.
+                    Every synced contact gets these labels. Skip to leave them unlabeled.
                 </p>
                 <CategoryPicker value={categoryIds} onChange={setCategoryIds} />
             </section>
@@ -722,4 +722,3 @@ function OptionsStep({
         </div>
     );
 }
-

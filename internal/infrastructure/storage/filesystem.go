@@ -75,6 +75,16 @@ func (s *FilesystemStore) Get(_ context.Context, key string) (io.ReadCloser, err
 		}
 		return nil, err
 	}
+	// A key naming a directory ("avatars/") opens cleanly and then reads as an
+	// empty object, so the public route answered 200 with no body instead of
+	// 404. Treat it as absent, which is what it is.
+	if info, serr := f.Stat(); serr != nil || info.IsDir() {
+		_ = f.Close()
+		if serr != nil {
+			return nil, serr
+		}
+		return nil, ErrNotFound
+	}
 	return f, nil
 }
 
@@ -115,7 +125,12 @@ func (s *FilesystemStore) PutPublic(ctx context.Context, key string, body io.Rea
 	if err := s.Put(ctx, key, body, contentType); err != nil {
 		return "", err
 	}
-	return s.publicBaseURL + "/" + key, nil
+	return s.PublicURL(key), nil
+}
+
+// PublicURL is the URL PutPublic returns for key, without writing anything.
+func (s *FilesystemStore) PublicURL(key string) string {
+	return s.publicBaseURL + "/" + key
 }
 
 func (s *FilesystemStore) Delete(_ context.Context, key string) error {

@@ -8,6 +8,7 @@ import type {
     CloudLinkPollResult,
     CloudLinkStatus,
     PoolLinkWorkspaceMailbox,
+    DiagnosticParticipation,
 } from "@/lib/api/models/app/cloudlink/CloudLink";
 import type Inbox from "@/lib/api/models/app/emails/Inbox";
 
@@ -28,8 +29,8 @@ export async function pollCloudLinkConnect(): Promise<CloudLinkPollResult> {
     return await Request<CloudLinkPollResult>({ method: "POST", url: "/cloud-link/connect/poll", authorization: true });
 }
 
-export async function disconnectCloudLink(): Promise<void> {
-    await Request<void>({ method: "DELETE", url: "/cloud-link", authorization: true });
+export async function disconnectCloudLink(legacy = false): Promise<void> {
+    await Request<void>({ method: "DELETE", url: "/cloud-link", params: legacy ? { legacy: true } : undefined, authorization: true });
 }
 
 export async function listCloudLinkMailboxes(): Promise<CloudLinkMailboxRow[]> {
@@ -47,6 +48,10 @@ export async function unenrollCloudLinkMailbox(id: string): Promise<void> {
 
 export async function setCloudLinkMailboxLifecycle(id: string, action: "pause" | "resume"): Promise<CloudLinkMailboxRow> {
     return await Request<CloudLinkMailboxRow>({ method: "POST", url: `/cloud-link/mailboxes/${id}/${action}`, authorization: true });
+}
+
+export async function setCloudLinkParticipation(id: string, participation: DiagnosticParticipation): Promise<CloudLinkMailboxRow> {
+    return await Request<CloudLinkMailboxRow>({ method: "PATCH", url: `/cloud-link/mailboxes/${id}/participation`, data: participation, authorization: true });
 }
 
 // Cloud-managed mailboxes: Google/Microsoft sign-in through Warmbly Cloud's own

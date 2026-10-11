@@ -1,6 +1,8 @@
 package models
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,6 +22,8 @@ type ContactNote struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 	// Joined
 	User *User `json:"user,omitempty"`
+	// External is set when the note lives in a connected CRM.
+	External *CRMExternalRef `json:"external,omitempty"`
 }
 
 type ContactNotesResult struct {
@@ -93,6 +97,8 @@ type Pipeline struct {
 	Stages         []PipelineStage `json:"stages,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
+	// External is set when the pipeline is managed in a connected CRM.
+	External *CRMExternalRef `json:"external,omitempty"`
 }
 
 type PipelineStage struct {
@@ -104,6 +110,10 @@ type PipelineStage struct {
 	DealCount  int       `json:"deal_count,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// Closed, Won and Probability come from a connected CRM's stage metadata.
+	Closed      bool     `json:"closed,omitempty"`
+	Won         bool     `json:"won,omitempty"`
+	Probability *float64 `json:"probability,omitempty"`
 }
 
 type CreatePipeline struct {
@@ -162,6 +172,8 @@ type Deal struct {
 	Contact      *Contact       `json:"contact,omitempty"`
 	Stage        *PipelineStage `json:"stage,omitempty"`
 	CampaignName *string        `json:"campaign_name,omitempty"`
+	// External is set when the deal lives in a connected CRM.
+	External *CRMExternalRef `json:"external,omitempty"`
 }
 
 type DealsResult struct {
@@ -326,6 +338,8 @@ type CRMTask struct {
 	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
+	// External is set when the task lives in a connected CRM.
+	External *CRMExternalRef `json:"external,omitempty"`
 }
 
 type CRMTasksResult struct {
@@ -381,6 +395,32 @@ type SearchTasks struct {
 	Reverse    bool        `json:"reverse"`     // true = ASC, false = DESC (default)
 }
 
+// Validate refuses the id-valued facets before they reach SQL. They are
+// compared against uuid columns, so a malformed one is an error from the
+// driver mid-query, which reads as a 500 on what is a bad request.
+func (f SearchTasks) Validate() error {
+	ids := map[string][]string{
+		"assigned_to": f.AssignedTo,
+		"contact_id":  derefOne(f.ContactID),
+		"deal_id":     derefOne(f.DealID),
+	}
+	for field, vals := range ids {
+		for _, v := range vals {
+			if _, err := uuid.Parse(strings.TrimSpace(v)); err != nil {
+				return fmt.Errorf("%s: %q is not an id", field, v)
+			}
+		}
+	}
+	return nil
+}
+
+func derefOne(v *string) []string {
+	if v == nil || strings.TrimSpace(*v) == "" {
+		return nil
+	}
+	return []string{*v}
+}
+
 // TasksSearchResult is the result of POST /crm/tasks/search. Offset pagination
 // under the hood (the sortable nullable due_date rules out a keyset cursor), but
 // it exposes the standard {total, next_cursor, has_more} envelope with an OPAQUE
@@ -388,6 +428,58 @@ type SearchTasks struct {
 type TasksSearchResult struct {
 	Data       []CRMTask  `json:"data"`
 	Pagination Pagination `json:"pagination"`
+}
+
+// MaxTaskBulkSelection bounds how many tasks one "select all matching" bulk
+// action may touch. Past it the action is refused and the user narrows the
+// filter, so a stray click can never walk a whole workspace's task list.
+const MaxTaskBulkSelection = 50000
+
+// TaskSelection names the tasks a bulk action applies to. Either an explicit
+// id list (Tasks), or every task matching a search (All + Filters) minus the
+// rows unticked afterwards (Exclude), which is what the Tasks page's "select
+// all matching" sends. A selection that names both prefers the filter.
+type TaskSelection struct {
+	Tasks []string `json:"tasks"`
+	// All switches the selection from the id list to Filters.
+	All bool `json:"all,omitempty"`
+	// Filters is the same search body /crm/tasks/search takes, so the set
+	// resolved here is exactly the set the list was showing.
+	Filters *SearchTasks `json:"filters,omitempty"`
+	// Exclude drops ids from the resolved set: the rows unticked after a
+	// select-all. Ignored unless All is set.
+	Exclude []string `json:"exclude,omitempty"`
+}
+
+// BulkUpdateTasks is the body of PATCH /crm/tasks: a selection plus the fields
+// to write on every task in it. At least one field is required.
+type BulkUpdateTasks struct {
+	TaskSelection
+	Status   *string `json:"status,omitempty"`
+	Priority *string `json:"priority,omitempty"`
+}
+
+// BulkTasksResponse reports how many tasks a bulk action touched.
+type BulkTasksResponse struct {
+	Affected int64 `json:"affected"`
+}
+
+// ValidCRMTaskStatus reports whether v is a status a task may hold.
+func ValidCRMTaskStatus(v string) bool {
+	switch CRMTaskStatus(v) {
+	case CRMTaskStatusPending, CRMTaskStatusInProgress, CRMTaskStatusCompleted, CRMTaskStatusCancelled:
+		return true
+	}
+	return false
+}
+
+// ValidCRMTaskPriority reports whether v is a priority a task may hold.
+func ValidCRMTaskPriority(v string) bool {
+	switch CRMTaskPriority(v) {
+	case CRMTaskPriorityLow, CRMTaskPriorityMedium, CRMTaskPriorityHigh, CRMTaskPriorityUrgent:
+		return true
+	}
+	return false
 }
 
 // TasksSummary is the server-side aggregate over the SAME filter body as a

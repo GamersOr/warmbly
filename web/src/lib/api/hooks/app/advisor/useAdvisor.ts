@@ -1,6 +1,6 @@
 import { useMemo } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import toast from "react-hot-toast";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import toast from "react-hot-toast/headless";
 import type {
     AdvisorEntityIndex,
     AdvisorFinding,
@@ -10,6 +10,7 @@ import type {
     AdvisorSurface,
 } from "@/lib/api/models/app/advisor/Advisor";
 import { indexByEntity } from "@/lib/api/models/app/advisor/Advisor";
+import { useAccessRestricted } from "@/hooks/usePermission";
 import {
     agentFixAdvisorFinding,
     applyAdvisorFinding,
@@ -30,23 +31,31 @@ import {
 // org-wide.
 const ADVISOR_KEY = ["advisor"] as const;
 
+// The Advisor reads the whole workspace, so a member restricted to selected resources never asks it.
 export function useAdvisorSummary(enabled = true) {
+    const restricted = useAccessRestricted();
     return useQuery<AdvisorSummary>({
         queryKey: [...ADVISOR_KEY, "summary"],
         queryFn: getAdvisorSummary,
-        enabled,
+        enabled: enabled && !restricted,
         // The findings themselves only move on the backend's own schedule, so a
         // long stale time keeps navigation from refetching on every route change.
         staleTime: 60_000,
     });
 }
 
-export function useAdvisorFindings(query: AdvisorFindingsQuery = {}, enabled = true) {
-    return useQuery<AdvisorFinding[]>({
+export const advisorFindingsQuery = (query: AdvisorFindingsQuery = {}) =>
+    queryOptions<AdvisorFinding[]>({
         queryKey: [...ADVISOR_KEY, "findings", query],
         queryFn: () => getAdvisorFindings(query),
-        enabled,
         staleTime: 60_000,
+    });
+
+export function useAdvisorFindings(query: AdvisorFindingsQuery = {}, enabled = true) {
+    const restricted = useAccessRestricted();
+    return useQuery({
+        ...advisorFindingsQuery(query),
+        enabled: enabled && !restricted,
     });
 }
 
@@ -54,6 +63,10 @@ export function useAdvisorFindings(query: AdvisorFindingsQuery = {}, enabled = t
 // run: a page that fetched only what fits on screen would leave rows below the
 // fold silently unflagged, which is worse than not flagging at all.
 export const SURFACE_FETCH_LIMIT = 200;
+
+/** The whole-surface query useAdvisorEntityIndex and AdvisorSummaryBar share. */
+export const advisorSurfaceQuery = (surface: AdvisorSurface) =>
+    advisorFindingsQuery({ surface, limit: SURFACE_FETCH_LIMIT });
 
 // useAdvisorEntityIndex gives a list page one request for the whole surface and
 // an index every row reads its own advice from. Rows must never fetch: twenty

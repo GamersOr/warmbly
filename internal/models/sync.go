@@ -21,6 +21,25 @@ type SyncPolicy struct {
 	// OrgDailyMessages caps new plus backfilled messages stored across the
 	// whole organization per UTC day.
 	OrgDailyMessages int `json:"org_daily_messages" avro:"org_daily_messages"`
+	// SkipFolders names the folders the sync leaves alone, as the server
+	// lists them; each also covers its subfolders. Per mailbox, unlike the
+	// budgets above, and only meaningful on IMAP.
+	SkipFolders []string `json:"skip_folders,omitempty" avro:"skip_folders"`
+}
+
+// SyncFolder is one folder the sync has seen on the server, as GET
+// /emails/:id/sync reports it: the name to use in skip_folders and the
+// canonical folder it files under, so a client can tell which ones are the
+// special folders that cannot be skipped.
+type SyncFolder struct {
+	Name   string `json:"name"`
+	Folder string `json:"folder"`
+}
+
+// UpdateSyncSettings is the body of PUT /emails/:id/sync. The list is the
+// desired state, so a retry converges.
+type UpdateSyncSettings struct {
+	SkipFolders []string `json:"skip_folders"`
 }
 
 // SyncBackfillStatus is where the initial import stands.
@@ -54,7 +73,17 @@ type SyncCursor struct {
 	// PageToken is Gmail's messages.list continuation.
 	PageToken string `json:"page_token,omitempty" avro:"page_token"`
 	// Folders is the per-folder position for IMAP and Graph.
-	Folders map[string]SyncFolderCursor `json:"folders,omitempty" avro:"folders"`
+	Folders        map[string]SyncFolderCursor `json:"folders,omitempty" avro:"folders"`
+	GoogleRecovery *GoogleHistoryRecovery      `json:"google_recovery,omitempty" avro:"google_recovery"`
+}
+
+// GoogleHistoryRecovery holds a baseline until additions and stored-message state are reconciled.
+type GoogleHistoryRecovery struct {
+	HistoryID    uint64    `json:"history_id" avro:"history_id"`
+	Since        time.Time `json:"since" avro:"since"`
+	PageToken    string    `json:"page_token,omitempty" avro:"page_token"`
+	MessagesDone bool      `json:"messages_done" avro:"messages_done"`
+	StoredAfter  string    `json:"stored_after,omitempty" avro:"stored_after"`
 }
 
 // SyncState is what the platform knows about a mailbox's sync: backfill
@@ -62,8 +91,9 @@ type SyncCursor struct {
 // owns the live copy and relays every change as SYNC_STATE; the consumer
 // persists it and the loader hands it back on the next (re)assignment.
 type SyncState struct {
-	BackfillStatus SyncBackfillStatus `json:"backfill_status" avro:"backfill_status"`
-	BackfillCursor SyncCursor         `json:"backfill_cursor" avro:"backfill_cursor"`
+	TransportGeneration uuid.UUID          `json:"transport_generation,omitempty" avro:"transport_generation"`
+	BackfillStatus      SyncBackfillStatus `json:"backfill_status" avro:"backfill_status"`
+	BackfillCursor      SyncCursor         `json:"backfill_cursor" avro:"backfill_cursor"`
 	// BackfillSynced counts messages the import has stored so far.
 	BackfillSynced int `json:"backfill_synced" avro:"backfill_synced"`
 	// BackfillSince is the cutoff the running import uses; fixed at start so
@@ -112,7 +142,7 @@ type AddWorkerEmailSyncData struct {
 // JobEventSyncState is the worker's SYNC_STATE relay: the full current state,
 // not a delta, so a lost event is repaired by the next one.
 type JobEventSyncState struct {
-	UserID  uuid.UUID `json:"user_id"`
-	EmailID uuid.UUID `json:"email_id"`
-	State   SyncState `json:"state"`
+	UserID  uuid.UUID `json:"user_id" avro:"user_id"`
+	EmailID uuid.UUID `json:"email_id" avro:"email_id"`
+	State   SyncState `json:"state" avro:"state"`
 }

@@ -11,6 +11,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type Contact from "@/lib/api/models/app/contacts/Contact";
+import { UserContext } from "@/hooks/context/user";
+import { useAppStore } from "@/stores/useAppStore";
+import type { ContactSlideTab } from "./contact-edit/tabs";
 
 const requested: { url?: string; data?: unknown }[] = [];
 vi.mock("@/lib/api/client/Request", () => ({
@@ -33,6 +36,10 @@ vi.mock("@/hooks/PresenceProvider", () => ({
 vi.mock("@/components/app/presence/ResourceViewers", () => ({ default: () => null }));
 vi.mock("@/components/app/integrations/BookACallButton", () => ({ default: () => null }));
 vi.mock("@/components/app/meetings/NewMeetingDialog", () => ({ default: () => null }));
+// jsdom has no layout, so the tab strip's scroll handling has nothing to measure.
+vi.mock("@/components/ui/scroll-strip", () => ({
+    default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+}));
 
 // The tabs are covered separately; this is about the panel chrome. The Details
 // stand-in is the only way into the draft, so it exposes one edit.
@@ -65,6 +72,9 @@ vi.mock("./contact-edit/DetailsTab", () => ({
                 onClick={() => setCustomFields((prev) => [...prev, { name: "", value: "half typed" }])}
             >
                 add field
+            </button>
+            <button type="button" onClick={() => setCustomFields((prev) => prev.filter((f) => f.name !== "industry"))}>
+                drop industry
             </button>
             <ul>
                 {customFields.map((f, i) => (
@@ -108,14 +118,41 @@ function Panel({ contacts }: { contacts: Contact[] }) {
     );
 }
 
+function BrowsePanel({ initialTab, active = "contact-1" }: { initialTab?: ContactSlideTab; active?: string }) {
+    const client = React.useMemo(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }), []);
+    const value = { user: { id: "member" } } as React.ComponentProps<typeof UserContext.Provider>["value"];
+    return <UserContext.Provider value={value}>
+        <QueryClientProvider client={client}>
+            <ContactEdit contacts={[contact(), contact({ id: "contact-2" })]} active={active} setActive={() => {}} initialTab={initialTab} />
+        </QueryClientProvider>
+    </UserContext.Provider>;
+}
+
 function clickBackdrop(container: HTMLElement) {
     fireEvent.mouseDown(container.querySelector(".fixed.inset-0") as Element);
 }
 
 describe("the contact 360 panel", () => {
     beforeEach(() => {
+        sessionStorage.clear();
         confirmShow.mockClear();
         requested.length = 0;
+    });
+
+    it("restores the contact tab, isolates other contacts, and lets explicit navigation beat the saved tab", () => {
+        useAppStore.setState({ currentOrganization: { id: "workspace", name: "Workspace", role: "owner" } });
+        const page = render(<BrowsePanel />);
+        fireEvent.click(screen.getByRole("button", { name: "Activity" }));
+        expect(screen.getByText("activity")).toBeInTheDocument();
+        page.unmount();
+        const refreshed = render(<BrowsePanel />);
+        expect(screen.getByText("activity")).toBeInTheDocument();
+        refreshed.rerender(<BrowsePanel active="contact-2" />);
+        expect(screen.getByText("overview")).toBeInTheDocument();
+        refreshed.unmount();
+        render(<BrowsePanel initialTab="details" />);
+        expect(screen.getByRole("button", { name: "rename" })).toBeInTheDocument();
+        expect(screen.queryByText("activity")).not.toBeInTheDocument();
     });
 
     it("closes without asking when the contact was re-subscribed elsewhere", () => {
@@ -204,5 +241,29 @@ describe("saving the contact 360 panel", () => {
         await waitFor(() => expect(requested.length).toBe(1));
         expect(requested[0].url).toBe("/contacts/contact-1");
         expect(requested[0].data).toEqual({ categories: ["cat-2"] });
+    });
+
+    // The save is a diff, so a teammate's field that arrives mid-edit must not
+    // be sent as a removal.
+    it("keeps a custom field a teammate added while the user edited", async () => {
+        const first = contact({ custom_fields: { industry: "Freight" } });
+        const { rerender } = render(<Panel contacts={[first]} />);
+        fireEvent.click(screen.getByText("drop industry"));
+        rerender(<Panel contacts={[contact({ custom_fields: { industry: "Freight", tier: "A" } })]} />);
+        fireEvent.click(screen.getByText("Save changes"));
+
+        await waitFor(() => expect(requested.length).toBe(1));
+        expect(requested[0].data).toEqual({ custom_fields: { industry: "" } });
+    });
+
+    // The server merges custom_fields, so a field that is simply left out is
+    // kept; removing one has to send it empty.
+    it("sends a removed custom field as empty so the server drops it", async () => {
+        render(<Panel contacts={[contact({ custom_fields: { industry: "Freight", tier: "A" } })]} />);
+        fireEvent.click(screen.getByText("drop industry"));
+        fireEvent.click(screen.getByText("Save changes"));
+
+        await waitFor(() => expect(requested.length).toBe(1));
+        expect(requested[0].data).toEqual({ custom_fields: { industry: "" } });
     });
 });

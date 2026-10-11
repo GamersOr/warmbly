@@ -2,12 +2,15 @@
 import '../styles/global.css';
 import Header from '../components/Header.astro';
 import Footer from '../components/Footer.astro';
-import LaunchBanner from '../components/LaunchBanner.astro';
 
 interface Props {
   title: string;
   description?: string;
   ogImage?: string;
+  /** Real pixel size of ogImage; scrapers render the card before fetching it. */
+  ogImageWidth?: number;
+  ogImageHeight?: number;
+  ogImageAlt?: string;
   /** og:type — 'website' for most pages, 'article' for Learn essays */
   ogType?: string;
   /** Extra structured data injected per-page (e.g. BlogPosting, SoftwareApplication) */
@@ -21,6 +24,9 @@ const {
   title,
   description = 'Warmbly is the deliverability platform for cold email. Warm your inboxes, send at scale, keep your reputation clean.',
   ogImage = '/og-image.jpg',
+  ogImageWidth = 1920,
+  ogImageHeight = 1008,
+  ogImageAlt = 'The Warmbly dashboard, showing the unified inbox across connected mailboxes',
   ogType = 'website',
   jsonLd,
   noIndex = false,
@@ -42,6 +48,12 @@ const posthogUiHost = import.meta.env.PUBLIC_POSTHOG_UI_HOST ?? 'https://us.post
 const siteOrigin = (Astro.site ?? new URL('https://warmbly.com')).toString().replace(/\/$/, '');
 const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://warmbly.com').toString();
 const ogImageAbsolute = new URL(ogImage, Astro.site ?? 'https://warmbly.com').toString();
+// Blog covers are .webp; declaring them as jpeg makes some scrapers skip the card.
+const ogImageType = ogImage.endsWith('.webp')
+  ? 'image/webp'
+  : ogImage.endsWith('.png')
+    ? 'image/png'
+    : 'image/jpeg';
 
 // Schema.org Organization payload, sourced from the real company record.
 const organizationJsonLd = {
@@ -125,10 +137,10 @@ const websiteJsonLd = {
     <meta property="og:locale" content="en_US" />
     <meta property="og:image" content={ogImageAbsolute} />
     <meta property="og:image:secure_url" content={ogImageAbsolute} />
-    <meta property="og:image:type" content="image/jpeg" />
-    <meta property="og:image:width" content="1280" />
-    <meta property="og:image:height" content="640" />
-    <meta property="og:image:alt" content="Warmbly: the open-source cold email platform" />
+    <meta property="og:image:type" content={ogImageType} />
+    <meta property="og:image:width" content={String(ogImageWidth)} />
+    <meta property="og:image:height" content={String(ogImageHeight)} />
+    <meta property="og:image:alt" content={ogImageAlt} />
 
     <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image" />
@@ -137,7 +149,7 @@ const websiteJsonLd = {
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImageAbsolute} />
-    <meta name="twitter:image:alt" content="Warmbly: the open-source cold email platform" />
+    <meta name="twitter:image:alt" content={ogImageAlt} />
 
     <!-- Crawler hints -->
     <meta name="robots" content={noIndex ? 'noindex,nofollow' : 'index,follow,max-image-preview:large,max-snippet:-1'} />
@@ -191,22 +203,76 @@ const websiteJsonLd = {
           capture_exceptions: true,
           disable_session_recording: true,
           respect_dnt: false,
+          // Browser noise the window error handler reports with no stack and
+          // no bug behind it: "Script error." is what a cross-origin script is
+          // flattened to, and the ResizeObserver notice is a benign scheduling
+          // message the spec requires browsers to fire. Between them they were
+          // the two largest issues in error tracking, all of it from this page,
+          // which is what buried the real ones. The dashboard and the admin
+          // panel already drop the same three.
+          before_send: function (event) {
+            if (!event || event.event !== '$exception') return event;
+            var noise = [
+              'Script error.',
+              'ResizeObserver loop completed with undelivered notifications.',
+              'ResizeObserver loop limit exceeded',
+            ];
+            // A link scanner's embedded browser (Outlook Safe Links and the like)
+            // rejects with this while it walks the page; it is not our code.
+            var scanner = 'Object Not Found Matching Id:';
+            var isNoise = function (v) {
+              return typeof v === 'string' && (noise.indexOf(v.trim()) !== -1 || v.indexOf(scanner) !== -1);
+            };
+            var isSdkTimeout = function (type, value) {
+              return type === 'AbortError' && typeof value === 'string' && value.indexOf('PostHog request timed out') === 0;
+            };
+            var exceptions = event.properties && event.properties.$exception_list;
+            if (Array.isArray(exceptions)) {
+              for (var i = 0; i < exceptions.length; i++) {
+                var value = exceptions[i] && (exceptions[i].value || exceptions[i].$exception_value);
+                if (isNoise(value)) return null;
+                var type = exceptions[i] && (exceptions[i].type || exceptions[i].$exception_type);
+                if (isSdkTimeout(type, value)) return null;
+              }
+            }
+            var message = event.properties && event.properties.$exception_message;
+            if (isNoise(message)) return null;
+            // Keep accepting flattened payloads while cached SDK chunks are
+            // still in browsers during a rolling release.
+            var values = event.properties && event.properties.$exception_values;
+            var types = event.properties && event.properties.$exception_types;
+            if (!Array.isArray(values)) return event;
+            for (var i = 0; i < values.length; i++) {
+              if (isNoise(values[i])) return null;
+              if (Array.isArray(types) && isSdkTimeout(types[i], values[i])) return null;
+            }
+            return event;
+          },
         });
         window.posthog.register({ service: 'site' });
       </script>
     )}
     <!--
-      Carry the landing page and any UTM parameters through to the dashboard's
-      signup form, in the query string and nowhere else. The dashboard reads
-      them at signup and the backend records them once on the new organization,
-      so channel attribution survives the daily salt rotation without anything
-      being stored in this browser.
+      Carry where a visitor came from through to the dashboard, in the query
+      string and nowhere else: the first page they landed on (wb_lp), the
+      external site that sent them (wb_ref, a bare host) and any UTM tags. The
+      dashboard reads them at signup, including a Google or SSO signup started
+      from its login page, and the backend records them once on the new
+      organization. Nothing is stored in this browser.
 
-      Done here rather than in each CTA because there are forty of these links
-      across the site and a new one should not have to remember.
+      First touch wins: once a page carries these, links to other pages on
+      this site carry them on, so a visitor who lands on a post from a
+      campaign and signs up from the pricing page is still attributed to it.
+      The landing path also survives internal navigation without a referrer.
+
+      Done here rather than in each CTA because there are dozens of these
+      links across the site and a new one should not have to remember.
     -->
     <script is:inline>
       (function () {
+        var DASHBOARD_HOST = 'app.warmbly.com';
+        var UTM = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+
         // This script sits in <head>, so the anchors it rewrites do not exist
         // yet. Wait for the parsed document before touching any of them.
         if (document.readyState === 'loading') {
@@ -214,46 +280,88 @@ const websiteJsonLd = {
         } else {
           decorate();
         }
+        // Hydrated components may add or replace links after DOMContentLoaded.
+        ['click', 'auxclick', 'contextmenu'].forEach(function (name) {
+          document.addEventListener(name, function (event) {
+            var link = event.target && event.target.closest && event.target.closest('a[href]');
+            if (link) decorateLink(link);
+          }, true);
+        });
 
-        function decorate() {
+        function acquisition() {
           var params = new URLSearchParams(location.search);
           var carried = new URLSearchParams();
 
-          ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].forEach(function (name) {
+          UTM.forEach(function (name) {
             var value = params.get(name);
-            if (value) carried.set(name, value.slice(0, 255));
+            if (value && value.trim()) carried.set(name, value.trim().slice(0, 255));
           });
-          carried.set('wb_lp', location.pathname.slice(0, 255));
 
-          if (document.referrer) {
+          // A wb_ value already on this URL came from an earlier page and wins.
+          var landing = params.get('wb_lp');
+          var path = location.pathname;
+          if (landing && landing.charAt(0) === '/' && landing.charAt(1) !== '/') {
             try {
-              var host = new URL(document.referrer).hostname;
-              if (host && host !== location.hostname) carried.set('wb_ref', host);
-            } catch (e) { /* an unparseable referrer is simply not recorded */ }
+              var landingUrl = new URL(landing, location.origin);
+              if (landingUrl.origin === location.origin) path = landingUrl.pathname;
+            } catch (e) { /* Keep the current path if the carried path is invalid. */ }
           }
+          carried.set('wb_lp', path.slice(0, 255));
 
-          document.querySelectorAll('a[href*="/register"]').forEach(function (link) {
-            try {
-              var url = new URL(link.href);
-              carried.forEach(function (value, name) {
-                if (!url.searchParams.has(name)) url.searchParams.set(name, value);
-              });
-              link.href = url.toString();
-            } catch (e) { /* leave a link we cannot parse exactly as it was */ }
+          var ref = params.get('wb_ref');
+          ref = externalHost(ref);
+          if (!ref && document.referrer) ref = externalHost(document.referrer);
+          if (ref) carried.set('wb_ref', ref.slice(0, 255));
+          return carried;
+        }
+
+        function externalHost(value) {
+          if (!value) return '';
+          try {
+            var host = new URL(value.indexOf('://') !== -1 ? value : 'https://' + value).hostname.toLowerCase();
+            return host === location.hostname || host === 'warmbly.com' || host.endsWith('.warmbly.com') ? '' : host;
+          } catch (e) { return ''; }
+        }
+
+        function decorateLink(link) {
+          var url;
+          try {
+            url = new URL(link.href, location.href);
+          } catch (e) {
+            return;
+          }
+          if (url.protocol !== 'https:' && url.protocol !== 'http:') return;
+          var toDashboard = url.hostname === DASHBOARD_HOST;
+          var toPage = url.origin === location.origin && !/\.[a-z0-9]+$/i.test(url.pathname) &&
+            (url.pathname !== location.pathname || url.search !== location.search);
+          if (!toDashboard && !toPage) return;
+          acquisition().forEach(function (value, name) {
+            url.searchParams.set(name, value);
           });
+          link.href = url.toString();
+        }
+
+        function decorate() {
+          document.querySelectorAll('a[href]').forEach(decorateLink);
         }
       })();
     </script>
-    <!-- Phone diagnostics: ?noshell / ?noanim / ?nogl switch heavy subsystems off (global.css, GrainBackdrop). -->
+    <!-- Phone diagnostics: ?noshell / ?noanim switch heavy subsystems off (global.css). -->
     <script is:inline>
       var diagParams = new URLSearchParams(location.search);
-      document.documentElement.dataset.diag = ['noshell', 'noanim', 'nogl'].filter(function (f) { return diagParams.has(f); }).join(' ');
+      document.documentElement.dataset.diag = ['noshell', 'noanim'].filter(function (f) { return diagParams.has(f); }).join(' ');
     </script>
   </head>
   <body class="min-h-screen flex flex-col antialiased">
-    {!bare && <LaunchBanner />}
     {!bare && <Header />}
-    <main class="flex-1">
+    <main class="relative flex-1">
+      <!-- Faint guide lines down both sides of the content tie every section
+           of a page into one column. -->
+      {!bare && (
+        <div aria-hidden="true" class="pointer-events-none absolute inset-0 z-[5] hidden md:block">
+          <div class="container-page h-full"><div class="h-full border-x border-slate-900/[0.06] md:-mx-6"></div></div>
+        </div>
+      )}
       <slot />
     </main>
     {!bare && <Footer />}

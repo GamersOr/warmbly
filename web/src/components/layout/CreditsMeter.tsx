@@ -13,7 +13,7 @@
 // the realtime spine on purchases, resets, and the low-credit alert.
 
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowUpRightIcon } from "lucide-react";
 import useClickOutside from "@/hooks/useClickOutside";
@@ -26,8 +26,10 @@ import { usePermission } from "@/hooks/usePermission";
 import useAiMetered from "@/hooks/useAiMetered";
 import { DitherMeter } from "@/components/ui/dither";
 import { cn } from "@/lib/utils";
+import { useAppStore } from "@/stores";
 
 export function CreditsMeter() {
+    const isTest = useAppStore((s) => s.currentOrganization?.category === "test");
     const canSee = usePermission("MANAGE_BILLING");
     const metered = useAiMetered();
     const credits = useCredits();
@@ -38,7 +40,7 @@ export function CreditsMeter() {
     const [open, setOpen] = React.useState(false);
     const ref = React.useRef<HTMLDivElement>(null);
     const close = React.useCallback(() => setOpen(false), []);
-    useClickOutside(ref, close);
+    useClickOutside(open, close, ref);
 
     // Nothing to gauge when the ledger is bypassed (self-host without billing).
     if (!canSee || !metered || credits.isPending || !credits.data || credits.data.unlimited) return null;
@@ -72,8 +74,8 @@ export function CreditsMeter() {
             : 0;
 
     const label = spendWindow
-        ? `${spendWindow.spent.toLocaleString()} of ${spendWindow.limit.toLocaleString()} credits used ${spendWindow.word}`
-        : `${c.monthly_balance.toLocaleString()} of ${c.monthly_allowance.toLocaleString()} plan credits left`;
+        ? `${spendWindow.spent.toLocaleString()} of ${spendWindow.limit.toLocaleString()} ${isTest ? "test credits" : "credits"} used ${spendWindow.word}`
+        : `${c.monthly_balance.toLocaleString()} of ${c.monthly_allowance.toLocaleString()} ${isTest ? "test" : "plan"} credits left`;
     const extraLabel =
         c.purchased_balance > 0 ? `, plus ${c.purchased_balance.toLocaleString()} extra` : "";
 
@@ -94,6 +96,7 @@ export function CreditsMeter() {
                 )}
             >
                 <Ring fraction={fraction} />
+                {isTest && <span>Test credits</span>}
                 {spendWindow ? (
                     <span className="flex items-baseline gap-1">
                         <span className="flex items-baseline">
@@ -126,9 +129,10 @@ export function CreditsMeter() {
                         transition={{ duration: 0.12 }}
                         className="absolute right-0 top-full mt-1.5 w-72 rounded-md border border-slate-200 bg-white shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)] z-50 overflow-hidden"
                     >
-                        <MeterPanel credits={c} settings={settings.data} low={low} empty={empty} />
+                        <MeterPanel credits={c} settings={settings.data} low={low} empty={empty} isTest={isTest} />
                         <Link
-                            to="/app/settings/billing/ai-credits"
+                            to="/app/settings/billing/{-$tab}"
+                            params={{ tab: "ai-credits" }}
                             onClick={close}
                             className="flex items-center gap-1 px-3 h-9 border-t border-slate-200 text-[11.5px] font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 transition-colors"
                         >
@@ -148,11 +152,13 @@ function MeterPanel({
     settings,
     low,
     empty,
+    isTest,
 }: {
     credits: CreditBalance;
     settings?: AISpendSettings;
     low: boolean;
     empty: boolean;
+    isTest: boolean;
 }) {
     const usage = useCreditUsage();
     const planUsed = Math.max(0, credits.monthly_allowance - credits.monthly_balance);
@@ -166,7 +172,7 @@ function MeterPanel({
             <div className="flex items-end justify-between">
                 <div>
                     <div className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">
-                        AI credits
+                        {isTest ? "Test credits" : "AI credits"}
                     </div>
                     <div className="mt-1 flex items-baseline gap-1.5">
                         <AnimatedNumber
@@ -199,7 +205,7 @@ function MeterPanel({
 
             <div>
                 <div className="flex items-baseline justify-between text-[11.5px]">
-                    <span className="text-slate-600">Plan credits</span>
+                    <span className="text-slate-600">{isTest ? "Test credits" : "Plan credits"}</span>
                     <span className="tabular-nums text-slate-900 font-medium">
                         {credits.monthly_balance.toLocaleString()}
                         <span className="text-slate-400 font-normal">
@@ -321,7 +327,7 @@ function formatCredits(n: number): string {
 }
 
 // resetLabel turns next_reset_at into a short relative note for the panel.
-function resetLabel(iso: string | null): string | null {
+function resetLabel(iso: string | Date | null): string | null {
     if (!iso) return null;
     const days = Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
     if (days <= 0) return "Resets soon";

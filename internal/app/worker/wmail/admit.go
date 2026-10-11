@@ -2,13 +2,16 @@ package wmail
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/emsg"
+	"github.com/warmbly/warmbly/internal/pkg/nodeevidence"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -132,15 +135,24 @@ func (w *WMail) laneOf(ctx context.Context, key string, msg *models.EmailMessage
 // beginTick releases an expired hold so the state reports "within budget"
 // before the pass looks at anything.
 func (w *WMail) beginTick() {
+	w.tracker.tickComplete = false
 	w.tracker.release(time.Now())
 }
 
-// endTick folds the pass into the relayed state. deferred is the number of
-// live messages still waiting on the server; it is reported as-is (not
-// accumulated) so a pass that admits everything zeroes it.
-func (w *WMail) endTick(stats *tickStats) {
-	w.tracker.setDeferred(stats.deferred)
-	w.tracker.touch(time.Now())
+// endTick retains unmeasured backlog until a complete pass confirms catch-up.
+func (w *WMail) endTick(ctx context.Context, stats *tickStats, complete bool) {
+	if stats.deferred > 0 {
+		nodeevidence.Emit(nodeevidence.PolicyDeferred, w.ID, 0, stats.deferred)
+	}
+	complete = complete && ctx.Err() == nil && !stats.aborted && stats.deferred == 0 && w.tracker.state.BackfillCursor.GoogleRecovery == nil
+	w.tracker.tickComplete = complete
+	if complete {
+		w.tracker.setDeferred(0)
+		w.tracker.touch(time.Now())
+		return
+	}
+	w.tracker.setDeferred(max(w.tracker.state.Deferred, stats.deferred))
+	w.tracker.flush(time.Now())
 }
 
 // storeNew is the shared tail of every provider's new-message path: record
@@ -148,6 +160,12 @@ func (w *WMail) endTick(stats *tickStats) {
 // events. mapKey is the id the provider reports on later remove/flag events
 // (RFC Message-ID for IMAP, provider message id for Gmail and Graph).
 func (w *WMail) storeNew(ctx context.Context, msg *models.EmailMessageData, data *models.EmailMessageStoreData, mapKey string) error {
+	w.verifyDiagnostic(ctx, msg, data)
+	evidence := models.EvidenceFromFlags(data.Flags)
+	if evidence.Source != "unavailable" {
+		evidence.ObservedAt = time.Now().UTC()
+		data.Flags = models.WithReceivedEvidence(data.Flags, evidence)
+	}
 	// Body first: a map entry without a body would make the message "known"
 	// on the next pass and never retried, while an orphaned body is harmless.
 	if err := w.StoreBody(ctx, data.ID, &emsg.EmailBlob{
@@ -157,24 +175,90 @@ func (w *WMail) storeNew(ctx context.Context, msg *models.EmailMessageData, data
 		return err
 	}
 
-	if err := w.EmailMessageMapRepository.Add(ctx, repository.EmailMessageData{
+	mapping := repository.EmailMessageData{
 		UserID:    w.UserID.String(),
 		EmailID:   w.ID.String(),
 		MessageID: mapKey,
 		ID:        data.ID.String(),
 		ThreadID:  data.ThreadID,
-	}); err != nil {
+	}
+
+	// Both report the send they are about, if any. The id goes on the arrival
+	// event so the consumer can tell a report about a campaign send from one
+	// about a warmup send without reading the body it is buried in.
+	// Both still run on every message: a report is one or the other in
+	// practice, and deciding that here by skipping the second would be this
+	// function guessing at a MIME question the parsers already answer.
+	bounce := w.bounceReport(msg)
+	complaint := w.complaintReport(msg)
+	var reportAbout string
+	switch {
+	case bounce != nil:
+		reportAbout = bounce.OriginalMessageID
+	case complaint != nil:
+		reportAbout = complaint.OriginalMessageID
+	}
+
+	// The consumer decodes NEW_EMAIL as JobEventNewEmail{user_id, message}.
+	arrival := &models.JobEventNewEmail{
+		UserID:                  w.UserID,
+		Message:                 data,
+		ReportOriginalMessageID: reportAbout,
+	}
+	if durable, ok := w.EmailMessageMapRepository.(repository.ArrivalAdmission); ok {
+		err := durable.AdmitArrival(ctx, mapping, &repository.PendingArrival{Arrival: arrival, Bounce: bounce, Complaint: complaint})
+		if errors.Is(err, repository.ErrArrivalMailboxOwnershipLost) {
+			log.Warn().Str("email_id", w.ID.String()).Msg("sync: mailbox ownership revoked; worker generation retired, arrival unacknowledged")
+			w.Terminate()
+			return err
+		}
+		if !errors.Is(err, repository.ErrArrivalOutboxUnsupported) {
+			return err
+		}
+		log.Warn().Str("email_id", w.ID.String()).Msg("sync: legacy arrival publication; upgrade backend and consumer before workers for crash durability")
+		nodeevidence.Emit(nodeevidence.LegacyArrival, w.ID, 0, 1)
+	}
+	if err := w.EmailMessageMapRepository.Add(ctx, mapping); err != nil {
+		return err
+	}
+	err := w.onEvent(models.JobEventTypeNewEmail, arrival)
+	if err != nil {
+		// The entry would mark a message that never reached the unibox as
+		// known, and every later pass would skip it; drop it so it is re-offered.
+		if derr := w.EmailMessageMapRepository.Del(ctx, w.UserID, w.ID, mapKey, data.ID); derr != nil {
+			log.Warn().Err(derr).Str("email_id", w.ID.String()).Msg("sync: map entry for an unpublished message not removed; retried next pass")
+			if w.unmapPending == nil {
+				w.unmapPending = map[string]uuid.UUID{}
+			}
+			w.unmapPending[mapKey] = data.ID
+		}
 		return err
 	}
 
-	w.maybeEmitBounce(msg)
-	w.maybeEmitComplaint(msg)
+	// Reports go out only once the arrival is published, so a message
+	// re-offered after a failed publish does not apply its report twice.
+	if bounce != nil {
+		_ = w.onEvent(models.JobEventTypeInboundBounce, bounce)
+	}
+	if complaint != nil {
+		_ = w.onEvent(models.JobEventTypeInboundComplaint, complaint)
+	}
+	return nil
+}
 
-	// The consumer decodes NEW_EMAIL as JobEventNewEmail{user_id, message}.
-	return w.onEvent(models.JobEventTypeNewEmail, &models.JobEventNewEmail{
-		UserID:  w.UserID,
-		Message: data,
-	})
+// retryUnmap removes the map entries a failed publish could not, and reports
+// whether none is left. A pass must not run while one is: it would read that
+// message as known and move its cursor past it.
+func (w *WMail) retryUnmap(ctx context.Context) bool {
+	for key, id := range w.unmapPending {
+		if err := w.EmailMessageMapRepository.Del(ctx, w.UserID, w.ID, key, id); err != nil {
+			nodeevidence.Emit(nodeevidence.MessageDeferred, w.ID, evidenceHTTPStatus(err), 1)
+			log.Warn().Err(err).Str("email_id", w.ID.String()).Msg("sync: map entry for an unpublished message still not removed; pass skipped")
+			return false
+		}
+		delete(w.unmapPending, key)
+	}
+	return true
 }
 
 // capBody bounds a stored body part at MaxEmailBodySize. IMAP already reads

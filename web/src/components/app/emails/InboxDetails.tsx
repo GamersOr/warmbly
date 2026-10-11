@@ -1,5 +1,8 @@
-// Mailbox detail — a themed right slide-over with five tabs:
+import { DashboardImage } from "@/components/ui/dashboard-image";
+
+// Mailbox detail — a themed right slide-over with six tabs:
 //   Overview   read-only at-a-glance: health, today's usage, warmup status, identity
+//   Deliverability  where warmup mail landed: inbox rate, daily history, providers
 //   Analytics  warmup volume series + summary metrics
 //   Warmup     editable warmup ramp config + live status
 //   Sending    human sending behaviour: working days, hours, lunch, volume, spacing
@@ -10,11 +13,15 @@
 // validation. Read data: /analytics/accounts/:id and /analytics/warmup?email_id=.
 
 import React, { useMemo, useState } from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { mailboxTab, type MailboxTab } from "@/lib/browse-accounts-analytics";
+import { diagnosticSendingAllowed, diagnosticWarmupActive } from "@/lib/diagnosticParticipation";
 import { AnimatePresence, motion } from "framer-motion";
 import AdvisorStrip from "@/components/app/advisor/AdvisorStrip";
 import {
     XIcon,
     GaugeIcon,
+    MailCheckIcon,
     BarChart3Icon,
     FlameIcon,
     Settings2Icon,
@@ -35,11 +42,15 @@ import {
     BanIcon,
     HourglassIcon,
     XCircleIcon,
+    HelpCircleIcon,
     RefreshCwIcon,
     TrashIcon,
+    PowerIcon,
+    PowerOffIcon,
     type LucideIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import useMailboxSwitch from "@/components/app/emails/useMailboxSwitch";
+import toast from "react-hot-toast/headless";
 
 import type Inbox from "@/lib/api/models/app/emails/Inbox";
 import type AccountStatusModel from "@/lib/api/models/app/analytics/AccountStatus";
@@ -54,35 +65,61 @@ import useWarmupBanStatus from "@/lib/api/hooks/app/emails/useWarmupBanStatus";
 import useAppealWarmupBan from "@/lib/api/hooks/app/emails/useAppealWarmupBan";
 import useAuthCheck from "@/lib/api/hooks/app/emails/useAuthCheck";
 import useRefreshAuthCheck from "@/lib/api/hooks/app/emails/useRefreshAuthCheck";
+import useSendIdentity from "@/lib/api/hooks/app/emails/useSendIdentity";
+import useRefreshSendIdentity from "@/lib/api/hooks/app/emails/useRefreshSendIdentity";
+import getEmail from "@/lib/api/client/app/emails/getEmail";
+import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { OptionSelect } from "@/components/app/campaigns/preferences/components/CampaignPreferenceBoolBox";
 import useUpdateEmailTrackingDomain from "@/lib/api/hooks/app/emails/useUpdateEmailTrackingDomain";
 import useEmailTrackingDomain from "@/lib/api/hooks/app/emails/useEmailTrackingDomain";
 import useVerifyEmailTrackingDomain from "@/lib/api/hooks/app/emails/useVerifyEmailTrackingDomain";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import reauthEmailOAuth from "@/lib/api/client/app/emails/reauthEmailOAuth";
 import onboardOAuthFinish from "@/lib/api/client/app/emails/onboardOAuthFinish";
-import { openEmailOAuthPopup } from "@/lib/emails/emailOAuthPopup";
+import { authorizeEmailInPopup } from "@/lib/emails/emailOAuthPopup";
+import { mailboxConnectionLabel, mailHostLogo } from "@/lib/mailHost";
+import { useGrants } from "@/lib/api/hooks/app/emails/useMailboxGrants";
+import { domainOf, grantFor, grantName, vendorLabel, type GrantProvider } from "@/lib/api/models/app/emails/MailboxSources";
+import MailboxGrantDialog from "./import/grants/MailboxGrantDialog";
+import SigninRetiringNotice from "./migration/SigninRetiringNotice";
+import ProviderLogo from "./ProviderLogo";
+import MailboxSourceChip from "./MailboxSourceChip";
+import { mailboxSource } from "@/lib/mailboxSource";
 import UpdateCredentialsDialog from "./UpdateCredentialsDialog";
+import MailboxPlacementTab from "@/components/app/placement/MailboxPlacementTab";
+import ScrollStrip from "@/components/ui/scroll-strip";
 import EmailEditor from "../EmailEditor";
 import SendingBehaviorTab from "./SendingBehaviorTab";
+import { useUserProfile } from "@/hooks/context/user";
+import useCurrentOrganization from "@/lib/api/hooks/app/organizations/useCurrentOrganization";
+import { timezoneOptions } from "@/lib/timezone";
+import { utcDay } from "@/lib/campaignPeriod";
 import SyncStatusCard from "./SyncStatusCard";
 import CloudWarmupCard from "./CloudWarmupCard";
+import WarmupPartnerDiversity from "./WarmupPartnerDiversity";
 import useCloudPool from "@/hooks/useCloudPool";
 import { Toggle } from "@/components/app/campaigns/preferences/components/CampaignPreferenceBoolBox";
+import setDirectTracking from "@/lib/api/client/app/emails/setDirectTracking";
 import useSendingBehavior from "@/lib/api/hooks/app/emails/useSendingBehavior";
 import useSendingPlan from "@/lib/api/hooks/app/emails/useSendingPlan";
 import { minutesToClock, secondsToLabel } from "@/lib/api/models/app/emails/SendingBehavior";
 import TagSelector from "../popup/select/TagSelector";
+import { useAppStore } from "@/stores";
+import { repliesGoTo } from "@/lib/unibox/replyInbox";
 import TimeSelect from "@/components/ui/TimeSelect";
 import { DitherBarChart } from "@/components/ui/dither";
 import WeekdayBitmask from "../campaigns/schedule/WeekdayBitmask";
 import { Loading } from "@/components/loader";
 import { NumberInput, TextInput } from "@/components/ui/field";
+import { clampWarmupRetentionDays } from "@/lib/warmupRetention";
 import { useConfirm } from "@/hooks/context/confirm";
+import { usePermission } from "@/hooks/usePermission";
 import { usePresenceResource } from "@/hooks/PresenceProvider";
 import ResourceViewers from "@/components/app/presence/ResourceViewers";
 import { cn } from "@/lib/utils";
+import WarmupSendFailureNote from "./WarmupSendFailureNote";
 
 /* ── small themed primitives ─────────────────────── */
 
@@ -148,7 +185,7 @@ function LifecycleNotice({
             onSuccess: (data) =>
                 toast.success(
                     data.state === "resting"
-                        ? "Still resting: its warmup health is throttled or worse, so it stays out until that recovers"
+                        ? "Still resting: it is quarantined or blocked from warmup, so it stays out until that lifts"
                         : "Mailbox back in campaign rotation",
                 ),
             onError: (e) => toast.error(buildError(e as unknown as AppError)),
@@ -223,18 +260,9 @@ function ColdRampNotice({ ramp }: { ramp: import("@/lib/api/models/app/analytics
                         Easing into cold sending: {ramp.ceiling} of {ramp.mailbox_cap} a day
                     </p>
                     <p className="text-[11.5px] text-sky-800/90 leading-relaxed mt-0.5">
-                        {ramp.held ? (
-                            <>
-                                The climb is paused after a recent spam placement. It resumes on its own, then adds 5 a
-                                day until it reaches {ramp.mailbox_cap}.
-                            </>
-                        ) : (
-                            <>
-                                Going straight from warmup to a full cold cap is the volume jump mailbox providers
-                                penalise, so this adds 5 a day instead. At this rate it reaches {ramp.mailbox_cap} in
-                                about {ramp.days_to_full_cap} {ramp.days_to_full_cap === 1 ? "day" : "days"}.
-                            </>
-                        )}
+                        {ramp.held ? "Recent negative feedback is holding the pacing policy. " : ""}
+                        Automated test history does not prove real-recipient readiness. This conservative policy
+                        requires recent human campaign replies before increasing volume. No full-speed date or safe volume is guaranteed.
                     </p>
                 </div>
             </div>
@@ -307,8 +335,9 @@ function statusTone(status: string) {
 
 /* ── tabs ─────────────────────── */
 
-const TABS: { key: string; label: string; icon: LucideIcon }[] = [
+const TABS: { key: MailboxTab; label: string; icon: LucideIcon }[] = [
     { key: "overview", label: "Overview", icon: GaugeIcon },
+    { key: "deliverability", label: "Deliverability", icon: MailCheckIcon },
     { key: "analytics", label: "Analytics", icon: BarChart3Icon },
     { key: "warmup", label: "Warmup", icon: FlameIcon },
     { key: "sending", label: "Sending", icon: ClockFadingIcon },
@@ -323,13 +352,17 @@ export default function InboxDetails({
     emails,
     view,
     setView,
-    initialTab = "overview",
+    initialTab,
+    tabIntentKey,
+    onTabIntentConsumed,
     canWarmup = true,
 }: {
     emails: Inbox[] | null;
     view: string;
     setView: React.Dispatch<React.SetStateAction<string>>;
-    initialTab?: string;
+    initialTab?: MailboxTab;
+    tabIntentKey?: number;
+    onTabIntentConsumed?: () => void;
     canWarmup?: boolean;
 }) {
     const mailbox = emails?.find((e) => e.id === view) ?? null;
@@ -352,9 +385,9 @@ export default function InboxDetails({
                         animate={{ x: 0 }}
                         exit={{ x: "100%" }}
                         transition={{ type: "spring", damping: 32, stiffness: 320 }}
-                        className="fixed right-0 top-0 z-50 h-full w-full sm:w-[600px] bg-white border-l border-slate-200 shadow-[0_0_60px_-12px_rgba(15,23,42,0.3)] flex flex-col"
+                        className="fixed right-0 top-0 z-50 h-full w-full sm:w-[640px] xl:w-[720px] bg-white border-l border-slate-200 shadow-[0_0_60px_-12px_rgba(15,23,42,0.3)] flex flex-col"
                     >
-                        <Detail key={mailbox.id} mailbox={mailbox} onClose={close} initialTab={initialTab} canWarmup={canWarmup} />
+                        <Detail key={mailbox.id} mailbox={mailbox} onClose={close} initialTab={initialTab} tabIntentKey={tabIntentKey} onTabIntentConsumed={onTabIntentConsumed} canWarmup={canWarmup} />
                     </motion.aside>
                 </>
             )}
@@ -365,13 +398,23 @@ export default function InboxDetails({
 /* ── editable fields tracked for the save bar ─────────────────────── */
 const EDITABLE: (keyof Inbox)[] = [
     "name", "signature_html", "signature_plain", "signature_sync", "signature_code",
-    "tags", "campaign_limit", "min_wait_time", "reply_to", "save_to_sent",
+    "send_as_email",
+    "tags", "campaign_limit", "min_wait_time", "reply_to", "save_to_sent", "relay_folder_moves", "timezone",
     "warmup_base", "warmup_max", "warmup_increase", "warmup_reply_rate",
     "warmup_tag", "warmup_start_time", "warmup_end_time", "warmup_days",
+    "warmup_placement", "warmup_folder", "warmup_retention_days",
+    "test_mode", "test_send_enabled", "test_receive_enabled", "shared_daily_limit", "rolling_recipient_limit",
 ];
 
-function Detail({ mailbox, onClose, initialTab = "overview", canWarmup = true }: { mailbox: Inbox; onClose: () => void; initialTab?: string; canWarmup?: boolean }) {
-    const [tab, setTab] = useState(initialTab);
+function Detail({ mailbox, onClose, initialTab, tabIntentKey, onTabIntentConsumed, canWarmup = true }: { mailbox: Inbox; onClose: () => void; initialTab?: MailboxTab; tabIntentKey?: number; onTabIntentConsumed?: () => void; canWarmup?: boolean }) {
+    const [tab, setTab] = useBrowseState<MailboxTab>(`emails.mailbox.${mailbox.id}.tab`, "overview", mailboxTab,
+        initialTab === undefined ? undefined : { initialOverride: initialTab });
+    React.useEffect(() => {
+        if (initialTab !== undefined) {
+            setTab(initialTab);
+            onTabIntentConsumed?.();
+        }
+    }, [initialTab, tabIntentKey, onTabIntentConsumed, setTab]);
     const [form, setForm] = useState<Inbox>(mailbox);
     const update = (patch: Partial<Inbox>) => setForm((f) => ({ ...f, ...patch }));
 
@@ -409,20 +452,41 @@ function Detail({ mailbox, onClose, initialTab = "overview", canWarmup = true }:
     };
 
     const initials = mailbox.email.slice(0, 2).toUpperCase();
+    // A photo that stops loading falls back to the letters.
+    const [avatarFailed, setAvatarFailed] = React.useState(false);
+    React.useEffect(() => setAvatarFailed(false), [mailbox.avatar_url]);
 
     return (
         <>
             {/* Header */}
             <div className="shrink-0 px-5 h-14 flex items-center gap-3 border-b border-slate-200">
-                <div className="w-8 h-8 rounded-lg bg-sky-50 text-sky-700 flex items-center justify-center text-[11px] font-semibold shrink-0">
-                    {initials}
+                <div className="relative w-8 h-8 rounded-lg bg-sky-50 text-sky-700 flex items-center justify-center text-[11px] font-semibold shrink-0">
+                    {mailbox.avatar_url && !avatarFailed ? (
+                        <DashboardImage
+                            src={mailbox.avatar_url}
+                            alt=""
+                            referrerPolicy="no-referrer"
+                            onError={() => setAvatarFailed(true)}
+                            className="w-8 h-8 rounded-lg object-cover"
+                        />
+                    ) : (
+                        initials
+                    )}
+                    <ProviderLogo
+                        id={mailbox.mail_host || mailbox.provider}
+                        size="xs"
+                        className="absolute -right-1 -bottom-1 ring-2 ring-white"
+                    />
                 </div>
                 <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-medium text-slate-900 truncate">{mailbox.email}</div>
-                    <div className="text-[10.5px] text-slate-400 capitalize">{mailbox.provider?.replace("_", "/")}</div>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[10.5px] text-slate-400 truncate">{mailboxConnectionLabel(mailbox)}</span>
+                        {mailboxSource(mailbox).kind !== "host" && <MailboxSourceChip box={mailbox} labelClassName="inline" />}
+                    </div>
                 </div>
                 <span className={cn("h-5 px-2 rounded-full border text-[10px] font-semibold uppercase tracking-wide inline-flex items-center shrink-0", statusTone(mailbox.status))}>
-                    {mailbox.status}
+                    {mailbox.status === "inactive" ? "Off" : mailbox.status}
                 </span>
                 <ResourceViewers resource={mailbox.id ? `mailbox:${mailbox.id}` : null} className="shrink-0" />
                 <button onClick={onClose} aria-label="Close" className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-900 hover:bg-slate-100 transition-colors shrink-0">
@@ -431,12 +495,13 @@ function Detail({ mailbox, onClose, initialTab = "overview", canWarmup = true }:
             </div>
 
             {/* Tabs */}
-            <div className="shrink-0 px-3 flex items-center gap-1 border-b border-slate-200 overflow-x-auto">
+            <ScrollStrip activeKey={tab} className="shrink-0 border-b border-slate-200" innerClassName="px-3 gap-1">
                 {TABS.map((t) => {
                     const active = tab === t.key;
                     return (
                         <button
                             key={t.key}
+                            data-active={active}
                             onClick={() => setTab(t.key)}
                             className={cn(
                                 "relative h-10 px-2.5 inline-flex shrink-0 items-center gap-1.5 text-[12.5px] transition-colors",
@@ -448,19 +513,20 @@ function Detail({ mailbox, onClose, initialTab = "overview", canWarmup = true }:
                             {active && (
                                 <motion.span
                                     layoutId="inbox-tab-underline"
-                                    className="absolute left-1.5 right-1.5 -bottom-px h-0.5 rounded-full bg-sky-600"
+                                    className="absolute left-1.5 right-1.5 bottom-0 h-0.5 rounded-full bg-sky-600"
                                     transition={{ type: "spring", duration: 0.3, bounce: 0.15 }}
                                 />
                             )}
                         </button>
                     );
                 })}
-            </div>
+            </ScrollStrip>
 
             {/* Body */}
             <div className="flex-1 min-h-0 overflow-y-auto">
                 {tab === "overview" && <OverviewTab status={status.data} loading={status.isPending} mailbox={mailbox} />}
-                {tab === "analytics" && <AnalyticsTab warmup={warmup.data} loading={warmup.isPending} />}
+                {tab === "deliverability" && <MailboxPlacementTab mailboxId={mailbox.id} poolHealth={status.data?.warmup_health} />}
+                {tab === "analytics" && <AnalyticsTab warmup={warmup.data} loading={warmup.isPending} failed={warmup.isError} retry={() => void warmup.refetch()} />}
                 {tab === "warmup" && <WarmupTab form={form} update={update} status={status.data} mailbox={mailbox} canWarmup={canWarmup} />}
                 {tab === "sending" && <SendingBehaviorTab mailboxId={mailbox.id} />}
                 {tab === "settings" && <SettingsTab form={form} update={update} mailbox={mailbox} onDisconnected={onClose} />}
@@ -519,8 +585,7 @@ function ReconnectAction({ mailbox }: { mailbox: Inbox }) {
         if (busy) return;
         setBusy(true);
         try {
-            const { url, state } = await reauthEmailOAuth(mailbox.id);
-            const { code } = await openEmailOAuthPopup(url, state);
+            const { code, state } = await authorizeEmailInPopup(() => reauthEmailOAuth(mailbox.id));
             await onboardOAuthFinish(code, state);
             toast.success("Mailbox re-authorized. It's back online.");
             qc.invalidateQueries({ queryKey: ["emails", "list"] });
@@ -564,6 +629,62 @@ function ReconnectAction({ mailbox }: { mailbox: Inbox }) {
     );
 }
 
+// A mailbox connected through an admin grant has no credential of its own to
+// re-authorize: the grant signs it in, so its drawer points at the grant instead.
+function DelegatedGrantNotice({ mailbox, inError = false }: { mailbox: Inbox; inError?: boolean }) {
+    const [open, setOpen] = useState(false);
+    const grants = useGrants(true);
+    const byId = mailbox.domain_grant_id ? grants.data?.data.find((g) => g.id === mailbox.domain_grant_id) : undefined;
+    const provider: GrantProvider =
+        byId?.provider ??
+        (mailbox.provider === "outlook" || mailHostLogo(mailbox.mail_host) === "microsoft" ? "microsoft" : "google");
+    // Matching by domain is only for a mailbox the server has not linked to its grant.
+    const grant =
+        byId ??
+        (mailbox.domain_grant_id
+            ? undefined
+            : grantFor(
+                  grants.data?.data.filter((g) => g.provider === provider),
+                  mailbox.email,
+              ));
+    const domain = grant ? grantName(grant) : domainOf(mailbox.email);
+    const openButton = (
+        <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className={cn(
+                "underline font-medium",
+                inError ? "text-rose-900 decoration-rose-300 hover:decoration-rose-600" : "text-sky-700 decoration-sky-300 hover:decoration-sky-600",
+            )}
+        >
+            {grant?.status === "invalid" ? "Check the grant" : "View the grant"}
+        </button>
+    );
+    return (
+        <>
+            {inError ? (
+                <p className="mt-2 text-[11px] text-rose-900 leading-relaxed">
+                    Connected through your administrator&apos;s grant for {domain}, so there is nothing to re-authorize here. {openButton}
+                </p>
+            ) : (
+                <div className="px-5 py-3 flex items-start gap-2.5 border-b border-slate-200/60">
+                    <ProviderLogo id={provider} size="sm" className="mt-px" />
+                    <div className="min-w-0 text-[12px] text-slate-600 leading-relaxed">
+                        Connected through your administrator&apos;s grant for <span className="text-slate-900 font-medium">{domain}</span>.{" "}
+                        {grant?.status === "invalid" && (
+                            <span className="text-rose-700">
+                                The grant failed its last check{grant.last_error ? `: ${grant.last_error}` : ""}, so this mailbox is stopped.{" "}
+                            </span>
+                        )}
+                        {openButton}
+                    </div>
+                </div>
+            )}
+            <MailboxGrantDialog open={open} provider={provider} grantId={grant?.id} onClose={() => setOpen(false)} />
+        </>
+    );
+}
+
 function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/models/app/analytics/AccountStatus").default; loading: boolean; mailbox: Inbox }) {
     const health = status?.health;
     const usage = status?.daily_usage;
@@ -591,6 +712,8 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
 
     return (
         <div className="divide-y divide-slate-200/60">
+            {mailbox.status === "inactive" && <SwitchedOffNotice mailbox={mailbox} />}
+            {mailbox.provider === "gmail" && mailbox.auth_method !== "delegated" && <SigninRetiringNotice mailbox={mailbox} />}
             {/* Whatever the Advisor has on this mailbox, above the numbers that
                 produced it. This is where a row flag and a deep link both land. */}
             <AdvisorStrip
@@ -631,7 +754,7 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
             </div>
 
             {/* Sync: import progress and fair-use status */}
-            <SyncStatusCard mailboxId={mailbox.id} />
+            <SyncStatusCard mailboxId={mailbox.id} provider={mailbox.provider} />
 
             {/* Key stats */}
             <div className="grid grid-cols-2 divide-x divide-y divide-slate-200/60">
@@ -649,7 +772,7 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
                     }
                 />
                 <StatCard label="Warmup today" value={ws ? ws.current_volume : (usage?.warmup_sent ?? "—")} sub={ws ? `target ${ws.target_volume}` : undefined} accent />
-                <StatCard label="Reply rate" value={ws ? `${ws.reply_rate}%` : "—"} sub="warmup replies" />
+                <StatCard label="Reply target" value={ws ? `${ws.reply_rate}%` : "—"} sub="configured warmup share" />
                 <StatCard label="Days warming" value={ws ? ws.days_active : "—"} sub={ws ? `max ${ws.max_volume}/day` : undefined} />
             </div>
 
@@ -668,7 +791,12 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
                                 <div className="text-[12px] font-medium text-rose-800">{e.title}</div>
                                 <div className="text-[11px] text-rose-700/90 mt-0.5 leading-relaxed">{e.message}</div>
                                 {e.action_required && <div className="text-[11px] text-rose-900 mt-1 font-medium">{e.action_required}</div>}
-                                {e.id === firstCredentialErrorId && <ReconnectAction mailbox={mailbox} />}
+                                {e.id === firstCredentialErrorId &&
+                                    (mailbox.auth_method === "delegated" ? (
+                                        <DelegatedGrantNotice mailbox={mailbox} inError />
+                                    ) : (
+                                        <ReconnectAction mailbox={mailbox} />
+                                    ))}
                             </div>
                         ))}
                     </div>
@@ -677,7 +805,21 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
 
             {/* Identity */}
             <div>
-                <Row label="Provider"><span className="capitalize">{mailbox.provider?.replace("_", "/")}</span></Row>
+                <Row label="Provider">
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                        <ProviderLogo id={mailbox.mail_host || mailbox.provider} size="sm" />
+                        <span className="truncate">{mailboxConnectionLabel(mailbox)}</span>
+                    </span>
+                </Row>
+                {mailbox.vendor && (
+                    <Row label="Imported from">
+                        <span className="inline-flex items-center gap-1.5 min-w-0">
+                            <ProviderLogo id={mailbox.vendor} size="sm" />
+                            <span className="truncate">{vendorLabel(mailbox.vendor)}</span>
+                        </span>
+                    </Row>
+                )}
+                {mailbox.auth_method === "delegated" && <DelegatedGrantNotice mailbox={mailbox} />}
                 <Row label="Tracking domain">{mailbox.tracking_domain || <span className="text-slate-400">Not set</span>}</Row>
                 <Row label="Daily cap">
                     {today?.is_working_day
@@ -718,11 +860,22 @@ function OverviewTab({ status, loading, mailbox }: { status?: import("@/lib/api/
 
 /* ── Analytics ─────────────────────── */
 
-function AnalyticsTab({ warmup, loading }: { warmup?: import("@/lib/api/models/app/analytics/WarmupAnalytics").default; loading: boolean }) {
+function AnalyticsTab({ warmup, loading, failed, retry }: { warmup?: import("@/lib/api/models/app/analytics/WarmupAnalytics").default; loading: boolean; failed: boolean; retry: () => void }) {
     // Tap affordance for touch devices, where the native title tooltip never fires.
     const [selectedDay, setSelectedDay] = useState<string | null>(null);
     if (loading) {
         return <div className="py-20 flex items-center justify-center"><Loading className="w-5 h-5 text-sky-500" /></div>;
+    }
+    if (failed) {
+        return (
+            <div className="px-5 py-16 text-center">
+                <p className="text-[12.5px] text-slate-700 font-medium">Couldn't load warmup analytics</p>
+                <p className="text-[11.5px] text-slate-400 mt-1">If this mailbox warms in Cloud, check the Cloud connection and try again.</p>
+                <button type="button" onClick={retry} className="mt-3 h-7 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-700">
+                    Retry
+                </button>
+            </div>
+        );
     }
     if (!warmup || warmup.daily_stats.length === 0) {
         return (
@@ -737,18 +890,23 @@ function AnalyticsTab({ warmup, loading }: { warmup?: import("@/lib/api/models/a
     const chartData = warmup.daily_stats.map((d) => ({
         key: d.date,
         value: d.emails_sent,
-        hint: `${d.date}: ${d.emails_sent} sent / ${d.target_volume} target · ${d.emails_replied} replies`,
+        hint: `${d.date}: ${d.emails_sent} sent / ${d.target_volume} target · ${d.emails_received ?? 0} received · ${d.emails_replied} replies`,
     }));
+    const received = s.total_received ?? 0;
+    const exchange = s.total_sent > 0 ? `${Math.round((received / s.total_sent) * 100)}% of what it sent` : "from the pool";
     const targets = warmup.daily_stats.map((d) => d.target_volume);
     const selectedIndex = selectedDay ? warmup.daily_stats.findIndex((d) => d.date === selectedDay) : -1;
 
     return (
         <div className="divide-y divide-slate-200/60">
             <div className="grid grid-cols-2 divide-x divide-y divide-slate-200/60">
-                <StatCard label="Total sent" value={s.total_sent} sub={`${s.average_daily.toFixed(1)}/day avg`} />
-                <StatCard label="Replies" value={s.total_replied} sub={`${s.reply_rate.toFixed(1)}% reply rate`} accent />
-                <StatCard label="Target progress" value={`${Math.round(s.target_progress)}%`} sub="toward max volume" />
-                <StatCard label="Days active" value={s.days_active} sub={`${warmup.date_range.from} → ${warmup.date_range.to}`} />
+                <StatCard label="Total sent" value={s.total_sent} sub={`${s.average_daily.toFixed(1)}/active day`} />
+                <StatCard label="Received" value={received} sub={exchange} accent />
+                <StatCard label="Replies" value={s.total_replied} sub={`${s.reply_rate.toFixed(1)}% reply rate`} />
+                <StatCard label="Target met" value={`${Math.round(s.target_progress)}%`} sub="of planned volume" />
+                <div className="col-span-2">
+                    <StatCard label="Days active" value={s.days_active} sub={`${utcDay(warmup.date_range.from)} → ${utcDay(warmup.date_range.to)}`} />
+                </div>
             </div>
 
             <div className="px-5 py-4">
@@ -776,7 +934,7 @@ function AnalyticsTab({ warmup, loading }: { warmup?: import("@/lib/api/models/a
                     if (!d) return null;
                     return (
                         <p className="mt-2 text-[11px] text-slate-500 font-mono tabular-nums">
-                            {d.date}: {d.emails_sent} sent / {d.target_volume} target · {d.emails_replied} replies
+                            {d.date}: {d.emails_sent} sent / {d.target_volume} target · {d.emails_received ?? 0} received · {d.emails_replied} replies
                         </p>
                     );
                 })()}
@@ -915,19 +1073,28 @@ function WarmupBanBanner({ emailId }: { emailId: string }) {
 
 /* ── Domain authentication (SPF / DKIM / DMARC live check) ─────────────────────── */
 
-// One row per auth record. Green check when present/aligned, red cross when
-// missing. Optional detail (selectors, the SPF record, the DMARC policy) is
-// shown muted underneath.
-function AuthRecordRow({ label, ok, detail }: { label: string; ok: boolean; detail?: React.ReactNode }) {
+// One row per auth record, in one of three states. "unverified" is not a
+// softer "missing": DKIM keys sit at a selector DNS cannot enumerate, so a
+// probe that finds nothing says nothing about whether the domain signs, and
+// showing that as a red Missing tells an owner whose DKIM is fine to go fix it.
+type AuthRecordState = "found" | "missing" | "unverified";
+
+function AuthRecordRow({ label, state, detail }: { label: string; state: AuthRecordState; detail?: React.ReactNode }) {
+    const badge = {
+        found: { className: "text-emerald-600", icon: <CheckCircle2Icon className="w-3.5 h-3.5" />, text: "Found" },
+        missing: { className: "text-rose-600", icon: <XCircleIcon className="w-3.5 h-3.5" />, text: "Missing" },
+        unverified: { className: "text-slate-400", icon: <HelpCircleIcon className="w-3.5 h-3.5" />, text: "Not verified" },
+    }[state];
+
     return (
         <div className="flex items-start justify-between gap-3 py-2 border-b border-slate-200/60 last:border-b-0">
             <div className="min-w-0">
                 <div className="text-[12.5px] font-medium text-slate-900">{label}</div>
-                {detail && <div className="mt-0.5 text-[10.5px] text-slate-500 font-mono break-all leading-relaxed">{detail}</div>}
+                {detail && <div className="mt-0.5 text-[10.5px] text-slate-500 leading-relaxed">{detail}</div>}
             </div>
-            <span className={cn("inline-flex items-center gap-1 shrink-0 text-[11px] font-medium", ok ? "text-emerald-600" : "text-rose-600")}>
-                {ok ? <CheckCircle2Icon className="w-3.5 h-3.5" /> : <XCircleIcon className="w-3.5 h-3.5" />}
-                {ok ? "Found" : "Missing"}
+            <span className={cn("inline-flex items-center gap-1 shrink-0 text-[11px] font-medium", badge.className)}>
+                {badge.icon}
+                {badge.text}
             </span>
         </div>
     );
@@ -936,7 +1103,9 @@ function AuthRecordRow({ label, ok, detail }: { label: string; ok: boolean; deta
 // The banner above the records, shown only when the stored state is "failing".
 // The gate is invisible otherwise, and an owner whose campaigns have stopped
 // needs to be told that here rather than inferring it from a paused campaign.
-function AuthGateNotice({ mailbox }: { mailbox: Inbox }) {
+// livePassing is a read-only check that passed: the records are fixed but the
+// stored verdict is not, so the banner says who can clear it.
+function AuthGateNotice({ mailbox, livePassing }: { mailbox: Inbox; livePassing: boolean }) {
     if (mailbox.auth_state !== "failing") return null;
 
     const since = mailbox.auth_failing_since ? new Date(mailbox.auth_failing_since) : null;
@@ -946,8 +1115,10 @@ function AuthGateNotice({ mailbox }: { mailbox: Inbox }) {
             <div className="min-w-0 text-[11.5px] text-rose-900/90 leading-relaxed">
                 <span className="font-medium">This domain is failing authentication.</span>{" "}
                 Cold sending and warmup from this mailbox stop while it stays that way
-                {since ? `, failing since ${since.toLocaleDateString()}` : ""}. Add the missing DNS
-                records at your registrar, then re-check below to clear it straight away.
+                {since ? `, failing since ${since.toLocaleDateString()}` : ""}.{" "}
+                {livePassing
+                    ? "The records check out now; someone who can manage mailboxes can re-check to clear it."
+                    : "Add the missing DNS records at your registrar, then re-check below to clear it straight away."}
             </div>
         </div>
     );
@@ -956,29 +1127,46 @@ function AuthGateNotice({ mailbox }: { mailbox: Inbox }) {
 function AuthCheckPanel({ mailbox }: { mailbox: Inbox }) {
     const emailId = mailbox.id;
     const [open, setOpen] = useState(false);
-    const check = useAuthCheck(emailId, open);
-    // Re-checking RECORDS the verdict, which is what lifts the send gate, so
-    // the button is a write and not a query refetch.
+    // A check by someone who can manage mailboxes RECORDS its verdict, which is
+    // what lifts the send gate. Showing a live result without recording it
+    // left a passing check under a "failing" banner that never cleared.
+    const canRecord = usePermission("MANAGE_EMAILS");
+    const check = useAuthCheck(emailId, open && !canRecord);
     const refresh = useRefreshAuthCheck(emailId);
     const data = refresh.data ?? check.data;
+    const error = canRecord ? refresh.error : check.error;
     const busy = check.isFetching || refresh.isPending;
+
+    const run = () => {
+        setOpen(true);
+        if (!canRecord) {
+            if (open) void check.refetch();
+            return;
+        }
+        refresh.mutate();
+    };
+
+    const unanswered = !!data?.lookup_error || !!data?.reserved || data?.domain === "";
+    const verdict = !data
+        ? null
+        : unanswered
+          ? { ok: false, tone: "text-slate-600", title: "DNS did not answer" }
+          : data.all_aligned
+            ? { ok: true, tone: "text-emerald-700", title: "SPF, DKIM and DMARC records found" }
+            : data.spf_found && data.dmarc_found
+              ? { ok: true, tone: "text-emerald-700", title: "SPF and DMARC records found, DKIM unverified" }
+              : { ok: false, tone: "text-amber-700", title: "DNS records need attention" };
+    const discoverable = (found: boolean): AuthRecordState => (found ? "found" : unanswered ? "unverified" : "missing");
 
     return (
         <div className="px-5 py-4">
             <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                     <Eyebrow>Domain authentication</Eyebrow>
-                    <p className="mt-1 text-[11px] text-slate-400 leading-relaxed">Live SPF, DKIM &amp; DMARC check on the sending domain.</p>
+                    <p className="mt-1 text-[11px] text-slate-400 leading-relaxed">DNS record discovery. Actual-message alignment and delivery TLS are separate, unverified checks.</p>
                 </div>
                 <button
-                    onClick={() => {
-                        setOpen(true);
-                        if (open) {
-                            refresh.mutate(undefined, {
-                                onError: (e) => toast.error(buildError(e as unknown as AppError)),
-                            });
-                        }
-                    }}
+                    onClick={run}
                     disabled={busy}
                     className="h-8 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] font-medium text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors disabled:opacity-60 shrink-0"
                 >
@@ -987,43 +1175,64 @@ function AuthCheckPanel({ mailbox }: { mailbox: Inbox }) {
                 </button>
             </div>
 
-            <AuthGateNotice mailbox={mailbox} />
+            <AuthGateNotice mailbox={mailbox} livePassing={!canRecord && !!data && !unanswered && data.spf_found && data.dmarc_found} />
 
             {open && (
-                <div className="mt-3">
-                    {check.isError ? (
+                <div className="mt-3 space-y-2">
+                    {error && (
                         <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2.5 text-[11.5px] text-rose-700 leading-relaxed">
-                            {buildError(check.error as unknown as AppError)}
+                            {buildError(error as unknown as AppError)}
                         </div>
-                    ) : check.isFetching && !data ? (
+                    )}
+                    {busy && !data ? (
                         <div className="rounded-md border border-slate-200 bg-slate-50/70 px-3 py-3 flex items-center gap-2 text-[12px] text-slate-500">
                             <Loading className="!w-3.5 h-3.5" /> Looking up DNS records…
                         </div>
-                    ) : data ? (
+                    ) : data && verdict ? (
                         <div className="rounded-md border border-slate-200 bg-white">
-                            <div className={cn("flex items-start gap-2 px-3 py-2.5 border-b border-slate-200/60", data.all_aligned ? "text-emerald-700" : "text-amber-700")}>
-                                {data.all_aligned ? <ShieldCheckIcon className="w-4 h-4 shrink-0 mt-0.5" /> : <ShieldAlertIcon className="w-4 h-4 shrink-0 mt-0.5" />}
+                            <div className={cn("flex items-start gap-2 px-3 py-2.5 border-b border-slate-200/60", verdict.tone)}>
+                                {verdict.ok ? <ShieldCheckIcon className="w-4 h-4 shrink-0 mt-0.5" /> : <ShieldAlertIcon className="w-4 h-4 shrink-0 mt-0.5" />}
                                 <div className="min-w-0">
-                                    <div className="text-[12px] font-medium">{data.all_aligned ? "Authentication aligned" : "Authentication needs attention"}</div>
+                                    <div className="text-[12px] font-medium">{verdict.title}</div>
                                     {data.summary && <div className="mt-0.5 text-[11px] text-slate-500 leading-relaxed">{data.summary}</div>}
+                                    {data.readiness?.filter((c) => c.state !== "record-present").map((c) => (
+                                        <div key={c.component} className="mt-1 text-[11px] text-slate-500 leading-relaxed">
+                                            {c.component.replaceAll("_", " ")}: {c.state}. {c.reason}
+                                        </div>
+                                    ))}
+                                    {unanswered && (
+                                        <div className="mt-0.5 text-[11px] text-slate-500 leading-relaxed">
+                                            Nothing is held against the domain for this. Try again in a minute.
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                             <div className="px-3">
-                                <AuthRecordRow label="SPF" ok={data.spf_found} detail={data.spf_record} />
+                                <AuthRecordRow
+                                    label="SPF"
+                                    state={discoverable(data.spf_found)}
+                                    detail={data.spf_record ? <span className="font-mono break-all">{data.spf_record}</span> : undefined}
+                                />
                                 <AuthRecordRow
                                     label="DKIM"
-                                    ok={data.dkim_found}
-                                    detail={data.dkim_selectors && data.dkim_selectors.length > 0 ? `selectors: ${data.dkim_selectors.join(", ")}` : undefined}
+                                    state={data.dkim_found ? "found" : "unverified"}
+                                    detail={
+                                        data.dkim_found ? (
+                                            <span className="font-mono break-all">selectors: {(data.dkim_selectors ?? []).join(", ")}</span>
+                                        ) : (
+                                            "A DKIM key sits at a selector only your provider knows, and DNS cannot be asked to list them, so this is unconfirmed rather than absent. Confirm signing is on in your provider's console. It never affects whether this mailbox may send."
+                                        )
+                                    }
                                 />
                                 <AuthRecordRow
                                     label="DMARC"
-                                    ok={data.dmarc_found}
+                                    state={discoverable(data.dmarc_found)}
                                     detail={
-                                        data.dmarc_found && data.dmarc_policy
-                                            ? data.dmarc_inherited
-                                                ? `policy: ${data.dmarc_policy} (inherited from ${data.dmarc_domain})`
-                                                : `policy: ${data.dmarc_policy}`
-                                            : undefined
+                                        data.dmarc_found && data.dmarc_policy ? (
+                                            <span className="font-mono break-all">
+                                                {data.dmarc_inherited ? `policy: ${data.dmarc_policy} (inherited from ${data.dmarc_domain})` : `policy: ${data.dmarc_policy}`}
+                                            </span>
+                                        ) : undefined
                                     }
                                 />
                             </div>
@@ -1046,22 +1255,26 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
     // back into cache on success.
     const life = useWarmupLifecycle(mailbox.id);
     const confirm = useConfirm();
-    const off = !mailbox.warmup;
-    const paused = !!mailbox.warmup && !!mailbox.warmup_paused_at;
-    const active = !!mailbox.warmup && !mailbox.warmup_paused_at;
+    const off = !mailbox.warmup || mailbox.test_mode === "off";
+    const paused = !off && !!mailbox.warmup && (!!mailbox.warmup_paused_at || !diagnosticSendingAllowed(mailbox));
+    const active = diagnosticWarmupActive(mailbox);
     // When Warmbly Cloud warms this mailbox the local controls step aside.
     const pool = useCloudPool();
     const inCloud = pool.connected && pool.isEnrolled(mailbox.id);
 
-    const run = (action: "start" | "pause" | "resume" | "stop", verb: string) =>
-        life.mutate(action, {
+    const run = (action: "start" | "pause" | "resume" | "stop", verb: string) => {
+        const execute = () => life.mutate(action, {
             onSuccess: () => toast.success(`Warmup ${verb}`),
             onError: (e) => toast.error(buildError(e as unknown as AppError)),
         });
+        if (action === "start" || action === "resume") {
+            confirm.show("Authorize automated diagnostic sends and replies? Starting from Off also enables receiving diagnostic tests. Tests are disclosed automation, not organic engagement or a proven reputation boost. Provider policies still apply.", execute);
+        } else execute();
+    };
 
     const stopReset = () => {
         confirm.show(
-            "Stop warmup and reset ramp progress? Restarting begins from the base volume. Use Pause to keep progress.",
+            "Stop all pool participation, including receiving tests and campaign health checks? Pending work is rechecked by updated workers; accepted provider sends cannot be recalled. Ramp history and safety holds are kept.",
             async () => {
                 try {
                     await life.mutateAsync("stop");
@@ -1091,7 +1304,7 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
                     </div>
                     <div className="min-w-0">
                         <div className="text-[12.5px] font-medium text-slate-900">{active ? "Warming up" : paused ? "Paused" : "Warmup off"}</div>
-                        <div className="text-[11px] text-slate-400 truncate">{active ? "Building sender reputation" : paused ? "Ramp progress kept — resume anytime" : "Not building reputation"}</div>
+                        <div className="text-[11px] text-slate-400 truncate">{active ? "Automated diagnostic traffic, not organic engagement" : paused && !off ? "Sending paused; receiving permission is separate" : "Sending and receiving diagnostic tests disabled"}</div>
                     </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
@@ -1118,7 +1331,7 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
                             <button
                                 onClick={stopReset}
                                 disabled={life.isPending}
-                                title="Stop warmup and reset ramp progress"
+                                title="Stop sending and receiving diagnostic tests"
                                 className="h-8 px-3 rounded-md border border-slate-200 hover:border-rose-200 text-[12px] font-medium text-slate-600 hover:text-rose-600 inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
                             >
                                 Stop
@@ -1129,7 +1342,7 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
                         <button
                             onClick={stopReset}
                             disabled={life.isPending}
-                            title="Stop warmup and reset ramp progress"
+                            title="Stop sending and receiving diagnostic tests"
                             className="h-8 px-3 rounded-md border border-slate-200 hover:border-rose-200 text-[12px] font-medium text-slate-600 hover:text-rose-600 inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
                         >
                             Stop
@@ -1143,12 +1356,32 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
             {!inCloud && off && !canWarmup && (
                 <div className="px-5 py-4">
                     <div className="rounded-md border border-sky-100 bg-sky-50/70 px-3 py-2.5 text-[11.5px] text-sky-900/90 leading-relaxed">
-                        Warmup is available on paid plans. Upgrade to build and protect sender reputation automatically.
+                        Paid plans include disclosed diagnostic traffic and placement monitoring, not a guaranteed reputation benefit.
                     </div>
                 </div>
             )}
 
             {/* Live volume */}
+            {!inCloud && (
+                <div className="px-5 py-4 space-y-3 border-t border-slate-100">
+                    <Eyebrow>Diagnostic participation</Eyebrow>
+                    <select aria-label="Diagnostic participation mode" value={form.test_mode ?? "legacy"}
+                        onChange={(e) => update({ test_mode: e.target.value as Inbox["test_mode"], test_send_enabled: false, test_receive_enabled: false })}
+                        className="h-8 rounded border border-slate-200 text-sm">
+                        {(form.test_mode == null || form.test_mode === "legacy") && <option value="legacy" disabled>Legacy participation (unchanged until explicit action)</option>}
+                        <option value="diagnostic">Disclosed automated diagnostics</option>
+                        <option value="off">Off: no diagnostic sends or receipts</option>
+                    </select>
+                    {form.test_mode === "diagnostic" && <>
+                        <label className="flex items-center justify-between text-xs">Allow diagnostic sending and replies<Toggle value={!!form.test_send_enabled} onChange={(v) => update({ test_send_enabled: v })} /></label>
+                        <label className="flex items-center justify-between text-xs">Allow receiving diagnostic tests<Toggle value={!!form.test_receive_enabled} onChange={(v) => update({ test_receive_enabled: v })} /></label>
+                    </>}
+                    <p className="text-xs text-slate-500">Save to apply. Sending also requires an active schedule and sender role. Receive-only does not authorize replies. Diagnostic mode does not star, mark read or rescue spam. Off also stops placement tests, not legitimate campaign mail.</p>
+                    <label className="block text-xs">Shared daily send limit (all send types; 0 uses configured caps)<input type="number" min={0} value={form.shared_daily_limit ?? 0} onChange={(e) => update({ shared_daily_limit: Number(e.target.value) })} className="ml-2 w-20 rounded border border-slate-200" /></label>
+                    <label className="block text-xs">Recipients in rolling 24 hours (To/CC/BCC; 0 uses configured caps)<input type="number" min={0} value={form.rolling_recipient_limit ?? 0} onChange={(e) => update({ rolling_recipient_limit: Number(e.target.value) })} className="ml-2 w-20 rounded border border-slate-200" /></label>
+                </div>
+            )}
+
             {ws && active && (
                 <div className="px-5 py-4">
                     <Eyebrow>Today</Eyebrow>
@@ -1158,6 +1391,14 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
                     <div className="mt-2.5 h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
                         <div className="h-full rounded-full bg-orange-400 transition-all" style={{ width: `${Math.min(100, (ws.current_volume / Math.max(1, ws.target_volume)) * 100)}%` }} />
                     </div>
+                    {ws.partner_limit && (
+                        <p className="mt-2 text-[11.5px] text-slate-500 leading-relaxed">
+                            The ramp is at {ws.partner_limit.ramp_target} today, but only {ws.partner_limit.reachable}{" "}
+                            {ws.partner_limit.reachable === 1 ? "partner is" : "partners are"} available to this mailbox, and it
+                            never writes to the same partner twice in a day. It sends more as partners free up.
+                        </p>
+                    )}
+                    {ws.send_failure && <WarmupSendFailureNote failure={ws.send_failure} provider={mailbox.provider} />}
                 </div>
             )}
 
@@ -1165,7 +1406,14 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
             {wh && (
                 <div className="px-5 py-4">
                     <div className="flex items-center justify-between">
-                        <Eyebrow>Warmup reputation</Eyebrow>
+                        <div className="flex items-center gap-2">
+                            <Eyebrow>Warmup reputation</Eyebrow>
+                            {(wh.pool_type || wh.source === "cloud") && (
+                                <span className="text-[10.5px] text-slate-400">
+                                    {[wh.source === "cloud" ? "Warmbly Cloud" : "", wh.pool_type ? (wh.pool_type === "premium" ? "Premium pool" : "Free pool") : ""].filter(Boolean).join(" · ")}
+                                </span>
+                            )}
+                        </div>
                         <span className={cn("inline-flex items-center gap-1 text-[11px] font-medium", warmupStateTone[wh.state]?.text ?? "text-slate-500")}>
                             <ShieldCheckIcon className="w-3.5 h-3.5" /> {warmupStateTone[wh.state]?.label ?? wh.state}
                         </span>
@@ -1174,6 +1422,16 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
                     {wh.blocked_until && (
                         <p className="mt-1 text-[11px] text-rose-600">Paused from the pool until {new Date(wh.blocked_until).toLocaleDateString()}.</p>
                     )}
+                    {wh.source === "cloud" && wh.state !== "healthy" && (
+                        <p className="mt-1 text-[11px] text-slate-500 leading-relaxed">
+                            {wh.state === "quarantined" || wh.state === "blocked"
+                                ? "Campaigns on this instance skip this mailbox while Warmbly Cloud holds it."
+                                : wh.state === "throttled"
+                                  ? "Campaigns on this instance send from this mailbox at half volume until it recovers."
+                                  : "Campaigns on this instance send from this mailbox at reduced volume until it recovers."}
+                        </p>
+                    )}
+                    <WarmupPartnerDiversity health={wh} />
                 </div>
             )}
 
@@ -1222,6 +1480,11 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
                 </FieldShell>
             </div>
 
+            {/* Where warmup mail lands in the real mail client */}
+            <div className="px-5 py-5 space-y-4">
+                <WarmupPlacementFields form={form} update={update} provider={mailbox.provider} />
+            </div>
+
             {/* Schedule */}
             <div className="px-5 py-5 space-y-5">
                 <Eyebrow>Sending window</Eyebrow>
@@ -1242,6 +1505,162 @@ function WarmupTab({ form, update, status, mailbox, canWarmup = true }: { form: 
                         />
                     </div>
                 </FieldShell>
+            </div>
+        </div>
+    );
+}
+
+/* ── Where warmup mail lands in the customer's own mail client ────────── */
+
+// Warmup mail is hidden from the unibox, but it is real mail in a real mailbox,
+// and the mailbox owner does see it. These two settings are the only thing that
+// decides what they see: mail they received AND the copy of what this mailbox
+// sent are both filed the same way, so one folder holds all of it and nothing
+// else does. That is also how someone tells a warmup message apart from a
+// stranger's email, which is why the folder is named rather than hidden.
+function WarmupPlacementFields({
+    form,
+    update,
+    provider,
+}: {
+    form: Inbox;
+    update: (patch: Partial<Inbox>) => void;
+    provider: string;
+}) {
+    const gmail = provider === "gmail";
+    const noun = gmail ? "label" : "folder";
+    const placement = form.warmup_placement ?? "folder";
+    const folder = form.warmup_folder ?? "";
+
+    return (
+        <>
+            <Eyebrow>In this mailbox</Eyebrow>
+            <FieldShell
+                label="Where warmup mail goes"
+                hint={`Applies to warmup mail this inbox receives and to the copy of every warmup message it sends, so warmup never shows up in ${gmail ? "your inbox or Sent" : "your inbox or Sent folder"}.`}
+            >
+                <OptionSelect<"folder" | "inbox" | "archive">
+                    aria-label="Warmup filing"
+                    value={placement}
+                    onChange={(v) => update({ warmup_placement: v })}
+                    options={[
+                        {
+                            value: "folder",
+                            label: `Its own ${noun}`,
+                            hint: "Recommended. Everything warmup in one place you can open, search and ignore.",
+                        },
+                        {
+                            value: "inbox",
+                            label: "Leave it in the inbox",
+                            hint: "Warmup mail stays where the provider put it. Mail that landed in spam is still rescued.",
+                        },
+                        {
+                            value: "archive",
+                            label: "Archive it",
+                            hint: `Out of the inbox with no ${noun} of its own. Findable by search only.`,
+                        },
+                    ]}
+                />
+            </FieldShell>
+            {placement === "folder" && (
+                <FieldShell
+                    label={`${gmail ? "Label" : "Folder"} name`}
+                    hint={`Created on first use. Leave empty for "Warmbly". Point it at a ${noun} you already use for this if another tool set one up.`}
+                >
+                    <TextInput
+                        value={folder}
+                        placeholder="Warmbly"
+                        maxLength={64}
+                        onChange={(v) => update({ warmup_folder: v.replace(/[/\\.%*"]/g, "") })}
+                        className="w-full h-9"
+                    />
+                </FieldShell>
+            )}
+            <WarmupRetentionField form={form} update={update} gmail={gmail} />
+        </>
+    );
+}
+
+/* ── How long warmup mail stays in the mailbox ─────────────────────────── */
+
+// Warmup mail is deleted by Warmbly once it has served its purpose, so a
+// mailbox on a fixed quota never fills with it and the owner never has to
+// clear the folder by hand. The window is per mailbox; empty follows the
+// instance setting (30 days unless the operator changed it).
+function WarmupRetentionField({
+    form,
+    update,
+    gmail,
+}: {
+    form: Inbox;
+    update: (patch: Partial<Inbox>) => void;
+    gmail: boolean;
+}) {
+    const days = form.warmup_retention_days ?? 0;
+    const where = gmail ? "moved to Trash, which Gmail empties after 30 days" : "deleted";
+    return (
+        <FieldShell
+            label="Keep warmup mail for (days)"
+            hint={`Warmup mail older than this is ${where} by Warmbly wherever the setting above keeps it, and the copy Warmbly stores goes with it. 0 follows the instance setting (30 days unless changed); otherwise 3 to 3650. A message is never deleted before its engagement is recorded.`}
+        >
+            <NumberInput
+                value={days}
+                min={0}
+                max={3650}
+                suffix="days"
+                onChange={(n) => update({ warmup_retention_days: clampWarmupRetentionDays(n) })}
+                className="w-full h-9"
+            />
+        </FieldShell>
+    );
+}
+
+/* ── Direct-mail open/click tracking (per mailbox, off by default) ────── */
+
+// Campaign mail has always carried a pixel and wrapped links. A reply written
+// by hand went out clean, which is the right default for one-to-one mail and
+// the reason this is opt-in rather than a platform-wide switch.
+function DirectMailTrackingControl({ mailbox }: { mailbox: Inbox }) {
+    const queryClient = useQueryClient();
+    // Optimistic: the switch paints immediately and the write follows, so the
+    // toggle never feels like it round-trips.
+    const [enabled, setEnabled] = useState(!!mailbox.track_direct_mail);
+
+    const save = useMutation({
+        mutationFn: (next: boolean) => setDirectTracking(mailbox.id, next),
+        onSuccess: (_res, next) => {
+            queryClient.invalidateQueries({ queryKey: ["emails"] });
+            queryClient.invalidateQueries({ queryKey: ["analytics", "direct"] });
+            toast.success(next ? "Tracking direct mail from this mailbox" : "Direct mail is no longer tracked");
+        },
+        onError: (e, next) => {
+            setEnabled(!next);
+            toast.error(buildError(e as unknown as AppError));
+        },
+    });
+
+    const toggle = (next: boolean) => {
+        setEnabled(next);
+        save.mutate(next);
+    };
+
+    return (
+        <div className="px-5 py-4 flex items-start justify-between gap-3 border-t border-slate-200">
+            <div className="min-w-0">
+                <div className="text-[12.5px] font-medium text-slate-900">Track opens and clicks on direct mail</div>
+                <div className="text-[11px] text-slate-400">
+                    Adds the same open pixel and link tracking your campaigns use to replies you write by hand in the inbox. Off by
+                    default: it costs a little deliverability and it would also track mail to people you know. Applies to mail sent
+                    from now on, and the results show up under Direct mail in Analytics.
+                </div>
+            </div>
+            <div className="shrink-0">
+                <Toggle
+                    value={enabled}
+                    onChange={toggle}
+                    disabled={save.isPending}
+                    ariaLabel="Track opens and clicks on direct mail"
+                />
             </div>
         </div>
     );
@@ -1270,10 +1689,10 @@ function normalizeTrackingDomain(raw: string): string {
 function trackingDomainProblem(host: string): string | null {
     if (!host) return null;
     if (host.length > 253) return "That domain is too long.";
-    if (/[^a-z0-9.-]/.test(host)) return "Use a plain hostname, like track.yourdomain.com.";
-    if (!host.includes(".")) return "Use a subdomain of a domain you own, like track.yourdomain.com.";
+    if (/[^a-z0-9.-]/.test(host)) return "Use a plain hostname, like link.yourdomain.com.";
+    if (!host.includes(".")) return "Use a subdomain of a domain you own, like link.yourdomain.com.";
     if (host.split(".").some((l) => !l || l.startsWith("-") || l.endsWith("-"))) {
-        return "Use a plain hostname, like track.yourdomain.com.";
+        return "Use a plain hostname, like link.yourdomain.com.";
     }
     if (!/^[a-z]{2,}$/.test(host.split(".").pop() ?? "")) return "That does not end in a domain ending, like .com.";
     return null;
@@ -1371,7 +1790,7 @@ function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
             </div>
 
             <FieldShell label="Custom tracking domain" hint="Track opens & clicks through your own subdomain instead of the shared host, and serve the unsubscribe link there too. Improves deliverability.">
-                <TextInput value={domain} placeholder="track.yourdomain.com" onChange={setDomain} className="w-full h-9" />
+                <TextInput value={domain} placeholder="link.yourdomain.com" onChange={setDomain} className="w-full h-9" />
             </FieldShell>
 
             {problem && (
@@ -1479,6 +1898,138 @@ function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
     );
 }
 
+
+/* ── sending identity ─────────────────────────────────────────────── */
+
+/**
+ * Which of the mailbox's verified addresses its mail goes out as, and the
+ * signature its owner already wrote at the provider.
+ *
+ * Both come from the same place (Gmail's settings API) and are refreshed by
+ * the same press, so they live in one card. Only Gmail exposes either, so the
+ * card is absent for Outlook and SMTP/IMAP rather than showing a control that
+ * cannot do anything.
+ *
+ * The alias is part of the drawer's shared form and saves with the save bar.
+ * The signature import is not: it writes immediately, then hands the imported
+ * text back so the editor above shows what was stored instead of quietly
+ * saving the old text over it.
+ */
+function SendIdentityCard({
+    mailbox,
+    value,
+    onChange,
+    onSignatureImported,
+}: {
+    mailbox: Inbox;
+    value: string;
+    onChange: (v: string) => void;
+    onSignatureImported: (html: string, plain: string) => void;
+}) {
+    const isGmail = mailbox.provider === "gmail";
+    const identity = useSendIdentity(mailbox.id, isGmail);
+    const refresh = useRefreshSendIdentity(mailbox.id);
+    const [importing, setImporting] = useState(false);
+
+    const data = identity.data;
+    const aliases = (data?.identities ?? []).filter((i) => i.email !== data?.mailbox_email);
+
+    const options: SelectOption[] = [
+        { value: "", label: `${mailbox.email} (mailbox address)` },
+        ...aliases.map((a) => ({
+            value: a.email,
+            label: a.verified ? (a.name ? `${a.name} · ${a.email}` : a.email) : `${a.email} (not verified)`,
+            disabled: !a.verified,
+        })),
+    ];
+
+    // A stored choice the provider has since stopped verifying is cleared on
+    // the next refresh, but until then it is still what mail goes out as, so
+    // it stays selectable rather than disappearing from its own dropdown.
+    if (value && !options.some((o) => o.value === value)) {
+        options.push({ value, label: `${value} (no longer listed)` });
+    }
+
+    const reload = async (importSignature: boolean) => {
+        try {
+            if (importSignature) setImporting(true);
+            const next = await refresh.mutateAsync(importSignature);
+            if (importSignature) {
+                // The import wrote the row; read it back so the editor holds
+                // what was stored and the save bar cannot undo it.
+                const fresh = await getEmail(mailbox.id);
+                onSignatureImported(fresh.signature_html, fresh.signature_plain);
+                toast.success(
+                    fresh.signature_html.trim()
+                        ? "Signature imported from Gmail"
+                        : "Your Gmail signature is empty, so nothing was changed",
+                );
+            } else {
+                toast.success(
+                    next.identities.length > 1
+                        ? `Found ${next.identities.length} addresses you can send as`
+                        : "No other send-as addresses on this mailbox",
+                );
+            }
+        } catch (e) {
+            toast.error(buildError(e as AppError));
+        } finally {
+            setImporting(false);
+        }
+    };
+
+    const busy = refresh.isPending || importing;
+
+    if (!isGmail) return null;
+
+    return (
+        <div className="px-5 py-5 space-y-3 border-b border-slate-100">
+            <Eyebrow>Sending identity</Eyebrow>
+
+            <FieldShell
+                label="Send mail as"
+                hint="Any address Google has verified this mailbox to send as. Add and verify one in Gmail's settings first, then refresh. Warmup always uses the mailbox address."
+            >
+                <SelectMenu
+                    value={value}
+                    onChange={onChange}
+                    options={options}
+                    fullWidth
+                    disabled={busy}
+                    aria-label="Send mail as"
+                />
+            </FieldShell>
+
+            <div className="flex flex-wrap items-center gap-2">
+                <button
+                    type="button"
+                    onClick={() => reload(false)}
+                    disabled={busy}
+                    className="h-8 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-600 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                >
+                    {refresh.isPending && !importing ? <Loading className="!w-3.5 h-3.5" /> : <RefreshCwIcon className="w-3.5 h-3.5" />}
+                    Refresh addresses
+                </button>
+                <button
+                    type="button"
+                    onClick={() => reload(true)}
+                    disabled={busy}
+                    className="h-8 px-3 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-600 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                >
+                    {importing ? <Loading className="!w-3.5 h-3.5" /> : <SendIcon className="w-3.5 h-3.5" />}
+                    Import signature from Gmail
+                </button>
+            </div>
+
+            <p className="text-[10.5px] text-slate-400 leading-relaxed">
+                {data?.signature_source === "provider" && data?.signature_imported_at
+                    ? `Signature imported from Gmail on ${new Date(data.signature_imported_at).toLocaleDateString()}. Editing it below makes it yours again.`
+                    : "Importing replaces the signature below with the one set in Gmail."}
+            </p>
+        </div>
+    );
+}
+
 /* ── Settings (editable) ─────────────────────── */
 
 /* ── disconnect ───────────────────────────────────────────────────── */
@@ -1493,6 +2044,63 @@ function TrackingDomainCard({ mailbox }: { mailbox: Inbox }) {
  * takes before asking, and the copy differs by provider because what happens to
  * the connection does: Google accepts a revocation and Microsoft does not.
  */
+// Off stops everything, so the way back sits where the drawer opens.
+function SwitchedOffNotice({ mailbox }: { mailbox: Inbox }) {
+    const power = useMailboxSwitch(mailbox.id, mailbox.email);
+    return (
+        <div className="px-5 py-4">
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 flex items-start gap-2">
+                <PowerOffIcon className="w-3.5 h-3.5 mt-px shrink-0 text-slate-500" />
+                <div className="min-w-0 flex-1">
+                    <p className="text-[12.5px] font-medium text-slate-900">This mailbox is switched off</p>
+                    <p className="text-[11.5px] text-slate-600 leading-relaxed mt-0.5">
+                        It is not sending campaigns, warming up or syncing mail, whatever its warmup setting says. Its
+                        settings, history and worker are kept, so switching it back on picks up where it stopped.
+                        To keep it out of campaigns while it warms, turn on Hold from campaigns below first, then switch it back on.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={power.switchOn}
+                        disabled={power.pending}
+                        className="mt-2 h-7 px-2.5 inline-flex items-center gap-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium disabled:opacity-60 transition-colors"
+                    >
+                        <PowerIcon className="w-3.5 h-3.5" />
+                        {power.pending ? "Switching on…" : "Switch back on"}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// The mailbox's own on/off switch; a revoked mailbox is turned back on by reconnecting.
+function MailboxPowerCard({ mailbox }: { mailbox: Inbox }) {
+    const power = useMailboxSwitch(mailbox.id, mailbox.email);
+    if (mailbox.status !== "active" && mailbox.status !== "inactive") return null;
+    const on = mailbox.status === "active";
+    return (
+        <div className="px-5 py-5 space-y-3">
+            <Eyebrow>Mailbox</Eyebrow>
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                    <div className="text-[12.5px] font-medium text-slate-900">Mailbox on</div>
+                    <div className="text-[11px] text-slate-400">
+                        Switched off, it neither sends, warms nor syncs, and keeps its settings and history. To stop
+                        only campaign sending and keep warming, use Hold from campaigns on the Overview tab. On a
+                        mailbox that is off, turn the hold on before switching it back on.
+                    </div>
+                </div>
+                <Toggle
+                    value={on}
+                    onChange={(v) => (v ? power.switchOn() : power.switchOff())}
+                    disabled={power.pending}
+                    ariaLabel="Mailbox on"
+                />
+            </div>
+        </div>
+    );
+}
+
 function DisconnectCard({ mailbox, onDisconnected }: { mailbox: Inbox; onDisconnected: () => void }) {
     const confirm = useConfirm();
     const remove = useRemoveEmail(mailbox.id);
@@ -1506,7 +2114,7 @@ function DisconnectCard({ mailbox, onDisconnected }: { mailbox: Inbox; onDisconn
 
     const ask = () =>
         confirm.show(
-            `Disconnect ${mailbox.email}? This deletes its imported mail, warmup history and credentials, and cannot be undone. Set the mailbox inactive instead if you only want it to stop sending.`,
+            `Disconnect ${mailbox.email}? This deletes its imported mail, warmup history and credentials, and cannot be undone. Switch the mailbox off instead if you only want it to stop.`,
             async () => {
                 try {
                     await remove.mutateAsync();
@@ -1549,7 +2157,39 @@ function DisconnectCard({ mailbox, onDisconnected }: { mailbox: Inbox; onDisconn
     );
 }
 
+// Where a reply-to sends replies, and whether Warmbly still sees them there.
+function ReplyToNote({ mailbox, value }: { mailbox: Inbox; value: string }) {
+    const accounts = useAppStore((s) => s.emails);
+    const address = value.trim();
+    const own = [mailbox.email, mailbox.send_as_email].some((a) => !!a && a.toLowerCase() === address.toLowerCase());
+    if (!address || own) return null;
+    const inbox = accounts.find((a) => repliesGoTo({ ...mailbox, reply_to: address }, a));
+    if (inbox) {
+        return (
+            <p className="text-[10.5px] text-slate-500 mt-1 leading-relaxed">
+                Replies land in {inbox.email} and still count for this mailbox's campaigns. Warmup mail keeps its replies here.
+            </p>
+        );
+    }
+    return (
+        <p className="text-[10.5px] text-amber-700 mt-1 leading-relaxed">
+            {address} is not a mailbox in this workspace, so replies sent there are not tracked. Connect it to track them.
+        </p>
+    );
+}
+
 function SettingsTab({ form, update, mailbox, onDisconnected }: { form: Inbox; update: (p: Partial<Inbox>) => void; mailbox: Inbox; onDisconnected: () => void }) {
+    const { timezones } = useUserProfile();
+    const org = useCurrentOrganization();
+    const workspaceZone = org.data?.timezone ?? "";
+    const zoneOptions = useMemo<SelectOption[]>(
+        () => [
+            { value: "", label: workspaceZone ? `Follow the workspace (${workspaceZone})` : "Follow the workspace (UTC until one is set)" },
+            ...timezoneOptions(timezones, form.timezone),
+        ],
+        [timezones, workspaceZone, form.timezone],
+    );
+    const mirrorTarget = mailbox.provider === "gmail" ? "Gmail" : mailbox.provider === "outlook" ? "Outlook" : "the mailbox";
     return (
         <div className="divide-y divide-slate-200/60">
             <div className="px-5 py-5 space-y-4">
@@ -1559,7 +2199,7 @@ function SettingsTab({ form, update, mailbox, onDisconnected }: { form: Inbox; u
                 </FieldShell>
                 <FieldShell
                     label="Reply-to"
-                    hint={`Where replies land. Leave empty to use ${mailbox.email}.`}
+                    hint={`Where replies land. Leave empty to use ${mailbox.email}. Point several mailboxes at one connected mailbox to read every reply in one place.`}
                 >
                     <div className="flex items-center gap-1.5">
                         <TextInput
@@ -1578,6 +2218,7 @@ function SettingsTab({ form, update, mailbox, onDisconnected }: { form: Inbox; u
                             </button>
                         )}
                     </div>
+                    <ReplyToNote mailbox={mailbox} value={form.reply_to ?? ""} />
                 </FieldShell>
             </div>
 
@@ -1602,6 +2243,35 @@ function SettingsTab({ form, update, mailbox, onDisconnected }: { form: Inbox; u
                     </div>
                 </div>
             )}
+
+            <div className="px-5 py-5 space-y-3">
+                <Eyebrow>Unibox</Eyebrow>
+                <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        <div className="text-[12.5px] font-medium text-slate-900">
+                            Mirror Archive and Delete to {mirrorTarget}
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                            Archive, Delete and Move to inbox in the unibox move the message in
+                            the mailbox too, so a conversation is only cleaned up once. Delete
+                            moves it to the mailbox's Trash and never removes it for good. Turn
+                            it off to keep filing inside Warmbly.
+                        </div>
+                    </div>
+                    <Toggle
+                        value={form.relay_folder_moves ?? true}
+                        onChange={(v) => update({ relay_folder_moves: v })}
+                        ariaLabel="Mirror Archive and Delete to the mailbox"
+                    />
+                </div>
+            </div>
+
+            <SendIdentityCard
+                mailbox={mailbox}
+                value={form.send_as_email}
+                onChange={(v) => update({ send_as_email: v })}
+                onSignatureImported={(html, plain) => update({ signature_html: html, signature_plain: plain })}
+            />
 
             <div className="px-5 py-5 space-y-2">
                 <Eyebrow>Signature</Eyebrow>
@@ -1629,9 +2299,25 @@ function SettingsTab({ form, update, mailbox, onDisconnected }: { form: Inbox; u
                 />
             </div>
 
+            <div className="px-5 py-5 space-y-4">
+                <Eyebrow>Timezone</Eyebrow>
+                <FieldShell
+                    label="Mailbox timezone"
+                    hint="Warmup hours and the Sending behaviour workday are read in this zone. Leave it on the workspace unless this mailbox belongs to somebody somewhere else; with its own zone it also stays inside 8am to 8pm local time on campaigns in another timezone."
+                >
+                    <SelectMenu
+                        value={form.timezone ?? ""}
+                        onChange={(v) => update({ timezone: v })}
+                        options={zoneOptions}
+                        fullWidth
+                        aria-label="Mailbox timezone"
+                    />
+                </FieldShell>
+            </div>
+
             <div className="px-5 py-5 space-y-5">
                 <Eyebrow>Sending limits</Eyebrow>
-                <FieldShell label="Daily campaign cap" hint="Max cold-campaign emails per day, up to 5,000. Default 50; raise only with good reputation.">
+                <FieldShell label="Maximum cold emails per day" hint="Shared ceiling across all campaigns, not a daily target. Default 50; the Sending tab plans 28–32/day for new mailboxes. Both are configurable, and the lower limit wins.">
                     <NumField value={form.campaign_limit} onChange={(v) => update({ campaign_limit: v })} suffix="emails / day" max={5000} />
                     {form.campaign_limit > 100 && (
                         <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
@@ -1650,6 +2336,10 @@ function SettingsTab({ form, update, mailbox, onDisconnected }: { form: Inbox; u
             </div>
 
             <TrackingDomainCard mailbox={mailbox} />
+
+            <DirectMailTrackingControl mailbox={mailbox} />
+
+            <MailboxPowerCard mailbox={mailbox} />
 
             <DisconnectCard mailbox={mailbox} onDisconnected={onDisconnected} />
 

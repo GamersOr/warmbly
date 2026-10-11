@@ -11,29 +11,26 @@
 //     section header so it nests cleanly under the campaign view.
 
 import React from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "@tanstack/react-router";
+import { useSearchParams } from "@/hooks/useSearchParams";
 import {
     AlertTriangleIcon,
-    BanIcon,
-    Building2Icon,
+    ArrowDownIcon,
+    ArrowUpIcon,
     CableIcon,
+    DatabaseZapIcon,
     CheckIcon,
-    ClockIcon,
     CornerUpLeftIcon,
     DownloadIcon,
-    InfoIcon,
     LayersIcon,
     Loader2Icon,
-    MailIcon,
     MailOpenIcon,
     MoreHorizontalIcon,
     MousePointerClickIcon,
     PauseIcon,
-    PhoneIcon,
     PlayIcon,
     PlusIcon,
     RefreshCcwIcon,
-    Settings2Icon,
     ShieldCheckIcon,
     SheetIcon,
     SparklesIcon,
@@ -51,37 +48,40 @@ import useSearchContacts from "@/lib/api/hooks/app/contacts/useSearchContacts";
 import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import useDeleteContacts from "@/lib/api/hooks/app/contacts/useDeleteContacts";
 import { useRequestContactVerification } from "@/lib/api/hooks/app/contacts/useContactVerification";
-import VerificationBadge from "./VerificationBadge";
+import { reverifyNotice } from "@/lib/api/client/app/contacts/verification";
 import { useBatchResearch } from "@/lib/api/hooks/app/contacts/useContactResearch";
 import useIntegrationConnections from "@/lib/api/hooks/app/integrations/useIntegrationConnections";
 import { usePushContacts } from "@/lib/api/hooks/app/integrations/usePushContacts";
+import { useStartApolloEnrichment } from "@/lib/api/hooks/app/integrations/useApollo";
 import {
     PROVIDER_LABELS,
     PUSHABLE_PROVIDERS,
     type IntegrationConnection,
 } from "@/lib/api/models/app/integrations/Integration";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
-import clippedTitle from "@/lib/helper/clippedTitle";
 import FilterBar from "./filters/FilterBar";
+import useContactBrowseState, { contactBrowseName } from "./filters/useContactBrowseState";
 import { hasNarrowingFilters, isCompleteCustomFilter, scopeSearch } from "./filters/helpers";
 import ContactEdit from "./ContactEdit";
 import type { ContactSlideTab } from "./contact-edit/tabs";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
 import { holdSummary } from "@/lib/api/models/app/contacts/Contact";
-import type { ContactCampaignProgress, LeadEngagement, LeadStatus, VerificationSource, VerificationStatus } from "@/lib/api/models/app/contacts/Contact";
+import type { ContactCampaignProgress, LeadEngagement, LeadStatus } from "@/lib/api/models/app/contacts/Contact";
 import type { CampaignLeadCounts } from "@/lib/api/models/app/contacts/SearchContactsResult";
 import ContactsEditBulk from "./ContactsEditBulk";
 import PauseLeadDialog from "./PauseLeadDialog";
 import { useResumeLead } from "@/lib/api/hooks/app/campaigns/useLeadHold";
+import { CC_RESUME_CONFIRM } from "@/lib/leadHold";
 import { selectionOf } from "@/lib/api/models/app/contacts/ContactSelection";
 import type ContactSelection from "@/lib/api/models/app/contacts/ContactSelection";
 import * as rowSelection from "./selection";
 import type { RowSelection } from "./selection";
 import { NewContactDialog } from "./NewContactDialog";
 import ExportDialog from "./ExportDialog";
-import ImportWizard from "./ImportWizard";
+import ImportWizard, { type ImportStep } from "./ImportWizard";
+import RunningImportChip from "./import/RunningImportChip";
 import AddFromContactsDialog from "./AddFromContactsDialog";
 import AddToSegmentMenu from "@/components/app/segments/AddToSegmentMenu";
 import SegmentEditor from "@/components/app/segments/SegmentEditor";
@@ -96,7 +96,12 @@ import type { ExportScopeContext } from "./ExportDialog";
 import useUpdateContactsBulk from "@/lib/api/hooks/app/contacts/useUpdateContactsBulk";
 import useAiMetered from "@/hooks/useAiMetered";
 import SyncSourcesPanel from "./SyncSourcesPanel";
-import { CategoryChip } from "./CategoryPicker";
+import { columnClass, emptyColumnIds, sortOptions, type ContactColumn, type ContactRow } from "./columns";
+import { ColumnChooser, SortMenu, type ViewSortState } from "./ViewControls";
+import { useContactView } from "./useContactView";
+import { readCachedView } from "@/lib/api/hooks/app/views/useViewPreferences";
+import type { SearchContactsSortBy } from "@/lib/api/models/app/contacts/search-contacts.types";
+import type { ColumnViewName } from "@/lib/api/models/app/views/ViewPreferences";
 
 import {
     EmptyBlock,
@@ -114,16 +119,23 @@ import {
     PopoverMenuContent,
     PopoverMenuItem,
     PopoverMenuLabel,
-    PopoverMenuSeparator,
     PopoverMenuTrigger,
     SelectButton,
 } from "@/components/ui/popover-menu";
+import { Checkbox } from "@/components/ui/checkbox";
+import useCrmProvider from "@/hooks/useCrmProvider";
+import { CrmMark } from "@/components/app/crm/crmProviders";
+import CrmImportDialog from "./import/CrmImportDialog";
 
 type SubFilter = "all" | "subscribed" | "unsubscribed";
 
 // Mirrors maxIntegrationPushSize on the backend: one synchronous push is a
 // live call per contact against the CRM's API.
 const MAX_CRM_PUSH = 500;
+// The most contacts one Apollo enrichment run takes; the server refuses more.
+const MAX_APOLLO_ENRICH = 5000;
+// Mirrors research.MaxBatch: every contact is a metered AI run.
+const MAX_RESEARCH_BATCH = 500;
 
 export default function ContactsTable({
     current_campaign,
@@ -152,7 +164,6 @@ export default function ContactsTable({
     const [bulkEdit, setBulkEdit] = React.useState<boolean>(false);
     const [newOpen, setNewOpen] = React.useState<boolean>(false);
     const [exportOpen, setExportOpen] = React.useState<boolean>(false);
-    const [importOpen, setImportOpen] = React.useState<boolean>(false);
     const [syncOpen, setSyncOpen] = React.useState<boolean>(false);
     const [fromContactsOpen, setFromContactsOpen] = React.useState<boolean>(false);
     const [fromSegmentOpen, setFromSegmentOpen] = React.useState<boolean>(false);
@@ -160,15 +171,132 @@ export default function ContactsTable({
     const [segmentPreset, setSegmentPreset] = React.useState<{ conditions: SegmentCondition[] } | null>(null);
     const navigate = useNavigate();
     // ?category=<id> pre-filters the list (the Categories tab links here).
-    const [params] = useSearchParams();
+    const [params, setParams] = useSearchParams();
 
-    const [searchProps, setSearchProps] = React.useState<SearchContacts>(() => {
-        const category = params.get("category");
-        return {
-            ...scopeSearch({ campaignId: current_campaign?.id, segmentId: segment?.id }),
-            category_ids: category && !segment && !current_campaign ? [category] : undefined,
-        };
+    // An open import lives in the URL (?import=<id>&importStep=<step>), so a
+    // reload reopens it where it was. "new" is the upload step before a draft exists.
+    const [importOpen, setImportOpen] = React.useState<boolean>(() => params.has("import"));
+    const [importId, setImportId] = React.useState<string | null>(() => {
+        const id = params.get("import");
+        return id && id !== "new" ? id : null;
     });
+    const [importStep, setImportStep] = React.useState<ImportStep | undefined>(
+        () => (params.get("importStep") as ImportStep) ?? undefined,
+    );
+    // Provider mode adds a list import; its draft continues in the same wizard.
+    const { isExternal, crm } = useCrmProvider();
+    const [crmImportOpen, setCrmImportOpen] = React.useState(false);
+    const continueImport = React.useCallback((id: string, step: ImportStep) => {
+        setCrmImportOpen(false);
+        setImportId(id);
+        setImportStep(step);
+        setImportOpen(true);
+    }, []);
+    const routeImport = React.useCallback(
+        (id: string | null, step: ImportStep) => {
+            setParams(
+                (prev) => {
+                    const next = new URLSearchParams(prev);
+                    next.set("import", id ?? "new");
+                    next.set("importStep", step);
+                    return next;
+                },
+                { replace: true },
+            );
+        },
+        [setParams],
+    );
+    const closeImport = React.useCallback(() => {
+        setImportOpen(false);
+        setImportId(null);
+        setImportStep(undefined);
+        setParams(
+            (prev) => {
+                const next = new URLSearchParams(prev);
+                next.delete("import");
+                next.delete("importStep");
+                return next;
+            },
+            { replace: true },
+        );
+    }, [setParams]);
+
+    // ?contact=<id> opens that contact's drawer (the CRM's "Open in Warmbly" links here).
+    const deepContact = params.get("contact");
+    React.useEffect(() => {
+        if (deepContact) openContact(deepContact);
+    }, [deepContact, openContact]);
+    // Closing the drawer drops the param, so a reload does not reopen it.
+    const prevEdit = React.useRef(edit);
+    React.useEffect(() => {
+        const was = prevEdit.current;
+        prevEdit.current = edit;
+        if (!was || edit) return;
+        setParams(
+            (prev) => {
+                if (!prev.has("contact")) return prev;
+                const next = new URLSearchParams(prev);
+                next.delete("contact");
+                return next;
+            },
+            { replace: true },
+        );
+    }, [edit, setParams]);
+
+    // The member's saved layout for this list: its columns and its sort. The
+    // Leads tab and the contacts page are two views with two layouts.
+    const viewName: ColumnViewName = current_campaign ? "campaign_leads" : "contacts";
+    const view = useContactView(viewName);
+
+    const browseName = contactBrowseName(current_campaign?.id, segment?.id);
+    const category = !segment && !current_campaign ? params.get("category") ?? undefined : undefined;
+    const [searchProps, setSearchProps] = useContactBrowseState({
+        campaignId: current_campaign?.id, segmentId: segment?.id, category,
+        initialSort: () => {
+            const cached = readCachedView(view.scope, viewName)?.sort;
+            return { sort_by: (cached?.by ?? "created_at") as SearchContactsSortBy, reverse: cached?.reverse ?? false };
+        },
+        clearCategoryIntent: () => setParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.delete("category");
+            return next;
+        }, { replace: true }),
+    });
+
+    // The saved sort applies once the server's copy is in hand, and only when
+    // it differs from what is already applied, so a change made here (which
+    // writes the same sort back) does not re-apply itself.
+    const appliedSortRef = React.useRef<string | null>(null);
+    React.useEffect(() => {
+        if (!view.loaded) return;
+        const saved = view.savedSort;
+        const sig = `${view.scope.userId}:${view.scope.orgId}:${viewName}:${saved ? `${saved.by}:${saved.reverse}` : "default"}`;
+        if (appliedSortRef.current === sig) return;
+        appliedSortRef.current = sig;
+        setSearchProps((prev) => ({
+            ...prev,
+            sort_by: (saved?.by ?? "created_at") as SearchContactsSortBy,
+            reverse: saved?.reverse ?? false,
+        }));
+    }, [view.loaded, view.savedSort, view.scope.userId, view.scope.orgId, viewName, setSearchProps]);
+    const sortState: ViewSortState = { by: searchProps.sort_by, reverse: searchProps.reverse };
+    function changeSort(next: ViewSortState) {
+        appliedSortRef.current = `${view.scope.userId}:${view.scope.orgId}:${viewName}:${next.by}:${next.reverse}`;
+        setSearchProps((s) => ({ ...s, sort_by: next.by, reverse: next.reverse }));
+        view.setSort({ by: next.by, reverse: next.reverse });
+    }
+    // A header click: the same column flips direction, a new one starts the
+    // way its kind reads best (A to Z for text, newest or most first otherwise).
+    function sortByColumn(col: ContactColumn) {
+        if (!col.sortKey) return;
+        if (searchProps.sort_by === col.sortKey) changeSort({ by: col.sortKey, reverse: !searchProps.reverse });
+        else changeSort({ by: col.sortKey, reverse: !!col.sortAsc });
+    }
+    function resetView() {
+        view.reset();
+        appliedSortRef.current = "default";
+        setSearchProps((s) => ({ ...s, sort_by: "created_at", reverse: false }));
+    }
 
     function saveAsSegment(draft: SearchContacts) {
         const { conditions, dropped } = filtersToSegment(draft, current_campaign?.id);
@@ -295,10 +423,46 @@ export default function ContactsTable({
             (connectionsQuery.data?.connections ?? []).filter(
                 (c) =>
                     PUSHABLE_PROVIDERS.includes(c.provider) &&
-                    (c.status === "connected" || c.status === "degraded"),
+                    (c.status === "connected" || c.status === "degraded") &&
+                    // In provider mode contacts sync to that CRM on their own.
+                    !(isExternal && c.provider === crm.id),
+            ),
+        [connectionsQuery.data, isExternal, crm.id],
+    );
+
+    // Connected Apollo accounts the "Enrich" bulk action can use.
+    const startEnrich = useStartApolloEnrichment();
+    const apolloTargets = React.useMemo<IntegrationConnection[]>(
+        () =>
+            (connectionsQuery.data?.connections ?? []).filter(
+                (c) => c.provider === "apollo" && (c.status === "connected" || c.status === "degraded"),
             ),
         [connectionsQuery.data],
     );
+
+    function enrichWithApollo(connectionId: string, overwrite: boolean) {
+        if (selectionCount === 0 || startEnrich.isPending) return;
+        if (selectionCount > MAX_APOLLO_ENRICH) {
+            toast.error(`Apollo enrichment takes up to ${MAX_APOLLO_ENRICH.toLocaleString()} contacts at a time. Narrow the selection and try again.`);
+            return;
+        }
+        const n = selectionCount.toLocaleString();
+        confirm.show(
+            `Enrich ${n} contact${selectionCount === 1 ? "" : "s"} with Apollo? Apollo charges one credit for each person it finds. ${
+                overwrite ? "Fields that already have a value are replaced." : "Only empty fields are filled in."
+            }`,
+            async () => {
+                try {
+                    await startEnrich.mutateAsync({ connectionId, selection, overwrite });
+                    toast.success("Enrichment started. Progress is on the Apollo page.");
+                    clearSelection();
+                } catch (err) {
+                    toast.error(buildError(err as AppError));
+                    throw err;
+                }
+            },
+        );
+    }
 
     async function pushToCRM(connectionId: string, providerLabel: string) {
         if (selectionCount === 0 || pushContacts.isPending) return;
@@ -329,6 +493,28 @@ export default function ContactsTable({
     const contacts = contactsData.contacts;
     const total = contactsData.data?.pages[0]?.pagination.total ?? 0;
     const rows = React.useMemo(() => contacts ?? [], [contacts]);
+
+    // Optional-data columns (phone, company, custom fields) that no contact in
+    // this list has a value for step aside instead of showing a column of dashes.
+    const emptyColumns = React.useMemo(() => emptyColumnIds(view.columns, rows), [rows, view.columns]);
+    const tableColumns = React.useMemo(
+        () => view.columns.filter((col) => !emptyColumns.has(col.id)),
+        [view.columns, emptyColumns],
+    );
+
+    const viewControls = (
+        <>
+            <SortMenu sort={sortState} options={sortOptions(viewName)} customKeys={view.customKeys} onChange={changeSort} />
+            <ColumnChooser
+                visible={view.columns}
+                empty={emptyColumns}
+                available={view.available}
+                customized={view.customized}
+                onChange={view.setColumns}
+                onReset={resetView}
+            />
+        </>
+    );
 
     // What every bulk action applies to, and how many contacts that is. In
     // select-all mode the server resolves the filter, so the count here is the
@@ -397,6 +583,10 @@ export default function ContactsTable({
     const metered = useAiMetered();
     function bulkResearch() {
         if (selectionCount === 0) return;
+        if (selectionCount > MAX_RESEARCH_BATCH) {
+            toast.error(`Research takes up to ${MAX_RESEARCH_BATCH.toLocaleString()} contacts at a time. Narrow the selection and try again.`);
+            return;
+        }
         confirm?.show(
             `Research ${selectionCount.toLocaleString()} ${selectionCount === 1 ? "contact" : "contacts"}? ${
                 metered
@@ -417,12 +607,14 @@ export default function ContactsTable({
     function bulkVerify() {
         if (selectionCount === 0) return;
         confirm?.show(
-            `Re-verify ${selectionCount.toLocaleString()} ${selectionCount === 1 ? "address" : "addresses"}? Verdicts land in the background${
+            `Re-verify ${selectionCount.toLocaleString()} ${selectionCount === 1 ? "address" : "addresses"}? Current verdicts stand until the new ones land in the background${
                 selectionCount > 50 ? " over the next few minutes" : ""
             }.`,
             async () => {
                 const res = await verification.mutateAsync({ ...selection, action: "verify" });
-                toast.success(`Re-checking ${res.affected.toLocaleString()} ${res.affected === 1 ? "address" : "addresses"}`);
+                const notice = reverifyNotice(res, "address", "addresses");
+                if (notice.warn) toast(notice.text, { icon: "⚠️" });
+                else toast.success(notice.text);
                 clearSelection();
             },
         );
@@ -446,22 +638,26 @@ export default function ContactsTable({
     const [pauseTarget, setPauseTarget] = React.useState<{ id: string; name: string } | null>(null);
     const resumeLead = useResumeLead();
     const resumeOne = React.useCallback(
-        async (contactId: string) => {
+        (contactId: string, copied?: boolean) => {
             if (!current_campaign) return;
-            try {
-                await toast.promise(
-                    resumeLead.mutateAsync({ campaignId: current_campaign.id, contactId }),
-                    {
-                        loading: "Resuming lead…",
-                        success: "Lead resumed",
-                        error: (err: AppError) => buildError(err),
-                    },
-                );
-            } catch {
-                /* toast.promise already surfaced it */
-            }
+            const run = async () => {
+                try {
+                    await toast.promise(
+                        resumeLead.mutateAsync({ campaignId: current_campaign.id, contactId }),
+                        {
+                            loading: "Resuming lead…",
+                            success: "Lead resumed",
+                            error: (err: AppError) => buildError(err),
+                        },
+                    );
+                } catch {
+                    /* toast.promise already surfaced it */
+                }
+            };
+            if (copied) confirm.show(CC_RESUME_CONFIRM, run);
+            else void run();
         },
-        [current_campaign, resumeLead],
+        [current_campaign, resumeLead, confirm],
     );
 
     // Leads-view scope chips write straight into the search request, so the
@@ -496,6 +692,9 @@ export default function ContactsTable({
             onRetry={() => contactsData.refetch()}
             isRefetching={contactsData.isFetching && !contactsData.isPending}
             contacts={rows}
+            columns={tableColumns}
+            sort={sortState}
+            onSort={sortByColumn}
             isRowSelected={isRowSelected}
             onToggle={(id, on) => setRowSel((s) => rowSelection.toggleRow(s, id, on))}
             isSelectedAll={loadedAllSelected}
@@ -656,6 +855,7 @@ export default function ContactsTable({
                         placeholder="Search leads…"
                         className="w-full sm:w-56"
                     />
+                    {viewControls}
                     <TopbarAction
                         variant="ghost"
                         icon={<LayersIcon className="w-3 h-3" />}
@@ -678,6 +878,15 @@ export default function ContactsTable({
                     >
                         Import
                     </TopbarAction>
+                    {isExternal && (
+                        <TopbarAction
+                            variant="ghost"
+                            icon={<CrmMark provider={crm.id} className="w-3 h-3" />}
+                            onClick={() => setCrmImportOpen(true)}
+                        >
+                            From {crm.name}
+                        </TopbarAction>
+                    )}
                     <TopbarAction
                         variant="ghost"
                         icon={<SheetIcon className="w-3 h-3" />}
@@ -708,6 +917,7 @@ export default function ContactsTable({
                     reenrolling={reenrolling}
                 />
                 <FilterBar
+                    browseName={browseName}
                     filters={searchProps}
                     setFilters={setSearchProps}
                     activeCampaign={current_campaign}
@@ -733,6 +943,9 @@ export default function ContactsTable({
                     pushTargets={pushTargets}
                     pushing={pushContacts.isPending}
                     onPush={pushToCRM}
+                    apolloTargets={apolloTargets}
+                    enriching={startEnrich.isPending}
+                    onEnrich={enrichWithApollo}
                     onBulkEdit={() => setBulkEdit(true)}
                     onResearch={bulkResearch}
                     researching={batchResearch.isPending}
@@ -788,9 +1001,20 @@ export default function ContactsTable({
                 />
                 <ImportWizard
                     open={importOpen}
-                    onClose={() => setImportOpen(false)}
+                    onClose={closeImport}
                     lockedCampaign={current_campaign}
+                    initialImportId={importId}
+                    initialStep={importStep}
+                    onRoute={routeImport}
                 />
+                {isExternal && (
+                    <CrmImportDialog
+                        open={crmImportOpen}
+                        onClose={() => setCrmImportOpen(false)}
+                        onContinue={continueImport}
+                        target={current_campaign ? `Adding to ${current_campaign.name}` : undefined}
+                    />
+                )}
                 <AddFromContactsDialog
                     open={fromContactsOpen}
                     onClose={() => setFromContactsOpen(false)}
@@ -836,6 +1060,12 @@ export default function ContactsTable({
                         Add contacts
                     </TopbarAction>
                 )}
+                <RunningImportChip
+                    onOpen={(id) => {
+                        setImportId(id);
+                        setImportOpen(true);
+                    }}
+                />
                 <div className="hidden md:contents">
                     <TopbarAction
                         variant="ghost"
@@ -844,6 +1074,15 @@ export default function ContactsTable({
                     >
                         Import
                     </TopbarAction>
+                    {isExternal && (
+                        <TopbarAction
+                            variant="ghost"
+                            icon={<CrmMark provider={crm.id} className="w-3 h-3" />}
+                            onClick={() => setCrmImportOpen(true)}
+                        >
+                            Import from {crm.name}
+                        </TopbarAction>
+                    )}
                     <TopbarAction
                         variant="ghost"
                         icon={<SheetIcon className="w-3 h-3" />}
@@ -871,6 +1110,14 @@ export default function ContactsTable({
                             <PopoverMenuItem onSelect={() => setImportOpen(true)}>
                                 Import
                             </PopoverMenuItem>
+                            {isExternal && (
+                                <PopoverMenuItem
+                                    icon={<CrmMark provider={crm.id} className="w-3.5 h-3.5" />}
+                                    onSelect={() => setCrmImportOpen(true)}
+                                >
+                                    Import from {crm.name}
+                                </PopoverMenuItem>
+                            )}
                             <PopoverMenuItem onSelect={() => setSyncOpen(true)}>
                                 Sheet sync
                             </PopoverMenuItem>
@@ -926,48 +1173,11 @@ export default function ContactsTable({
                     placeholder="Search by name, email, company…"
                     className="w-full sm:w-72"
                 />
-                <PopoverMenu align="end">
-                    <PopoverMenuTrigger asChild>
-                        <SelectButton
-                            icon={<Settings2Icon className="w-3.5 h-3.5" />}
-                            label="Sort"
-                        />
-                    </PopoverMenuTrigger>
-                    <PopoverMenuContent>
-                        <PopoverMenuLabel>Sort by</PopoverMenuLabel>
-                        {[
-                            ["created_at", "Date added"],
-                            ["email", "Email"],
-                            ["first_name", "First name"],
-                            ["last_name", "Last name"],
-                            ["company", "Company"],
-                        ].map(([key, label]) => (
-                            <PopoverMenuItem
-                                key={key}
-                                selected={searchProps.sort_by === key}
-                                onSelect={() =>
-                                    setSearchProps((s) => ({
-                                        ...s,
-                                        sort_by: key as SearchContacts["sort_by"],
-                                    }))
-                                }
-                            >
-                                {label}
-                            </PopoverMenuItem>
-                        ))}
-                        <PopoverMenuSeparator />
-                        <PopoverMenuItem
-                            selected={searchProps.reverse}
-                            onSelect={() => setSearchProps((s) => ({ ...s, reverse: !s.reverse }))}
-                            closeOnSelect={false}
-                        >
-                            Reverse order
-                        </PopoverMenuItem>
-                    </PopoverMenuContent>
-                </PopoverMenu>
+                {viewControls}
             </SectionBar>
 
             <FilterBar
+                browseName={browseName}
                 filters={searchProps}
                 setFilters={setSearchProps}
                 hideSegments={!!segment}
@@ -987,6 +1197,9 @@ export default function ContactsTable({
                 pushTargets={pushTargets}
                 pushing={pushContacts.isPending}
                 onPush={pushToCRM}
+                apolloTargets={apolloTargets}
+                enriching={startEnrich.isPending}
+                onEnrich={enrichWithApollo}
                 onBulkEdit={() => setBulkEdit(true)}
                 onResearch={bulkResearch}
                 researching={batchResearch.isPending}
@@ -1010,7 +1223,7 @@ export default function ContactsTable({
                 open={segmentPreset !== null}
                 onClose={() => setSegmentPreset(null)}
                 preset={segmentPreset}
-                onSaved={(saved) => navigate(`/app/contacts/segments/${saved.id}`)}
+                onSaved={(saved) => navigate({ to: "/app/contacts/segments/$id", params: { id: saved.id } })}
             />
             <ContactEdit contacts={contacts ?? []} active={edit} setActive={setEdit} initialTab={editTab} />
             <ContactsEditBulk
@@ -1039,9 +1252,20 @@ export default function ContactsTable({
             />
             <ImportWizard
                 open={importOpen}
-                onClose={() => setImportOpen(false)}
+                onClose={closeImport}
                 lockedSegment={segment}
+                initialImportId={importId}
+                initialStep={importStep}
+                onRoute={routeImport}
             />
+            {isExternal && (
+                <CrmImportDialog
+                    open={crmImportOpen}
+                    onClose={() => setCrmImportOpen(false)}
+                    onContinue={continueImport}
+                    target={segment ? `Adding to ${segment.name}` : undefined}
+                />
+            )}
             <SyncSourcesPanel open={syncOpen} onClose={() => setSyncOpen(false)} segment={segment} />
         </Page>
     );
@@ -1055,6 +1279,9 @@ function ContactsTableBody({
     onRetry,
     isRefetching,
     contacts,
+    columns,
+    sort,
+    onSort,
     isRowSelected,
     onToggle,
     isSelectedAll,
@@ -1081,25 +1308,11 @@ function ContactsTableBody({
     errorMessage: string;
     onRetry: () => void;
     isRefetching: boolean;
-    contacts: {
-        id: string;
-        first_name: string;
-        last_name: string;
-        email: string;
-        company: string;
-        phone: string;
-        subscribed: boolean;
-        campaigns: { id: string }[];
-        categories?: { id: string; title: string; color: string }[];
-        campaign_lead?: ContactCampaignProgress | null;
-        verification_status?: VerificationStatus;
-        verification_sub_status?: string;
-        verification_source?: VerificationSource;
-        verification_provider?: string;
-        verification_checked_at?: string | null;
-        verification_confidence?: number;
-        created_at: Date;
-    }[];
+    contacts: ContactRow[];
+    // The saved view: the columns in order (Name first) and the current sort.
+    columns: ContactColumn[];
+    sort: ViewSortState;
+    onSort: (col: ContactColumn) => void;
     isRowSelected: (id: string) => boolean;
     onToggle: (id: string, on: boolean) => void;
     isSelectedAll: boolean;
@@ -1115,7 +1328,7 @@ function ContactsTableBody({
     // member without campaign write access, which takes the control off the
     // row rather than offering one that fails.
     onPauseLead?: (id: string, name: string) => void;
-    onResumeLead?: (id: string) => void;
+    onResumeLead?: (id: string, copied?: boolean) => void;
     emptyTitle: string;
     emptyBody: string;
     emptyCta: React.ReactNode;
@@ -1129,15 +1342,6 @@ function ContactsTableBody({
     loadedCount: number;
     totalCount: number;
 }) {
-    // Name is the only auto-width column, so it takes every pixel the sized
-    // columns leave — under table-fixed a second auto column would split that
-    // slack with it and size the name like a phone number. Which breakpoint each
-    // sized column appears at is then just "does Name still clear ~170px": Leads
-    // carries five campaign columns Contacts does not, so company waits longer
-    // for room there, and a phone number is no part of reading a campaign, so
-    // Leads drops that column and the contact drawer keeps the address.
-    const companyCol = embedded ? "w-40 hidden xl:table-cell" : "w-36 hidden lg:table-cell";
-    const phoneCol = "w-36 hidden xl:table-cell";
 
     if (isLoading) {
         return (
@@ -1267,61 +1471,14 @@ function ContactsTableBody({
                 <thead className="sticky top-0 bg-white z-[1]">
                     <tr className="border-b border-slate-200">
                         <th className="pl-5 pr-2 py-2 w-11">
-                            <input
-                                type="checkbox"
-                                className="w-3.5 h-3.5 rounded accent-sky-600"
+                            <Checkbox
                                 checked={isSelectedAll}
                                 onChange={onToggleAll}
                             />
                         </th>
-                        <Th>Name</Th>
-                        <Th className={companyCol}>Company</Th>
-                        {!embedded && <Th className={phoneCol}>Phone</Th>}
-                        <Th className="w-12 sm:w-32">
-                            {/* Below sm the pill is its icon alone, so the column
-                                narrows to it and the label waits for the room —
-                                but never leaves the accessibility tree. */}
-                            <span className="sr-only">{embedded ? "Progress" : "Status"}</span>
-                            <span aria-hidden className="hidden sm:inline">{embedded ? "Progress" : "Status"}</span>
-                        </Th>
-                        {embedded && (
-                            <>
-                                <Th className="w-24 hidden lg:table-cell">
-                                    <span className="inline-flex items-center gap-1">
-                                        Opened
-                                        <span
-                                            className="inline-flex cursor-help text-slate-300 hover:text-slate-500"
-                                            title="Opens rely on the mail client loading images. Clients that block images show no open even when the email was read. A click by the person always counts as an open."
-                                        >
-                                            <InfoIcon className="w-3 h-3" aria-label="How opens are counted" />
-                                        </span>
-                                    </span>
-                                </Th>
-                                <Th className="w-24 hidden lg:table-cell">Clicked</Th>
-                                <Th className="w-24 hidden lg:table-cell">Replied</Th>
-                            </>
-                        )}
-                        {embedded ? (
-                            <>
-                                <Th className="w-32 hidden xl:table-cell">Current step</Th>
-                                <Th className="w-36 hidden 2xl:table-cell">
-                                    <span className="inline-flex items-center gap-1">
-                                        Sender
-                                        <span
-                                            className="inline-flex cursor-help text-slate-300 hover:text-slate-500"
-                                            title="The mailbox this lead's whole sequence sends from. It is picked when the first email goes out and every follow-up keeps it, so the contact always hears from one address."
-                                        >
-                                            <InfoIcon className="w-3 h-3" aria-label="How the sender is chosen" />
-                                        </span>
-                                    </span>
-                                </Th>
-                            </>
-                        ) : (
-                            <Th className="w-28 text-right hidden lg:table-cell">Campaigns</Th>
-                        )}
-                        <Th className={`text-right ${embedded ? "w-32 hidden 2xl:table-cell" : "w-24 hidden md:table-cell"}`}>
-                            {embedded ? "Last activity" : "Added"}
-                        </Th>
+                        {columns.map((col) => (
+                            <Th key={col.id} col={col} sort={sort} onSort={onSort} />
+                        ))}
                         <th className="px-3 py-2 w-[76px]"></th>
                     </tr>
                 </thead>
@@ -1370,159 +1527,19 @@ function ContactsTableBody({
                                     className="pl-5 pr-2"
                                     onClick={(e) => e.stopPropagation()}
                                 >
-                                    <input
-                                        type="checkbox"
-                                        className="w-3.5 h-3.5 rounded accent-sky-600"
+                                    <Checkbox
                                         checked={isSel}
                                         onChange={() => onToggle(c.id, !isSel)}
                                     />
                                 </td>
-                                <td className="px-3 overflow-hidden">
-                                    <div className="flex items-center gap-2.5 min-w-0">
-                                        <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center shrink-0">
-                                            <span className="text-[9.5px] font-semibold text-slate-600">
-                                                {(c.first_name || c.email)?.slice(0, 2).toUpperCase()}
-                                            </span>
-                                        </div>
-                                        {/* flex-1, not shrink-to-fit: the chip cap below is a
-                                            percentage, so this has to be the column's width and
-                                            not the name's. */}
-                                        <div className="flex-1 min-w-0">
-                                            <div className={`text-[12.5px] font-medium truncate leading-tight flex items-center gap-1.5 ${processed ? "text-slate-400" : "text-slate-900"}`}>
-                                                <span className="truncate" {...clippedTitle}>{name}</span>
-                                                {/* One tag, then a count. The Name column is a fixed width
-                                                    now, and two tags sharing it with a name left each of them
-                                                    about three legible characters. The tags take at most 45%
-                                                    of the line, and the +N tooltip names the rest in full. */}
-                                                {c.categories && c.categories.length > 0 && (
-                                                    <span className="inline-flex items-center gap-0.5 min-w-0 max-w-[45%]">
-                                                        <CategoryChip category={c.categories[0]} compact />
-                                                        {c.categories.length > 1 && (
-                                                            <span
-                                                                className="inline-flex items-center h-4 px-1 shrink-0 rounded text-[10px] font-medium bg-slate-100 text-slate-500"
-                                                                title={c.categories.slice(1).map((x) => x.title).join(", ")}
-                                                            >
-                                                                +{c.categories.length - 1}
-                                                            </span>
-                                                        )}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="text-[10.5px] text-slate-400 truncate font-mono leading-tight flex items-center gap-1">
-                                                <MailIcon className="w-2.5 h-2.5 shrink-0" />
-                                                <span className="truncate" {...clippedTitle}>{c.email}</span>
-                                                <VerificationBadge contact={c} />
-                                            </div>
-                                        </div>
-                                    </div>
-                                </td>
-                                <td className={`px-3 overflow-hidden text-[12px] text-slate-600 ${companyCol}`}>
-                                    {c.company ? (
-                                        <div className="flex items-center gap-1.5 min-w-0">
-                                            <Building2Icon className="w-3 h-3 shrink-0 text-slate-400" />
-                                            <span className="truncate" {...clippedTitle}>
-                                                {c.company}
-                                            </span>
-                                        </div>
-                                    ) : (
-                                        <span className="text-slate-300">—</span>
-                                    )}
-                                </td>
-                                {!embedded && (
-                                    <td className={`px-3 overflow-hidden text-[12px] text-slate-600 font-mono ${phoneCol}`}>
-                                        {c.phone ? (
-                                            <div className="flex items-center gap-1.5 min-w-0">
-                                                <PhoneIcon className="w-3 h-3 shrink-0 text-slate-400" />
-                                                <span className="truncate" {...clippedTitle}>
-                                                    {c.phone}
-                                                </span>
-                                            </div>
-                                        ) : (
-                                            <span className="text-slate-300">—</span>
-                                        )}
+                                {columns.map((col) => (
+                                    <td
+                                        key={col.id}
+                                        className={`px-3 overflow-hidden ${columnClass(col)} ${col.cellClassName ?? ""}`}
+                                    >
+                                        {col.cell({ c, lead, processed: !!processed, embedded: !!embedded })}
                                     </td>
-                                )}
-                                <td className="px-3 overflow-hidden">
-                                    {embedded ? (
-                                        <LeadStatusPill lead={lead} />
-                                    ) : (
-                                        <StatusPill subscribed={c.subscribed} />
-                                    )}
-                                </td>
-                                {embedded && (
-                                    <>
-                                        <EngagementCell
-                                            n={lead?.opened ?? 0}
-                                            sent={(lead?.sent ?? 0) > 0}
-                                            Icon={MailOpenIcon}
-                                            label="opened"
-                                            auto={(lead?.machine_opened ?? 0) > 0}
-                                        />
-                                        <EngagementCell
-                                            n={lead?.clicked ?? 0}
-                                            sent={(lead?.sent ?? 0) > 0}
-                                            Icon={MousePointerClickIcon}
-                                            label="clicked"
-                                        />
-                                        <EngagementCell
-                                            n={lead?.replied ?? 0}
-                                            sent={(lead?.sent ?? 0) > 0}
-                                            Icon={CornerUpLeftIcon}
-                                            label="replied"
-                                        />
-                                    </>
-                                )}
-                                {embedded ? (
-                                    <>
-                                    <td className="px-3 overflow-hidden hidden xl:table-cell">
-                                        {lead?.current_step ? (
-                                            <span
-                                                title={lead.current_step}
-                                                className={`inline-flex items-center h-5 px-1.5 rounded text-[11px] font-medium max-w-full ${
-                                                    processed
-                                                        ? "bg-slate-100 text-slate-400"
-                                                        : "bg-sky-100 text-sky-700"
-                                                }`}
-                                            >
-                                                <span className="truncate">{lead.current_step}</span>
-                                            </span>
-                                        ) : (
-                                            <span className="text-[11px] text-slate-300">Not started</span>
-                                        )}
-                                    </td>
-                                    <td className="px-3 overflow-hidden hidden 2xl:table-cell">
-                                        {lead?.sender ? (
-                                            <span
-                                                title={`Every step of this lead's sequence sends from ${lead.sender}`}
-                                                className="block truncate text-[11.5px] text-slate-600"
-                                            >
-                                                {lead.sender}
-                                            </span>
-                                        ) : (
-                                            <span className="text-[11px] text-slate-300">Not assigned</span>
-                                        )}
-                                    </td>
-                                    </>
-                                ) : (
-                                    <td className="px-3 text-right font-mono text-[12px] text-slate-600 tabular-nums hidden lg:table-cell">
-                                        {c.campaigns?.length ?? 0}
-                                    </td>
-                                )}
-                                <td className={`px-3 text-right font-mono text-[11px] text-slate-500 tabular-nums ${embedded ? "hidden 2xl:table-cell" : "hidden md:table-cell"}`}>
-                                    {embedded
-                                        ? lead?.last_activity_at
-                                            ? new Date(lead.last_activity_at).toLocaleDateString("en-US", {
-                                                  month: "short",
-                                                  day: "numeric",
-                                              })
-                                            : "—"
-                                        : c.created_at
-                                            ? new Date(c.created_at).toLocaleDateString("en-US", {
-                                                  month: "short",
-                                                  day: "numeric",
-                                              })
-                                            : "—"}
-                                </td>
+                                ))}
                                 <td className="px-3" onClick={(e) => e.stopPropagation()}>
                                     {/* Touch-safe: always visible on mobile, hover-reveal on desktop. */}
                                     <div className="flex items-center gap-0.5 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
@@ -1531,7 +1548,7 @@ function ContactsTableBody({
                                                 type="button"
                                                 aria-label="Resume lead"
                                                 title={`${holdSummary(lead.hold)}. Resume now`}
-                                                onClick={() => onResumeLead(c.id)}
+                                                onClick={() => onResumeLead(c.id, lead.hold?.source === "cc")}
                                                 className="size-6 rounded text-violet-500 hover:text-violet-700 hover:bg-violet-50 flex items-center justify-center transition-colors"
                                             >
                                                 <PlayIcon className="w-3 h-3" />
@@ -1586,131 +1603,28 @@ function ContactsTableBody({
     );
 }
 
-function Th({ children, className }: { children: React.ReactNode; className?: string }) {
+// A header cell. A sortable column's header is the sort control: the arrow
+// shows on hover, and stays while the column is the active sort.
+function Th({ col, sort, onSort }: { col: ContactColumn; sort: ViewSortState; onSort: (col: ContactColumn) => void }) {
+    const base = `px-3 py-2 text-[10px] font-medium text-slate-400 uppercase tracking-[0.14em] truncate ${columnClass(col)}`;
+    const content = col.header ?? col.label;
+    if (!col.sortKey) return <th className={base}>{content}</th>;
+    const active = sort.by === col.sortKey;
+    const Dir = sort.reverse ? ArrowUpIcon : ArrowDownIcon;
     return (
-        <th
-            className={`px-3 py-2 text-[10px] font-medium text-slate-400 uppercase tracking-[0.14em] truncate ${className ?? ""}`}
-        >
-            {children}
+        <th className={base} aria-sort={active ? (sort.reverse ? "ascending" : "descending") : "none"}>
+            <button
+                type="button"
+                onClick={() => onSort(col)}
+                title={`Sort by ${col.label}`}
+                className={`group/th inline-flex items-center gap-1 max-w-full uppercase tracking-[0.14em] hover:text-slate-700 transition-colors ${
+                    active ? "text-slate-700" : ""
+                } ${col.align === "right" ? "flex-row-reverse" : ""}`}
+            >
+                <span className="truncate">{content}</span>
+                <Dir className={`w-3 h-3 shrink-0 ${active ? "" : "opacity-0 group-hover/th:opacity-60"}`} aria-hidden />
+            </button>
         </th>
-    );
-}
-
-function StatusPill({ subscribed }: { subscribed: boolean }) {
-    const label = subscribed ? "subscribed" : "unsubscribed";
-    return (
-        <span
-            className={`inline-flex items-center gap-1 max-w-full text-[10.5px] font-medium uppercase tracking-[0.08em] ${
-                subscribed ? "text-emerald-700" : "text-slate-500"
-            }`}
-        >
-            <span
-                className={`size-1.5 shrink-0 rounded-full ${subscribed ? "bg-emerald-500" : "bg-slate-300"}`}
-            />
-            {/* The dot carries the state on its own below sm, so the word stays
-                for screen readers at every width and the visible copy is the
-                one that comes and goes. */}
-            <span className="sr-only">{label}</span>
-            <span aria-hidden className="hidden sm:inline truncate" {...clippedTitle}>
-                {label}
-            </span>
-        </span>
-    );
-}
-
-// One engagement column of the Leads view. A count of steps engaged, a dash
-// for a lead that was sent but never did, and blank for a lead never emailed.
-// A machine-only open (Apple MPP prefetch) reads "auto" so it is not mistaken
-// for a person.
-function EngagementCell({
-    n,
-    sent,
-    Icon,
-    label,
-    auto = false,
-}: {
-    n: number;
-    sent: boolean;
-    Icon: typeof MailOpenIcon;
-    label: string;
-    auto?: boolean;
-}) {
-    return (
-        <td className="px-3 overflow-hidden hidden lg:table-cell">
-            {n > 0 ? (
-                <span
-                    className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 tabular-nums"
-                    title={`${label} ${n} ${n === 1 ? "email" : "emails"}`}
-                >
-                    <Icon className="w-3 h-3 shrink-0" />
-                    {n}
-                </span>
-            ) : auto ? (
-                <span
-                    className="text-[10.5px] text-slate-400"
-                    title="Opened by a mail client automatically, not by a person"
-                >
-                    auto
-                </span>
-            ) : sent ? (
-                <span className="text-slate-300 text-[11px]" aria-label={`not ${label}`}>
-                    —
-                </span>
-            ) : null}
-        </td>
-    );
-}
-
-// Per-lead processing state inside a campaign (campaign Leads view only).
-// `active` renders the animated dot-grid loader (the same "processing" motif
-// used across the app); every other state is a distinct lucide icon.
-const LEAD_META: Record<
-    LeadStatus,
-    { label: string; dot: string; text: string; Icon: typeof ClockIcon }
-> = {
-    pending: { label: "Queued", dot: "bg-slate-300", text: "text-slate-500", Icon: ClockIcon },
-    active: { label: "Processing", dot: "bg-sky-500", text: "text-sky-700", Icon: ClockIcon },
-    completed: { label: "Done", dot: "bg-indigo-500", text: "text-indigo-700", Icon: CheckIcon },
-    replied: { label: "Replied", dot: "bg-emerald-500", text: "text-emerald-700", Icon: CornerUpLeftIcon },
-    bounced: { label: "Bounced", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
-    failed: { label: "Failed", dot: "bg-rose-500", text: "text-rose-600", Icon: AlertTriangleIcon },
-    unsubscribed: { label: "Unsubscribed", dot: "bg-slate-300", text: "text-slate-400", Icon: BanIcon },
-    paused: { label: "Paused", dot: "bg-violet-400", text: "text-violet-600", Icon: PauseIcon },
-    undeliverable: { label: "Undeliverable", dot: "bg-amber-500", text: "text-amber-600", Icon: AlertTriangleIcon },
-};
-
-function LeadStatusPill({ lead }: { lead?: ContactCampaignProgress | null }) {
-    const status: LeadStatus = lead?.status ?? "pending";
-    const meta = LEAD_META[status];
-    const Icon = meta.Icon;
-    // A failed lead carries the worker's reason; surface it on hover since the
-    // pill itself only has room for the word.
-    const title =
-        status === "failed" && lead?.failure_reason
-            ? `Could not send: ${lead.failure_reason}`
-            : status === "undeliverable"
-                ? "Address verification refused this recipient, so the campaign skips it"
-                : lead?.hold
-                    ? holdSummary(lead.hold)
-                    : undefined;
-    return (
-        <span
-            className={`inline-flex items-center gap-1.5 max-w-full text-[10.5px] font-medium uppercase tracking-[0.08em] ${meta.text}`}
-            title={title}
-        >
-            {status === "active" ? (
-                <span className="campaign-grid text-sky-600 shrink-0" aria-hidden />
-            ) : (
-                <Icon className="w-3 h-3 shrink-0" />
-            )}
-            <span className="sr-only">{meta.label}</span>
-            {/* The reason, when there is one, is worth more than the word it
-                covers — and React owning the attribute is what clears any word
-                the tooltip helper left here before the lead changed state. */}
-            <span aria-hidden className="hidden sm:inline truncate" title={title} {...(title ? {} : clippedTitle)}>
-                {meta.label}
-            </span>
-        </span>
     );
 }
 
@@ -1985,6 +1899,9 @@ function SelectionBar({
     pushTargets,
     pushing,
     onPush,
+    apolloTargets,
+    enriching,
+    onEnrich,
     onBulkEdit,
     onResearch,
     researching,
@@ -2006,6 +1923,9 @@ function SelectionBar({
     pushTargets: IntegrationConnection[];
     pushing: boolean;
     onPush: (connectionId: string, providerLabel: string) => void;
+    apolloTargets: IntegrationConnection[];
+    enriching: boolean;
+    onEnrich: (connectionId: string, overwrite: boolean) => void;
     onBulkEdit: () => void;
     onResearch: () => void;
     researching: boolean;
@@ -2059,6 +1979,32 @@ function SelectionBar({
                                     {label}
                                     {custom}
                                 </PopoverMenuItem>
+                            );
+                        })}
+                    </PopoverMenuContent>
+                </PopoverMenu>
+            )}
+            {apolloTargets.length > 0 && (
+                <PopoverMenu side="top" align="center">
+                    <PopoverMenuTrigger asChild>
+                        <button
+                            type="button"
+                            disabled={enriching}
+                            className="h-7 px-2.5 rounded text-[12px] text-slate-700 hover:text-slate-900 hover:bg-slate-100 font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                        >
+                            {enriching ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <DatabaseZapIcon className="w-3 h-3" />}
+                            <span className="hidden sm:inline">Enrich</span>
+                        </button>
+                    </PopoverMenuTrigger>
+                    <PopoverMenuContent>
+                        <PopoverMenuLabel>Enrich {count.toLocaleString()} with Apollo</PopoverMenuLabel>
+                        {apolloTargets.map((t) => {
+                            const custom = apolloTargets.length > 1 ? ` · ${t.label}` : "";
+                            return (
+                                <React.Fragment key={t.id}>
+                                    <PopoverMenuItem onSelect={() => onEnrich(t.id, false)}>Fill empty fields{custom}</PopoverMenuItem>
+                                    <PopoverMenuItem onSelect={() => onEnrich(t.id, true)}>Replace with Apollo data{custom}</PopoverMenuItem>
+                                </React.Fragment>
                             );
                         })}
                     </PopoverMenuContent>

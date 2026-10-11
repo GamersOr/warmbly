@@ -19,7 +19,7 @@ import {
     SunsetIcon,
     TimerIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import { Toggle } from "@/components/app/campaigns/preferences/components/CampaignPreferenceBoolBox";
 import WeekdayBitmask from "@/components/app/campaigns/schedule/WeekdayBitmask";
@@ -224,7 +224,7 @@ function TodayCard({ mailboxId, enabled }: { mailboxId: string; enabled: boolean
                     <b className="text-slate-900 tabular-nums">{p.sent_today}</b> of{" "}
                     <b className="text-slate-900 tabular-nums">{p.daily_limit}</b> sent
                 </span>
-                <span className="text-slate-400 tabular-nums">{p.remaining_today} left</span>
+                <span className="text-slate-400 tabular-nums">{p.remaining_today} left in plan</span>
             </div>
             <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
                 <div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${used}%` }} />
@@ -309,7 +309,7 @@ export default function SendingBehaviorTab({ mailboxId, timezone }: { mailboxId:
                         </div>
                         <div className="min-w-0">
                             <div className="text-[12.5px] font-medium text-slate-900">
-                                {form.enabled ? "Sending like a person" : "Fixed schedule"}
+                                {form.enabled ? "Variable sending plan" : "Fixed schedule"}
                             </div>
                             <div className="text-[11px] text-slate-400">
                                 {form.enabled
@@ -326,9 +326,9 @@ export default function SendingBehaviorTab({ mailboxId, timezone }: { mailboxId:
                 {!form.enabled && (
                     <div className="px-5 py-3">
                         <p className="text-[11.5px] text-slate-500 leading-relaxed">
-                            This mailbox is on its fixed schedule, so nothing below applies. Turn on &quot;Sending like
-                            a person&quot; to use these hours, volumes and spacing in place of the mailbox&apos;s own
-                            daily cap and minimum gap.
+                            This mailbox uses its fixed cap and minimum gap. Enable the variable sending plan to choose
+                            a daily target from your range, with varied hours and spacing. Campaign and mailbox maximums
+                            still apply, so this never raises either ceiling.
                         </p>
                     </div>
                 )}
@@ -422,8 +422,8 @@ export default function SendingBehaviorTab({ mailboxId, timezone }: { mailboxId:
                     <div className="px-5 py-5 space-y-5">
                         <Eyebrow>Volume and spacing</Eyebrow>
                         <FieldShell
-                            label="Cold emails per day"
-                            hint="Rolled once a day inside this range. It can only lower the mailbox's daily cap, never raise it."
+                            label="Daily cold-email target range"
+                            hint="New-mailbox default: 28–32/day, about 30. Chosen once per local day and kept stable across retries. Mailbox and campaign maximums can lower it. Saved range changes apply from the next local day."
                         >
                             <PairField
                                 min={form.daily_limit_min}
@@ -469,9 +469,10 @@ export default function SendingBehaviorTab({ mailboxId, timezone }: { mailboxId:
                     <div className="rounded-md border border-sky-100 bg-sky-50/70 px-3 py-2.5 flex gap-2.5">
                         <InfoIcon className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
                         <p className="text-[11.5px] text-sky-900/90 leading-relaxed">
-                            Every time here is local to <b>{tz || "UTC"}</b>, this mailbox&apos;s own timezone. Mailboxes in
-                            other regions keep their own working hours on the same campaign. Change the timezone on the
-                            mailbox to move the whole schedule.
+                            Every time here is local to <b>{tz || "UTC"}</b>: this mailbox&apos;s own timezone, or the
+                            workspace timezone when it has none. Mailboxes in other regions keep their own working hours on
+                            the same campaign. Change it on this mailbox&apos;s Settings tab. The workspace timezone under
+                            Settings &gt; Profile &gt; Timezones moves this schedule only while the mailbox follows it.
                         </p>
                     </div>
                 </div>

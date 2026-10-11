@@ -1,11 +1,14 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useChannel, useChannelEvent } from './context/socket';
+import { originSummary, type EngagementKind } from '@/lib/engagementOrigin';
 
 // Task progress event payload
 export interface TaskProgressPayload {
     campaign_id: string;
     task_id: string;
-    status: 'pending' | 'active' | 'completed' | 'failed';
+    // scheduled: the campaign's chain woke up and may send nothing. active: a
+    // send is in flight, and the contact fields are always set.
+    status: 'scheduled' | 'pending' | 'active' | 'completed' | 'failed';
     contact_id: string;
     contact_email: string;
     contact_name: string;
@@ -14,6 +17,9 @@ export interface TaskProgressPayload {
     step_index: number;
     progress: number;
     total_contacts: number;
+    // processed_count and progress are in emails (contacts × steps), which
+    // total_emails is the size of.
+    total_emails: number;
     processed_count: number;
     timestamp: string;
 }
@@ -46,7 +52,11 @@ interface TrackingPayload {
     occurred_at?: string;
     timestamp?: string;
     client?: string;
+    client_type?: string;
+    device_hidden?: boolean;
     device_type?: string;
+    os?: string;
+    browser?: string;
     country_code?: string;
     city?: string;
 }
@@ -58,9 +68,9 @@ function occurredAt(p: TrackingPayload): Date {
     return d && !Number.isNaN(d.getTime()) ? d : new Date();
 }
 
-// " (Gmail, Berlin DE)" or "" when the logs say nothing.
-function whereFrom(p: TrackingPayload): string {
-    const bits = [p.client, [p.city, p.country_code].filter(Boolean).join(' ')].filter(Boolean);
+// " (iPhone · Apple Mail app, Berlin DE)" or "" when the logs say nothing.
+function whereFrom(p: TrackingPayload, kind: EngagementKind): string {
+    const bits = [originSummary(p, kind), [p.city, p.country_code].filter(Boolean).join(' ')].filter(Boolean);
     return bits.length ? ` (${bits.join(', ')})` : '';
 }
 
@@ -122,10 +132,16 @@ export function useCampaignChannel(campaignId: string): CampaignChannelState {
         const name = normalizeEvent(raw._event ?? raw.event_type ?? raw.type);
 
         switch (name) {
+            // A send's outcome arrives as EMAIL_SENT (org-scoped, so the whole
+            // team sees it), not as a TASK_PROGRESS with status completed. It
+            // has to land here too, or the "Sending…" card opened by the
+            // active event stays up until the page is reloaded.
+            case 'EMAIL_SENT':
             case 'TASK_PROGRESS': {
                 const data = payload as unknown as TaskProgressPayload;
-                setTaskProgress(data);
-                if (data.status === 'completed') {
+                const status = name === 'EMAIL_SENT' ? 'completed' : data.status;
+                setTaskProgress({ ...data, status });
+                if (status === 'completed') {
                     addActivity({
                         id: nextId('sent'),
                         type: 'sent',
@@ -134,7 +150,7 @@ export function useCampaignChannel(campaignId: string): CampaignChannelState {
                         message: `Email sent to ${data.contact_email}`,
                         timestamp: new Date(data.timestamp || Date.now()),
                     });
-                } else if (data.status === 'failed') {
+                } else if (status === 'failed') {
                     addActivity({
                         id: nextId('failed'),
                         type: 'failed',
@@ -152,14 +168,14 @@ export function useCampaignChannel(campaignId: string): CampaignChannelState {
                     id: nextId('open'),
                     type: 'opened',
                     contactEmail: data.contact_email || 'Unknown',
-                    message: `${data.machine ? 'Auto-opened' : 'Opened'} by ${data.contact_email || 'Unknown'}${whereFrom(data)}`,
+                    message: `${data.machine ? 'Auto-opened' : 'Opened'} by ${data.contact_email || 'Unknown'}${whereFrom(data, 'open')}`,
                     timestamp: occurredAt(data),
                 });
                 break;
             }
             case 'EMAIL_CLICKED': {
                 const data = payload as TrackingPayload;
-                const who = `${data.contact_email || 'Unknown'}${whereFrom(data)}`;
+                const who = `${data.contact_email || 'Unknown'}${whereFrom(data, 'click')}`;
                 const target = data.link_label || data.original_url;
                 addActivity({
                     id: nextId('click'),

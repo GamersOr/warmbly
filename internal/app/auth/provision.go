@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/mail"
 	"strings"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/observability/analytics"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
 	"github.com/warmbly/warmbly/internal/pkg/signuprisk"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
 // createAccount provisions a user, their organization and their trial. Both
@@ -46,64 +49,64 @@ func (s *authService) createAccount(ctx context.Context, address, passwordHash s
 	if perr != nil {
 		return nil, errx.ErrEmail
 	}
+	// The single write path for a new account, so the stored form is decided
+	// here even though every caller already folded it.
+	email.Address = normalizeEmail(email.Address)
 
 	// Whether the invitation is the only thing that permitted this signup.
 	// When it is, a failed accept cannot fall through to a personal workspace:
 	// that would turn an invite-gated signup into an unrelated account.
 	inviteRequired := s.inviteIsLoadBearing(ctx, attr.Invite)
 
-	u, xerr := s.userRepository.CreateUser(ctx, email, passwordHash)
-	if xerr != nil {
-		errs.CaptureException(xerr)
-		return nil, errx.InternalError()
+	var u *models.User
+	var member *models.OrganizationMember
+	if attr.Invite != "" && s.organizationService != nil {
+		var xerr *errx.Error
+		u, member, xerr = s.organizationService.CreateInvitedUser(ctx, attr.Invite, email, passwordHash)
+		if xerr != nil && (inviteRequired || xerr != errx.ErrInvitationInvalid) {
+			return nil, xerr
+		}
+	} else if inviteRequired {
+		return nil, errx.ErrInvitationInvalid
+	}
+	if u == nil {
+		var xerr error
+		u, xerr = s.userRepository.CreateUser(ctx, email, passwordHash)
+		if xerr != nil {
+			if errors.Is(xerr, repository.ErrUserEmailTaken) {
+				return nil, errx.ErrAccountExists
+			}
+			errs.CaptureException(xerr)
+			return nil, errx.InternalError()
+		}
 	}
 
 	if err := s.userService.SaveUser(ctx, u); err != nil {
-		return nil, err
+		if member == nil {
+			return nil, err
+		}
+		errs.CaptureException(err)
 	}
 
 	s.recordSignupOrigin(ctx, u.ID, u.Email, origin)
 
-	// An invited account joins the inviting org and stops there: no second
-	// workspace, no trial of its own. A token that died between start and
-	// confirm only falls through to a personal org when open registration
-	// would have accepted the signup anyway.
-	if attr.Invite != "" && s.organizationService != nil {
-		if member, err := s.organizationService.AcceptInvitation(ctx, attr.Invite, u.ID, u.Email); err == nil {
-			// An invited account finished signing up just as much as a
-			// self-serve one; it simply joined an existing workspace. It is
-			// counted here rather than at the end because this path returns
-			// early, and the count cannot move above the invitation check: a
-			// failed invitation either refuses or falls through to a
-			// self-serve signup, and only one of those is a signup.
-			s.notifyOperatorSignup(u, "")
-			// The workspace joined is the inviter's, so it comes from the
-			// membership rather than from the account's own (owned)
-			// organizations, of which an invited account has none. Failing
-			// to resolve it only leaves the group off the event.
-			var joined *models.Organization
-			if member != nil {
-				if org, oerr := s.organizationService.Get(ctx, member.OrganizationID); oerr == nil {
-					joined = org
-				}
-			}
-			s.countSignup(u, joined, attr, origin)
-			return u, nil
+	// An invited signup needs neither a personal workspace nor its own trial.
+	if member != nil {
+		s.notifyOperatorSignup(u, "")
+		var joined *models.Organization
+		if org, oerr := s.organizationService.Get(ctx, member.OrganizationID); oerr == nil {
+			joined = org
 		}
-		if inviteRequired {
-			return nil, errx.ErrInvitationInvalid
-		}
+		s.countSignup(u, joined, attr, origin)
+		return u, nil
 	}
 
 	// Auto-create organization for new user
 	var org *models.Organization
 	if s.organizationService != nil {
-		orgName := u.FirstName + "'s Organization"
-		if u.FirstName == "" {
-			orgName = "My Organization"
-		}
+		orgName := displayname.DefaultWorkspace(u.FirstName)
 		var orgErr *errx.Error
-		org, orgErr = s.organizationService.Create(ctx, u.ID, orgName)
+		org, orgErr = s.organizationService.Create(ctx, u.ID, orgName, "")
 		if orgErr != nil {
 			errs.CaptureException(orgErr)
 			// Don't fail registration if org creation fails
@@ -235,7 +238,7 @@ func (s *authService) notifyOperatorSignup(u *models.User, workspace string) {
 		"A new account finished signing up.",
 		map[string]string{
 			"Email":     u.Email,
-			"Name":      strings.TrimSpace(u.FirstName + " " + u.LastName),
+			"Name":      displayname.FullName(u.FirstName, u.LastName),
 			"Workspace": workspace,
 		},
 	)

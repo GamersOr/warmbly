@@ -13,6 +13,20 @@ const (
 
 	CampaignDailyLimitMin = 3
 
+	// AppDirectoryPopularInstalls is how many workspaces must use a community
+	// app before it is listed in the directory without being featured. Only
+	// workspaces other than the publisher's, at least AppDirectoryInstallOrgMinAgeDays
+	// old, count toward it, so fresh throwaway workspaces cannot list an app.
+	AppDirectoryPopularInstalls      = 25
+	AppDirectoryInstallOrgMinAgeDays = 14
+
+	// SignatureHTMLMax/SignaturePlainMax bound a stored mailbox signature.
+	// The old ceiling was 1000 characters for both, which a real signature
+	// exceeds the moment it carries a logo or a table: Gmail itself allows
+	// 10,000, so an imported one had nowhere to go.
+	SignatureHTMLMax  = 20000
+	SignaturePlainMax = 10000
+
 	CampaignLimitDefault  = 50
 	MinWaitTimeDefault    = 600
 	WarmupBaseDefault     = 10
@@ -28,15 +42,6 @@ const (
 	CampaignRampIncrementDefault = 5
 	CampaignRampCeilingDefault   = 50
 	CampaignMaxNewLeadsMax       = 1000
-
-	// MaxSignatureSize bounds one mailbox's stored signature, plain or HTML.
-	// The old 1000-byte ceiling fit a few lines of text and nothing else: a
-	// designed signature sliced into per-link images spends ~700 bytes on the
-	// absolute URLs alone, so it was rejected however tightly it was written.
-	// The column is `text`, and a signature is appended to every send, so the
-	// bound is about keeping one mailbox's footer sane rather than protecting
-	// storage.
-	MaxSignatureSize = 20480 // 20 KB
 
 	MaxContactSize = 10240
 	// MaxEmailBodySize bounds a single stored message body. 200 KB cut real
@@ -97,10 +102,65 @@ const (
 	SyncBackfillPerMinute           = 240   // backfill pacing per mailbox
 	SyncFloodPerHour                = 5_000 // new live messages observed in one hour that mark a mailbox as flooding
 	SyncThrottleEscalationDays      = 3     // throttled UTC days out of the last 7 that deactivate a mailbox
+	SyncSkipFoldersMax              = 50    // folders one mailbox may exclude from sync
+	SyncSkipFolderNameMax           = 255   // characters in one excluded folder name
+
+	// Gmail folder reconciliation: how often stored Gmail mail is checked
+	// against where Gmail has it now, how many rows one pass checks, how many
+	// inbox listing pages it reads, how many messages it looks up, how long a
+	// message found still in the inbox is not looked up again, and how soon a
+	// pass that failed is tried again.
+	GmailFolderReconcileInterval = 6 * time.Hour
+	GmailFolderReconcileRetry    = 15 * time.Minute
+	GmailFolderReconcileMessages = 1_000
+	GmailFolderReconcilePages    = 10
+	GmailFolderReconcileLookups  = 100
+	GmailFolderReconcileRecheck  = 24 * time.Hour
 
 	// Forms. Funnel events feed analytics ranges up to 90 days, so the default
 	// window keeps double coverage. Operator-editable under Instance settings.
 	FormEventsRetentionDaysDefault = 180
+
+	// Inbox placement tests. The monthly allowance covers tests on the
+	// instance and cloud seed panels only; a workspace's own seeds cost the
+	// operator nothing. Operator-editable under Instance settings.
+	PlacementTestsPerMonthTrialDefault = 3
+	PlacementTestsPerMonthPaidDefault  = 40
+	PlacementTestsPerMonthMax          = 100_000
+	PlacementSeedsPerTestDefault       = 20
+	PlacementSeedsPerTestMax           = 100
+	PlacementSeedsPerTestMin           = 5  // below this a test is noise, so it is refused rather than shrunk
+	PlacementSpacingSecondsDefault     = 60 // gap between two probes from one sender
+	PlacementSpacingSecondsMin         = 5
+	PlacementSpacingSecondsMax         = 600
+	PlacementQuickSpacingSeconds       = 8  // the gap in a quick test, so it sends in minutes
+	PlacementCreditsPerTestDefault     = 25 // price of a test past the free allowance
+	PlacementCreditsPerTestMax         = 10_000
+	PlacementFamiliesMax               = 32  // provider families one test may name
+	PlacementClassifyTimeoutMinutes    = 120 // after the send, a copy not seen in the seed is missing
+	PlacementRunningPerOrgMax          = 3   // tests one workspace may have in flight at once
+	PlacementSeedsPerWorkspaceMax      = 50  // a workspace's own seed mailboxes
+	PlacementSeedDailySyncMessages     = 50_000
+	PlacementMonitorIntervalDaysMin    = 1
+	PlacementMonitorIntervalDaysMax    = 30
+	PlacementMonitorIntervalDaysDef    = 7
+	PlacementMonitorAlertBelowDefault  = 70 // inbox rate, percent
+
+	// Placement batches run one test from many senders. Membership is bounded
+	// only by an operator ceiling; execution by concurrency and a start rate.
+	PlacementBatchSendersMaxDefault          = 10_000
+	PlacementBatchSendersMaxCeiling          = 100_000
+	PlacementBatchSenderConcurrencyDefault   = 20 // senders of one workspace sending probes at once
+	PlacementBatchSenderConcurrencyMax       = 500
+	PlacementBatchInstanceConcurrencyDefault = 200 // batch senders sending at once across every workspace, so no shared seed floods
+	PlacementBatchInstanceConcurrencyMax     = 5_000
+	PlacementBatchStartsPerMinuteDefault     = 10
+	PlacementBatchStartsPerMinuteMax         = 600
+	PlacementBatchRetryDays                  = 7 // a deferred sender is retried this long, then skipped
+	PlacementBatchOpenPerOrgMax              = 5 // batches one workspace may have open at once
+	PlacementBatchSenderErrorAttemptsMax     = 5 // unexpected errors before a sender fails
+	PlacementBatchRunnerBatchesPerTick       = 20
+	PlacementBatchSenderStaleMinutes         = 10 // a claimed sender with no test after this goes back to the queue
 
 	// Sequences. Empty by default so the editor shows a smart, position-based
 	// label (e.g. "Email 1") until the user names the step themselves.
@@ -118,6 +178,10 @@ const (
 	// tick retries it; this bounds that loop for a mailbox that can never send.
 	CampaignSendMaxAttempts = 5
 
+	// CampaignLeadMaxCC caps the contacts copied on one lead's emails. Every
+	// copy is one more recipient who did not ask for the email.
+	CampaignLeadMaxCC = 2
+
 	// CampaignNotDueGraceSeconds is how far in the future a step's hard
 	// constraints (wait_after, start date, sending window, mailbox min-gap)
 	// may sit while a firing task still sends it. Beyond this the scheduler
@@ -131,11 +195,20 @@ const (
 	// lead's (ESP-strict has no mailbox for their provider, their own mailbox
 	// is busy, their preferred hours are hours away); the leads behind them are
 	// still sendable, so the pass moves on instead of parking the campaign on
-	// the first refusal (issue #437). Every extra candidate costs a handful of
-	// reads and only on a pass that is being refused, so this is deliberately
-	// generous — but bounded, because a campaign whose every lead is refused
-	// must still end the pass rather than walk a million-row list.
-	CampaignPlacementCandidates = 25
+	// the first refusal (issue #437). The leads at the head of the queue are
+	// the same on every pass, so this reaches well past them; it is bounded
+	// because a campaign whose every lead is refused must still end the pass
+	// rather than walk a million-row list.
+	CampaignPlacementCandidates = 200
+
+	// CampaignRoutedCandidateChunk is how many ordered candidate leads one
+	// FindRoutedPairs pass hydrates and routes at a time. The ordered candidate
+	// ids are enumerated cheaply up front; the expensive per-lead history and
+	// classification joins then run one chunk at a time, so a pass that fills
+	// its batch early stops instead of paying for the campaign's whole audience.
+	// Kept comfortably above CampaignPlacementCandidates so the common case
+	// (plenty sendable) finishes in a single chunk.
+	CampaignRoutedCandidateChunk = 1000
 
 	// WarmupReputationLedgerDays is how long the standing of a removed mailbox
 	// is held against its address, counted from the later of its removal and
@@ -158,6 +231,16 @@ const (
 	// tick that actually sent parks its successor at the paced interval, which
 	// is the send spacing and must not be shortened.
 	CampaignMaxDeferMinutes = 15
+
+	// CampaignTickRetrySeconds is how far a campaign pass that failed is moved
+	// before it runs again, and how soon the next pass follows one that could
+	// not hand its send to a worker. The in-process dispatcher fires a due
+	// task every second, so a retry kept at its old slot would run in a loop.
+	CampaignTickRetrySeconds = 60
+
+	// CampaignSendClaimRetrySeconds is how soon a pass that lost its mailbox to
+	// another campaign looks again, plus up to as much again of spread.
+	CampaignSendClaimRetrySeconds = 10
 
 	// CampaignStaleParkHours is when the reconciler starts distrusting a parked
 	// wakeup. Even-distribution can only push a successor to the end of the
@@ -207,6 +290,29 @@ const (
 	TrackingMachineWindowSecondsMin = 1
 	TrackingMachineWindowSecondsMax = 900
 
+	// TrackingMachineWindowProbableSecondsDefault is the window used instead
+	// of the two above when the tracking edge recognised the source as a
+	// scanner network that ALSO carries people's own requests: Proofpoint
+	// Isolation and Mimecast Browser Isolation render a clicked page in the
+	// vendor's own cloud, so the request may have a person behind it.
+	//
+	// Such a match cannot settle the verdict, but it moves the odds a long
+	// way, which is what buys the wider window: inside it the event is the
+	// delivery-time scan, outside it the person who got to the mail later. Ten
+	// minutes covers a gateway scanning on arrival behind a slow provider
+	// queue while leaving all but the fastest recipients on the human side.
+	//
+	// Never shorter than the per-kind window in effect: the classifier takes
+	// the wider of the two, so this setting can only ever catch more.
+	TrackingMachineWindowProbableSecondsDefault = 600
+
+	// Bounds on that window. It reaches a day because how long a vendor takes
+	// to detonate a link is the vendor's property, not the instance's, and an
+	// operator whose recipients sit almost entirely behind one may want the
+	// whole of it.
+	TrackingMachineWindowProbableSecondsMin = 1
+	TrackingMachineWindowProbableSecondsMax = 86400
+
 	// TrackingClickBurstSeconds is the window inside which clicks on two
 	// different links of the same email from the same source are treated as
 	// a scanner walking the message. A person follows one link at a time.
@@ -230,6 +336,51 @@ const (
 	// there is always a window in which an event can be read.
 	RetentionDaysMin = 1
 	RetentionDaysMax = 3650
+
+	// Warmup mail is real mail in the customer's mailbox, and nothing about
+	// it is worth keeping once its engagement has been recorded. The platform
+	// deletes it from the warmup folder after this many days (per mailbox
+	// override in email_accounts.warmup_retention_days), so a mailbox on a
+	// fixed quota never fills up with it and the deletion is the platform's
+	// own. The floor leaves room for the delayed engagement legs and for a
+	// reply-back in the thread to finish before its opener goes.
+	WarmupMailRetentionDaysDefault = 30
+	WarmupMailRetentionDaysMin     = 3
+
+	// WarmupEventRetentionDaysDefault is how long the per-message warmup
+	// records (tokens, receipts, tampering and spam reports) are kept. The
+	// health bands read at most thirty days, which is the floor; the daily
+	// warmup_statistics rows carry the analytics and are never pruned.
+	WarmupEventRetentionDaysDefault = 365
+	WarmupEventRetentionDaysMin     = 30
+
+	// WarmupDeletionStrikeHours is how soon after arrival a deletion of a
+	// warmup email still costs the pool its engagement and so counts as
+	// tampering. Later on it is housekeeping: the platform was going to delete
+	// it anyway, and a mailbox owner tidying a folder, a provider purging its
+	// Trash or a server retention rule must not read as harm.
+	WarmupDeletionStrikeHours = 24
+
+	// WarmupTamperingKeepDays is the least a tampering strike is kept: the
+	// seven days it counts plus the thirty-day block it can impose, so the
+	// strikes behind a live hold are always there to re-decide it.
+	WarmupTamperingKeepDays = 37
+
+	// A warmup email moved to spam names no actor on any provider, so the move
+	// is held this long before it is attributed, to see the activity around it.
+	WarmupSpamMoveSettleMinutes = 30
+	// Owner activity this close to a move, either side, attributes it to the owner.
+	WarmupSpamMoveActivityMinutes = 30
+	// A move this soon after arrival, with nobody active, is the filter catching up.
+	WarmupSpamMoveQuickMinutes = 15
+	// The same sender's mail moved to spam in another workspace this close is the provider re-judging it.
+	WarmupSpamMoveCorrelationHours = 24
+	// Unexplained moves from this many distinct senders in seven days, in a mailbox someone uses, are its owner's.
+	WarmupSpamMovePatternSenders = 3
+	// A mailbox with no owner activity this long has nobody to have moved anything.
+	WarmupOwnerDormantDays = 14
+	// Owner activity is kept this long; it only answers the two windows above.
+	WarmupOwnerActivityKeepDays = 30
 
 	// CampaignSendStampAttempts is how many times the control plane retries the
 	// sent_at stamp after a send is already on the bus. The reservation is what
@@ -265,6 +416,34 @@ const (
 	UniboxLimitMin     = 1
 	UniboxLimitMax     = 100
 	UniboxLimitDefault = 50
+
+	// Account-status list paging (GET /analytics/accounts). The default and
+	// ceiling match the 1000-row cap this endpoint used to apply silently, so a
+	// caller with no more mailboxes than that sees the same page; beyond it the
+	// overflow is reachable through next_cursor instead of being dropped.
+	AccountStatusLimitDefault = 1000
+	AccountStatusLimitMax     = 1000
+	// AccountStatusMaxIDs bounds an email_ids request, so a page view asks only
+	// for the mailboxes it shows.
+	AccountStatusMaxIDs = 200
+
+	// ContactMailHostBatchSize is how many contacts one provider sweep pass
+	// reads; lookups are per distinct domain, so a pass costs far fewer.
+	ContactMailHostBatchSize = 2000
+	// ContactMailHostIntervalSeconds is how often the provider sweep passes. A
+	// full batch runs again immediately, so an import drains without waiting.
+	ContactMailHostIntervalSeconds = 60
+	// ContactMailHostConcurrency bounds parallel domain lookups in one pass.
+	ContactMailHostConcurrency = 16
+	// ContactMailHostRecheckDays is how long a domain with no known host waits
+	// before it is looked up again.
+	ContactMailHostRecheckDays = 7
+	// ContactMailHostRetryMinutes is how soon a lookup that failed transiently
+	// is tried again.
+	ContactMailHostRetryMinutes = 60
+	// ContactMailHostCacheHours is how long a domain's host is cached across
+	// sweeps and backend replicas.
+	ContactMailHostCacheHours = 24
 
 	// VerificationRecheckDays is how long a verification verdict is trusted
 	// before the address is checked again. Mailboxes get created and closed;
@@ -309,6 +488,15 @@ const (
 	// cluster on the header name to fingerprint warmup traffic.
 	WarmupVerifyHeader = "X-Mailtrace-Verify"
 
+	// WarmupFolderDefault is the folder (a label on Gmail) warmup mail is
+	// filed into when a mailbox has not named its own. Both directions land
+	// there — the copy a mailbox received and the copy of what it sent — so
+	// the folder is what identifies warmup traffic in a real mail client.
+	WarmupFolderDefault = "Warmbly"
+	// WarmupFolderMaxLen bounds a customer-supplied folder name. It becomes a
+	// mailbox name on the provider, so it is short and single-level.
+	WarmupFolderMaxLen = 64
+
 	// Product-level hard caps. These are the backstop for plans that
 	// advertise "unlimited" on campaigns, seats, contacts and daily sends.
 	// Each cap is the floor that GetEffectiveLimits falls back to when both
@@ -346,6 +534,29 @@ const (
 	MailboxBulkBatchMax    = 50
 	MailboxBulkConcurrency = 8
 
+	// Mailbox import (background job): rows per file, upload size, how many
+	// rows connect at once overall and per mail host (a burst of sign-ins to
+	// one provider from one address earns an auth throttle), how long a row
+	// may run before another pass takes it back, how long failed rows keep
+	// their sealed credentials for a retry, and when a finished import goes.
+	MailboxImportMaxRows            = 5000
+	MailboxImportMaxBytes           = 10 << 20
+	MailboxImportConcurrency        = 8
+	MailboxImportPerHostConcurrency = 3
+	MailboxImportLeaseSeconds       = 120
+	MailboxImportCredentialDays     = 7
+	MailboxImportRetentionDays      = 30
+
+	// Contact import (background job): uploads still waiting on a mapping are
+	// dropped after ContactImportDraftHours, finished imports and their rows
+	// after ContactImportRetentionDays. A run renews its lease every chunk, and
+	// a workspace may hold ContactImportMaxActive drafts and runs at once.
+	ContactImportDraftHours    = 24
+	ContactImportRetentionDays = 30
+	ContactImportLeaseSeconds  = 120
+	ContactImportMaxAttempts   = 3
+	ContactImportMaxActive     = 10
+
 	// Daily creation throttles. The total caps above stop "you have
 	// 5000 campaigns on this org" — the throttles below stop "you
 	// created 1000 campaigns today on a fresh unlimited account."
@@ -364,9 +575,21 @@ const (
 	PoolLinkPollIntervalSeconds  = 3
 	PoolLinkPlanID               = "00000000-0000-0000-0000-000000000002"
 	PoolLinkPlanPriceUSD         = 15
-	WarmupPoolTierFallbackFloor  = 25 // below this many own-tier recipients, a premium tier borrows up to this many proven free mailboxes
-	WarmupPoolFallbackMinAgeDays = 3  // a free mailbox must have been a pool member this long before premium may borrow it
-	DailyThrottleNewOrgs         = 3  // new workspaces per owner per day
+	PoolLinkRedirectLimit        = 200 // root redirects Warmbly Cloud serves for one linked instance
+	WarmupPoolFallbackMinAgeDays = 3   // a free mailbox must have been a pool member this long before premium may borrow it, or write back to one
+	WarmupPoolReturnVisitDays    = 14  // a proven free mailbox may write back to a paying mailbox that wrote to it this recently
+	// What one inbox may receive from the pool in a day: WarmupInboundDailyMultiple
+	// times its own daily sends, never below the floor (a recipient-only mailbox
+	// sends nothing) and never above the ceiling. A recipient at its cap is left
+	// out of every draw for the rest of the day, so paying the pool's debt to a
+	// thin tier never turns into flooding it.
+	WarmupInboundDailyFloor    = 10
+	WarmupInboundDailyCeiling  = 60
+	WarmupInboundDailyMultiple = 2
+	// A free sender stops at this share of an inbox's daily cap, so the rest
+	// of every inbox's day is left for premium senders.
+	WarmupFreeInboundSharePercent = 75
+	DailyThrottleNewOrgs          = 3 // new workspaces per owner per day
 
 	// CLI sign-in handshake (`warmbly auth login`). Shorter-lived than the pool
 	// link handshake because a person is watching the terminal while it runs.
@@ -381,24 +604,24 @@ const (
 	// to 200 inbound messages a day couldn't hit it organically).
 	DailyThrottleNewScheduledSends = 1000
 
-	// MaxPendingScheduledSendsPerUser caps how many pending scheduled
-	// email sends one user can have queued at once. The DAILY rate
-	// (DailyThrottleNewScheduledSends) is the primary abuse defense;
-	// this is the DB-bloat defense — each pending row carries a body
-	// (~5KB), so capping pending count keeps total scheduled-queue
-	// storage bounded per user.
+	// MaxPendingScheduledSendsPerOrg caps how many pending scheduled
+	// email sends one workspace can have queued at once, across all of
+	// its mailboxes. The DAILY rate (DailyThrottleNewScheduledSends) is
+	// the primary abuse defense; this is the DB-bloat defense — each
+	// pending row carries a body (~5KB), so capping pending count keeps
+	// total scheduled-queue storage bounded per workspace.
 	//
-	// 10,000 is generous: a user scheduling 100 sends/day for the next
+	// 10,000 is generous: a team scheduling 100 sends/day for the next
 	// 100 days hits this exactly once. The combination of "1K new/day"
-	// + "10K total pending" means a legitimate user cannot organically
+	// + "10K total pending" means legitimate use cannot organically
 	// hit either, while a scripted attacker is bounded on both axes.
 	//
 	// Cloud Tasks cost is negligible at this size — at $0.40/M
-	// operations, 10K pending = 20K ops = $0.008/user even at the
+	// operations, 10K pending = 20K ops = $0.008/workspace even at the
 	// hardest abuse. The cap exists for DB sanity, not cost.
 	//
 	// Future: per-plan ceiling lookup. Today: single backstop.
-	MaxPendingScheduledSendsPerUser = 10000
+	MaxPendingScheduledSendsPerOrg = 10000
 
 	// Undo send: instant sends are queued this many seconds in the
 	// future so the sender can still cancel. Per-user setting stored in
@@ -431,4 +654,9 @@ var InboundClassificationHeaders = []string{
 	"X-Autoreply",
 	"X-Autorespond",
 	"X-Auto-Response-Suppress",
+	// A failure notice with no RFC 3464 status part names its recipient here.
+	"X-Failed-Recipients",
+	// List mail (newsletters, notifications): never a person answering us.
+	"List-Unsubscribe",
+	"List-Id",
 }

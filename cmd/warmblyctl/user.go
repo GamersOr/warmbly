@@ -12,11 +12,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/auth"
+	"github.com/warmbly/warmbly/internal/app/token"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/argon2"
 	"github.com/warmbly/warmbly/internal/pkg/crypt"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
 )
 
 // resetSessionKeyPrefix must match getResetPasswordSessionKey in
@@ -94,6 +96,9 @@ func runUserCreate(ctx context.Context, args []string) error {
 	if *noOrg && strings.TrimSpace(*orgName) != "" {
 		return errors.New("--org and --no-org contradict each other. Pass one or neither.")
 	}
+	if _, nerr := displayname.Validate("--org", *orgName, displayname.Workspace, true); nerr != nil {
+		return errors.New(nerr.Message)
+	}
 
 	c, err := connect(ctx)
 	if err != nil {
@@ -126,6 +131,12 @@ func runUserCreate(ctx context.Context, args []string) error {
 	if cerr != nil {
 		return fmt.Errorf("creating the account: %w", cerr)
 	}
+	// An operator-made account is ready to use; the first-run wizard is for self-service signups.
+	if at, merr := c.users.MarkOnboarded(ctx, created.ID); merr != nil {
+		warn("the account was created but is not marked onboarded, so the dashboard will show the setup wizard first: %v", merr)
+	} else {
+		created.OnboardingCompletedAt = &at
+	}
 	if c.cache != nil {
 		if xerr := c.userService().SaveUser(ctx, created); xerr != nil {
 			warn("the account was created but could not be cached: %v", xerr)
@@ -135,11 +146,11 @@ func runUserCreate(ctx context.Context, args []string) error {
 	changed := []string{fmt.Sprintf("Created account %s (id %s)", created.Email, created.ID)}
 
 	if !*noOrg {
-		name := strings.TrimSpace(*orgName)
+		name := displayname.Normalize(*orgName)
 		if name == "" {
-			name = defaultOrgName(created.FirstName)
+			name = displayname.DefaultWorkspace(created.FirstName)
 		}
-		org, oerr := c.orgService().Create(ctx, created.ID, name)
+		org, oerr := c.orgService().Create(ctx, created.ID, name, "")
 		if oerr != nil {
 			return fmt.Errorf("the account %s was created, but its organization was not: %w\nCreate one from the dashboard after signing in.", created.Email, oerr)
 		}
@@ -297,7 +308,8 @@ func issueResetLink(ctx context.Context, c *conn, u *models.User, ttl time.Durat
 	issuedAt := time.Now()
 	expiresAt := issuedAt.Add(ttl)
 
-	tok, terr := c.tokenService(secret).GenerateToken(u.ID, sessionID, u.Email, nonce, issuedAt, expiresAt)
+	// The reset flow accepts only a token minted for its own purpose.
+	tok, terr := c.tokenService(secret).GenerateTokenFor(token.PurposePasswordReset, u.ID, sessionID, u.Email, nonce, issuedAt, expiresAt)
 	if terr != nil {
 		return fmt.Errorf("signing the reset token: %w", terr)
 	}
@@ -305,7 +317,7 @@ func issueResetLink(ctx context.Context, c *conn, u *models.User, ttl time.Durat
 		return fmt.Errorf("storing the reset session: %w", serr)
 	}
 
-	fmt.Printf("Issued a password reset session for %s. It is single use and expires at %s. No password has changed yet.\n\n  %s\n\n", u.Email, expiresAt.UTC().Format(time.RFC3339), config.GetPasswordResetURL(tok))
+	fmt.Printf("Issued a password reset session for %s. It is single use and expires at %s. No password has changed yet.\n\n  %s\n\n", u.Email, expiresAt.UTC().Format(time.RFC3339), config.GetPasswordResetURL(tok, ""))
 	fmt.Println("Open that link in a browser to choose the new password. Opening it revokes every existing session for the account.")
 	fmt.Println("If the host is wrong, set APP_URL to the URL the dashboard is served from and run this again.")
 	return nil
@@ -427,7 +439,7 @@ func runUserRevokeAdmin(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	result, lerr := c.admins.ListAdmins(ctx, nil, 100)
+	result, lerr := c.admins.ListAdmins(ctx, 0, 100)
 	if lerr != nil {
 		return fmt.Errorf("counting the remaining platform admins: %w", lerr)
 	}
@@ -518,15 +530,6 @@ func lookupUser(ctx context.Context, c *conn, address string) (*models.User, err
 		return nil, fmt.Errorf("no account on this instance uses the address %s, so nothing was changed.\nSee who does:\n  warmblyctl user list", address)
 	}
 	return u, nil
-}
-
-// defaultOrgName mirrors the bootstrap owner's naming so an account created
-// here is indistinguishable from one claimed through the setup link.
-func defaultOrgName(firstName string) string {
-	if firstName == "" {
-		return "My Organization"
-	}
-	return firstName + "'s Organization"
 }
 
 func adminRoleNames() []string {

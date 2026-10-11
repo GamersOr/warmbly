@@ -6,17 +6,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/warmbly/warmbly/internal/pkg/encrypt"
 
 	"github.com/warmbly/warmbly/internal/models"
 )
 
 // WebhookRepository persists webhook endpoints and per-attempt delivery
 // records. The dispatcher polls due deliveries from this repo.
+// Not-found sentinels, so a caller can tell a missing row from a failed query.
+var (
+	ErrWebhookEndpointNotFound = errors.New("webhook endpoint not found")
+	ErrWebhookDeliveryNotFound = errors.New("webhook delivery not found")
+)
+
 type WebhookRepository interface {
 	// Endpoints
 	CreateEndpoint(ctx context.Context, endpoint *models.WebhookEndpoint, secret, verificationToken string) error
@@ -78,10 +86,57 @@ type WebhookRepository interface {
 
 type webhookRepository struct {
 	db *pgxpool.Pool
+	// enc seals the endpoint signing secret at rest under the instance key
+	// (CREDENTIALS_ENCRYPTION_KEY). The secret is what a receiver uses to
+	// prove a delivery came from us, so a read-only copy of the database was
+	// enough to forge one. Nil is tolerated so a deployment without the key
+	// keeps booting; rows are then read and written in the clear exactly as
+	// before, which is the pre-existing behaviour rather than a new failure.
+	enc *encrypt.Encrypter
 }
 
 func NewWebhookRepository(db *pgxpool.Pool) WebhookRepository {
 	return &webhookRepository{db: db}
+}
+
+// NewWebhookRepositorySealed is NewWebhookRepository with secret sealing on.
+func NewWebhookRepositorySealed(db *pgxpool.Pool, enc *encrypt.Encrypter) WebhookRepository {
+	return &webhookRepository{db: db, enc: enc}
+}
+
+// errNoCredentialKey refuses to store a signing secret that could not be sealed.
+var errNoCredentialKey = errors.New("CREDENTIALS_ENCRYPTION_KEY is not set, so a signing secret cannot be stored")
+
+// sealSecret encrypts a signing secret for storage, and refuses without the instance key.
+func (r *webhookRepository) sealSecret(plain string) (string, error) {
+	if plain == "" {
+		return plain, nil
+	}
+	if r.enc == nil {
+		return "", errNoCredentialKey
+	}
+	return r.enc.Encrypt(plain)
+}
+
+// openSecret returns the plaintext signing secret, reporting whether the row
+// was still in the pre-sealing plaintext format.
+//
+// Rows written before sealing hold a "whsec_"-prefixed token, which is not
+// valid hex, so a decrypt failure identifies a legacy row rather than
+// corruption. Those are returned as they are: the alternative is breaking every
+// webhook that already works.
+func (r *webhookRepository) openSecret(stored string) (string, bool) {
+	if r.enc == nil || stored == "" {
+		return stored, false
+	}
+	if plain, err := r.enc.Decrypt(stored); err == nil {
+		return plain, false
+	}
+	// Only a plaintext token is legacy; anything else is ciphertext under another key.
+	if strings.HasPrefix(stored, "whsec_") {
+		return stored, true
+	}
+	return "", false
 }
 
 // endpointCols is the shared column projection so every read scans identically.
@@ -111,6 +166,11 @@ func (r *webhookRepository) CreateEndpoint(ctx context.Context, endpoint *models
 	// returns it instead of echoing a null filter.
 	endpoint.EventTypes = textArray(endpoint.EventTypes)
 
+	sealed, serr := r.sealSecret(secret)
+	if serr != nil {
+		return serr
+	}
+
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO webhook_endpoints (
 			id, organization_id, url, description, secret, event_types,
@@ -119,7 +179,7 @@ func (r *webhookRepository) CreateEndpoint(ctx context.Context, endpoint *models
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
 	`,
 		endpoint.ID, endpoint.OrganizationID, endpoint.URL, endpoint.Description,
-		secret, endpoint.EventTypes, endpoint.Enabled,
+		sealed, endpoint.EventTypes, endpoint.Enabled,
 		endpoint.OAuthApplicationID, endpoint.CreatedBy, verificationToken,
 		endpoint.CreatedAt,
 	)
@@ -141,21 +201,25 @@ func (r *webhookRepository) UpdateEndpoint(ctx context.Context, endpoint *models
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
-		return errors.New("webhook endpoint not found")
+		return ErrWebhookEndpointNotFound
 	}
 	return nil
 }
 
 func (r *webhookRepository) RotateSecret(ctx context.Context, orgID, endpointID uuid.UUID, newSecret string) error {
+	sealed, serr := r.sealSecret(newSecret)
+	if serr != nil {
+		return serr
+	}
 	cmd, err := r.db.Exec(ctx,
 		`UPDATE webhook_endpoints SET secret = $1, updated_at = NOW() WHERE id = $2 AND organization_id = $3`,
-		newSecret, endpointID, orgID,
+		sealed, endpointID, orgID,
 	)
 	if err != nil {
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
-		return errors.New("webhook endpoint not found")
+		return ErrWebhookEndpointNotFound
 	}
 	return nil
 }
@@ -169,7 +233,7 @@ func (r *webhookRepository) DeleteEndpoint(ctx context.Context, orgID, endpointI
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
-		return errors.New("webhook endpoint not found")
+		return ErrWebhookEndpointNotFound
 	}
 	return nil
 }
@@ -210,9 +274,28 @@ func (r *webhookRepository) GetEndpointSecret(ctx context.Context, endpointID uu
 		`SELECT secret FROM webhook_endpoints WHERE id = $1`, endpointID,
 	).Scan(&secret)
 	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
-		return "", errors.New("webhook endpoint not found")
+		return "", ErrWebhookEndpointNotFound
 	}
-	return secret, err
+	if err != nil {
+		return "", err
+	}
+
+	plain, legacy := r.openSecret(secret)
+	if plain == "" && secret != "" {
+		return "", errors.New("webhook signing secret is unreadable under this instance's key; rotate it")
+	}
+	if legacy {
+		// Re-seal on first read, the same way mailbox credentials convert, so
+		// the plaintext window closes on its own rather than waiting for the
+		// owner to rotate. Best effort: a failure here still returns a working
+		// secret, and the next delivery tries again.
+		if sealed, serr := r.sealSecret(plain); serr == nil && sealed != plain {
+			_, _ = r.db.Exec(ctx,
+				`UPDATE webhook_endpoints SET secret = $2 WHERE id = $1 AND secret = $3`,
+				endpointID, sealed, secret)
+		}
+	}
+	return plain, nil
 }
 
 func (r *webhookRepository) GetVerificationToken(ctx context.Context, endpointID uuid.UUID) (string, error) {
@@ -221,7 +304,7 @@ func (r *webhookRepository) GetVerificationToken(ctx context.Context, endpointID
 		`SELECT verification_token FROM webhook_endpoints WHERE id = $1`, endpointID,
 	).Scan(&token)
 	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
-		return "", errors.New("webhook endpoint not found")
+		return "", ErrWebhookEndpointNotFound
 	}
 	return token, err
 }
@@ -236,7 +319,7 @@ func (r *webhookRepository) ArmVerification(ctx context.Context, orgID, endpoint
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
-		return errors.New("webhook endpoint not found")
+		return ErrWebhookEndpointNotFound
 	}
 	return nil
 }
@@ -287,6 +370,10 @@ func (r *webhookRepository) ListEndpointsForOrg(ctx context.Context, orgID uuid.
 // and the URL is inside the app's allowed domains), so it receives events
 // immediately. event_types is the scope-filtered set the org's grant allows.
 func (r *webhookRepository) UpsertAppEndpoint(ctx context.Context, orgID, appID uuid.UUID, url, secret string, eventTypes []string) error {
+	sealed, serr := r.sealSecret(secret)
+	if serr != nil {
+		return serr
+	}
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO webhook_endpoints (
 			id, organization_id, url, description, secret, event_types, enabled,
@@ -297,7 +384,7 @@ func (r *webhookRepository) UpsertAppEndpoint(ctx context.Context, orgID, appID 
 		DO UPDATE SET url = EXCLUDED.url, secret = EXCLUDED.secret,
 		    event_types = EXCLUDED.event_types, enabled = true,
 		    auto_disabled_at = NULL, disabled_reason = NULL, updated_at = NOW()
-	`, orgID, url, "Managed by OAuth app", secret, textArray(eventTypes), appID)
+	`, orgID, url, "Managed by OAuth app", sealed, textArray(eventTypes), appID)
 	return err
 }
 
@@ -402,6 +489,9 @@ func (r *webhookRepository) MatchingEndpoints(ctx context.Context, orgID uuid.UU
 }
 
 func (r *webhookRepository) EnqueueDelivery(ctx context.Context, delivery *models.WebhookDelivery) error {
+	if id := SendResultEffectEventID(ctx); id != uuid.Nil {
+		delivery.ID = uuid.NewSHA1(id, []byte(delivery.EndpointID.String()))
+	}
 	if delivery.ID == uuid.Nil {
 		delivery.ID = uuid.New()
 	}
@@ -418,7 +508,7 @@ func (r *webhookRepository) EnqueueDelivery(ctx context.Context, delivery *model
 		INSERT INTO webhook_deliveries (
 			id, endpoint_id, organization_id, event_type, event_id, payload,
 			status, attempt_count, max_attempts, next_attempt_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW()) ON CONFLICT(id) DO NOTHING
 	`,
 		delivery.ID, delivery.EndpointID, delivery.OrganizationID,
 		delivery.EventType, delivery.EventID, json.RawMessage(delivery.Payload),
@@ -584,7 +674,7 @@ func (r *webhookRepository) RedeliverDelivery(ctx context.Context, orgID, delive
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
-		return errors.New("webhook delivery not found")
+		return ErrWebhookDeliveryNotFound
 	}
 	return nil
 }

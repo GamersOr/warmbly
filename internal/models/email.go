@@ -2,6 +2,7 @@ package models
 
 import (
 	"net"
+	"net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,14 @@ const (
 	InboxProviderSMTPIMAP InboxProvider = "smtp_imap"
 )
 
+// How a mailbox signs in, mirroring the email_accounts.auth_method CHECK.
+const (
+	MailAuthPassword    = "password"
+	MailAuthAppPassword = "app_password"
+	MailAuthOAuth       = "oauth"
+	MailAuthDelegated   = "delegated"
+)
+
 // Sending-domain authentication states, mirroring the email_accounts.auth_state
 // CHECK constraint. "unknown" is deliberately distinct from "failing": it means
 // not checked yet or the DNS lookup could not complete, and never gates.
@@ -29,11 +38,12 @@ const (
 )
 
 type Email struct {
-	ID             uuid.UUID  `json:"id"`
-	UserID         string     `json:"user_id"`
-	OrganizationID *uuid.UUID `json:"organization_id,omitempty"`
-	WorkerID       *uuid.UUID `json:"worker_id"`
-	Email          string     `json:"email"`
+	TransportGeneration uuid.UUID  `json:"-"`
+	ID                  uuid.UUID  `json:"id"`
+	UserID              string     `json:"user_id"`
+	OrganizationID      *uuid.UUID `json:"organization_id,omitempty"`
+	WorkerID            *uuid.UUID `json:"worker_id"`
+	Email               string     `json:"email"`
 
 	Name           string `json:"name"`
 	SignaturePlain string `json:"signature_plain"`
@@ -41,25 +51,58 @@ type Email struct {
 	SignatureSync  bool   `json:"signature_sync"`
 	SignatureCode  bool   `json:"signature_code"`
 
+	// SendAsEmail is the verified provider alias this mailbox sends from.
+	// Empty, which is every mailbox until someone picks one, means the
+	// mailbox's own address. The alias list itself is not carried here: it is
+	// read through the identity endpoint, like sync state and behaviour.
+	SendAsEmail string `json:"send_as_email"`
+
 	Provider string `json:"provider"`
 	Status   string `json:"status"`
+
+	// MailHost is who hosts the mailbox (google_workspace, microsoft365, ...)
+	// and AuthMethod how it signs in; both "" until known. See mailhost.Host.
+	MailHost   string `json:"mail_host"`
+	AuthMethod string `json:"auth_method"`
+	// DomainGrantID is the administrator's grant a delegated mailbox connects through.
+	DomainGrantID *uuid.UUID `json:"domain_grant_id,omitempty"`
+	// VendorConnectionID and Vendor name the inbox vendor account a mailbox was imported from.
+	VendorConnectionID *uuid.UUID `json:"vendor_connection_id,omitempty"`
+	Vendor             string     `json:"vendor,omitempty"`
+	// AvatarURL is the mailbox's own profile photo, empty when its provider or vendor has none we can read.
+	AvatarURL string `json:"avatar_url"`
 
 	LastSyncedAt time.Time `json:"last_synced_at"`
 	LastID       *int64    `json:"last_id"`
 
-	CampaignLimit int    `json:"campaign_limit"`
-	MinWaitTime   int    `json:"min_wait_time"`
-	ReplyTo       string `json:"reply_to"`
+	CampaignLimit         int                    `json:"campaign_limit"`
+	TestMode              *TestParticipationMode `json:"test_mode"`
+	TestSendEnabled       bool                   `json:"test_send_enabled"`
+	TestReceiveEnabled    bool                   `json:"test_receive_enabled"`
+	SharedDailyLimit      *int                   `json:"shared_daily_limit"`
+	RollingRecipientLimit *int                   `json:"rolling_recipient_limit"`
+	MinWaitTime           int                    `json:"min_wait_time"`
+	ReplyTo               string                 `json:"reply_to"`
 
 	TrackingDomain           string     `json:"tracking_domain"`
 	TrackingDomainVerified   bool       `json:"tracking_domain_verified"`
 	TrackingDomainVerifiedAt *time.Time `json:"tracking_domain_verified_at"`
+
+	// TrackDirectMail opts this mailbox's hand-written unibox sends into the
+	// open/click tracking campaign mail already gets. Off by default: a pixel
+	// in a one-to-one reply is the operator's call, not ours.
+	TrackDirectMail bool `json:"track_direct_mail"`
 
 	// Sending-domain authentication (SPF/DKIM/DMARC), refreshed by the
 	// background auth-check sweep. AuthState is "unknown" until checked (or
 	// when a DNS lookup failed transiently), distinct from a real "failing".
 	// A sustained "failing" gates cold sending and warmup; see
 	// DomainAuthBlocked for when that becomes enforceable.
+	//
+	// AuthDKIM is a positive-only signal: true means a key was found at a
+	// probed selector, false means none answered. Selectors are not
+	// discoverable from DNS, so false is "unverified" and must never be
+	// presented as a missing record.
 	AuthState       string     `json:"auth_state"`
 	AuthSPF         bool       `json:"auth_spf"`
 	AuthDKIM        bool       `json:"auth_dkim"`
@@ -84,12 +127,29 @@ type Email struct {
 	WarmupEndTime   string     `json:"warmup_end_time"`
 	WarmupDays      int        `json:"warmup_days"`
 
+	// WarmupPlacement and WarmupFolder decide where warmup mail ends up in the
+	// customer's real mail client: see WarmupFiling. An empty WarmupFolder
+	// means the instance default rather than "no folder".
+	WarmupPlacement string `json:"warmup_placement"`
+	WarmupFolder    string `json:"warmup_folder"`
+	// WarmupRetentionDays is how long warmup mail stays in this mailbox before
+	// the platform deletes it. Zero means the instance setting: see
+	// WarmupMailRetentionDays.
+	WarmupRetentionDays int `json:"warmup_retention_days"`
+
 	Timezone string `json:"timezone"`
+	// OrgTimezone is the workspace timezone, read alongside the row so
+	// ClockTimezone needs no second query. Not part of the mailbox's API shape.
+	OrgTimezone string `json:"-"`
 
 	// SaveToSent applies to SMTP/IMAP mailboxes only: after a send, the worker
 	// APPENDs a copy to the mailbox's Sent folder. Gmail and Outlook file their
 	// own copy, so the flag is ignored for them.
 	SaveToSent bool `json:"save_to_sent"`
+
+	// RelayFolderMoves makes Archive, Delete and Move to inbox in the unibox
+	// move the message in the mailbox too. On by default.
+	RelayFolderMoves bool `json:"relay_folder_moves"`
 
 	Tags []string `json:"tags"`
 
@@ -102,6 +162,17 @@ type Email struct {
 // task runner, and analytics all key off this rather than the raw Warmup
 // pointer so a paused mailbox is treated as "not sending normal warmup" while
 // still preserving its ramp progress.
+// ClockTimezone is the zone the mailbox's own hours (warmup window, sending
+// behaviour workday, business-hours band) are read in: its own timezone, else
+// the workspace's. Empty means UTC. Campaign windows are not read here; a
+// mailbox with no timezone of its own follows the campaign's window.
+func (e *Email) ClockTimezone() string {
+	if e.Timezone != "" {
+		return e.Timezone
+	}
+	return e.OrgTimezone
+}
+
 func (e *Email) IsWarmingActive() bool {
 	return e.Warmup != nil && e.WarmupPausedAt == nil
 }
@@ -121,6 +192,190 @@ func (e *Email) DomainAuthBlocked(now time.Time, grace time.Duration) bool {
 // mailbox keeps its ramp progress (the anchor is shifted forward on resume).
 func (e *Email) IsWarmupPaused() bool {
 	return e.Warmup != nil && e.WarmupPausedAt != nil
+}
+
+// Where warmup mail is filed in the customer's own mail client. The platform
+// hides warmup from the unibox on its own; these decide what the mailbox owner
+// sees in Gmail, Outlook or their IMAP client.
+const (
+	// WarmupPlacementFolder moves warmup mail out of the inbox (and out of
+	// Sent, where the provider filed our own copy) into one named folder.
+	WarmupPlacementFolder = "folder"
+	// WarmupPlacementInbox leaves warmup mail where the provider put it. Mail
+	// that landed in spam is still rescued into the inbox.
+	WarmupPlacementInbox = "inbox"
+	// WarmupPlacementArchive takes warmup mail out of the inbox without giving
+	// it a folder of its own: the provider's archive.
+	WarmupPlacementArchive = "archive"
+)
+
+// ValidWarmupPlacement reports whether p is one of the placement modes.
+func ValidWarmupPlacement(p string) bool {
+	switch p {
+	case WarmupPlacementFolder, WarmupPlacementInbox, WarmupPlacementArchive:
+		return true
+	}
+	return false
+}
+
+// WarmupFiling resolves where this mailbox's warmup mail belongs: the placement
+// mode, and the folder name to use when that mode is "folder". A row written
+// before the columns existed carries neither, and filing into the default
+// folder is the behaviour every mailbox already had.
+func (e *Email) WarmupFiling() (placement, folder string) {
+	placement = e.WarmupPlacement
+	if !ValidWarmupPlacement(placement) {
+		placement = WarmupPlacementFolder
+	}
+	folder = strings.TrimSpace(e.WarmupFolder)
+	if folder == "" {
+		folder = config.WarmupFolderDefault
+	}
+	return placement, folder
+}
+
+// ValidWarmupRetentionDays reports whether d is an accepted per-mailbox
+// window: zero for the instance setting, or a number of days inside the band.
+func ValidWarmupRetentionDays(d int) bool {
+	return d == 0 || (d >= config.WarmupMailRetentionDaysMin && d <= config.RetentionDaysMax)
+}
+
+// WarmupMailRetentionDays resolves how long this mailbox keeps warmup mail:
+// its own window when it set one, otherwise the instance's. A row written
+// before the column existed carries zero and follows the instance, which is
+// what every mailbox did when the window was not a choice.
+func (e *Email) WarmupMailRetentionDays(instanceDays int) int {
+	if ValidWarmupRetentionDays(e.WarmupRetentionDays) && e.WarmupRetentionDays != 0 {
+		return e.WarmupRetentionDays
+	}
+	if instanceDays < config.WarmupMailRetentionDaysMin {
+		return config.WarmupMailRetentionDaysDefault
+	}
+	return instanceDays
+}
+
+// SendFrom is the address this mailbox's mail is actually From. A verified
+// alias when one was chosen, the mailbox address otherwise.
+func (e *Email) SendFrom() string {
+	if s := strings.TrimSpace(e.SendAsEmail); s != "" {
+		return s
+	}
+	return e.Email
+}
+
+// ReplyToHeader is the Reply-To a campaign or unibox send carries: the
+// configured reply-to as a bare address, empty when unset, unparseable or the
+// address the mail is already From.
+func (e *Email) ReplyToHeader() string {
+	raw := strings.TrimSpace(e.ReplyTo)
+	if raw == "" || strings.ContainsAny(raw, "\r\n") {
+		return ""
+	}
+	addr, err := mail.ParseAddress(raw)
+	if err != nil || addr.Address == "" {
+		return ""
+	}
+	if strings.EqualFold(addr.Address, e.Email) || strings.EqualFold(addr.Address, e.SendFrom()) {
+		return ""
+	}
+	return addr.Address
+}
+
+// ReceivesAt reports whether address, as a send's Reply-To named it, reaches
+// this mailbox.
+func (e *Email) ReceivesAt(address string) bool {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return false
+	}
+	return strings.EqualFold(address, strings.TrimSpace(e.Email)) || strings.EqualFold(address, strings.TrimSpace(e.SendFrom()))
+}
+
+// SendAsIdentity is one address the provider has verified this mailbox to send
+// as, as the provider last reported it. Primary is the mailbox's own address;
+// Default is the one the provider composes from by default, which Warmbly
+// reports but does not follow: which alias Warmbly sends from is the
+// workspace's choice and lives in Email.SendAsEmail.
+type SendAsIdentity struct {
+	Email     string `json:"email"`
+	Name      string `json:"name"`
+	IsPrimary bool   `json:"is_primary"`
+	IsDefault bool   `json:"is_default"`
+	// Verified reports that the provider finished verifying the address.
+	// Sending as an unverified alias is refused by the provider, so these are
+	// offered but never selectable.
+	Verified bool `json:"verified"`
+}
+
+// Signature provenance, mirroring the email_accounts.signature_source CHECK.
+// Unrelated to SignatureSync, which decides whether the signature is appended
+// to outgoing mail.
+const (
+	// SignatureSourceManual: written in Warmbly.
+	SignatureSourceManual = "manual"
+	// SignatureSourceProvider: imported from the mailbox provider.
+	SignatureSourceProvider = "provider"
+)
+
+// SendIdentity is the mailbox's sending identity as the dashboard reads it:
+// which addresses the provider will let it send as, which one is in use, and
+// where the stored signature came from.
+type SendIdentity struct {
+	// Supported reports whether the provider can be asked at all. Only Gmail
+	// exposes send-as identities and a stored signature; an Outlook or
+	// SMTP/IMAP mailbox answers with Supported false and an empty list rather
+	// than an error, so the dashboard can say so instead of failing.
+	Supported bool   `json:"supported"`
+	Provider  string `json:"provider"`
+	// MailboxEmail is the address the mailbox authenticates as, which is
+	// always a legal sender and is what an empty SendAsEmail means.
+	MailboxEmail string           `json:"mailbox_email"`
+	SendAsEmail  string           `json:"send_as_email"`
+	Identities   []SendAsIdentity `json:"identities"`
+	SyncedAt     *time.Time       `json:"synced_at,omitempty"`
+
+	SignatureSource     string     `json:"signature_source"`
+	SignatureImportedAt *time.Time `json:"signature_imported_at,omitempty"`
+}
+
+// EventWorkerMailboxIdentity asks a worker to read one mailbox's sending
+// identity from its provider and answer on the process channel.
+//
+// The worker is the only side that talks to a customer's mailbox: it holds the
+// credential, and the address the provider sees for a mailbox has to stay the
+// one it always sees, or the provider answers with a sign-in challenge.
+type EventWorkerMailboxIdentity struct {
+	EmailID uuid.UUID `json:"email_id" avro:"email_id"`
+	// ProcessID names the reply channel, like a credential validation.
+	ProcessID uuid.UUID `json:"process_id" avro:"process_id"`
+	// WantSignature asks for the signature too. Off for a plain address
+	// refresh, which is the common press.
+	WantSignature bool `json:"want_signature" avro:"want_signature"`
+	// SignatureFor is the address whose signature is wanted: the alias the
+	// mailbox sends as, so it signs off as that alias. Empty takes the
+	// provider's default identity.
+	SignatureFor string `json:"signature_for,omitempty" avro:"signature_for"`
+}
+
+// MailboxIdentityResult is the worker's answer, published to the process
+// channel. Everything the control plane stores comes from here; nothing about
+// the provider call itself crosses back.
+type MailboxIdentityResult struct {
+	OK bool `json:"ok"`
+	// Error is a short reason when OK is false, for the log and for the
+	// message the customer sees.
+	Error      string           `json:"error,omitempty"`
+	Identities []SendAsIdentity `json:"identities,omitempty"`
+	// SignatureHTML is empty both when none was asked for and when the
+	// provider holds none, which are the same thing to the caller: nothing to
+	// import, so nothing is overwritten.
+	SignatureHTML string `json:"signature_html,omitempty"`
+}
+
+// ImportedSignature is a signature read from the provider, ready to store.
+type ImportedSignature struct {
+	HTML  string
+	Plain string
 }
 
 // EmailAuthTarget is a mailbox due for a sending-domain authentication check,
@@ -264,14 +519,14 @@ func ResolveIMAPSecurity(security string, port int) string {
 }
 
 type Service struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
+	Username string `json:"username" avro:"username"`
+	Password string `json:"password" avro:"password"`
+	Host     string `json:"host" avro:"host"`
+	Port     int    `json:"port" avro:"port"`
 	// Security is the connection mode (see MailSecurity*). Empty means "infer
 	// from the port", which is how rows and events written before the field
 	// existed behave.
-	Security string `json:"security,omitempty"`
+	Security string `json:"security,omitempty" avro:"security"`
 }
 
 type Oauth2Service struct {
@@ -281,8 +536,8 @@ type Oauth2Service struct {
 }
 
 type SmtpImap struct {
-	SMTP *Service `json:"smtp"`
-	IMAP *Service `json:"imap"`
+	SMTP *Service `json:"smtp" avro:"smtp"`
+	IMAP *Service `json:"imap" avro:"imap"`
 }
 
 type Oauth2SmtpImap struct {
@@ -291,6 +546,7 @@ type Oauth2SmtpImap struct {
 }
 
 type NewOauthAccount struct {
+	ID             uuid.UUID `json:"-"`
 	OrganizationID *uuid.UUID
 	// Allowance, when set, is enforced again inside the insert transaction
 	// under the organization's mailbox lock, so concurrent connects cannot
@@ -302,6 +558,54 @@ type NewOauthAccount struct {
 	AccessToken  string
 	RefreshToken string
 	ExpiresAt    time.Time
+	// MailHost is stored as given; "" when unknown.
+	MailHost string
+}
+
+// NewDelegatedAccount is a Gmail or Outlook mailbox reached through an
+// administrator's grant: no credential is stored, tokens are minted per use.
+type NewDelegatedAccount struct {
+	OrganizationID *uuid.UUID
+	Allowance      *MailboxAllowance
+	Provider       InboxProvider
+	Name           string
+	Email          string
+	MailHost       string
+	GrantID        uuid.UUID
+	// Subject is who tokens are minted for: the address (Google) or the Graph user id (Microsoft).
+	Subject string
+}
+
+// DelegatedMailbox is what minting a token for a delegated mailbox needs.
+type DelegatedMailbox struct {
+	AccountID      uuid.UUID
+	OrganizationID uuid.UUID
+	Provider       InboxProvider
+	Email          string
+	GrantID        uuid.UUID
+	Subject        string
+	Status         string
+}
+
+// EmailRef is the little of a mailbox a duplicate check needs.
+type EmailRef struct {
+	ID         uuid.UUID `json:"id"`
+	Provider   string    `json:"provider"`
+	Status     string    `json:"status"`
+	AuthMethod string    `json:"auth_method"`
+	// Managed is a mailbox whose tokens Warmbly Cloud holds.
+	Managed bool `json:"managed"`
+}
+
+// SigninRetiring is a mailbox connected with per-mailbox Google sign-in, the
+// method being retired; it moves to an administrator's grant or an app password.
+func (r EmailRef) SigninRetiring() bool {
+	return InboxProvider(r.Provider) == InboxProviderGoogle && r.AuthMethod == MailAuthOAuth && !r.Managed
+}
+
+// Movable is a per-mailbox sign-in an administrator's grant for provider can take over in place.
+func (r EmailRef) Movable(provider InboxProvider) bool {
+	return InboxProvider(r.Provider) == provider && r.AuthMethod == MailAuthOAuth && !r.Managed
 }
 
 type NewSMTPIMAPAccount struct {
@@ -312,6 +616,9 @@ type NewSMTPIMAPAccount struct {
 	Email     string
 	SMTP      *Service
 	IMAP      *Service
+	// MailHost and AuthMethod are stored as given; "" when the caller did not detect them.
+	MailHost   string
+	AuthMethod string
 }
 
 // EmailOnboardingState is stored in Redis for the lifetime of an OAuth round trip.
@@ -320,15 +627,25 @@ type EmailOnboardingState struct {
 	OrganizationID *uuid.UUID `json:"organization_id,omitempty"`
 	Provider       string     `json:"provider"`
 	Nonce          string     `json:"nonce"`
+	// ReturnOrigin binds the callback to the allowlisted dashboard that started it.
+	ReturnOrigin string `json:"return_origin,omitempty"`
 	// EmailAccountID marks a re-authorization round trip: the finish leg
 	// renews this mailbox's tokens instead of connecting a new one.
 	EmailAccountID *uuid.UUID `json:"email_account_id,omitempty"`
+	// CodeVerifier is the PKCE verifier for this round trip. It stays here,
+	// server-side, and is never sent to the browser: the point of PKCE is that
+	// only the party that started the flow can finish it, so an authorization
+	// code intercepted anywhere between the provider and this backend is not
+	// redeemable. A state without one is refused.
+	CodeVerifier string `json:"code_verifier,omitempty"`
 }
 
 // EmailOnboardingStartResponse is returned from POST /emails/onboarding/oauth/start.
 type EmailOnboardingStartResponse struct {
 	URL   string `json:"url"`
 	State string `json:"state"`
+	// AdminConsentURL (Microsoft only) lets an administrator approve sign-in for their whole organization.
+	AdminConsentURL string `json:"admin_consent_url,omitempty"`
 }
 
 type EmailsResult struct {
@@ -379,11 +696,22 @@ type UpdateEmail struct {
 	SignatureSync  *bool   `json:"signature_sync"`
 	SignatureCode  *bool   `json:"signature_code"`
 
+	// SendAsEmail picks which verified provider alias the mailbox sends from.
+	// An empty string clears it back to the mailbox's own address; anything
+	// else has to be an address the provider reported as verified.
+	SendAsEmail *string `json:"send_as_email"`
+
 	Status *string `json:"status"` // active, inactive, revoked
 
-	CampaignLimit *int    `json:"campaign_limit"`
-	MinWaitTime   *int    `json:"min_wait_time"`
-	ReplyTo       *string `json:"reply_to"`
+	CampaignLimit          *int                    `json:"campaign_limit"`
+	TestMode               *TestParticipationMode  `json:"test_mode"`
+	TestSendEnabled        *bool                   `json:"test_send_enabled"`
+	TestReceiveEnabled     *bool                   `json:"test_receive_enabled"`
+	SharedDailyLimit       *int                    `json:"shared_daily_limit"`
+	RollingRecipientLimit  *int                    `json:"rolling_recipient_limit"`
+	SendRecoveryResolution *SendRecoveryResolution `json:"send_recovery_resolution"`
+	MinWaitTime            *int                    `json:"min_wait_time"`
+	ReplyTo                *string                 `json:"reply_to"`
 
 	Warmup          *bool   `json:"warmup"`
 	WarmupBase      *int    `json:"warmup_base"`
@@ -395,6 +723,15 @@ type UpdateEmail struct {
 	WarmupEndTime   *string `json:"warmup_end_time"`
 	WarmupDays      *int    `json:"warmup_days"`
 
+	// WarmupPlacement is "folder", "inbox" or "archive"; WarmupFolder names the
+	// destination for "folder" and is cleared back to the instance default by
+	// an empty string.
+	WarmupPlacement *string `json:"warmup_placement"`
+	WarmupFolder    *string `json:"warmup_folder"`
+	// WarmupRetentionDays is how long warmup mail is kept in the mailbox; 0
+	// goes back to the instance setting.
+	WarmupRetentionDays *int `json:"warmup_retention_days"`
+
 	// Timezone is the mailbox's own IANA zone, which its sending behaviour and
 	// business-hours window are evaluated in. Empty means not configured, so
 	// only the campaign's window applies.
@@ -405,7 +742,21 @@ type UpdateEmail struct {
 	// with two of everything.
 	SaveToSent *bool `json:"save_to_sent"`
 
+	// RelayFolderMoves turns the unibox's filing relay to the mailbox on or off.
+	RelayFolderMoves *bool `json:"relay_folder_moves"`
+
 	Tags []string `json:"tags"`
+}
+
+type SendRecoveryResolution struct {
+	MessageID             string     `json:"message_id,omitempty"`
+	ProviderMsgID         string     `json:"provider_msg_id,omitempty"`
+	ThreadID              string     `json:"thread_id,omitempty"`
+	HeldTaskID            uuid.UUID  `json:"held_task_id"`
+	HeldReason            string     `json:"held_reason"`
+	EvidenceType          string     `json:"evidence_type"`
+	EvidenceTaskID        *uuid.UUID `json:"evidence_task_id,omitempty"`
+	ConfirmationReference string     `json:"confirmation_reference,omitempty"`
 }
 
 // BulkEmailTags adds and removes tags across many mailboxes in one call (the

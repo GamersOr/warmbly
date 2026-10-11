@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 
+	"github.com/google/uuid"
+
 	"github.com/warmbly/warmbly/internal/app/cipher"
 	"github.com/warmbly/warmbly/internal/app/worker/mailmanager"
 	"github.com/warmbly/warmbly/internal/config"
@@ -18,6 +20,7 @@ import (
 )
 
 type WorkerService struct {
+	OnMailboxMissing          func()
 	ID                        string
 	CipherService             cipher.CipherService
 	Bus                       eventbus.EventBus
@@ -39,6 +42,10 @@ type WorkerService struct {
 	TokenBroker repository.BrokeredTokenClient
 
 	mailManager *mailmanager.MailManager
+	// loads holds the mailboxes being loaded, so a republished ADD_EMAIL never dials twice.
+	loads                  sync.Map // uuid.UUID -> *mailboxLoad
+	pendingSendResults     sync.Map // uuid.UUID -> pendingSendResult
+	pendingFilingDeferrals sync.Map // uuid.UUID -> models.WarmupFilingDeferralRequest
 
 	// HealthCounters tracks the per-window send-side telemetry the worker
 	// reports via JobEventTypeWorkerHealth. Lazily initialised by
@@ -72,6 +79,7 @@ func (s *WorkerService) Init() error {
 	if s.TokenBroker != nil {
 		s.mailManager.WireTokenBroker(s.TokenBroker)
 	}
+	s.mailManager.ExecutorID, _ = uuid.Parse(s.ID)
 
 	return nil
 }

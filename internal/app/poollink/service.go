@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/url"
 	"strings"
 	"time"
@@ -21,10 +22,14 @@ import (
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/cache"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/crypt"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
 var (
+	ErrLegacyLink        = errx.NewWithIdentifier(errx.Conflict, "pool_link_workspace_required", "Update this self-hosted instance before creating a new connection. Existing connections continue working.")
+	ErrWorkspaceLinked   = errx.NewWithIdentifier(errx.Conflict, "pool_link_workspace_connected", "This Cloud workspace already has an active connection. Use a separate Cloud workspace and subscription, or disconnect the existing link first.")
 	ErrCodeNotFound      = errx.NewWithIdentifier(errx.NotFound, "pool_link_code_not_found", "That code is unknown or has expired. Start the connection again from your instance.")
 	ErrCodeNotPending    = errx.NewWithIdentifier(errx.Conflict, "pool_link_code_used", "That code has already been used.")
 	ErrCodeDenied        = errx.NewWithIdentifier(errx.Forbidden, "pool_link_denied", "The connection was declined.")
@@ -35,7 +40,18 @@ var (
 	ErrWarmupNotEntitled = errx.NewWithIdentifier(errx.Forbidden, "pool_link_warmup_unavailable", "Warmup is not available on this workspace.")
 	ErrBadCredential     = errx.NewWithIdentifier(errx.BadRequest, "pool_link_credential", "A credential matching the provider is required.")
 	ErrBadRequest        = errx.NewWithIdentifier(errx.BadRequest, "pool_link_request", "Instance name is required.")
+	ErrCleartextMailbox  = errx.NewWithIdentifier(errx.Unprocessable, "pool_link_cleartext_mailbox", "Warmbly Cloud reaches your mail server over the internet, so it needs TLS or STARTTLS on both SMTP and IMAP. This mailbox uses security \"none\", which only works for a mail server on your instance's own machine. Switch it to TLS, or keep warming it on your instance.")
 )
+
+// cloudReachable refuses an SMTP/IMAP credential this instance's workers cannot use, before anything is stored.
+func cloudReachable(c *models.SmtpImap) *errx.Error {
+	for _, svc := range []*models.Service{c.SMTP, c.IMAP} {
+		if svc != nil && svc.Security == models.MailSecurityNone && !models.CleartextMailAllowed(models.NormalizeMailHost(svc.Host)) {
+			return ErrCleartextMailbox
+		}
+	}
+	return nil
+}
 
 // WarmupScheduler seeds the first warmup task after enrollment.
 type WarmupScheduler interface {
@@ -61,15 +77,24 @@ type Service interface {
 
 	Enroll(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkEnrollRequest) (*models.PoolLinkMailboxState, *errx.Error)
 	ListMailboxes(ctx context.Context, inst *models.PoolLinkInstance) ([]models.PoolLinkMailboxState, *errx.Error)
+	WarmupStats(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkWarmupReportRequest) ([]models.WarmupDailyStats, *errx.Error)
+	WarmupPlacementData(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkWarmupReportRequest) (*models.WarmupPlacementData, *errx.Error)
+	// ListStanding is the warmup standing of every enrolled mailbox, which the
+	// instance polls so its own send gates hold the cloud's verdict.
+	ListStanding(ctx context.Context, inst *models.PoolLinkInstance) ([]models.PoolLinkMailboxStanding, *errx.Error)
 	GetMailbox(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) (*models.PoolLinkMailboxState, *errx.Error)
 	PatchMailbox(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID, patch models.PoolLinkMailboxPatch) (*models.PoolLinkMailboxState, *errx.Error)
 	Unenroll(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) *errx.Error
 
 	// Cloud-managed mailboxes for linked instances (oauth.go).
 	StartOAuth(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkOAuthStartRequest) (*models.PoolLinkOAuthStartResponse, *errx.Error)
-	// CompleteOAuthCallback finishes a brokered consent; returns "" when the state is not brokered.
-	CompleteOAuthCallback(ctx context.Context, provider, code, state, providerErr string) string
+	// DescribeOAuthConsent and ContinueOAuth back the cloud page shown before the provider opens.
+	DescribeOAuthConsent(ctx context.Context, state string) (*models.PoolLinkOAuthConsent, *errx.Error)
+	ContinueOAuth(ctx context.Context, state, binding string) (string, *errx.Error)
+	// CompleteOAuthCallback finishes a brokered consent and returns where to send the browser.
+	CompleteOAuthCallback(ctx context.Context, provider, code, state, providerErr, binding string) (string, *errx.Error)
 	FinishOAuth(ctx context.Context, inst *models.PoolLinkInstance, session string) (*models.PoolLinkMailboxState, *errx.Error)
+	FinishManagedOAuth(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkOAuthFinishRequest) (*models.PoolLinkMailboxState, *errx.Error)
 	AccessToken(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) (*models.PoolLinkAccessToken, *errx.Error)
 	ListWorkspaceMailboxes(ctx context.Context, inst *models.PoolLinkInstance) ([]models.PoolLinkWorkspaceMailbox, *errx.Error)
 	Adopt(ctx context.Context, inst *models.PoolLinkInstance, req models.PoolLinkAdoptRequest) (*models.PoolLinkMailboxState, *errx.Error)
@@ -116,18 +141,11 @@ func (s *service) WireScheduler(w WarmupScheduler) { s.scheduler = w }
 const userCodeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 func randomUserCode() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
+	s, err := crypt.RandomString(userCodeAlphabet, 8)
+	if err != nil {
 		return "", err
 	}
-	out := make([]byte, 0, 9)
-	for i, v := range b {
-		if i == 4 {
-			out = append(out, '-')
-		}
-		out = append(out, userCodeAlphabet[int(v)%len(userCodeAlphabet)])
-	}
-	return string(out), nil
+	return s[:4] + "-" + s[4:], nil
 }
 
 func randomToken(prefix string) (string, error) {
@@ -155,18 +173,19 @@ func NormalizeUserCode(raw string) string {
 }
 
 func (s *service) StartCode(ctx context.Context, req models.PoolLinkStartRequest) (*models.PoolLinkStartResponse, *errx.Error) {
-	req.InstanceName = strings.TrimSpace(req.InstanceName)
-	if req.InstanceName == "" {
+	if strings.TrimSpace(req.InstanceName) == "" || req.RemoteOrganizationID == uuid.Nil {
+		if req.RemoteOrganizationID == uuid.Nil {
+			return nil, ErrLegacyLink
+		}
 		return nil, ErrBadRequest
 	}
-	if len(req.InstanceName) > 80 {
-		req.InstanceName = req.InstanceName[:80]
-	}
+	// Shown to the approving workspace, so it follows the workspace naming rules.
+	req.InstanceName = displayname.CleanOr(req.InstanceName, displayname.Workspace, "Self-hosted instance")
 	if u, err := url.Parse(strings.TrimSpace(req.InstanceURL)); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		req.InstanceURL = ""
 	}
-	if len(req.InstanceVersion) > 40 {
-		req.InstanceVersion = req.InstanceVersion[:40]
+	if r := []rune(req.InstanceVersion); len(r) > 40 {
+		req.InstanceVersion = string(r[:40])
 	}
 
 	deviceCode, err := randomToken("")
@@ -191,6 +210,7 @@ func (s *service) StartCode(ctx context.Context, req models.PoolLinkStartRequest
 		return nil, errx.InternalError()
 	}
 	return &models.PoolLinkStartResponse{
+		WorkspaceScoped: true,
 		DeviceCode:      deviceCode,
 		UserCode:        code.UserCode,
 		VerificationURL: config.AppBaseURL() + "/connect?code=" + url.QueryEscape(code.UserCode),
@@ -255,18 +275,26 @@ func (s *service) ApproveCode(ctx context.Context, userCode string, orgID, userI
 		return nil, errx.InternalError()
 	}
 	inst := &models.PoolLinkInstance{
-		ID:             uuid.New(),
-		OrganizationID: orgID,
-		Name:           code.InstanceName,
-		URL:            code.InstanceURL,
-		Version:        code.InstanceVersion,
-		CreatedBy:      &userID,
+		ID:                   uuid.New(),
+		RemoteOrganizationID: code.RemoteOrganizationID,
+		OrganizationID:       orgID,
+		Name:                 code.InstanceName,
+		URL:                  code.InstanceURL,
+		Version:              code.InstanceVersion,
+		CreatedBy:            &userID,
+	}
+	if code.RemoteOrganizationID == nil || *code.RemoteOrganizationID == uuid.Nil {
+		return nil, ErrLegacyLink
 	}
 	if err := s.repo.CreateInstance(ctx, inst, hashToken(token)); err != nil {
+		if errors.Is(err, repository.ErrCloudWorkspaceLinked) {
+			return nil, ErrWorkspaceLinked
+		}
 		return nil, errx.InternalError()
 	}
 	ok, err := s.repo.ApproveCode(ctx, code.UserCode, orgID, userID, inst.ID, token)
 	if err != nil {
+		_ = s.repo.RevokeInstance(ctx, inst.ID)
 		return nil, errx.InternalError()
 	}
 	if !ok {
@@ -310,12 +338,17 @@ func (s *service) Plan(ctx context.Context, orgID uuid.UUID) (models.PoolLinkPla
 	if xerr != nil {
 		return models.PoolLinkPlan{}, xerr
 	}
-	plan := models.PoolLinkPlan{Tier: "free", Enrolled: enrolled, PriceUSD: config.PoolLinkPlanPriceUSD, WarmupEntitled: true}
+	warming, xerr := s.emails.CountWarmingForOrganization(ctx, orgID)
+	if xerr != nil {
+		return models.PoolLinkPlan{}, xerr
+	}
+	plan := models.PoolLinkPlan{Tier: "free", Enrolled: enrolled, Warming: warming, PriceUSD: config.PoolLinkPlanPriceUSD, WarmupEntitled: true}
 	if config.BillingProvider() == "none" {
 		plan.Tier = "paid"
 		return plan, nil
 	}
-	paid, xerr := s.gate.IsPaidOrganization(ctx, orgID)
+	plan.ManageURL = config.AppBaseURL() + "/app/settings/billing"
+	paid, xerr := s.gate.HasPremiumWarmup(ctx, orgID)
 	if xerr != nil {
 		return plan, xerr
 	}
@@ -348,9 +381,10 @@ func (s *service) InstanceInfo(ctx context.Context, inst *models.PoolLinkInstanc
 	}
 	inst.MailboxCount = len(mailboxes)
 	return &models.PoolLinkInstanceInfo{
-		Instance:     *inst,
-		Organization: models.PoolLinkOrgInfo{ID: org.ID, Name: org.Name},
-		Plan:         plan,
+		ManagedConsentProtocol: models.ManagedConsentProtocol,
+		Instance:               *inst,
+		Organization:           models.PoolLinkOrgInfo{ID: org.ID, Name: org.Name},
+		Plan:                   plan,
 	}, nil
 }
 
@@ -363,12 +397,23 @@ func (s *service) ListInstances(ctx context.Context, orgID uuid.UUID) ([]models.
 }
 
 func (s *service) RevokeInstance(ctx context.Context, orgID, instanceID uuid.UUID) *errx.Error {
+	if _, ok := s.repo.(repository.PoolLinkManagedRepository); ok && !managedOperationLocked(ctx) {
+		return s.withManagedOperationLock(ctx, instanceID, func(ctx context.Context) *errx.Error { return s.RevokeInstance(ctx, orgID, instanceID) })
+	}
 	inst, err := s.repo.GetInstance(ctx, instanceID)
 	if err != nil {
 		return errx.InternalError()
 	}
 	if inst == nil || inst.OrganizationID != orgID {
 		return ErrInstanceNotFound
+	}
+	if r, ok := s.repo.(repository.PoolLinkManagedRepository); ok {
+		if err := r.RevokeManagedOperations(ctx, inst.ID, nil); err != nil {
+			return errx.InternalError()
+		}
+	}
+	if err := s.repo.RevokeInstance(ctx, inst.ID); err != nil {
+		return errx.InternalError()
 	}
 	mailboxes, err := s.repo.ListMailboxes(ctx, inst.ID)
 	if err != nil {
@@ -378,9 +423,6 @@ func (s *service) RevokeInstance(ctx context.Context, orgID, instanceID uuid.UUI
 		if xerr := s.Unenroll(ctx, inst, m.RemoteID); xerr != nil {
 			log.Warn().Str("account_id", m.EmailAccountID.String()).Msg("pool link: mailbox removal failed during revoke; continuing")
 		}
-	}
-	if err := s.repo.RevokeInstance(ctx, inst.ID); err != nil {
-		return errx.InternalError()
 	}
 	return nil
 }
@@ -448,6 +490,9 @@ func (s *service) Enroll(ctx context.Context, inst *models.PoolLinkInstance, req
 		if req.SMTPIMAP == nil || req.SMTPIMAP.SMTP == nil || req.SMTPIMAP.IMAP == nil {
 			return nil, ErrBadCredential
 		}
+		if xerr := cloudReachable(req.SMTPIMAP); xerr != nil {
+			return nil, xerr
+		}
 		acc, xerr = s.emails.NewSMTPIMAPAccount(ctx, userID, models.NewSMTPIMAPAccount{
 			OrganizationID: &orgID,
 			Name:           name,
@@ -463,13 +508,13 @@ func (s *service) Enroll(ctx context.Context, inst *models.PoolLinkInstance, req
 	}
 
 	if err := s.repo.EnrollMailbox(ctx, &models.PoolLinkMailbox{InstanceID: inst.ID, RemoteID: req.RemoteID, EmailAccountID: acc.ID}); err != nil {
-		_ = s.emailSvc.Delete(ctx, userID, acc.ID.String())
+		_ = s.emailSvc.Delete(ctx, orgID.String(), acc.ID.String())
 		return nil, errx.InternalError()
 	}
 
 	s.applyWarmupSettings(ctx, orgID, userID, acc.ID, req.Warmup)
-	if _, xerr := s.emailSvc.SetWarmupLifecycle(ctx, userID, acc.ID.String(), "start"); xerr != nil {
-		log.Warn().Str("account_id", acc.ID.String()).Msg("pool link: warmup start failed after enrollment")
+	if _, xerr := s.emailSvc.SetWarmupLifecycle(ctx, orgID.String(), acc.ID.String(), "start"); xerr != nil {
+		log.Warn().Str("account_id", acc.ID.String()).Str("code", xerr.Identifier).Str("error", xerr.Message).Msg("pool link: warmup start failed after enrollment")
 	}
 	if err := s.emailSvc.LoadAccountOntoWorker(ctx, acc.ID); err != nil {
 		log.Warn().Err(err).Str("account_id", acc.ID.String()).Msg("pool link: worker load failed; reconciler will retry")
@@ -495,11 +540,12 @@ func (s *service) applyWarmupSettings(ctx context.Context, orgID uuid.UUID, user
 	if w.ReplyRate > 0 {
 		upd.WarmupReplyRate, set = &w.ReplyRate, true
 	}
-	if w.StartTime != "" {
-		upd.WarmupStartTime, set = &w.StartTime, true
+	// Instances send the column as read ("08:00:00.000000"); the write accepts "HH:MM" only.
+	if start := models.ClockHHMM(w.StartTime); start != "" {
+		upd.WarmupStartTime, set = &start, true
 	}
-	if w.EndTime != "" {
-		upd.WarmupEndTime, set = &w.EndTime, true
+	if end := models.ClockHHMM(w.EndTime); end != "" {
+		upd.WarmupEndTime, set = &end, true
 	}
 	if w.Days > 0 {
 		upd.WarmupDays, set = &w.Days, true
@@ -511,7 +557,7 @@ func (s *service) applyWarmupSettings(ctx context.Context, orgID uuid.UUID, user
 		return
 	}
 	if _, xerr := s.emailSvc.Update(ctx, orgID.String(), userID, accountID.String(), upd); xerr != nil {
-		log.Warn().Str("account_id", accountID.String()).Msg("pool link: warmup settings update failed")
+		log.Warn().Str("account_id", accountID.String()).Str("code", xerr.Identifier).Str("error", xerr.Message).Msg("pool link: warmup settings update failed")
 	}
 }
 
@@ -527,6 +573,14 @@ func (s *service) ListMailboxes(ctx context.Context, inst *models.PoolLinkInstan
 			continue
 		}
 		out = append(out, *state)
+	}
+	return out, nil
+}
+
+func (s *service) ListStanding(ctx context.Context, inst *models.PoolLinkInstance) ([]models.PoolLinkMailboxStanding, *errx.Error) {
+	out, err := s.repo.ListStanding(ctx, inst.ID)
+	if err != nil {
+		return nil, errx.InternalError()
 	}
 	return out, nil
 }
@@ -548,6 +602,7 @@ func (s *service) state(ctx context.Context, inst *models.PoolLinkInstance, m *m
 		return nil, xerr
 	}
 	st := &models.PoolLinkMailboxState{
+		Participation:  &models.DiagnosticParticipation{Mode: models.TestParticipationLegacy, Send: acc.TestSendingAllowed(), Receive: acc.TestReceivingAllowed(), SharedDailyLimit: acc.SharedDailyLimit, RollingRecipientLimit: acc.RollingRecipientLimit},
 		RemoteID:       m.RemoteID,
 		EmailAccountID: acc.ID,
 		Email:          acc.Email,
@@ -559,11 +614,15 @@ func (s *service) state(ctx context.Context, inst *models.PoolLinkInstance, m *m
 		AuthState:      acc.AuthState,
 		Settings: models.PoolLinkWarmupSettings{
 			Base: acc.WarmupBase, Max: acc.WarmupMax, Increase: acc.WarmupIncrease, ReplyRate: acc.WarmupReplyRate,
-			StartTime: acc.WarmupStartTime, EndTime: acc.WarmupEndTime, Days: acc.WarmupDays, Timezone: acc.Timezone,
+			StartTime: acc.WarmupStartTime, EndTime: acc.WarmupEndTime, Days: acc.WarmupDays, Timezone: acc.ClockTimezone(),
 		},
 	}
+	if acc.TestMode != nil {
+		st.Participation.Mode = *acc.TestMode
+	}
 	if s.analytics != nil {
-		status, xerr := s.analytics.GetAccountStatus(ctx, inst.OrganizationID, acc.ID)
+		// Detail carries the partner cap, so a target no partner can meet is never shown as one.
+		status, xerr := s.analytics.GetAccountStatusDetail(ctx, inst.OrganizationID, acc.ID)
 		if xerr == nil && status != nil {
 			st.Warmup = status.WarmupStatus
 			st.Health = status.WarmupHealth
@@ -591,6 +650,29 @@ func (s *service) state(ctx context.Context, inst *models.PoolLinkInstance, m *m
 }
 
 func (s *service) PatchMailbox(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID, patch models.PoolLinkMailboxPatch) (*models.PoolLinkMailboxState, *errx.Error) {
+	if patch.Participation != nil && !patch.Participation.Valid() {
+		return nil, errx.ErrInvalid
+	}
+	if r, ok := s.repo.(repository.PoolLinkManagedRepository); ok {
+		if !managedOperationLocked(ctx) {
+			var out *models.PoolLinkMailboxState
+			xerr := s.withManagedOperationLock(ctx, inst.ID, func(ctx context.Context) *errx.Error {
+				var xerr *errx.Error
+				out, xerr = s.PatchMailbox(ctx, inst, remoteID, patch)
+				return xerr
+			})
+			return out, xerr
+		}
+		op, xerr := s.managedAuthority(ctx, inst, remoteID)
+		if xerr != nil {
+			return nil, xerr
+		}
+		if op != nil && patch.Lifecycle != "" {
+			if err := r.CompleteManagedActivation(ctx, inst.ID, remoteID); err != nil {
+				return nil, errx.InternalError()
+			}
+		}
+	}
 	m, err := s.repo.GetMailboxByRemote(ctx, inst.ID, remoteID)
 	if err != nil {
 		return nil, errx.InternalError()
@@ -610,6 +692,9 @@ func (s *service) PatchMailbox(ctx context.Context, inst *models.PoolLinkInstanc
 		reload = true
 	}
 	if patch.SMTPIMAP != nil {
+		if xerr := cloudReachable(patch.SMTPIMAP); xerr != nil {
+			return nil, xerr
+		}
 		if err := s.emails.ReplaceSMTPIMAPCredentials(ctx, m.EmailAccountID, patch.SMTPIMAP); err != nil {
 			return nil, errx.InternalError()
 		}
@@ -618,9 +703,21 @@ func (s *service) PatchMailbox(ctx context.Context, inst *models.PoolLinkInstanc
 	if patch.Warmup != nil {
 		s.applyWarmupSettings(ctx, inst.OrganizationID, userID, m.EmailAccountID, *patch.Warmup)
 	}
+	if p := patch.Participation; p != nil {
+		upd := &models.UpdateEmail{TestMode: &p.Mode, TestSendEnabled: &p.Send, TestReceiveEnabled: &p.Receive, SharedDailyLimit: p.SharedDailyLimit, RollingRecipientLimit: p.RollingRecipientLimit}
+		if p.Send {
+			upd.Warmup = &p.Send
+		}
+		if _, xerr := s.emailSvc.Update(ctx, inst.OrganizationID.String(), userID, m.EmailAccountID.String(), upd); xerr != nil {
+			return nil, xerr
+		}
+		if p.Send && s.scheduler != nil {
+			_ = s.scheduler.EnsureWarmupScheduled(ctx, m.EmailAccountID)
+		}
+	}
 	switch patch.Lifecycle {
 	case "pause", "resume":
-		if _, xerr := s.emailSvc.SetWarmupLifecycle(ctx, userID, m.EmailAccountID.String(), patch.Lifecycle); xerr != nil {
+		if _, xerr := s.emailSvc.SetWarmupLifecycle(ctx, inst.OrganizationID.String(), m.EmailAccountID.String(), patch.Lifecycle); xerr != nil {
 			return nil, xerr
 		}
 		if patch.Lifecycle == "resume" && s.scheduler != nil {
@@ -636,6 +733,14 @@ func (s *service) PatchMailbox(ctx context.Context, inst *models.PoolLinkInstanc
 }
 
 func (s *service) Unenroll(ctx context.Context, inst *models.PoolLinkInstance, remoteID uuid.UUID) *errx.Error {
+	if _, ok := s.repo.(repository.PoolLinkManagedRepository); ok && !managedOperationLocked(ctx) {
+		return s.withManagedOperationLock(ctx, inst.ID, func(ctx context.Context) *errx.Error { return s.Unenroll(ctx, inst, remoteID) })
+	}
+	if r, ok := s.repo.(repository.PoolLinkManagedRepository); ok {
+		if err := r.RevokeManagedOperations(ctx, inst.ID, &remoteID); err != nil {
+			return errx.InternalError()
+		}
+	}
 	m, err := s.repo.GetMailboxByRemote(ctx, inst.ID, remoteID)
 	if err != nil {
 		return errx.InternalError()
@@ -645,11 +750,7 @@ func (s *service) Unenroll(ctx context.Context, inst *models.PoolLinkInstance, r
 	}
 	// A managed mailbox belongs to the workspace; only the link goes.
 	if !m.Managed {
-		userID, xerr := s.ownerUserID(ctx, inst)
-		if xerr != nil {
-			return xerr
-		}
-		if xerr := s.emailSvc.Delete(ctx, userID, m.EmailAccountID.String()); xerr != nil && xerr != errx.ErrNotFound {
+		if xerr := s.emailSvc.Delete(ctx, inst.OrganizationID.String(), m.EmailAccountID.String()); xerr != nil && xerr != errx.ErrNotFound {
 			return xerr
 		}
 	}

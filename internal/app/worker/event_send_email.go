@@ -14,30 +14,82 @@ import (
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/emsg"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
+// errMailboxNotLoaded is what an owner reads when the worker never connected the mailbox.
+const errMailboxNotLoaded = models.MailboxNotLoadedPrefix + ", so nothing was sent. Active mailboxes are reloaded automatically."
+
 func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.SendEmail) error {
+	pending, hasPending := w.pendingSendResults.Load(sendEmail.TaskID)
+	workerID, workerIDErr := uuid.Parse(w.ID)
+	var dispatch repository.WorkerWarmupDispatch
+	var requiresNonce bool
+	{
+		if d, ok := w.SyncContextRepository.(repository.WorkerWarmupDispatch); ok {
+			if workerIDErr != nil || workerID == uuid.Nil {
+				return errors.New("invalid warmup worker identity")
+			}
+			dispatch = d
+			state, err := d.WarmupDispatch(ctx, sendEmail.TaskID, sendEmail.EmailID, workerID, uuid.Nil, false, nil)
+			if err != nil {
+				return err
+			}
+			if state == nil {
+				return errors.New("warmup dispatch authority unavailable")
+			}
+			requiresNonce = state.State == "authorized"
+			if requiresNonce && state.Recipients != nil {
+				recipients := append(append(append([]string{}, sendEmail.To...), sendEmail.Cc...), sendEmail.Bcc...)
+				if state.OrganizationID == nil || *state.OrganizationID != sendEmail.OrgID || !repository.MatchOutboundRecipients(state.Recipients, recipients) {
+					return errors.New("send envelope does not match durable authorization")
+				}
+			}
+			if state.State == "denied" {
+				return nil
+			}
+			if hasPending {
+				return w.replayPendingSend(ctx, sendEmail, workerID, pending.(pendingSendResult))
+			}
+			if state.State == "started" {
+				return nil
+			}
+			if state.State == "finished" {
+				return w.replayWarmupResult(state.Result)
+			}
+			if !requiresNonce && state.State != "legacy" {
+				return errors.New("invalid warmup dispatch state")
+			}
+		}
+	}
+	if hasPending {
+		return w.replayPendingSend(ctx, sendEmail, workerID, pending.(pendingSendResult))
+	}
 	log.Info().
 		Str("task_id", sendEmail.TaskID.String()).
 		Str("email_id", sendEmail.EmailID.String()).
-		Strs("to", sendEmail.To).
 		Bool("is_warmup", sendEmail.IsWarmup).
 		Msg("Processing send email event")
 
 	// Get the email account from MailManager
-	w.mailManager.RLock()
-	mail, exists := w.mailManager.Emails[sendEmail.EmailID]
-	w.mailManager.RUnlock()
+	mail, exists := w.loadedMailbox(ctx, sendEmail.EmailID)
 
 	if !exists {
+		if w.OnMailboxMissing != nil {
+			w.OnMailboxMissing()
+		}
 		// The mailbox is not loaded here: it is still being added (its
 		// ADD_EMAIL is queued behind this send), or this worker restarted and
 		// the reconciler has not re-shipped it yet. Leave the send for
 		// redelivery a few times so a queued ADD_EMAIL gets processed first,
 		// then report the failure so the control plane retries the step.
-		err := fmt.Errorf("email account %s not found in worker", sendEmail.EmailID.String())
-		return w.failSend(ctx, sendEmail, err.Error(), true)
+		return w.failSend(ctx, sendEmail, errMailboxNotLoaded, true)
 	}
+
+	if sendEmail.OrgID != uuid.Nil && (mail.OrgID == nil || *mail.OrgID != sendEmail.OrgID) {
+		return errors.New("send organization does not own loaded mailbox")
+	}
+	transportGeneration := mail.TransportGeneration
 
 	// Decrypt subject
 	subject := sendEmail.Subject
@@ -52,7 +104,7 @@ func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.Se
 	}
 
 	// Fetch email body from S3 (attachment refs ride inside the emsg blob).
-	bodyPlain, bodyHTML, attachmentRefs, fromName, err := w.fetchEmailBody(ctx, sendEmail.OrgID, sendEmail.BodyS3Key)
+	body, err := w.fetchEmailBody(ctx, sendEmail.OrgID, sendEmail.BodyS3Key)
 	if err != nil {
 		log.Error().Err(err).Str("s3_key", sendEmail.BodyS3Key).Msg("Failed to fetch email body from S3")
 		return w.failSend(ctx, sendEmail, fmt.Sprintf("failed to fetch email body: %v", err), true)
@@ -60,13 +112,35 @@ func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.Se
 
 	// Fetch each attachment's bytes from object storage by key. A fetch failure
 	// fails the send rather than silently dropping a file the user expects.
-	attachments, err := w.fetchAttachments(ctx, attachmentRefs)
+	attachments, err := w.fetchAttachments(ctx, body.Attachments)
 	if err != nil {
 		log.Error().Err(err).Str("task_id", sendEmail.TaskID.String()).Msg("Failed to fetch attachment bytes from S3")
 		return w.failSend(ctx, sendEmail, fmt.Sprintf("failed to fetch attachment: %v", err), true)
 	}
 
 	// Use unified Send method
+	if requiresNonce && body.DispatchNonce == "" {
+		return errors.New("warmup dispatch nonce missing")
+	}
+	if body.DispatchNonce != "" {
+		if dispatch == nil {
+			return errors.New("warmup dispatch authority unavailable")
+		}
+		nonce, err := uuid.Parse(body.DispatchNonce)
+		if err != nil {
+			return err
+		}
+		state, err := dispatch.WarmupDispatch(ctx, sendEmail.TaskID, sendEmail.EmailID, workerID, nonce, true, nil)
+		if err != nil {
+			return err
+		}
+		if state.State == "finished" {
+			return w.replayWarmupResult(state.Result)
+		}
+		if state.State != "execute" {
+			return nil
+		}
+	}
 	w.recordSendAttempt()
 	sendStart := time.Now()
 	result := mail.Send(ctx, &wmail.SendRequest{
@@ -76,18 +150,35 @@ func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.Se
 		Bcc:            sendEmail.Bcc,
 		MessageID:      sendEmail.MessageID,
 		Subject:        subject,
-		BodyPlain:      bodyPlain,
-		BodyHTML:       bodyHTML,
+		BodyPlain:      body.Plain,
+		BodyHTML:       body.HTML,
 		InReplyTo:      sendEmail.InReplyTo,
+		References:     body.References,
 		Parent:         sendEmail.Parent,
 		IsWarmup:       sendEmail.IsWarmup,
 		WarmupToken:    sendEmail.WarmupToken,
 		UnsubscribeURL: sendEmail.UnsubscribeURL,
 		Attachments:    attachments,
-		FromName:       fromName,
+		FromName:       body.FromName,
+		FromEmail:      body.FromEmail,
+		ReplyTo:        body.ReplyTo,
 	})
 	w.recordSendLatency(time.Since(sendStart))
 	w.recordSendOutcome(result)
+	stored := models.SendEmailResult{TransportGeneration: transportGeneration, TaskID: sendEmail.TaskID, Success: result.Success, MessageID: result.MessageID, ProviderMsgID: result.ProviderMsgID, ThreadID: result.ThreadID, SentAt: time.Now().UTC()}
+	if result.Error != nil {
+		stored.Error = wmail.MailErrorToSendError(result.Error)
+		stored.LegacyErrorMsg = result.Error.Message
+	}
+	p := pendingSendResult{result: stored, mailboxID: sendEmail.EmailID, orgID: sendEmail.OrgID, workerID: workerID,
+		nonce: body.DispatchNonce, recipients: append(append(append([]string{}, sendEmail.To...), sendEmail.Cc...), sendEmail.Bcc...)}
+	if body.DispatchNonce != "" {
+		p.dispatch = dispatch
+	}
+	w.pendingSendResults.Store(sendEmail.TaskID, p)
+	if err := w.reportSendResult(ctx, p); err != nil {
+		return err
+	}
 
 	if result.Success {
 		log.Info().
@@ -99,18 +190,24 @@ func (w *WorkerService) HandleSendEmail(ctx context.Context, sendEmail models.Se
 
 		w.deleteTransportEmailBody(ctx, sendEmail.TaskID, sendEmail.BodyS3Key)
 
-		w.sendEmailSuccess(sendEmail.TaskID, result.MessageID, result.ProviderMsgID, result.ThreadID)
 	} else {
 		log.Error().
 			Str("task_id", sendEmail.TaskID.String()).
-			Str("error_code", string(result.Error.Code)).
-			Str("error_message", result.Error.Message).
 			Msg("Email send failed")
 
-		w.sendEmailError(sendEmail.TaskID, sendEmail.EmailID, mail, result.Error)
+		if result.Error != nil {
+			w.sendMailboxError(sendEmail.TaskID, sendEmail.EmailID, mail, result.Error)
+		}
 	}
 
 	return nil
+}
+
+func (w *WorkerService) replayWarmupResult(result *models.SendEmailResult) error {
+	if result == nil {
+		return errors.New("warmup result unavailable")
+	}
+	return w.reportSendResult(context.Background(), pendingSendResult{result: *result})
 }
 
 func (w *WorkerService) deleteTransportEmailBody(ctx context.Context, taskID uuid.UUID, s3Key string) {
@@ -127,31 +224,44 @@ func (w *WorkerService) deleteTransportEmailBody(ctx context.Context, taskID uui
 	}
 }
 
-// fetchEmailBody fetches and decodes the email body from S3, returning the
-// decrypted plain/HTML bodies, the attachment refs and the sender display name
-// carried inside the blob (empty when the publisher predates it).
-func (w *WorkerService) fetchEmailBody(ctx context.Context, orgID uuid.UUID, s3Key string) (string, string, []emsg.Attachment, string, error) {
+// sendBody is what one send needs out of the transport blob: the decrypted
+// bodies, the attachment refs, and the sender identity resolved at publish
+// time. The identity fields are empty when the publisher predates them, which
+// means "use the mailbox's own".
+type sendBody struct {
+	DispatchNonce string
+	References    string
+	Plain         string
+	HTML          string
+	Attachments   []emsg.Attachment
+	FromName      string
+	FromEmail     string
+	ReplyTo       string
+}
+
+// fetchEmailBody fetches and decodes the email body from S3.
+func (w *WorkerService) fetchEmailBody(ctx context.Context, orgID uuid.UUID, s3Key string) (*sendBody, error) {
 	if w.Storage == nil {
-		return "", "", nil, "", fmt.Errorf("storage client not configured")
+		return nil, fmt.Errorf("storage client not configured")
 	}
 
 	// Get object from storage
 	body, err := w.Storage.Get(ctx, s3Key)
 	if err != nil {
-		return "", "", nil, "", fmt.Errorf("failed to get S3 object: %w", err)
+		return nil, fmt.Errorf("failed to get S3 object: %w", err)
 	}
 	defer body.Close()
 
 	// Read the body
 	data, err := io.ReadAll(body)
 	if err != nil {
-		return "", "", nil, "", fmt.Errorf("failed to read S3 object: %w", err)
+		return nil, fmt.Errorf("failed to read S3 object: %w", err)
 	}
 
 	// Decode using emsg
 	blob, err := emsg.DecodeBinary(bytes.NewReader(data))
 	if err != nil {
-		return "", "", nil, "", fmt.Errorf("failed to decode emsg blob: %w", err)
+		return nil, fmt.Errorf("failed to decode emsg blob: %w", err)
 	}
 
 	bodyPlain := string(blob.PlainText)
@@ -172,7 +282,16 @@ func (w *WorkerService) fetchEmailBody(ctx context.Context, orgID uuid.UUID, s3K
 		}
 	}
 
-	return bodyPlain, bodyHTML, blob.Attachments, blob.FromName, nil
+	return &sendBody{
+		Plain:         bodyPlain,
+		HTML:          bodyHTML,
+		Attachments:   blob.Attachments,
+		FromName:      blob.FromName,
+		FromEmail:     blob.FromEmail,
+		ReplyTo:       blob.ReplyTo,
+		References:    blob.References,
+		DispatchNonce: blob.DispatchNonce,
+	}, nil
 }
 
 // fetchAttachments downloads each attachment's bytes from object storage by
@@ -229,10 +348,7 @@ func (w *WorkerService) sendEmailSuccess(taskID uuid.UUID, messageID, providerMs
 	}
 }
 
-// sendNotLoadedRedeliveries is how many bus deliveries a send may burn waiting
-// for a transient condition (mailbox not loaded yet, object storage blip)
-// before the worker reports it failed. Each redelivery is a second apart, and
-// the bus stops redelivering at ten, so this stays well inside that.
+// Report unattempted sends before either broker's retry budget expires.
 const sendNotLoadedRedeliveries = 5
 
 // failSend reports a send the worker could not attempt. A retryable condition
@@ -245,32 +361,13 @@ func (w *WorkerService) failSend(ctx context.Context, sendEmail models.SendEmail
 	if d := deliveryOf(ctx); retryable && d.redelivers && d.attempt < sendNotLoadedRedeliveries {
 		return errors.New(reason)
 	}
-	w.sendEmailFailure(sendEmail.TaskID, sendEmail.EmailID, nil, reason)
-	return nil
+	return w.sendEmailFailure(sendEmail.TaskID, sendEmail.EmailID, nil, reason)
 }
 
-// sendEmailError reports a failed send attempt. The per-task result is always
-// an EMAIL_FAILED so the control plane has one result channel to walk the
-// send back on; account-level conditions (auth, disabled, rate limit, server
-// error) additionally raise their own typed event carrying the full context.
-func (w *WorkerService) sendEmailError(taskID uuid.UUID, emailID uuid.UUID, mail *wmail.WMail, mailErr *errx.MailError) {
+// Account-level refusals additionally raise their typed mailbox event.
+func (w *WorkerService) sendMailboxError(taskID uuid.UUID, emailID uuid.UUID, mail *wmail.WMail, mailErr *errx.MailError) {
 	// Determine the appropriate event type based on error
 	eventType := wmail.DetermineErrorEventType(mailErr)
-
-	// Convert to transport format
-	sendError := wmail.MailErrorToSendError(mailErr)
-
-	result := models.SendEmailResult{
-		TaskID:         taskID,
-		Success:        false,
-		Error:          sendError,
-		LegacyErrorMsg: mailErr.Message,
-		SentAt:         time.Now(),
-	}
-
-	if err := w.Produce(models.JobEventTypeEmailFailed, taskID.String(), result); err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("Failed to produce email failed event")
-	}
 
 	// Account-level conditions also raise their typed event with full context
 	if eventType == models.JobEventTypeEmailAuthError ||
@@ -280,18 +377,20 @@ func (w *WorkerService) sendEmailError(taskID uuid.UUID, emailID uuid.UUID, mail
 
 		userInfo := mailErr.GetUserErrorInfo()
 		errorEvent := models.EmailErrorEvent{
-			TaskID:         taskID.String(),
-			EmailAccountID: emailID.String(),
-			UserID:         mail.UserID.String(),
-			ErrorCode:      string(mailErr.Code),
-			ErrorType:      string(mailErr.Type),
-			ResolveMethod:  string(mailErr.ResolveMethod),
-			Message:        mailErr.Message,
-			UserVisible:    mailErr.IsUserVisible(),
-			UserTitle:      userInfo.Title,
-			UserMessage:    userInfo.Message,
-			ActionRequired: userInfo.ActionRequired,
-			Timestamp:      time.Now().Unix(),
+			TransportGeneration: mail.TransportGeneration,
+			Operation:           models.MailTransportSend,
+			TaskID:              taskID.String(),
+			EmailAccountID:      emailID.String(),
+			UserID:              mail.UserID.String(),
+			ErrorCode:           string(mailErr.Code),
+			ErrorType:           string(mailErr.Type),
+			ResolveMethod:       string(mailErr.ResolveMethod),
+			Message:             mailErr.Message,
+			UserVisible:         mailErr.IsUserVisible(),
+			UserTitle:           userInfo.Title,
+			UserMessage:         userInfo.Message,
+			ActionRequired:      userInfo.ActionRequired,
+			Timestamp:           wmail.ErrorObservedTimestamp(mailErr),
 		}
 
 		if err := w.Produce(eventType, emailID.String(), errorEvent); err != nil {
@@ -301,15 +400,21 @@ func (w *WorkerService) sendEmailError(taskID uuid.UUID, emailID uuid.UUID, mail
 }
 
 // sendEmailFailure sends a generic failure result (for non-MailError cases)
-func (w *WorkerService) sendEmailFailure(taskID uuid.UUID, emailID uuid.UUID, mail *wmail.WMail, errorMsg string) {
+func (w *WorkerService) sendEmailFailure(taskID uuid.UUID, emailID uuid.UUID, mail *wmail.WMail, errorMsg string) error {
+	now := time.Now().UTC()
 	result := models.SendEmailResult{
 		TaskID:         taskID,
 		Success:        false,
 		LegacyErrorMsg: errorMsg,
-		SentAt:         time.Now(),
+		SentAt:         now,
+		Error: &models.EmailSendError{Code: string(errx.MailErrorCodeServerUnreachable), Message: errorMsg, Failure: &errx.SendFailure{
+			Protocol: "internal", Stage: "prepare", Disposition: errx.SendRetry, Scope: "mailbox", ObservedAt: now,
+		}},
 	}
 
 	if err := w.Produce(models.JobEventTypeEmailFailed, taskID.String(), result); err != nil {
 		log.Error().Err(err).Str("task_id", taskID.String()).Msg("Failed to produce email failure event")
+		return err
 	}
+	return nil
 }

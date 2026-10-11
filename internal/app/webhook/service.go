@@ -89,6 +89,11 @@ type Service interface {
 	// replacement; pass nil to detach.
 	WireDispatchSink(sink DispatchSink)
 
+	// WireRecordSink adds a sink that sees every event before the throttle: a
+	// connected CRM is a system of record and must not lose a send to a burst.
+	// Each call adds one; every sink sees every event.
+	WireRecordSink(sink DispatchSink)
+
 	// WireThrottle attaches a Redis-backed per-org, per-event-type dispatch
 	// throttle. resolveLimit returns the org's per-minute cap on how many events
 	// of a single type it may fan out. Over the cap, further events of that type
@@ -130,6 +135,7 @@ type service struct {
 	repo         repository.WebhookRepository
 	now          func() time.Time
 	sink         DispatchSink
+	recordSinks  []DispatchSink
 	cache        *cache.Cache
 	resolveLimit func(ctx context.Context, orgID uuid.UUID) int
 	appDomains   AppDomainResolver
@@ -141,6 +147,12 @@ func NewService(repo repository.WebhookRepository) Service {
 
 func (s *service) WireDispatchSink(sink DispatchSink) {
 	s.sink = sink
+}
+
+func (s *service) WireRecordSink(sink DispatchSink) {
+	if sink != nil {
+		s.recordSinks = append(s.recordSinks, sink)
+	}
 }
 
 func (s *service) WireThrottle(c *cache.Cache, resolveLimit func(ctx context.Context, orgID uuid.UUID) int) {
@@ -217,6 +229,13 @@ func (s *service) throttled(ctx context.Context, orgID uuid.UUID, eventType mode
 
 func (s *service) Dispatch(ctx context.Context, orgID uuid.UUID, eventType models.WebhookEventType, data any) (uuid.UUID, error) {
 	eventID := uuid.New()
+	if durableID := repository.SendResultEffectEventID(ctx); durableID != uuid.Nil {
+		eventID = durableID
+	}
+
+	for _, sink := range s.recordSinks {
+		sink(ctx, orgID, eventType, data)
+	}
 
 	// Global per-org, per-event-type fan-out throttle. Stops a per-contact
 	// event source (notably a campaign "notify" action over a large lead list)
@@ -245,7 +264,7 @@ func (s *service) Dispatch(ctx context.Context, orgID uuid.UUID, eventType model
 		EventType:      eventType,
 		OrganizationID: orgID,
 		CreatedAt:      s.now().UTC(),
-		Data:           data,
+		Data:           withoutPrivateKeys(data),
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -262,6 +281,7 @@ func (s *service) Dispatch(ctx context.Context, orgID uuid.UUID, eventType model
 		}
 		if err := s.repo.EnqueueDelivery(ctx, delivery); err != nil {
 			log.Warn().Err(err).Str("endpoint_id", endpoints[i].ID.String()).Msg("Failed to enqueue webhook delivery")
+			return eventID, err
 		}
 	}
 	return eventID, nil
@@ -319,7 +339,7 @@ func (s *service) UpdateEndpoint(ctx context.Context, orgID, endpointID uuid.UUI
 		return nil, err
 	}
 	if existing == nil {
-		return nil, fmt.Errorf("webhook endpoint not found")
+		return nil, repository.ErrWebhookEndpointNotFound
 	}
 	if err := s.enforceAppDomain(ctx, existing.OAuthApplicationID, rawURL); err != nil {
 		return nil, err
@@ -379,7 +399,7 @@ func (s *service) VerifyEndpoint(ctx context.Context, orgID, endpointID uuid.UUI
 		return err
 	}
 	if endpoint == nil {
-		return fmt.Errorf("webhook endpoint not found")
+		return repository.ErrWebhookEndpointNotFound
 	}
 	token, err := generateChallenge()
 	if err != nil {
@@ -418,7 +438,7 @@ func (s *service) Redeliver(ctx context.Context, orgID, deliveryID uuid.UUID) er
 		return err
 	}
 	if d == nil {
-		return fmt.Errorf("webhook delivery not found")
+		return repository.ErrWebhookDeliveryNotFound
 	}
 	return s.repo.RedeliverDelivery(ctx, orgID, deliveryID)
 }
@@ -471,10 +491,10 @@ func (s *service) enforceAppDomain(ctx context.Context, appID *uuid.UUID, rawURL
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid url: %w", err)
+		return invalidInput("invalid url: %v", err)
 	}
 	if !whdomain.HostAllowed(u.Hostname(), domains) {
-		return fmt.Errorf("webhook URL host %q is not in this app's allowed webhook domains", u.Hostname())
+		return invalidInput("webhook URL host %q is not in this app's allowed webhook domains", u.Hostname())
 	}
 	return nil
 }
@@ -544,26 +564,26 @@ func ValidateOutboundURL(raw string) error {
 func validateURL(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return fmt.Errorf("url is required")
+		return invalidInput("url is required")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("invalid url: %w", err)
+		return invalidInput("invalid url: %v", err)
 	}
 	allowUnsafe := strings.EqualFold(os.Getenv("WARMBLY_ALLOW_UNSAFE_WEBHOOK_URLS"), "true")
 	if u.Scheme != "https" && !(allowUnsafe && u.Scheme == "http") {
-		return fmt.Errorf("url scheme must be https")
+		return invalidInput("url scheme must be https")
 	}
 	if u.Host == "" {
-		return fmt.Errorf("url must have a host")
+		return invalidInput("url must have a host")
 	}
 	// Reject userinfo (user:pass@host) — a classic URL-parser-confusion SSRF
 	// bypass and never legitimate on a webhook endpoint.
 	if u.User != nil {
-		return fmt.Errorf("url must not contain credentials")
+		return invalidInput("url must not contain credentials")
 	}
 	if !allowUnsafe && isPrivateWebhookHost(u.Hostname()) {
-		return fmt.Errorf("url host must be publicly routable")
+		return invalidInput("url host must be publicly routable")
 	}
 	return nil
 }
@@ -583,7 +603,7 @@ func isPrivateWebhookHost(host string) bool {
 func validateEventTypes(eventTypes []string) error {
 	for _, t := range eventTypes {
 		if !models.IsValidWebhookEventType(t) {
-			return fmt.Errorf("unknown event type: %s", t)
+			return invalidInput("unknown event type: %s", t)
 		}
 	}
 	return nil
@@ -914,4 +934,29 @@ func challengeToken(payload []byte) string {
 		return ""
 	}
 	return p.Data.Challenge
+}
+
+// withoutPrivateKeys drops "_"-prefixed keys, which carry internal context
+// (message bodies, owner ids) for in-process sinks and never leave the platform.
+func withoutPrivateKeys(data any) any {
+	m, ok := data.(map[string]any)
+	if !ok {
+		return data
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if !strings.HasPrefix(k, "_") {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// InvalidInputError is a refusal the caller can correct; its message is written for them.
+type InvalidInputError struct{ msg string }
+
+func (e *InvalidInputError) Error() string { return e.msg }
+
+func invalidInput(format string, args ...any) error {
+	return &InvalidInputError{msg: fmt.Sprintf(format, args...)}
 }

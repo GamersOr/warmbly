@@ -21,10 +21,10 @@
 // run in.
 //
 // Everything the SDK can observe is on: autocapture, pageviews and pageleaves,
-// heatmaps, rage and dead clicks, web vitals, network timing, session replay
-// with console logs, surveys and exceptions. The only thing masked is what a
-// password field holds, which is never ours to see. The privacy page on the
-// marketing site describes exactly this and has to change with it.
+// heatmaps, rage and dead clicks, web vitals, network timing, session replay,
+// surveys and exceptions. Replay masks password fields, one-time codes and any
+// secret the page reveals (data-ph-mask). The privacy page on the marketing
+// site describes exactly this and has to change with it.
 import type { CaptureResult, PostHog, Properties } from "posthog-js";
 import {
     POSTHOG_ERROR_TRACKING,
@@ -74,19 +74,31 @@ export function loadPostHog(): Promise<PostHog | null> {
                 // Plain `true` would report one pageview per session.
                 capture_pageview: "history_change",
                 capture_pageleave: true,
+                // Sign-in sessions, invitation and setup tokens and pairing codes travel in the URL.
+                mask_personal_data_properties: true,
+                custom_personal_data_properties: ["token", "session", "agent_session", "code", "invite", "next"],
                 capture_dead_clicks: true,
                 capture_heatmaps: true,
                 rageclick: true,
                 capture_performance: { web_vitals: true, network_timing: true },
                 disable_session_recording: !POSTHOG_SESSION_REPLAY,
                 session_recording: {
-                    // Only what is typed into a password field is hidden. A
-                    // mailbox's app password and an API secret are both
-                    // password inputs, so that is exactly the credential set.
+                    // Password inputs cover the mailbox app password and the
+                    // API secret. They do not cover the one-time codes, which
+                    // are plain inputs so the browser will autofill them from
+                    // SMS and mail, nor a secret the page has already revealed
+                    // as text. Those carry data-ph-mask / .ph-mask: text is
+                    // masked, and an input is blocked, since text masking
+                    // never reaches an input's value.
                     maskAllInputs: false,
                     maskInputOptions: { password: true },
+                    maskTextSelector: "[data-ph-mask], .ph-mask",
+                    blockSelector: "input[data-ph-mask], textarea[data-ph-mask], [data-ph-mask] input, [data-ph-mask] textarea, [data-input-otp], input[autocomplete='one-time-code']",
                 },
-                enable_recording_console_log: true,
+                // Console output is replayed alongside the session, so anything
+                // printed is retained. Off: it is not worth one careless log of
+                // a token, and exceptions are captured separately below.
+                enable_recording_console_log: false,
                 respect_dnt: false,
                 capture_exceptions: POSTHOG_ERROR_TRACKING
                     ? {
@@ -156,11 +168,104 @@ export function notePostHogStep(message: string, properties?: Properties): void 
     client?.addExceptionStep(message, properties);
 }
 
+// Browser noise: reported by the window error handler, carrying no stack we
+// can act on and no bug behind it. "Script error." is what a cross-origin
+// script is flattened to, and the ResizeObserver notice is a benign scheduling
+// message the spec requires browsers to fire. Both drown the real issues.
+const NOISE = [
+    "Script error.",
+    "ResizeObserver loop completed with undelivered notifications.",
+    "ResizeObserver loop limit exceeded",
+];
+
+// A session ending is a lifecycle event, not a crash: normalizeError turns an
+// AuthError into a redirect and UserProvider sends the user to sign in. It
+// reached error tracking only by also escaping to the global rejection handler.
+// PasskeyCancelled is control flow by definition: the sign-in page aborts with it when it is left.
+const NOISE_TYPES = ["AuthError", "PasskeyCancelled"];
+
+// posthog-js aborts its own slow requests with this named AbortError and retries them; an app abort stays reported.
+function isSdkRequestTimeout(type: unknown, value: unknown): boolean {
+    return type === "AbortError" && typeof value === "string" && value.startsWith("PostHog request timed out");
+}
+
+// Keep the known raw refusal quiet too, without hiding unrelated InvalidStateErrors.
+function isPasskeyAlreadyRegistered(type: unknown, value: unknown): boolean {
+    if (type === "PasskeyAlreadyRegistered") return true;
+    if (type !== "DOMException" && type !== "InvalidStateError") return false;
+    return value === "The authenticator was previously registered"
+        || value === "The authenticator was previously registered: InvalidStateError"
+        || value === "InvalidStateError: The authenticator was previously registered";
+}
+
+// An exception whose message is an object's default toString, with no stack and
+// no real Error behind it, carries nothing: no name, no cause, no place. They
+// arrive from extensions and from handlers that concatenate a DOM Event into a
+// string, and they all fingerprint together.
+//
+// All three conditions are required. `synthetic` marks a value PostHog wrapped
+// because it was thrown as something other than an Error, so anything we
+// construct ourselves is excluded even when its message also stringified an
+// object; and a single frame would make it findable, so a stack of any depth is
+// kept.
+function isUninformative(entry: Record<string, unknown>): boolean {
+    const value = entry.value ?? entry.$exception_value;
+    if (typeof value !== "string" || !DEFAULT_OBJECT_STRING.test(value)) return false;
+    const mechanism = entry.mechanism as { synthetic?: unknown } | undefined;
+    if (mechanism?.synthetic !== true) return false;
+    const trace = entry.stacktrace as { frames?: unknown[] } | undefined;
+    return !Array.isArray(trace?.frames) || trace.frames.length === 0;
+}
+
+const DEFAULT_OBJECT_STRING = /\[object [A-Z][A-Za-z]*\]/;
+
+export function isNoise(properties: Properties): boolean {
+    const exceptionList = properties.$exception_list;
+    if (Array.isArray(exceptionList) && exceptionList.length > 0 && exceptionList.every((exception) => {
+        if (!exception || typeof exception !== "object") return false;
+        const entry = exception as Record<string, unknown>;
+        return isPasskeyAlreadyRegistered(entry.type ?? entry.$exception_type, entry.value ?? entry.$exception_value);
+    })) return true;
+    if (Array.isArray(exceptionList) && exceptionList.some((exception) => {
+        if (!exception || typeof exception !== "object") return false;
+        const entry = exception as Record<string, unknown>;
+        const type = entry.type ?? entry.$exception_type;
+        const value = entry.value ?? entry.$exception_value;
+        return (typeof type === "string" && NOISE_TYPES.includes(type))
+            || (typeof value === "string" && NOISE.includes(value.trim()))
+            || isSdkRequestTimeout(type, value)
+            || isUninformative(entry);
+    })) {
+        return true;
+    }
+
+    const type = properties.$exception_type;
+    if (typeof type === "string" && NOISE_TYPES.includes(type)) return true;
+    const message = properties.$exception_message;
+    if (typeof message === "string" && NOISE.includes(message.trim())) return true;
+    if (isSdkRequestTimeout(type, message)) return true;
+    const hasExceptionList = Array.isArray(exceptionList) && exceptionList.length > 0;
+    if (!hasExceptionList && isPasskeyAlreadyRegistered(type, message)) return true;
+
+    // Keep accepting flattened payloads while cached SDK chunks are still in
+    // browsers during a rolling release.
+    const types = properties.$exception_types;
+    if (Array.isArray(types) && types.some((t) => typeof t === "string" && NOISE_TYPES.includes(t))) return true;
+    const values = properties.$exception_values;
+    if (!Array.isArray(values)) return false;
+    if (Array.isArray(types) && types.some((t, i) => isSdkRequestTimeout(t, values[i]))) return true;
+    if (!hasExceptionList && Array.isArray(types) && types.length > 0 && types.length === values.length
+        && types.every((t, i) => isPasskeyAlreadyRegistered(t, values[i]))) return true;
+    return values.some((v) => typeof v === "string" && NOISE.includes(v.trim()));
+}
+
 // decorate is the last thing to touch an event before it is sent. Exceptions
 // get the account and workspace ids as flat properties on top of the person,
 // so "every error this workspace hit" is a property filter.
 function decorate(event: CaptureResult | null): CaptureResult | null {
-    if (!event?.properties || event.event !== "$exception" || !identity) return event;
+    if (!event?.properties || event.event !== "$exception") return event;
+    if (isNoise(event.properties)) return null;
+    if (!identity) return event;
     event.properties.user_id = identity.userId;
     if (identity.organizationId) event.properties.organization_id = identity.organizationId;
     return event;

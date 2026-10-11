@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -35,7 +37,7 @@ func (h *Handler) CreateContactNote(c *gin.Context) {
 
 	var data models.CreateContactNote
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -92,6 +94,11 @@ func (h *Handler) UpdateContactNote(c *gin.Context) {
 		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
 		return
 	}
+	contactID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		errx.Handle(c, errx.ErrUuid)
+		return
+	}
 	noteID, err := uuid.Parse(c.Param("noteId"))
 	if err != nil {
 		errx.Handle(c, errx.ErrUuid)
@@ -100,11 +107,11 @@ func (h *Handler) UpdateContactNote(c *gin.Context) {
 
 	var data models.UpdateContactNote
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
-	note, xerr := h.CRMService.UpdateNote(c.Request.Context(), *orgID, noteID, &data)
+	note, xerr := h.CRMService.UpdateNote(c.Request.Context(), *orgID, &contactID, noteID, &data)
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -121,13 +128,18 @@ func (h *Handler) DeleteContactNote(c *gin.Context) {
 		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
 		return
 	}
+	contactID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		errx.Handle(c, errx.ErrUuid)
+		return
+	}
 	noteID, err := uuid.Parse(c.Param("noteId"))
 	if err != nil {
 		errx.Handle(c, errx.ErrUuid)
 		return
 	}
 
-	xerr := h.CRMService.DeleteNote(c.Request.Context(), *orgID, noteID)
+	xerr := h.CRMService.DeleteNote(c.Request.Context(), *orgID, &contactID, noteID)
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -191,7 +203,7 @@ func (h *Handler) CreatePipeline(c *gin.Context) {
 
 	var data models.CreatePipeline
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -257,7 +269,7 @@ func (h *Handler) UpdatePipeline(c *gin.Context) {
 
 	var data models.UpdatePipeline
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -313,7 +325,7 @@ func (h *Handler) CreateStage(c *gin.Context) {
 
 	var data models.CreatePipelineStage
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -342,7 +354,7 @@ func (h *Handler) UpdateStage(c *gin.Context) {
 
 	var data models.UpdatePipelineStage
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -393,7 +405,7 @@ func (h *Handler) CreateDeal(c *gin.Context) {
 
 	var data models.CreateDeal
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -467,7 +479,7 @@ func (h *Handler) SearchDeals(c *gin.Context) {
 
 	var filters models.SearchDeals
 	if err := c.ShouldBindJSON(&filters); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -506,7 +518,7 @@ func (h *Handler) DealsSummary(c *gin.Context) {
 
 	var filters models.SearchDeals
 	if err := c.ShouldBindJSON(&filters); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -554,7 +566,7 @@ func (h *Handler) UpdateDeal(c *gin.Context) {
 
 	var data models.UpdateDeal
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -645,7 +657,7 @@ func (h *Handler) CreateTaskType(c *gin.Context) {
 	}
 	var data models.CreateCRMTaskType
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	t, xerr := h.CRMService.CreateTaskType(c.Request.Context(), *orgID, &data)
@@ -669,7 +681,7 @@ func (h *Handler) UpdateTaskType(c *gin.Context) {
 	}
 	var data models.UpdateCRMTaskType
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	t, xerr := h.CRMService.UpdateTaskType(c.Request.Context(), *orgID, typeID, &data)
@@ -716,7 +728,7 @@ func (h *Handler) CreateCRMTask(c *gin.Context) {
 
 	var data models.CreateCRMTask
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -795,7 +807,7 @@ func (h *Handler) SearchCRMTasks(c *gin.Context) {
 
 	var filters models.SearchTasks
 	if err := c.ShouldBindJSON(&filters); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -834,7 +846,7 @@ func (h *Handler) TasksSummary(c *gin.Context) {
 
 	var filters models.SearchTasks
 	if err := c.ShouldBindJSON(&filters); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -882,7 +894,7 @@ func (h *Handler) UpdateCRMTask(c *gin.Context) {
 
 	var data models.UpdateCRMTask
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -900,6 +912,82 @@ func (h *Handler) UpdateCRMTask(c *gin.Context) {
 	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityCRMTask, &taskID, nil, taskMeta)
 
 	c.JSON(http.StatusOK, task)
+}
+
+// BulkUpdateCRMTasks writes one status or priority onto a whole selection:
+// the ids the user ticked, or every task the current filter matches minus the
+// ones unticked afterwards. The response carries the count rather than the
+// rows, because a select-all can cover tens of thousands.
+func (h *Handler) BulkUpdateCRMTasks(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	var data models.BulkUpdateTasks
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	// The completion activity carries the actor, and contact_activities.user_id
+	// is a nullable FK: an unresolvable actor travels as NULL rather than as a
+	// zero uuid the insert would be refused for, which would take the whole
+	// bulk write down with it.
+	var actor *uuid.UUID
+	if userID, err := middleware.GetUserUUID(c); err == nil {
+		actor = &userID
+	}
+	affected, xerr := h.CRMService.BulkUpdateCRMTasks(c.Request.Context(), *orgID, actor, &data)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityCRMTask, nil, nil, map[string]string{
+		"bulk":  "true",
+		"count": fmt.Sprintf("%d", affected),
+	})
+
+	c.JSON(http.StatusOK, models.BulkTasksResponse{Affected: affected})
+}
+
+// BulkDeleteCRMTasks deletes a whole selection. Two bodies are accepted: a
+// bare id array, and the selection object ({"all":true,"filters":{...}}) the
+// Tasks page sends for "select all matching".
+func (h *Handler) BulkDeleteCRMTasks(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	var raw json.RawMessage
+	if err := c.ShouldBindJSON(&raw); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+	var sel models.TaskSelection
+	if err := json.Unmarshal(raw, &sel.Tasks); err != nil {
+		if err := json.Unmarshal(raw, &sel); err != nil {
+			errx.Handle(c, errx.InvalidBody(err))
+			return
+		}
+	}
+
+	affected, xerr := h.CRMService.BulkDeleteCRMTasks(c.Request.Context(), *orgID, sel)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionDelete, models.AuditEntityCRMTask, nil, nil, map[string]string{
+		"bulk":  "true",
+		"count": fmt.Sprintf("%d", affected),
+	})
+
+	c.JSON(http.StatusOK, models.BulkTasksResponse{Affected: affected})
 }
 
 func (h *Handler) DeleteCRMTask(c *gin.Context) {

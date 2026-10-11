@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,6 +74,18 @@ var (
 )
 
 func main() {
+	// This seeder plants accounts with published passwords (dev@warmbly.com and
+	// a super-admin with a known API key), which is exactly what it is for. The
+	// binary ships inside the release backend image, so the one thing it must
+	// never do is run against a real deployment by accident.
+	//
+	// APP_ENV unset counts as dev, matching cmd/backend/boot.go, so `make dev`
+	// keeps working with no extra variable.
+	if env := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))); env != "" &&
+		env != "dev" && env != "development" && env != "local" {
+		log.Fatalf("Refusing to seed: APP_ENV=%s. This seeder creates accounts with published credentials and is only for local development.", env)
+	}
+
 	dsn := os.Getenv("PRIMARY_DB")
 	if dsn == "" {
 		dsn = "postgres://warmbly:warmbly@localhost:5432/warmbly_dev?sslmode=disable"
@@ -122,6 +135,8 @@ func main() {
 		}
 		result.Print(os.Stdout)
 	}
+
+	seed.ForgetCachedUsers(ctx, pool)
 
 	fmt.Println("seed complete")
 }
@@ -370,15 +385,17 @@ func upsertUser(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, first, la
 		return err
 	}
 	if exists {
-		return nil
+		// Fixture accounts skip the first-run wizard, including ones seeded before this rule.
+		_, err := pool.Exec(ctx, `UPDATE users SET onboarding_completed_at = NOW(), updated_at = NOW() WHERE email = $1 AND onboarding_completed_at IS NULL`, email)
+		return err
 	}
 	hash, err := argon2.Hash(password)
 	if err != nil {
 		return err
 	}
 	_, err = pool.Exec(ctx, `
-		INSERT INTO users (id, first_name, last_name, email, password_hash)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO users (id, first_name, last_name, email, password_hash, onboarding_completed_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
 		ON CONFLICT (id) DO NOTHING`,
 		id, first, last, email, hash)
 	return err
@@ -436,13 +453,13 @@ func upsertEmailAccount(ctx context.Context, pool *pgxpool.Pool, id, userID, org
 			email, name,
 			signature_plain, signature_html,
 			provider, status,
-			warmup_tag, warmup_pool_type
+			warmup_tag, warmup_pool_type, test_mode
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6,
 			'', '',
 			'smtp_imap', 'active',
-			$7, $8
+			$7, $8, 'legacy'
 		)
 		ON CONFLICT (id) DO NOTHING`,
 		id, userID, orgID, workerID, email, name, warmupTag, poolType)

@@ -45,10 +45,15 @@ const (
 	EventAccountError         EventType = "ACCOUNT_ERROR"
 	EventAccountSynced        EventType = "ACCOUNT_SYNCED"
 	EventAccountHealthChanged EventType = "ACCOUNT_HEALTH_CHANGED"
+	// EventWarmupPlacement: a partner saw one of the org's warmup emails land.
+	EventWarmupPlacement EventType = "WARMUP_PLACEMENT"
 	// EventAccountSyncState: a mailbox's import finished or fair use started
 	// or stopped holding it. Status carries the backfill status, Reason the
 	// throttle reason (empty when released).
 	EventAccountSyncState EventType = "ACCOUNT_SYNC_STATE"
+	// EventPlacementTest: an inbox placement test started, got a verdict for
+	// a copy, or finished.
+	EventPlacementTest EventType = "PLACEMENT_TEST_UPDATED"
 
 	// Bulk operation events
 	EventBulkStarted   EventType = "BULK_STARTED"
@@ -57,8 +62,10 @@ const (
 	EventBulkFailed    EventType = "BULK_FAILED"
 
 	// Tracking events (from Rust tracking service)
-	EventEmailOpened  EventType = "EMAIL_OPENED"
-	EventEmailClicked EventType = "EMAIL_CLICKED"
+	EventEmailOpened        EventType = "EMAIL_OPENED"
+	EventEmailClicked       EventType = "EMAIL_CLICKED"
+	EventDirectEmailOpened  EventType = "DIRECT_EMAIL_OPENED"
+	EventDirectEmailClicked EventType = "DIRECT_EMAIL_CLICKED"
 
 	// A human reply landed for a campaign contact (org-scoped pulse).
 	EventEmailReplied EventType = "EMAIL_REPLIED"
@@ -94,6 +101,13 @@ const (
 	// AI contact research progress (org-scoped). Fires as each run completes so
 	// teammates see a batch advance and the contact's research refreshes live.
 	EventAIResearchProgress EventType = "AI_RESEARCH_PROGRESS"
+	// EventMailboxImportProgress: a mailbox import moved (rows settled, or it finished).
+	EventMailboxImportProgress EventType = "MAILBOX_IMPORT_PROGRESS"
+	// EventContactImportProgress: a contact import moved (a chunk settled, or it finished).
+	EventContactImportProgress EventType = "CONTACT_IMPORT_PROGRESS"
+	// EventCRMSynced: mirrored CRM records changed (a connected CRM pushed or
+	// pulled), so the deals, tasks and contact panels refetch.
+	EventCRMSynced EventType = "CRM_SYNCED"
 
 	// An AI-drafted unibox reply is ready for human review (org-scoped, gated on
 	// access_unibox). The web client invalidates the unibox + drafts queries.
@@ -122,6 +136,10 @@ const (
 	// this internally (re-track / untrack / strip activity) to apply the new
 	// policy live; it is not forwarded to web clients.
 	EventPresencePolicyUpdated EventType = "PRESENCE_POLICY_UPDATED"
+
+	// A user's sessions were revoked (sign out, password change, ban). The
+	// realtime service closes every socket the user holds; not forwarded.
+	EventSessionsRevoked EventType = "SESSIONS_REVOKED"
 )
 
 // BaseEvent contains common fields for all events
@@ -155,6 +173,8 @@ type ContactEvent struct {
 // BulkOperationEvent for bulk operation signals
 type BulkOperationEvent struct {
 	BaseEvent
+	// OrgID routes the event to every member of the organization.
+	OrgID          string  `json:"org_id,omitempty"`
 	OperationID    string  `json:"operation_id"`
 	OperationType  string  `json:"operation_type"`
 	EntityType     string  `json:"entity_type"`
@@ -214,13 +234,14 @@ type WarmupStatsEvent struct {
 // TrackingEventPayload for email open/click tracking events
 type TrackingEventPayload struct {
 	BaseEvent
-	OrgID        string `json:"org_id,omitempty"`
-	CampaignID   string `json:"campaign_id"`
-	ContactID    string `json:"contact_id,omitempty"`
-	ContactEmail string `json:"contact_email,omitempty"`
-	SequenceID   string `json:"step_id,omitempty"`
-	OriginalURL  string `json:"original_url,omitempty"` // For click events
-	LinkLabel    string `json:"link_label,omitempty"`   // Anchor text of the clicked link
+	OrgID          string `json:"org_id,omitempty"`
+	CampaignID     string `json:"campaign_id,omitempty"`
+	EmailAccountID string `json:"email_account_id,omitempty"`
+	ContactID      string `json:"contact_id,omitempty"`
+	ContactEmail   string `json:"contact_email,omitempty"`
+	SequenceID     string `json:"step_id,omitempty"`
+	OriginalURL    string `json:"original_url,omitempty"` // For click events
+	LinkLabel      string `json:"link_label,omitempty"`   // Anchor text of the clicked link
 	// Machine marks an automated open or click (Apple MPP prefetch, UA-less
 	// fetcher, a security gateway walking the links) so live views can badge
 	// it instead of presenting it as a person's.
@@ -229,10 +250,14 @@ type TrackingEventPayload struct {
 	// base timestamp is when this event was published.
 	OccurredAt time.Time `json:"occurred_at,omitempty"`
 	// Where and on what, from the engagement logs, for live feeds.
-	Client      string `json:"client,omitempty"`
-	DeviceType  string `json:"device_type,omitempty"`
-	CountryCode string `json:"country_code,omitempty"`
-	City        string `json:"city,omitempty"`
+	Client       string `json:"client,omitempty"`
+	ClientType   string `json:"client_type,omitempty"`
+	DeviceHidden bool   `json:"device_hidden,omitempty"`
+	DeviceType   string `json:"device_type,omitempty"`
+	OS           string `json:"os,omitempty"`
+	Browser      string `json:"browser,omitempty"`
+	CountryCode  string `json:"country_code,omitempty"`
+	City         string `json:"city,omitempty"`
 }
 
 // PageHitEvent is a website page view tied to a contact.
@@ -257,25 +282,28 @@ func (p *StreamingPublisher) PublishPageHit(ctx context.Context, event *PageHitE
 		"contact_id": event.ContactID,
 		"event_type": string(event.EventType),
 	}
-	_ = p.client.Publish(ctx, TopicCampaignUpdate, event, attrs)
+	_ = p.publish(ctx, TopicCampaignUpdate, event, attrs)
 }
 
 // TaskProgressEvent for detailed campaign task progress
 type TaskProgressEvent struct {
 	BaseEvent
-	OrgID          string `json:"org_id,omitempty"`
-	CampaignID     string `json:"campaign_id"`
-	TaskID         string `json:"task_id"`
-	Status         string `json:"status"` // pending, active, completed, failed
-	ContactID      string `json:"contact_id"`
-	ContactEmail   string `json:"contact_email"`
-	ContactName    string `json:"contact_name"`
-	SequenceID     string `json:"step_id"`
-	SequenceName   string `json:"step_name"`
-	SequenceIndex  int    `json:"step_index"`
-	Progress       int    `json:"progress"` // Percentage 0-100
-	TotalContacts  int    `json:"total_contacts"`
-	ProcessedCount int    `json:"processed_count"`
+	OrgID         string `json:"org_id,omitempty"`
+	CampaignID    string `json:"campaign_id"`
+	TaskID        string `json:"task_id"`
+	Status        string `json:"status"` // pending, active, completed, failed
+	ContactID     string `json:"contact_id"`
+	ContactEmail  string `json:"contact_email"`
+	ContactName   string `json:"contact_name"`
+	SequenceID    string `json:"step_id"`
+	SequenceName  string `json:"step_name"`
+	SequenceIndex int    `json:"step_index"`
+	Progress      int    `json:"progress"` // Percentage 0-100
+	TotalContacts int    `json:"total_contacts"`
+	// TotalEmails is contacts x steps, the unit ProcessedCount and Progress
+	// are in: one sent step, not one finished contact.
+	TotalEmails    int `json:"total_emails"`
+	ProcessedCount int `json:"processed_count"`
 }
 
 // MeetingEvent for booked / rescheduled / canceled meetings from Calendly /
@@ -306,7 +334,7 @@ func (p *StreamingPublisher) PublishMeeting(ctx context.Context, userID string, 
 		"user_id":    userID,
 		"event_type": string(eventType),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -328,7 +356,7 @@ func (p *StreamingPublisher) PublishEmailReceived(ctx context.Context, event *Em
 		"event_type": string(EventEmailReceived),
 	}
 
-	if err := p.client.Publish(ctx, TopicEmailInbox, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicEmailInbox, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
@@ -348,7 +376,7 @@ func (p *StreamingPublisher) PublishEmailUpdated(ctx context.Context, event *Ema
 		"event_type": string(EventEmailUpdated),
 	}
 
-	if err := p.client.Publish(ctx, TopicEmailInbox, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicEmailInbox, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
@@ -368,13 +396,13 @@ func (p *StreamingPublisher) PublishEmailDeleted(ctx context.Context, event *Ema
 		"event_type": string(EventEmailDeleted),
 	}
 
-	if err := p.client.Publish(ctx, TopicEmailInbox, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicEmailInbox, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
 
 // PublishContactsReload signals frontend to reload contacts
-func (p *StreamingPublisher) PublishContactsReload(ctx context.Context, userID, operationID string) {
+func (p *StreamingPublisher) PublishContactsReload(ctx context.Context, userID, operationID string, orgID uuid.UUID) {
 	if p.client == nil {
 		return
 	}
@@ -387,6 +415,7 @@ func (p *StreamingPublisher) PublishContactsReload(ctx context.Context, userID, 
 		},
 		OperationID: operationID,
 		EntityType:  "contacts",
+		OrgID:       orgID.String(),
 	}
 
 	attrs := map[string]string{
@@ -394,15 +423,37 @@ func (p *StreamingPublisher) PublishContactsReload(ctx context.Context, userID, 
 		"event_type": string(EventContactsReload),
 	}
 
-	if err := p.client.Publish(ctx, TopicBulkOps, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicBulkOps, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
 
-// PublishBulkProgress sends bulk operation progress update
-func (p *StreamingPublisher) PublishBulkProgress(ctx context.Context, event *BulkOperationEvent) {
+// PublishOrgContactsReload tells every member of an organization to reload
+// its contact lists, for a change no single member made.
+func (p *StreamingPublisher) PublishOrgContactsReload(ctx context.Context, orgID, operationID string) {
 	if p.client == nil {
 		return
+	}
+	event := &BulkOperationEvent{
+		BaseEvent: BaseEvent{
+			EventType: EventContactsReload,
+			Timestamp: time.Now(),
+		},
+		OrgID:       orgID,
+		OperationID: operationID,
+		EntityType:  "contacts",
+	}
+	attrs := map[string]string{
+		"org_id":     orgID,
+		"event_type": string(EventContactsReload),
+	}
+	_ = p.publish(ctx, TopicBulkOps, event, attrs)
+}
+
+// PublishBulkProgress sends bulk operation progress update
+func (p *StreamingPublisher) PublishBulkProgress(ctx context.Context, event *BulkOperationEvent) error {
+	if p.client == nil {
+		return nil
 	}
 
 	event.Timestamp = time.Now()
@@ -413,9 +464,7 @@ func (p *StreamingPublisher) PublishBulkProgress(ctx context.Context, event *Bul
 		"event_type":   string(event.EventType),
 	}
 
-	if err := p.client.Publish(ctx, TopicBulkOps, event, attrs); err != nil {
-		// Log error but don't fail
-	}
+	return p.publish(ctx, TopicBulkOps, event, attrs)
 }
 
 // PublishCampaignEvent sends campaign event
@@ -431,8 +480,7 @@ func (p *StreamingPublisher) PublishCampaignEvent(ctx context.Context, event *Ca
 		"campaign_id": event.CampaignID,
 		"event_type":  string(event.EventType),
 	}
-
-	if err := p.client.Publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
@@ -456,7 +504,7 @@ func (p *StreamingPublisher) PublishAccountEvent(ctx context.Context, event *Acc
 		topicID = TopicEmailError
 	}
 
-	if err := p.client.Publish(ctx, topicID, event, attrs); err != nil {
+	if err := p.publish(ctx, topicID, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
@@ -481,6 +529,21 @@ func (p *StreamingPublisher) PublishAccountHealth(ctx context.Context, orgID, us
 		HealthState:    newState,
 		PreviousState:  prevState,
 		Reason:         reason,
+	})
+}
+
+// PublishWarmupPlacement tells the sending mailbox's organization that one of
+// its warmup emails was seen landing, so placement views refresh live.
+func (p *StreamingPublisher) PublishWarmupPlacement(ctx context.Context, orgID, userID, accountID, email, landed string) {
+	if p == nil || p.client == nil || orgID == "" {
+		return
+	}
+	p.PublishAccountEvent(ctx, &AccountEvent{
+		BaseEvent:      BaseEvent{EventType: EventWarmupPlacement, UserID: userID},
+		OrgID:          orgID,
+		EmailAccountID: accountID,
+		Email:          email,
+		Status:         landed,
 	})
 }
 
@@ -524,7 +587,7 @@ func (p *StreamingPublisher) PublishAuditCreated(ctx context.Context, orgID, act
 		"event_type": string(EventAuditCreated),
 	}
 
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -559,9 +622,60 @@ func (p *StreamingPublisher) PublishFormSubmission(ctx context.Context, orgID, f
 		"org_id":     orgID.String(),
 		"event_type": string(EventFormSubmission),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
+}
+
+// PlacementTestEvent is the org-scoped placement test signal. Ids and status
+// only: where the copies landed stays behind the read endpoint's permission.
+type PlacementTestEvent struct {
+	BaseEvent
+	OrgID      string `json:"org_id"`
+	TestID     string `json:"test_id,omitempty"`
+	BatchID    string `json:"batch_id,omitempty"`
+	CampaignID string `json:"campaign_id,omitempty"`
+	Status     string `json:"status"`
+}
+
+// PublishPlacementTest emits an org-scoped placement test signal.
+func (p *StreamingPublisher) PublishPlacementTest(ctx context.Context, orgID, testID uuid.UUID, campaignID *uuid.UUID, status string) {
+	if p == nil || p.client == nil || orgID == uuid.Nil {
+		return
+	}
+	event := &PlacementTestEvent{
+		BaseEvent: BaseEvent{EventType: EventPlacementTest, Timestamp: time.Now()},
+		OrgID:     orgID.String(),
+		TestID:    testID.String(),
+		Status:    status,
+	}
+	if campaignID != nil {
+		event.CampaignID = campaignID.String()
+	}
+	attrs := map[string]string{
+		"org_id":     orgID.String(),
+		"event_type": string(EventPlacementTest),
+	}
+	_ = p.publish(ctx, TopicUserEvents, event, attrs)
+}
+
+// PublishPlacementBatch emits the placement signal for a batch that moved
+// without one of its tests moving (a sender skipped, the batch finished).
+func (p *StreamingPublisher) PublishPlacementBatch(ctx context.Context, orgID, batchID uuid.UUID, status string) {
+	if p == nil || p.client == nil || orgID == uuid.Nil {
+		return
+	}
+	event := &PlacementTestEvent{
+		BaseEvent: BaseEvent{EventType: EventPlacementTest, Timestamp: time.Now()},
+		OrgID:     orgID.String(),
+		BatchID:   batchID.String(),
+		Status:    status,
+	}
+	attrs := map[string]string{
+		"org_id":     orgID.String(),
+		"event_type": string(EventPlacementTest),
+	}
+	_ = p.publish(ctx, TopicUserEvents, event, attrs)
 }
 
 // AutomationEvent is an org-scoped automation lifecycle/run signal. The web
@@ -587,6 +701,78 @@ type AIResearchEvent struct {
 	Status    string `json:"status,omitempty"`
 }
 
+// MailboxImportEvent is the org-scoped payload for MAILBOX_IMPORT_PROGRESS.
+type MailboxImportEvent struct {
+	BaseEvent
+	OrgID    string `json:"org_id"`
+	ImportID string `json:"import_id"`
+	Status   string `json:"status"`
+}
+
+// PublishMailboxImportProgress tells the workspace an import moved, so every
+// teammate watching it refetches.
+func (p *StreamingPublisher) PublishMailboxImportProgress(ctx context.Context, orgID, importID uuid.UUID, status string) {
+	if p == nil || p.client == nil || orgID == uuid.Nil {
+		return
+	}
+	event := &MailboxImportEvent{
+		BaseEvent: BaseEvent{EventType: EventMailboxImportProgress, Timestamp: time.Now()},
+		OrgID:     orgID.String(),
+		ImportID:  importID.String(),
+		Status:    status,
+	}
+	attrs := map[string]string{"org_id": orgID.String(), "event_type": string(EventMailboxImportProgress)}
+	_ = p.publish(ctx, TopicUserEvents, event, attrs)
+}
+
+// ContactImportEvent is the org-scoped payload for CONTACT_IMPORT_PROGRESS.
+type ContactImportEvent struct {
+	BaseEvent
+	OrgID    string `json:"org_id"`
+	ImportID string `json:"import_id"`
+	Status   string `json:"status"`
+}
+
+// PublishContactImportProgress tells the workspace a contact import moved, so
+// every teammate watching it refetches.
+func (p *StreamingPublisher) PublishContactImportProgress(ctx context.Context, orgID, importID uuid.UUID, status string) {
+	if p == nil || p.client == nil || orgID == uuid.Nil {
+		return
+	}
+	event := &ContactImportEvent{
+		BaseEvent: BaseEvent{EventType: EventContactImportProgress, Timestamp: time.Now()},
+		OrgID:     orgID.String(),
+		ImportID:  importID.String(),
+		Status:    status,
+	}
+	attrs := map[string]string{"org_id": orgID.String(), "event_type": string(EventContactImportProgress)}
+	_ = p.publish(ctx, TopicUserEvents, event, attrs)
+}
+
+// CRMSyncedEvent names what changed; ids only, the records stay behind their
+// list endpoints.
+type CRMSyncedEvent struct {
+	BaseEvent
+	OrgID     string   `json:"org_id"`
+	Objects   []string `json:"objects"`
+	ContactID string   `json:"contact_id,omitempty"`
+}
+
+// PublishCRMSynced tells the workspace its mirrored CRM data moved.
+func (p *StreamingPublisher) PublishCRMSynced(ctx context.Context, orgID uuid.UUID, objects []string, contactID string) {
+	if p == nil || p.client == nil || orgID == uuid.Nil || len(objects) == 0 {
+		return
+	}
+	event := &CRMSyncedEvent{
+		BaseEvent: BaseEvent{EventType: EventCRMSynced, Timestamp: time.Now()},
+		OrgID:     orgID.String(),
+		Objects:   objects,
+		ContactID: contactID,
+	}
+	attrs := map[string]string{"org_id": orgID.String(), "event_type": string(EventCRMSynced)}
+	_ = p.publish(ctx, TopicUserEvents, event, attrs)
+}
+
 // PublishAIResearchProgress emits AI_RESEARCH_PROGRESS for one completed run.
 func (p *StreamingPublisher) PublishAIResearchProgress(ctx context.Context, orgID, actorID uuid.UUID, contactID, runID, status string) {
 	if p == nil || p.client == nil || orgID == uuid.Nil {
@@ -608,7 +794,7 @@ func (p *StreamingPublisher) PublishAIResearchProgress(ctx context.Context, orgI
 		"org_id":     orgID.String(),
 		"event_type": string(EventAIResearchProgress),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -646,7 +832,7 @@ func (p *StreamingPublisher) PublishAIDraftReady(ctx context.Context, orgID, act
 		"org_id":     orgID.String(),
 		"event_type": string(EventAIDraftReady),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -681,7 +867,7 @@ func (p *StreamingPublisher) PublishCreditsLow(ctx context.Context, orgID uuid.U
 		"org_id":     orgID.String(),
 		"event_type": string(EventBillingCreditsLow),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -714,7 +900,7 @@ func (p *StreamingPublisher) PublishCreditsChanged(ctx context.Context, orgID uu
 		"org_id":     orgID.String(),
 		"event_type": string(EventBillingCreditsChanged),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -738,7 +924,7 @@ func (p *StreamingPublisher) PublishAutomationEvent(ctx context.Context, orgID, 
 		"org_id":     orgID.String(),
 		"event_type": string(eventType),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -781,7 +967,7 @@ func (p *StreamingPublisher) PublishCustomEvent(ctx context.Context, orgID, acto
 		"org_id":     orgID.String(),
 		"event_type": string(EventCustomFired),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -815,30 +1001,51 @@ func (p *StreamingPublisher) PublishPresencePolicy(ctx context.Context, orgID uu
 		"org_id":     orgID.String(),
 		"event_type": string(EventPresencePolicyUpdated),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
 
-// PublishToUser publishes a generic event to a user
-func (p *StreamingPublisher) PublishToUser(ctx context.Context, userID string, event interface{}) {
-	if p.client == nil {
+// PublishSessionsRevoked tells the realtime service to drop the user's sockets.
+func (p *StreamingPublisher) PublishSessionsRevoked(ctx context.Context, userID uuid.UUID) {
+	if p == nil || p.client == nil {
 		return
+	}
+	event := &BaseEvent{
+		EventType: EventSessionsRevoked,
+		UserID:    userID.String(),
+		Timestamp: time.Now(),
+	}
+	attrs := map[string]string{
+		"user_id":    userID.String(),
+		"event_type": string(EventSessionsRevoked),
+	}
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
+		// Best-effort: the sessions are already revoked, and every reconnect needs a live one.
+	}
+}
+
+// PublishToUser publishes a generic event to a user
+func (p *StreamingPublisher) PublishToUser(ctx context.Context, userID string, event interface{}, orgIDs ...uuid.UUID) error {
+	if p.client == nil {
+		return nil
 	}
 
 	attrs := map[string]string{
 		"user_id": userID,
 	}
-
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
-		// Log error but don't fail
+	if len(orgIDs) > 0 {
+		attrs["organization_id"] = orgIDs[0].String()
 	}
+
+	return p.publish(ctx, TopicUserEvents, event, attrs)
 }
 
 // NotificationEvent is the user-scoped realtime signal for a new in-app
 // notification (the bell). Best-effort; the feed table is the source of truth.
 type NotificationEvent struct {
 	BaseEvent
+	OrgID          string `json:"org_id,omitempty"`
 	NotificationID string `json:"notification_id"`
 	Category       string `json:"category"`
 	Title          string `json:"title"`
@@ -846,7 +1053,7 @@ type NotificationEvent struct {
 }
 
 // PublishNotificationCreated pushes a new-notification event to a single user.
-func (p *StreamingPublisher) PublishNotificationCreated(ctx context.Context, userID, notifID, category, title, link string) {
+func (p *StreamingPublisher) PublishNotificationCreated(ctx context.Context, userID, notifID, category, title, link string, orgID ...*uuid.UUID) {
 	if p == nil || p.client == nil || userID == "" {
 		return
 	}
@@ -861,11 +1068,14 @@ func (p *StreamingPublisher) PublishNotificationCreated(ctx context.Context, use
 		Title:          title,
 		Link:           link,
 	}
+	if len(orgID) > 0 && orgID[0] != nil {
+		event.OrgID = orgID[0].String()
+	}
 	attrs := map[string]string{
 		"user_id":    userID,
 		"event_type": string(EventNotificationCreated),
 	}
-	if err := p.client.Publish(ctx, TopicUserEvents, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicUserEvents, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }
@@ -883,8 +1093,11 @@ func (p *StreamingPublisher) PublishTrackingEvent(ctx context.Context, event *Tr
 		"campaign_id": event.CampaignID,
 		"event_type":  string(event.EventType),
 	}
+	if event.OrgID != "" {
+		attrs["org_id"] = event.OrgID
+	}
 
-	if err := p.client.Publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
@@ -905,7 +1118,7 @@ func (p *StreamingPublisher) PublishTaskProgress(ctx context.Context, event *Tas
 		"event_type":  string(EventTaskProgress),
 	}
 
-	if err := p.client.Publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
 		// Log error but don't fail
 	}
 }
@@ -947,7 +1160,7 @@ func (p *StreamingPublisher) PublishEmailSent(ctx context.Context, event *TaskPr
 		"event_type":  string(EventEmailSent),
 	}
 
-	if err := p.client.Publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
+	if err := p.publish(ctx, TopicCampaignUpdate, event, attrs); err != nil {
 		// Best-effort: realtime is a nicety, not a requirement.
 	}
 }

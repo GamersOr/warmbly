@@ -18,7 +18,7 @@ import (
 // (contact, kind, ref) and best effort: a failure is logged, never returned
 // into the caller's path.
 type EvidenceRecorder interface {
-	RecordEvidence(ctx context.Context, contactID uuid.UUID, kind, ref, detail string)
+	RecordEvidence(ctx context.Context, contactID uuid.UUID, step models.EvidenceStep, kind, ref, detail string)
 }
 
 // Evidence scores contacts from the ledger. It is separate from Service so
@@ -37,11 +37,11 @@ func NewEvidence(repo repository.VerificationEvidenceRepository) *Evidence {
 
 func (e *Evidence) SetOnChange(fn func(ctx context.Context, contactID uuid.UUID)) { e.onChange = fn }
 
-func (e *Evidence) RecordEvidence(ctx context.Context, contactID uuid.UUID, kind, ref, detail string) {
+func (e *Evidence) RecordEvidence(ctx context.Context, contactID uuid.UUID, step models.EvidenceStep, kind, ref, detail string) {
 	if e == nil || e.repo == nil || contactID == uuid.Nil {
 		return
 	}
-	inserted, err := e.repo.Record(ctx, contactID, kind, ref, detail, time.Now().UTC())
+	inserted, err := e.repo.Record(ctx, contactID, step, kind, ref, detail, time.Now().UTC())
 	if err != nil {
 		log.Warn().Err(err).Str("contact_id", contactID.String()).Str("kind", kind).Msg("verification evidence not recorded")
 		return
@@ -65,7 +65,7 @@ func (e *Evidence) Rescore(ctx context.Context, contactID uuid.UUID) {
 	if err != nil {
 		return
 	}
-	scored := emailverify.Score(verdict, toEvidence(rows), time.Now().UTC())
+	scored := emailverify.Score(verdict.Verdict, toEvidence(rows), time.Now().UTC())
 	reason := ""
 	if len(scored.Reasons) > 0 {
 		reason = scored.Reasons[0]
@@ -73,7 +73,7 @@ func (e *Evidence) Rescore(ctx context.Context, contactID uuid.UUID) {
 	if err := e.repo.SetScore(ctx, contactID, string(scored.Status), scored.Confidence, reason, scored.LastPositiveAt, scored.Decisive); err != nil {
 		return
 	}
-	if scored.Decisive && scored.Status != verdict.Status && e.onChange != nil {
+	if scored.Decisive && scored.Status != verdict.Stored && e.onChange != nil {
 		e.onChange(ctx, contactID)
 	}
 }
@@ -91,14 +91,24 @@ func (e *Evidence) Explain(ctx context.Context, contactID uuid.UUID) *models.Con
 	if err != nil {
 		return nil
 	}
-	scored := emailverify.Score(verdict, toEvidence(rows), time.Now().UTC())
-	return &models.ContactVerificationDetail{
-		Status:     string(scored.Status),
-		Confidence: scored.Confidence,
-		Reasons:    scored.Reasons,
-		Decisive:   scored.Decisive,
-		Evidence:   rows,
+	scored := emailverify.Score(verdict.Verdict, toEvidence(rows), time.Now().UTC())
+	detail := &models.ContactVerificationDetail{
+		Status:        string(scored.Status),
+		Confidence:    scored.Confidence,
+		Reasons:       scored.Reasons,
+		Decisive:      scored.Decisive,
+		Evidence:      rows,
+		Source:        verdict.Source,
+		Provider:      verdict.Provider,
+		ProviderLabel: emailverify.ProviderLabel(verdict.Provider),
+		CheckStatus:   string(verdict.Status),
+		RequestedAt:   verdict.RequestedAt,
 	}
+	if !verdict.CheckedAt.IsZero() {
+		at := verdict.CheckedAt
+		detail.CheckedAt = &at
+	}
+	return detail
 }
 
 // CreditCleanDeliveries turns sends that never bounced into evidence, then
@@ -127,7 +137,7 @@ func (e *Evidence) Apply(ctx context.Context, contactID uuid.UUID, res emailveri
 	if res.Provider != "" && res.Provider != emailverify.ProviderBuiltin {
 		source = models.VerificationSourceProvider
 	}
-	verdict := emailverify.Verdict{Status: res.Status, Source: source, CheckedAt: res.CheckedAt}
+	verdict := emailverify.Verdict{Status: res.Status, Source: source, Provider: res.Provider, CheckedAt: res.CheckedAt}
 	var rows []models.ContactVerificationEvidence
 	if e != nil && e.repo != nil {
 		rows, _ = e.repo.ListForContact(ctx, contactID)

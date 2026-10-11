@@ -24,9 +24,11 @@ func (s *tokenService) GetSession(ctx context.Context, sessionID uuid.UUID) (*mo
 		return nil, err
 	}
 
-	if err := s.saveSession(ctx, sess, SessionTTL); err != nil {
-		return nil, err
-	}
+	// Best effort: the session is already resolved, and failing to cache it
+	// only costs the next request a database read. Returning the error here
+	// meant a Redis write that was refused, on quota or anything else, failed
+	// every authenticated request with a 500.
+	_ = s.saveSession(ctx, sess, SessionTTL)
 	return sess, nil
 }
 
@@ -37,7 +39,7 @@ func sameTokenIssueTime(a, b time.Time) bool {
 }
 
 func (s *tokenService) ValidateAccessToken(ctx context.Context, accessToken string) (*models.Session, *errx.Error) {
-	t, err := s.VerifyToken(accessToken)
+	t, err := s.VerifyTokenFor(PurposeAccess, accessToken)
 	if err != nil {
 		return nil, err
 	}
@@ -63,4 +65,17 @@ func (s *tokenService) ValidateAccessToken(ctx context.Context, accessToken stri
 	}
 
 	return session, nil
+}
+
+// VerifyTokenFor is VerifyToken plus the check that the token was minted for
+// this flow. A token with no purpose verifies for none.
+func (s *tokenService) VerifyTokenFor(purpose, tokenStr string) (*TokenClaims, *errx.Error) {
+	claims, err := s.VerifyToken(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Purpose == "" || claims.Purpose != purpose {
+		return nil, errx.ErrToken
+	}
+	return claims, nil
 }

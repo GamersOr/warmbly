@@ -6,7 +6,9 @@
 // until you commit.
 
 import React from "react";
-import toast from "react-hot-toast";
+import useBrowseState from "@/hooks/useBrowseState";
+import { aiUsageRangeSchema } from "@/lib/browse-other-lists";
+import toast from "react-hot-toast/headless";
 import { AnimatePresence, motion } from "framer-motion";
 import { Loader2Icon, RotateCcwIcon } from "lucide-react";
 import useCredits from "@/lib/api/hooks/app/subscription/useCredits";
@@ -24,12 +26,13 @@ const REASON_LABELS: Record<string, string> = {
     writing_assistant: "Writing assistant",
     writing_edit: "Selection edits",
     reply_draft: "Reply drafts",
-    agent_iteration: "Dashboard assistant",
+    agent_iteration: "Remie",
     inbox_agent_draft: "Inbox agent",
     research_run: "Contact research",
     automation_ai: "Automation AI",
     campaign_ai: "Campaign switches",
     spam_analysis: "Spam analysis",
+    placement_test: "Placement tests",
 };
 
 type WindowKey = "day" | "week" | "month";
@@ -85,7 +88,7 @@ function toForm(s: AISpendSettings): SpendForm {
 type RangeDays = 7 | 30 | 90;
 
 export default function AIUsageCard() {
-    const [range, setRange] = React.useState<RangeDays>(30);
+    const [range, setRange] = useBrowseState<RangeDays>("settings.billing.ai-usage.range", 30, aiUsageRangeSchema);
     const usage = useCreditUsage(range);
     const settings = useCreditSettings();
     const credits = useCredits();
@@ -181,7 +184,7 @@ export default function AIUsageCard() {
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
                         <Breakdown title="By feature" rows={u.by_reason} labelFor={(k) => REASON_LABELS[k] ?? k} />
-                        <Breakdown title="By model" rows={u.by_model} labelFor={(k) => k || "unmetered"} />
+                        <Breakdown title="By model" rows={u.by_model} labelFor={(k) => k || "No AI model"} />
                     </div>
                 </>
             ) : (

@@ -7,6 +7,7 @@ import (
 
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/mailhdr"
 )
 
 // GraphMessage is the subset of the Graph message resource we read. Delta pages
@@ -14,6 +15,7 @@ import (
 // the envelope, body, and headers.
 type GraphMessage struct {
 	ID                     string           `json:"id"`
+	ParentFolderID         string           `json:"parentFolderId"`
 	InternetMessageID      string           `json:"internetMessageId"`
 	ConversationID         string           `json:"conversationId"`
 	Subject                string           `json:"subject"`
@@ -81,6 +83,11 @@ func (m *GraphMessage) toEmailData() *models.EmailMessageData {
 	}
 
 	flags := []string{}
+	observedHeaders := make(map[string][]string)
+	for _, h := range m.InternetMessageHeaders {
+		observedHeaders[h.Name] = append(observedHeaders[h.Name], h.Value)
+	}
+	flags = append(flags, mailhdr.ReceivedEvidence(observedHeaders, "graph_api").Flag())
 	if m.IsRead {
 		flags = append(flags, "\\Seen")
 	}

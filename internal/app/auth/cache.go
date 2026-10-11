@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,21 +14,29 @@ import (
 	"github.com/warmbly/warmbly/internal/pkg/crypt"
 )
 
-// Login and registration keep separate send budgets. They used to share one
-// key, which let anyone lock a known user out of login for the whole window by
-// POSTing /auth/register with that user's address.
+// Login and registration keep separate send budgets, so registering an address cannot spend its login budget.
 func getEmailVerificationKey(flow, email string) string {
 	return "email_verification:" + flow + ":" + crypt.SHA256(email)
 }
 
-// getKnownDeviceKey remembers a device that has already completed a full login,
-// so AUTH_LOGIN_CODE=new_device only challenges genuinely new ones.
-func getKnownDeviceKey(userID uuid.UUID, fingerprint string) string {
-	return "known_device:" + userID.String() + ":" + fingerprint
-}
-
 func getPasswordResetLimitKey(email string) string {
 	return "password_reset_limit:" + crypt.SHA256(email)
+}
+
+// getLoginFailureKey counts wrong passwords for one address. Keyed on the
+// address rather than the user id because the lookup that would resolve the id
+// is the thing being throttled, and a miss must cost the guesser the same as a
+// hit.
+func getLoginFailureKey(email string) string {
+	return "login_fail:" + crypt.SHA256(email)
+}
+
+// getReauthFailureKey counts failed confirmations for one account. The
+// re-authentication endpoint checks a password, so without its own budget it is
+// a second, unthrottled place to guess one: the per-IP limiter allows a few
+// hundred an hour and the per-account login counter does not see this path.
+func getReauthFailureKey(userID uuid.UUID) string {
+	return "reauth_fail:" + userID.String()
 }
 
 func getLoginSessionKey(sessionID uuid.UUID) string {
@@ -158,10 +165,37 @@ func (s *authService) passwordResetLimit(ctx context.Context, email string) *err
 	return nil
 }
 
+// refundPasswordResetLimit gives back an attempt that produced no mail through
+// no fault of the person asking. The budget is only two requests per four
+// hours, so without this a transient SES rejection or a cache blip spent half
+// of someone's allowance and a second one locked them out of the flow for the
+// rest of the afternoon, with nothing in their inbox to explain why. Best
+// effort: failing to refund must never turn into a failed request on top of
+// the one that already failed.
+//
+// Only OUR failures are refunded. An address with no account still pays, or
+// the counter stops costing an attacker anything to probe with.
+func (s *authService) refundPasswordResetLimit(ctx context.Context, email string) {
+	key := getPasswordResetLimitKey(email)
+
+	// DECR cannot take the counter below what this request added: the key is
+	// only ever incremented by a request that reaches here to undo it, and a
+	// key that expired in between comes back at -1 with no TTL, which would
+	// hand out unlimited attempts. Refuse that case rather than create it.
+	count, err := s.cache.Decr(ctx, key).Result()
+	if err != nil {
+		errs.CaptureException(err)
+		return
+	}
+	if count < 0 {
+		if err := s.cache.Del(ctx, key).Err(); err != nil {
+			errs.CaptureException(err)
+		}
+	}
+}
+
 // saveResetPasswordSession binds the emailed reset JWT to a server-side nonce.
-// The TTL is PasswordResetTTL, the same lifetime the JWT carries and the same
-// one the email quotes: it used to be SessionTTL (10 minutes) against a 1-hour
-// token and a mail that promised 4 hours.
+// The TTL is PasswordResetTTL, the same lifetime the JWT carries and the email quotes.
 func (s *authService) saveResetPasswordSession(ctx context.Context, sessionID uuid.UUID, nonce string) *errx.Error {
 	if err := s.cache.SetEx(ctx, getResetPasswordSessionKey(sessionID), nonce, PasswordResetTTL).Err(); err != nil {
 		errs.CaptureException(err)
@@ -185,38 +219,6 @@ func (s *authService) getResetPasswordSession(ctx context.Context, sessionID uui
 	return val, nil
 }
 
-// rememberDevice marks this device as having completed a full login, so
-// AUTH_LOGIN_CODE=new_device stops challenging it.
-func (s *authService) rememberDevice(ctx context.Context, userID uuid.UUID, userAgent string) {
-	fp := deviceFingerprint(userAgent)
-	if fp == "" {
-		return
-	}
-	_ = s.cache.SetEx(ctx, getKnownDeviceKey(userID, fp), "1", KnownDeviceTTL).Err()
-}
-
-// isKnownDevice reports whether this device has completed a login inside the
-// retention window.
-func (s *authService) isKnownDevice(ctx context.Context, userID uuid.UUID, userAgent string) bool {
-	fp := deviceFingerprint(userAgent)
-	if fp == "" {
-		return false
-	}
-	n, err := s.cache.Exists(ctx, getKnownDeviceKey(userID, fp)).Result()
-	return err == nil && n > 0
-}
-
-// deviceFingerprint is deliberately weak: a user agent is trivially spoofable,
-// so this is a convenience signal for skipping a code on a device the user has
-// already used, never an authentication factor. An empty agent yields no
-// fingerprint, which fails closed into "new device".
-func deviceFingerprint(userAgent string) string {
-	if strings.TrimSpace(userAgent) == "" {
-		return ""
-	}
-	return crypt.SHA256(userAgent)
-}
-
 func (s *authService) deletePasswordResetSession(ctx context.Context, sessionID uuid.UUID) *errx.Error {
 	val, err := s.cache.Del(ctx, getResetPasswordSessionKey(sessionID)).Result()
 	if err != nil {
@@ -229,4 +231,80 @@ func (s *authService) deletePasswordResetSession(ctx context.Context, sessionID 
 	}
 
 	return nil
+}
+
+// reserveAttempt charges one attempt before a credential is compared, so
+// concurrent guesses cannot all pass a read-only check. It fails OPEN on a
+// cache error: the budget is a brake on guessing, and a Redis outage must not
+// lock every customer out of their own account.
+func (s *authService) reserveAttempt(ctx context.Context, key string, limit int64, window time.Duration) bool {
+	ok, err := s.cache.ReserveAttempt(ctx, key, limit, window)
+	if err != nil {
+		errs.CaptureException(err)
+		return true
+	}
+	return ok
+}
+
+// releaseAttempt refunds a reserved attempt that ended before any credential
+// was compared.
+func (s *authService) releaseAttempt(ctx context.Context, key string) {
+	if err := s.cache.ReleaseAttempt(ctx, key); err != nil {
+		errs.CaptureException(err)
+	}
+}
+
+// reserveLoginAttempt charges one password attempt to the address.
+func (s *authService) reserveLoginAttempt(ctx context.Context, email string) bool {
+	return s.reserveAttempt(ctx, getLoginFailureKey(email), LoginFailureLimit, LoginFailureTTL)
+}
+
+// releaseLoginAttempt refunds a password attempt that compared nothing.
+func (s *authService) releaseLoginAttempt(ctx context.Context, email string) {
+	s.releaseAttempt(ctx, getLoginFailureKey(email))
+}
+
+// reserveCodeAttempt charges one try to an emailed-code session before the
+// code is compared; the counter lives no longer than the session.
+func (s *authService) reserveCodeAttempt(ctx context.Context, sessionKey string, ttl time.Duration) bool {
+	return s.reserveAttempt(ctx, sessionKey+":tries", AuthAttempts, ttl)
+}
+
+// consumeCodeSession deletes an emailed-code session and reports whether this
+// call was the one that removed it, so a code is accepted exactly once.
+func (s *authService) consumeCodeSession(ctx context.Context, sessionKey string) bool {
+	n, err := s.cache.Del(ctx, sessionKey).Result()
+	if err != nil {
+		errs.CaptureException(err)
+		return false
+	}
+	_ = s.cache.Del(ctx, sessionKey+":tries").Err()
+	return n == 1
+}
+
+// clearLoginFailures forgives the count once the right password arrives, so a
+// person who mistypes a few times and then gets it right starts clean.
+func (s *authService) clearLoginFailures(ctx context.Context, email string) {
+	if err := s.cache.Del(ctx, getLoginFailureKey(email)).Err(); err != nil {
+		errs.CaptureException(err)
+	}
+}
+
+// ReserveReauthAttempt charges one attempt to the account before the proof is
+// checked. The signed-in password change spends the same budget.
+func (s *authService) ReserveReauthAttempt(ctx context.Context, userID uuid.UUID) bool {
+	return s.reserveAttempt(ctx, getReauthFailureKey(userID), LoginFailureLimit, LoginFailureTTL)
+}
+
+// ReleaseReauthAttempt refunds a reserved attempt that ended before any
+// credential was compared.
+func (s *authService) ReleaseReauthAttempt(ctx context.Context, userID uuid.UUID) {
+	s.releaseAttempt(ctx, getReauthFailureKey(userID))
+}
+
+// ClearReauthFailures forgives the count once a confirmation succeeds.
+func (s *authService) ClearReauthFailures(ctx context.Context, userID uuid.UUID) {
+	if err := s.cache.Del(ctx, getReauthFailureKey(userID)).Err(); err != nil {
+		errs.CaptureException(err)
+	}
 }

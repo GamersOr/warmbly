@@ -1,13 +1,16 @@
+import { DashboardImage } from "@/components/ui/dashboard-image";
+
 // Public invitation landing page (/invite?token=...).
 //
 // The token is the capability: anyone holding it can see who invited them
 // where (a safe preview, no permissions/ids), then accept. Works for both
-// brand-new users (sign up, bounce back, accept) and logged-in users.
+// brand-new users (sign up and join) and logged-in users (return to accept).
 
 import React from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useSearchParams } from "@/hooks/useSearchParams";
 import { Loader2Icon, AlertCircleIcon, MailIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import getToken from "@/lib/helper/getToken";
 import usePreviewInvitation from "@/lib/api/hooks/app/organizations/usePreviewInvitation";
 import useAcceptInvitation from "@/lib/api/hooks/app/organizations/useAcceptInvitation";
@@ -20,6 +23,7 @@ import { useAppStore } from "@/stores";
 import { Logo } from "@/components/svg";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
+import { labelInk } from "@/lib/utils";
 
 export default function InviteAcceptPage() {
     const [params] = useSearchParams();
@@ -46,10 +50,11 @@ export default function InviteAcceptPage() {
     const invitedEmail = preview.data?.email ?? "";
     // The token has to travel as ?invite= too: without it the backend cannot
     // tell the signup is invited, and an invite_only instance refuses it.
-    const registerPath =
-        `/auth/register?invite=${encodeURIComponent(token ?? "")}` +
-        (invitedEmail ? `&email=${encodeURIComponent(invitedEmail)}` : "") +
-        `&next=${encodeURIComponent(nextPath)}`;
+    const registerSearch = {
+        invite: token ?? "",
+        email: invitedEmail || undefined,
+        next: "/app/emails",
+    };
     const signupClosed = authConfig.registration === "true";
     const signedInEmail = me.data?.email ?? "";
     const wrongAccount =
@@ -61,7 +66,7 @@ export default function InviteAcceptPage() {
 
     async function onSwitchAccount() {
         await logout.mutateAsync();
-        navigate(`/auth/login?next=${encodeURIComponent(nextPath)}`, { replace: true });
+        navigate({ to: "/auth/login", search: { next: nextPath }, replace: true });
     }
 
     async function onAccept() {
@@ -80,7 +85,7 @@ export default function InviteAcceptPage() {
                 setOrganizations(list);
                 setCurrentOrganization(joined);
             }
-            navigate("/app/emails", { replace: true });
+            navigate({ to: "/app/emails", replace: true });
         } catch {
             /* surfaced */
         }
@@ -113,7 +118,7 @@ export default function InviteAcceptPage() {
                             <div className="flex items-center gap-3 mb-4">
                                 <div className="size-10 rounded-lg bg-sky-50 border border-sky-100 text-sky-700 flex items-center justify-center text-[14px] font-semibold overflow-hidden shrink-0">
                                     {preview.data.organization_avatar ? (
-                                        <img src={preview.data.organization_avatar} alt="" className="w-full h-full object-cover" />
+                                        <DashboardImage src={preview.data.organization_avatar} alt="" className="w-full h-full object-cover" />
                                     ) : (
                                         preview.data.organization_name.slice(0, 2).toUpperCase()
                                     )}
@@ -140,7 +145,7 @@ export default function InviteAcceptPage() {
                                                 <span
                                                     key={r.id}
                                                     className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10px] font-medium border"
-                                                    style={{ backgroundColor: `${r.color || "#64748b"}14`, borderColor: `${r.color || "#64748b"}55`, color: r.color || "#475569" }}
+                                                    style={{ backgroundColor: `${r.color || "#64748b"}14`, borderColor: `${r.color || "#64748b"}55`, color: labelInk(r.color || "#475569") }}
                                                 >
                                                     <span className="size-1.5 rounded-full" style={{ backgroundColor: r.color || "#64748b" }} />
                                                     {r.name}
@@ -187,7 +192,8 @@ export default function InviteAcceptPage() {
                                         Sign in or create an account with <span className="font-medium text-slate-700">{preview.data.email}</span> to join.
                                     </p>
                                     <Link
-                                        to={`/auth/login?next=${encodeURIComponent(nextPath)}`}
+                                        to="/auth/login"
+                                        search={{ next: nextPath }}
                                         className="w-full h-9 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[13px] font-medium inline-flex items-center justify-center transition-colors"
                                     >
                                         Sign in to accept
@@ -199,7 +205,8 @@ export default function InviteAcceptPage() {
                                         </p>
                                     ) : (
                                         <Link
-                                            to={registerPath}
+                                            to="/auth/register"
+                                            search={registerSearch}
                                             className="w-full h-9 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[13px] font-medium inline-flex items-center justify-center transition-colors"
                                         >
                                             Create an account

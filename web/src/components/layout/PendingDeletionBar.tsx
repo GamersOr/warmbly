@@ -9,9 +9,9 @@
 // We deliberately don't make these dismissible — they need to nag.
 
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link } from "@tanstack/react-router";
 import { AlertOctagonIcon, Loader2Icon, UndoIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import useFeatureAccess from "@/hooks/useFeatureAccess";
 import useOrganizationDangerZone from "@/lib/api/hooks/app/dangerzone/useOrganizationDangerZone";
 import useAccountDangerZone from "@/lib/api/hooks/app/dangerzone/useAccountDangerZone";

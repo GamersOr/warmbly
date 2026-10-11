@@ -190,6 +190,7 @@ type ScheduledJobRun struct {
 	// when it picks the request up.
 	RunRequestedAt *time.Time `json:"run_requested_at,omitempty"`
 	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
+	RetiredAt      *time.Time `json:"retired_at,omitempty"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
@@ -208,13 +209,14 @@ type AdminFleetWorkerRow struct {
 	Live         bool              `json:"live"`
 	AccountCount int               `json:"account_count"`
 	Tags         []string          `json:"tags"`
+	Usage        NodeUsage         `json:"usage"`
 
 	LoadScore         float64 `json:"load_score"`
 	BaseCapacity      float64 `json:"base_capacity"`
 	HealthMultiplier  float64 `json:"health_multiplier"`
 	AgeMultiplier     float64 `json:"age_multiplier"`
 	EffectiveCapacity float64 `json:"effective_capacity"`
-	// Utilization is load over effective capacity; the rebalancer calls a
+	// Utilization is load over the worker's operational target; the rebalancer calls a
 	// worker hot above 0.8 and cold below 0.5.
 	Utilization      float64 `json:"utilization"`
 	SendsAttempted1h int64   `json:"sends_attempted_1h"`

@@ -12,7 +12,7 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { SparklesIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import useGenerateEdit from "@/lib/api/hooks/app/generation/useGenerateEdit";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
@@ -140,7 +140,7 @@ export default function TextareaAIEdit({
         const ta = textareaRef.current;
         if (!ta) return;
         const onKey = (e: KeyboardEvent) => {
-            if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "j") return;
+            if (!(e.metaKey || e.ctrlKey) || e.key?.toLowerCase() !== "j") return;
             const { selectionStart: s, selectionEnd: en } = ta;
             if (s === en) return;
             e.preventDefault();
@@ -196,7 +196,7 @@ export default function TextareaAIEdit({
     }, [sel, syncRects]);
 
     // Dismiss when the user clicks anywhere outside the floating layer and
-    // the textarea (mirrors useClickOutside, plus the textarea exception).
+    // the textarea (like useClickOutside, plus the textarea exception).
     React.useEffect(() => {
         if (!open) return;
         const onDown = (e: MouseEvent | TouchEvent) => {

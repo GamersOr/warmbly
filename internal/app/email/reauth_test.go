@@ -25,6 +25,11 @@ type stubReauthRepo struct {
 	updated      *models.UpdateEmail
 }
 
+// GetSyncSkipFolders answers the loader's skip-list read with an empty list.
+func (s *stubReauthRepo) GetSyncSkipFolders(context.Context, uuid.UUID) ([]string, *errx.Error) {
+	return nil, nil
+}
+
 func (s *stubReauthRepo) GetByID(ctx context.Context, emailAccountID uuid.UUID) (*models.Email, *errx.Error) {
 	return s.account, nil
 }
@@ -176,7 +181,7 @@ func TestFinishReauth_KeepsErrorsWhenReactivationFails(t *testing.T) {
 func TestOAuthReauth_RefusesSMTPIMAPMailboxes(t *testing.T) {
 	svc, repo, _, _ := reauthFixture("smtp_imap", "owner@example.com")
 
-	_, xerr := svc.OAuthReauth(context.Background(), repo.account.UserID, repo.account.OrganizationID, repo.account.ID)
+	_, xerr := svc.OAuthReauth(context.Background(), repo.account.UserID, repo.account.OrganizationID, repo.account.ID, "")
 	if xerr != errx.ErrEmailReauthProvider {
 		t.Fatalf("expected ErrEmailReauthProvider, got %v", xerr)
 	}

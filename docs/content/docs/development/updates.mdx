@@ -15,13 +15,13 @@ How "fetched" happens depends on how the instance was installed, and the updater
 
 ## The indicator
 
-The top bar of the **admin panel** (`:5174`) carries a version pill next to the environment label. It reads the running backend's build identity, so it shows exactly what is deployed, not what the checkout says.
+The foot of the **admin panel** (`:5174`) sidebar carries a version pill next to the environment label. It reads the running backend's build identity, so it shows exactly what is deployed, not what the checkout says.
 
 | Pill | Means |
 |---|---|
 | `v1.4.0` (grey) | Up to date. Click it for the details and a manual check |
-| `Update to v1.5.0` (amber) | A newer release exists on the configured channel |
-| `Update available` (amber) | The checkout is behind its branch (an install that tracks `main`) |
+| `Update to v1.5.0` (highlighted, pulsing) | A newer release exists on the configured channel |
+| `Update available` (highlighted, pulsing) | The checkout is behind its branch (an install that tracks `main`) |
 | `Updating` (blue, spinning) | An update job is running; the pill follows it from any tab |
 | `Restarting` (blue, spinning) | The backend is coming back after an update |
 
@@ -34,6 +34,7 @@ Every member of a self-hosted workspace sees the same version pill in the **dash
 Who can act on it follows platform admin access, not workspace roles:
 
 - **Members** see a badge. Its tooltip names the version and says to ask a platform admin.
+- **Platform admins whose session has no second factor** get the same badge, and clicking it explains that administrative access needs two-factor authentication, with a link to Settings > Security. Turn on 2FA or add a passkey there and sign in again; the same rule gates the admin panel.
 - **Platform admins** click it and get the update dialog: the running and available versions with the release notes, the checkout and updater state, a "Check now" button, and **Update and restart**. That button leads to a confirmation pane that spells out what the update does (pull, rebuild and restart, sending pauses and resumes, migrations apply, the tab reconnects) before anything runs.
 
 While the update runs the dialog shows a progress bar, the step list with the live step highlighted, and the log behind a toggle. When the backend goes away for the restart the dialog says it is reconnecting and keeps polling; the pill in the header turns into a spinner so the job stays visible with the dialog closed, and a reload picks it back up. When the new backend answers, the dialog shows the result and reloads the dashboard after a short countdown, or, if the dialog was closed, a toast reports the new version and every list refreshes.
@@ -50,6 +51,31 @@ Two signals, and either one lights the pill:
 A build that carries no version (an image built without the build arguments, reported as `dev`) cannot be compared with a release, and only the commit distance applies.
 
 The version comes from the binary itself: the Dockerfiles and `make up` stamp the tag, commit and build time in (`internal/version`), CI does the same for published images, and `warmblyctl status` prints it as the first line.
+
+## Before updating past this release
+
+Two boot-time requirements were added, and an instance that does not meet them
+will restart-loop after the pull rather than starting with a warning. Both are
+worth checking before you press the button.
+
+- **`AUTH_SECRET` must be at least 32 characters.** It signs every session
+  token, and a shorter key can be recovered offline from any token the instance
+  has issued. The realtime service applies the same floor to the same value
+  (`JWT_SECRET`). Generate one with `make gen-key`, or any 32-plus-character
+  random string, and set it in the install's `.env`. **Changing it signs
+  everybody out**, which is the intended effect and is a good moment to do it.
+- **Administrators need two-factor authentication.** Every admin route now
+  refuses a session that did not present a second factor. Enrol at least one
+  administrator under **Settings > Security** in the dashboard *before*
+  updating, or the admin panel is unreachable until someone does. The dashboard
+  itself is unaffected, so enrolling afterwards still works; it is just a worse
+  moment to discover it.
+
+Check the first one with:
+
+```bash
+awk -F= '/^AUTH_SECRET=/{print length($2)" characters"}' /opt/warmbly/.env
+```
 
 ## Update and restart
 
@@ -86,7 +112,7 @@ The updater mounts `/var/run/docker.sock`, which is root on the host. That is wh
 
 ### An install from install.sh
 
-Already done. The installer writes the updater into the generated compose file in image mode, pointed at the install directory, sharing `INTERNAL_API_TOKEN` with the backend. Nothing to configure.
+Already done. The installer writes the updater into the generated compose file in image mode, pointed at the install directory, with its own `UPDATER_TOKEN` that the backend also reads from `.env`. Nothing to configure.
 
 To update by hand instead, from the install directory:
 
@@ -153,7 +179,7 @@ Backend:
 | `RELEASES_GITHUB_REPO` | The `owner/repo` whose releases are Warmbly versions. Point a fork's instance at the fork | `warmbly/warmbly` |
 | `RELEASES_GITHUB_TOKEN` | Optional; only raises the GitHub API rate limit | unset |
 | `UPDATER_URL` | The updater. Unset, or `none`, leaves the panel report-only | `http://updater:8095` under compose |
-| `UPDATER_TOKEN` | Bearer token presented to the updater | `INTERNAL_API_TOKEN` |
+| `UPDATER_TOKEN` | Bearer token presented to the updater. Give it its own value; the one-command installer generates one | `INTERNAL_API_TOKEN` |
 
 Updater:
 

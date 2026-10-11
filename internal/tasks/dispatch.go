@@ -32,6 +32,9 @@ func (s *tasksService) HandleTask(task *proto.ProcessTask) *errx.Error {
 	if rec == nil {
 		return errx.ErrNotFound
 	}
+	if rec.Status != "pending" || rec.ScheduledAt != nil && rec.ScheduledAt.After(time.Now()) {
+		return nil
+	}
 
 	switch rec.TaskType {
 	case "campaign":
@@ -43,6 +46,8 @@ func (s *tasksService) HandleTask(task *proto.ProcessTask) *errx.Error {
 	// anywhere in the database.
 	case "email":
 		return s.HandleUserEmailTask(task)
+	case "placement":
+		return s.HandlePlacementTask(task)
 	default:
 		log.Warn().Str("task_id", taskID.String()).Str("task_type", rec.TaskType).Msg("task dispatch: unknown task type")
 		return errx.New(errx.BadRequest, "unknown task type")

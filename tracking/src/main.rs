@@ -1,4 +1,5 @@
 mod abuse;
+mod asndb;
 mod aws;
 mod config;
 mod events;
@@ -11,8 +12,10 @@ mod nats;
 mod observability;
 mod posthog;
 mod producer;
+mod redirects;
 mod scanners;
 mod unsubscribe;
+mod unsubscribe_i18n;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -30,11 +33,21 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
 use crate::handlers::{
-    health, track_click, track_open, track_page_hit, tracking_js, unsubscribe_page,
-    unsubscribe_submit, unsubscribe_undo, AppState,
+    health, not_found, redirect_first, track_click, track_open, track_page_hit, tracking_js,
+    unsubscribe_page, unsubscribe_submit, unsubscribe_undo, AppState,
 };
 use crate::observability::report_error;
 use crate::producer::Producer;
+
+/// No response here is ever content-sniffed. HSTS is left to the proxy: this
+/// service also answers on customers' own tracking and redirect domains.
+async fn nosniff(mut res: axum::response::Response) -> axum::response::Response {
+    res.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    res
+}
 
 /// Connects the event-bus producer, retrying transient failures.
 ///
@@ -116,7 +129,12 @@ async fn main() {
     // and the `kafka` feature is compiled in).
     let producer = connect_producer(&config).await;
 
-    let state = AppState::new(producer, &config);
+    // The scanner ASN database: a mounted file, or a download held in memory.
+    // Resolved here because it may go to the network, and never fatal: without
+    // it the catalogue's asn: entries match nothing and everything else works.
+    let asn_db = asndb::AsnDb::resolve(&config.scanner_asn_db, &config.scanner_asn_db_url).await;
+
+    let state = AppState::new(producer, &config, asn_db);
 
     // Build router
     let app = Router::new()
@@ -143,6 +161,13 @@ async fn main() {
             "/unsubscribe/:token/resubscribe",
             post(unsubscribe_undo).layer(DefaultBodyLimit::max(unsubscribe::MAX_BODY_BYTES)),
         )
+        .fallback(not_found)
+        // A sending domain pointed here for its redirect answers only with it.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            redirect_first,
+        ))
+        .layer(axum::middleware::map_response(nosniff))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

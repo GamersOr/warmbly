@@ -24,7 +24,7 @@ import {
     SlidersIcon,
     XIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import useCreateAPIKey from "@/lib/api/hooks/app/api-keys/useCreateAPIKey";
 import useAPIPermissions from "@/lib/api/hooks/app/api-keys/useAPIPermissions";
@@ -104,18 +104,24 @@ function ConfigureStep({
     const [expiresIn, setExpiresIn] = React.useState<"never" | "30" | "90" | "365">("never");
     const [allowedIPsRaw, setAllowedIPsRaw] = React.useState("");
     const [advanced, setAdvanced] = React.useState(false);
+    // A key never holds more than its creator could do, so only those permissions are offered.
+    const available = React.useMemo(() => {
+        const data = perms.data;
+        if (!data) return [];
+        return data.permissions.filter((p) => (data.grantable & p.value) === p.value);
+    }, [perms.data]);
 
     // Default the bitmask to whatever the read_only preset says, once perms load.
     React.useEffect(() => {
         if (perms.data && permissionsBitmask === 0 && preset !== "custom") {
-            setPermissionsBitmask(presetMask(preset, perms.data.presets));
+            setPermissionsBitmask(presetMask(preset, perms.data.presets) & perms.data.grantable);
         }
     }, [perms.data, preset, permissionsBitmask]);
 
     function switchPreset(p: Preset) {
         setPreset(p);
         if (p !== "custom" && perms.data) {
-            setPermissionsBitmask(presetMask(p, perms.data.presets));
+            setPermissionsBitmask(presetMask(p, perms.data.presets) & perms.data.grantable);
         }
     }
 
@@ -228,13 +234,13 @@ function ConfigureStep({
                                 Retry
                             </button>
                         </div>
-                    ) : (perms.data?.permissions?.length ?? 0) === 0 ? (
+                    ) : available.length === 0 ? (
                         <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-[11.5px] text-slate-500">
                             No permissions available for this account.
                         </div>
                     ) : (
                         <PermissionMatrix
-                            permissions={perms.data!.permissions}
+                            permissions={available}
                             bitmask={permissionsBitmask}
                             onToggle={togglePermission}
                         />
@@ -338,7 +344,7 @@ function RevealStep({ apiKey, onClose }: { apiKey: APIKeyWithSecret; onClose: ()
                     Copy the secret now. We hash it on the server and can never show it again.
                 </p>
 
-                <div className="rounded-md border border-slate-200 bg-slate-950 overflow-hidden">
+                <div className="rounded-md border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden">
                     <div className="px-3 py-2 flex items-center gap-2 border-b border-slate-800/60">
                         <KeyIcon className="w-3 h-3 text-slate-400" />
                         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-slate-400">
@@ -353,7 +359,7 @@ function RevealStep({ apiKey, onClose }: { apiKey: APIKeyWithSecret; onClose: ()
                             {copied ? "Copied" : "Copy"}
                         </button>
                     </div>
-                    <pre className="px-4 py-3 text-[12px] text-slate-100 font-mono whitespace-pre-wrap break-all">
+                    <pre className="px-4 py-3 text-[12px] text-slate-100 font-mono whitespace-pre-wrap break-all" data-ph-mask="">
                         {apiKey.secret}
                     </pre>
                 </div>

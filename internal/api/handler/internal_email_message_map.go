@@ -2,17 +2,70 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/api/middleware"
+	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
+func (h *Handler) InternalAdmitEmailArrival(c *gin.Context) {
+	var p struct {
+		Map     emailMessageMapPayload     `json:"map"`
+		Pending *repository.PendingArrival `json:"pending"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 4<<20)).Decode(&p); err != nil {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	repo, ok := h.EmailMessageMap.(repository.ArrivalAdmission)
+	if !ok {
+		logArrivalAdmissionFailure(c, p.Map, repository.ErrArrivalOutboxUnsupported)
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+	if err := repo.AdmitArrival(c.Request.Context(), repository.EmailMessageData(p.Map), p.Pending); err != nil {
+		logArrivalAdmissionFailure(c, p.Map, err)
+		if errors.Is(err, repository.ErrArrivalMailboxOwnershipLost) {
+			if mailbox, parseErr := uuid.Parse(p.Map.EmailID); parseErr == nil && mailbox != uuid.Nil {
+				c.Header("X-Warmbly-Arrival-Ownership-Lost", mailbox.String())
+			}
+		}
+		// Do not expose message content or org encryption failures over the protocol.
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+	c.Header("X-Warmbly-Arrival-Durable", "1")
+	c.Status(http.StatusNoContent)
+}
+
+func logArrivalAdmissionFailure(c *gin.Context, mapping emailMessageMapPayload, err error) {
+	stage, state := repository.ArrivalAdmissionDiagnostic(err)
+	event := log.Warn().Timestamp().Str("admission_stage", stage)
+	if state != "" {
+		event.Str("sqlstate", state)
+	}
+	for name, raw := range map[string]string{
+		"user_id": mapping.UserID, "email_id": mapping.EmailID, "arrival_id": mapping.ID,
+	} {
+		if id, err := uuid.Parse(raw); err == nil && id != uuid.Nil {
+			event.Str(name, id.String())
+		}
+	}
+	if requestID := middleware.RequestID(c); requestID != "" {
+		event.Str("request_id", requestID)
+	}
+	event.Msg("sync arrival admission deferred; durability not confirmed")
+}
+
 // Internal email-message-map endpoints. Workers call these instead of touching
 // Postgres directly (per CLAUDE.md), mirroring the DEK endpoints. Auth via
-// middleware.InternalAuthMiddleware (static bearer token in INTERNAL_API_TOKEN).
+// middleware.NodeBrokerAuthMiddleware (the node token).
 //
 //	PUT    /api/v1/internal/email-message-map  body {user_id,email_id,message_id,id,thread_id} -> 204
 //	GET    /api/v1/internal/email-message-map?user_id=&email_id=&message_id=
@@ -50,7 +103,7 @@ func (h *Handler) InternalPutEmailMessageMap(c *gin.Context) {
 		ThreadID:  p.ThreadID,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -63,7 +116,7 @@ func (h *Handler) InternalGetEmailMessageMap(c *gin.Context) {
 	}
 	data, err := h.EmailMessageMap.Get(c.Request.Context(), userID, emailID, messageID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 		return
 	}
 	if data == nil {
@@ -94,7 +147,7 @@ func (h *Handler) InternalDeleteEmailMessageMap(c *gin.Context) {
 		id = parsed
 	}
 	if err := h.EmailMessageMap.Del(c.Request.Context(), userID, emailID, messageID, id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 		return
 	}
 	c.Status(http.StatusNoContent)

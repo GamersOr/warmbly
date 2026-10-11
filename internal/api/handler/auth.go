@@ -19,7 +19,7 @@ func (h *Handler) LoginStart(c *gin.Context) {
 	var data auth.AuthData
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -39,7 +39,7 @@ func (h *Handler) LoginConfirm(c *gin.Context) {
 	var data auth.ConfirmData
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, err)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -59,7 +59,7 @@ func (h *Handler) RegistrationStart(c *gin.Context) {
 	var data auth.AuthData
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -79,7 +79,7 @@ func (h *Handler) RegistrationConfirm(c *gin.Context) {
 	var data auth.ConfirmData
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, err)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -101,7 +101,7 @@ func (h *Handler) RefreshToken(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -131,6 +131,12 @@ func (h *Handler) LogoutAll(c *gin.Context) {
 	if err := h.TokenService.RevokeAllSession(c.Request.Context(), accessToken); err != nil {
 		errx.Handle(c, err)
 		return
+	}
+	if uid, err := middleware.GetUserUUID(c); err == nil {
+		if ferr := h.AuthService.ForgetTrustedDevices(c.Request.Context(), uid); ferr != nil {
+			errx.Handle(c, ferr)
+			return
+		}
 	}
 
 	c.Status(http.StatusNoContent)
@@ -162,6 +168,12 @@ func (h *Handler) GetUser(c *gin.Context) {
 	// Scoped to the session's current organization, not the caller: labels
 	// are workspace assets, so a teammate must see what the owner created
 	// (issue #436). A session with no workspace selected gets empty lists.
+	// Admin routes require a second factor, so the panel has to be able to say
+	// so before it makes a call that 403s.
+	if sess := middleware.GetSession(c); sess != nil {
+		u.SessionMFAVerified = sess.MFAVerified
+	}
+
 	u.Folders, u.Tags, u.Categories = []models.Group{}, []models.Group{}, []models.Group{}
 	if orgID := middleware.GetOrganizationID(c); orgID != nil {
 		if folders, ferr := h.FolderService.List(ctx, *orgID); ferr == nil {
@@ -170,7 +182,19 @@ func (h *Handler) GetUser(c *gin.Context) {
 		if tags, terr := h.TagService.List(ctx, *orgID); terr == nil {
 			u.Tags = tags
 		}
-		if cats, cerr := h.CategoryService.List(ctx, *orgID); cerr == nil {
+		// Restricted members see only registries around their grants.
+		if m := middleware.GetAuthMember(c); m.IsRestricted() {
+			scope, xerr := h.OrganizationService.ResolveMemberScope(ctx, *orgID, m.UserID)
+			if xerr != nil {
+				errx.Handle(c, xerr)
+				return
+			}
+			u.Folders = keepGroups(u.Folders, scope.Folders)
+			u.Tags = keepGroups(u.Tags, scope.MailboxTags)
+			if cats, cerr := h.UniboxService.CategoriesForMailboxes(ctx, *orgID, scope.Mailboxes); cerr == nil {
+				u.Categories = cats
+			}
+		} else if cats, cerr := h.CategoryService.List(ctx, *orgID); cerr == nil {
 			u.Categories = cats
 		}
 	}
@@ -178,11 +202,25 @@ func (h *Handler) GetUser(c *gin.Context) {
 	c.JSON(http.StatusOK, u)
 }
 
+// keepGroups is the labels whose ids are in keep.
+func keepGroups(groups []models.Group, keep []uuid.UUID) []models.Group {
+	out := make([]models.Group, 0, len(keep))
+	for _, g := range groups {
+		for _, id := range keep {
+			if g.ID == id {
+				out = append(out, g)
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (h *Handler) ResetPasswordStart(c *gin.Context) {
 	var data auth.ResetPasswordStart
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -201,7 +239,7 @@ func (h *Handler) ResetPasswordConfirm(c *gin.Context) {
 	var data auth.ResetPasswordConfirm
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -216,7 +254,9 @@ func (h *Handler) ResetPasswordConfirm(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// ChangePassword updates the signed-in user's password (current + new).
+// ChangePassword updates the signed-in user's password (current + new). Every
+// session ends with it; the response carries the token pair of a new session
+// for this device, and the client must use it from here on.
 func (h *Handler) ChangePassword(c *gin.Context) {
 	uid, err := uuid.Parse(middleware.GetUserID(c))
 	if err != nil {
@@ -226,17 +266,22 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 
 	var data auth.ChangePassword
 	if berr := c.ShouldBindJSON(&data); berr != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(berr))
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), authRequestTimeout)
 	defer cancel()
 
-	if xerr := h.AuthService.ChangePassword(ctx, uid, currentSessionID(c), &data); xerr != nil {
+	tok, xerr := h.AuthService.ChangePassword(ctx, uid, middleware.GetSession(c), c.ClientIP(), c.Request.UserAgent(), &data)
+	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
 	}
+	if tok == nil {
+		c.Status(http.StatusOK)
+		return
+	}
 
-	c.Status(http.StatusOK)
+	c.JSON(http.StatusOK, tok)
 }

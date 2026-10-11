@@ -5,18 +5,23 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/api/middleware"
 	"github.com/warmbly/warmbly/internal/app/fleetnode"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/errs"
+	"github.com/warmbly/warmbly/internal/pkg/publicip"
 )
 
 // The fleet is pull-based. A node joins with the instance token, gets the
@@ -70,7 +75,7 @@ func (h *Handler) FleetJoin(c *gin.Context) {
 	}
 	var req fleetJoinRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -81,6 +86,8 @@ func (h *Handler) FleetJoin(c *gin.Context) {
 			// Distinct from a wrong token on purpose: this is a setup problem,
 			// and telling the operator so saves a long hunt.
 			errx.JSON(c, errx.New(errx.BadRequest, "this instance has no join token yet; issue one from Fleet settings or with `warmblyctl fleet join-token`"))
+		case fleetnode.ErrJoinTokenExpired:
+			errx.JSON(c, errx.New(errx.Unauthorized, "join token has expired; issue a fresh one"))
 		default:
 			errx.JSON(c, errx.New(errx.Unauthorized, "join token is not valid"))
 		}
@@ -103,9 +110,16 @@ func (h *Handler) FleetJoin(c *gin.Context) {
 		nodeID = parsed
 	}
 
-	address := strings.TrimSpace(req.Address)
-	if address == "" {
-		address = c.ClientIP()
+	address := heartbeatAddress(req.Address)
+	joinVersion := h.FleetNodes.JoinVersion(ctx, nodeID)
+	if joinVersion == "" {
+		errx.JSON(c, errx.New(errx.Internal, "cannot resolve a backend-compatible node image; configure WARMBLY_VERSION for unstamped builds"))
+		return
+	}
+
+	if h.NodeLogs == nil {
+		errx.JSON(c, errx.ErrServiceDown)
+		return
 	}
 
 	// Registering here rather than waiting for the first beat means the node
@@ -130,20 +144,26 @@ func (h *Handler) FleetJoin(c *gin.Context) {
 		return
 	}
 
+	logToken, logErr := h.NodeLogs.Enroll(ctx, nodeID)
+	if logErr != nil {
+		errx.JSON(c, errx.ErrServiceDown)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, fleetJoinResponse{
 		NodeID: nodeID,
 		Role:   string(role),
-		EnvB64: base64.StdEncoding.EncodeToString([]byte(renderNodeEnv(nodeID, role, req.Region))),
+		EnvB64: base64.StdEncoding.EncodeToString([]byte(renderNodeEnv(nodeID, role, req.Region) + "\nNODE_LOG_TOKEN=" + logToken + "\n")),
 		// Not reply.DesiredVersion: an empty answer is "no opinion" to a node
 		// that is already running something, but this one has nothing to run.
-		DesiredVersion:   h.FleetNodes.JoinVersion(ctx, nodeID),
+		DesiredVersion:   joinVersion,
 		HeartbeatSeconds: nodeHeartbeatSeconds(reply.LivenessSeconds),
 	})
 }
 
 // FleetHeartbeat records a beat and answers with the version the node should
-// be running. Authenticated with INTERNAL_API_TOKEN, the same shared secret
-// the node already needs to read encrypted keys.
+// be running. Authenticated with the node token (NODE_BROKER_TOKEN, falling
+// back to INTERNAL_API_TOKEN), the one the node reads encrypted keys with.
 func (h *Handler) FleetHeartbeat(c *gin.Context) {
 	if h.FleetNodes == nil {
 		c.Status(http.StatusNoContent)
@@ -154,6 +174,11 @@ func (h *Handler) FleetHeartbeat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "decode body"})
 		return
 	}
+	if middleware.IsNodeUpdateOnly(c) {
+		h.fleetUpdateOnlyHeartbeat(c, beat)
+		return
+	}
+	beat.Address = heartbeatAddress(beat.Address)
 	reply, err := h.FleetNodes.Heartbeat(c.Request.Context(), beat)
 	if err != nil {
 		switch {
@@ -162,7 +187,12 @@ func (h *Handler) FleetHeartbeat(c *gin.Context) {
 		case errors.Is(err, fleetnode.ErrRoleChanged):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			// The heartbeat is answered to a machine, not a person, and the
+			// caller authenticates with a node credential rather than an
+			// operator session. The detail goes to the log where an operator
+			// reads it; the node only needs to know to retry.
+			errs.CaptureException(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "heartbeat could not be recorded"})
 		}
 		return
 	}
@@ -180,6 +210,30 @@ func (h *Handler) FleetHeartbeat(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, reply)
+}
+
+// legacyTokenNodes remembers which nodes were already warned about, so the log says it once per process.
+var legacyTokenNodes sync.Map
+
+// fleetUpdateOnlyHeartbeat answers a node still on INTERNAL_API_TOKEN with its version only.
+func (h *Handler) fleetUpdateOnlyHeartbeat(c *gin.Context, beat models.NodeHeartbeat) {
+	reply, err := h.FleetNodes.UpdateOnly(c.Request.Context(), beat)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if _, seen := legacyTokenNodes.LoadOrStore(beat.NodeID, struct{}{}); !seen {
+		log.Printf("fleet: node %s heartbeats with INTERNAL_API_TOKEN; it is told its version (%q) but not recorded as live. A node that stays on this token after updating needs to join again to receive NODE_BROKER_TOKEN", beat.NodeID, reply.DesiredVersion)
+	}
+	c.JSON(http.StatusOK, reply)
+}
+
+// A backend may see a reverse proxy rather than the worker's mail egress address.
+func heartbeatAddress(reported string) string {
+	if normalized, ok := publicip.IPv4(reported); ok {
+		return normalized
+	}
+	return ""
 }
 
 // nodeHeartbeatSeconds derives the beat interval from the server's liveness
@@ -249,6 +303,27 @@ var nodeEnvKeys = []string{
 	"SENTRY_DSN",
 }
 
+// consumerEnvKeys reach a consumer and never a worker. A consumer runs the
+// integration actions, refreshes their OAuth tokens and drains the CRM outbox,
+// so it reads the integration client credentials (integration.NewOAuthManager),
+// APP_URL (the "Open in Warmbly" link written to the CRM) and the backend's
+// public URL (where it registers Pipedrive's webhooks).
+var consumerEnvKeys = []string{
+	"APP_URL",
+	"BACKEND_PUBLIC_URL",
+	"API_PUBLIC_URL",
+	"HUBSPOT_OAUTH_CLIENT_ID",
+	"HUBSPOT_OAUTH_CLIENT_SECRET",
+	"SLACK_OAUTH_CLIENT_ID",
+	"SLACK_OAUTH_CLIENT_SECRET",
+	"GOOGLE_SHEETS_OAUTH_CLIENT_ID",
+	"GOOGLE_SHEETS_OAUTH_CLIENT_SECRET",
+	"PIPEDRIVE_OAUTH_CLIENT_ID",
+	"PIPEDRIVE_OAUTH_CLIENT_SECRET",
+	"SALESFORCE_OAUTH_CLIENT_ID",
+	"SALESFORCE_OAUTH_CLIENT_SECRET",
+}
+
 // nodeProviders translates the control plane's own crypto and blob providers
 // into the ones a node should run.
 //
@@ -310,21 +385,25 @@ func renderNodeEnv(nodeID uuid.UUID, role models.NodeRole, region string) string
 	fmt.Fprintf(&b, "WARMBLY_BACKEND_URL=%s\n", backend)
 	fmt.Fprintf(&b, "ENCRYPTED_KEYS_PROVIDER=%s\n", keysProvider)
 	fmt.Fprintf(&b, "ENCRYPTED_KEYS_BACKEND_URL=%s\n", backend)
-	fmt.Fprintf(&b, "ENCRYPTED_KEYS_WORKER_TOKEN=%s\n", os.Getenv("INTERNAL_API_TOKEN"))
-	fmt.Fprintf(&b, "INTERNAL_API_TOKEN=%s\n", os.Getenv("INTERNAL_API_TOKEN"))
+	// A node calls only the node-only internal routes. With a separate
+	// NODE_BROKER_TOKEN it is sent that alone and never the edge services' token.
+	if v := os.Getenv("NODE_BROKER_TOKEN"); v != "" {
+		fmt.Fprintf(&b, "ENCRYPTED_KEYS_WORKER_TOKEN=%s\n", v)
+		fmt.Fprintf(&b, "NODE_BROKER_TOKEN=%s\n", v)
+	} else {
+		fmt.Fprintf(&b, "ENCRYPTED_KEYS_WORKER_TOKEN=%s\n", os.Getenv("INTERNAL_API_TOKEN"))
+		fmt.Fprintf(&b, "INTERNAL_API_TOKEN=%s\n", os.Getenv("INTERNAL_API_TOKEN"))
+	}
 
 	kmsProvider, blobProvider := nodeProviders()
 	fmt.Fprintf(&b, "KMS_PROVIDER=%s\n", kmsProvider)
 	fmt.Fprintf(&b, "BLOB_PROVIDER=%s\n", blobProvider)
 
-	// The credential for the two endpoints that open a key and sign a blob
-	// operation. Sent only when the instance issues a separate one; otherwise
-	// the node falls back to the internal token it already has.
-	if v := os.Getenv("NODE_BROKER_TOKEN"); v != "" {
-		fmt.Fprintf(&b, "NODE_BROKER_TOKEN=%s\n", v)
+	keys := nodeEnvKeys
+	if role == models.NodeRoleConsumer {
+		keys = append(append([]string{}, nodeEnvKeys...), consumerEnvKeys...)
 	}
-
-	for _, k := range nodeEnvKeys {
+	for _, k := range keys {
 		if v := os.Getenv(k); v != "" {
 			fmt.Fprintf(&b, "%s=%s\n", k, v)
 		}
@@ -362,15 +441,16 @@ func (h *Handler) AdminFleetIssueJoinToken(c *gin.Context) {
 		errx.JSON(c, errx.New(errx.NotImplemented, "fleet enrolment is not available on this instance"))
 		return
 	}
-	token, err := h.FleetNodes.IssueJoinToken(c.Request.Context())
+	token, expiresAt, err := h.FleetNodes.IssueJoinToken(c.Request.Context(), fleetnode.DefaultJoinTokenTTL)
 	if err != nil {
 		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 		return
 	}
-	h.audit(c, "fleet_join_token_issued", models.AuditEntityWorker, nil, nil)
+	h.audit(c, "fleet_join_token_issued", models.AuditEntityWorker, nil, map[string]string{"expires_at": expiresAt.Format(time.RFC3339)})
 	c.JSON(http.StatusOK, gin.H{
-		"token": token,
-		"note":  "Shown once. Issuing a new token revokes this one; nodes already enrolled are unaffected.",
+		"token":      token,
+		"expires_at": expiresAt,
+		"note":       "Shown once. It joins any number of machines until it expires; issuing a new token revokes this one. Nodes already enrolled are unaffected.",
 	})
 }
 
@@ -398,7 +478,7 @@ func (h *Handler) AdminSetWorkerTags(c *gin.Context) {
 	}
 	var body setTagsBody
 	if err := c.ShouldBindJSON(&body); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 	// Normalise: trim, lowercase, dedupe, drop empties. The DB constraint
@@ -417,7 +497,7 @@ func (h *Handler) AdminSetWorkerTags(c *gin.Context) {
 		tags = append(tags, t)
 	}
 	if err := h.WorkerRepo.SetWorkerTags(c.Request.Context(), id, tags); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, err.Error()))
+		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 		return
 	}
 	h.audit(c, models.AuditActionUpdate, models.AuditEntityWorker, &id, map[string]string{
@@ -451,7 +531,7 @@ func (h *Handler) AdminFleetReserveWorker(c *gin.Context) {
 	}
 	var body reserveWorkerBody
 	if err := c.ShouldBindJSON(&body); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 	orgID, err := uuid.Parse(body.OrganizationID)
@@ -512,6 +592,14 @@ func (h *Handler) AdminFleetDeleteNode(c *gin.Context) {
 		errx.JSON(c, errx.New(errx.NotImplemented, "fleet enrolment is not available on this instance"))
 		return
 	}
+	if h.NodeLogs == nil {
+		errx.JSON(c, errx.ErrServiceDown)
+		return
+	}
+	if err := h.NodeLogs.Revoke(c.Request.Context(), id); err != nil {
+		errx.JSON(c, errx.ErrServiceDown)
+		return
+	}
 	if err := h.FleetNodeRepo.Delete(c.Request.Context(), id); err != nil {
 		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 		return
@@ -545,12 +633,18 @@ func (h *Handler) AdminFleetPatchNode(c *gin.Context) {
 	}
 	var body patchNodeBody
 	if err := c.ShouldBindJSON(&body); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 
 	ctx := c.Request.Context()
 	changed := map[string]string{}
+	if body.PinnedVersion != nil && *body.PinnedVersion != "" && h.FleetNodes != nil {
+		if err := h.FleetNodes.CheckTarget(*body.PinnedVersion); err != nil {
+			errx.JSON(c, errx.New(errx.BadRequest, err.Error()))
+			return
+		}
+	}
 	if body.Name != nil {
 		if err := h.FleetNodeRepo.SetName(ctx, id, *body.Name); err != nil {
 			errx.JSON(c, errx.New(errx.Internal, err.Error()))
@@ -619,7 +713,7 @@ func (h *Handler) AdminFleetSetRelease(c *gin.Context) {
 	}
 	var body setReleaseBody
 	if err := c.ShouldBindJSON(&body); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -634,6 +728,12 @@ func (h *Handler) AdminFleetSetRelease(c *gin.Context) {
 	}
 
 	if body.Tag != "" {
+		if h.FleetNodes != nil {
+			if err := h.FleetNodes.CheckTarget(strings.TrimSpace(body.Tag)); err != nil {
+				errx.JSON(c, errx.New(errx.BadRequest, err.Error()))
+				return
+			}
+		}
 		state.Tag = strings.TrimSpace(body.Tag)
 		state.Channel = models.FleetChannelPinned
 		state.ResolvedAt = time.Now()

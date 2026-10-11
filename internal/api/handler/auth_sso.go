@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/warmbly/warmbly/internal/app/auth"
+	"github.com/warmbly/warmbly/internal/app/delegation"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -51,8 +54,14 @@ func (h *Handler) OIDCCallback(c *gin.Context) {
 	})
 }
 
-// GoogleCallback is where Google sends the browser back.
+// GoogleCallback is where Google sends the browser back. An administrator's
+// sign-in proving a Workspace domain shares this client and redirect, and is
+// handed to the dashboard window that opened it rather than signing anyone in.
 func (h *Handler) GoogleCallback(c *gin.Context) {
+	if strings.HasPrefix(c.Query("state"), delegation.GoogleStatePrefix) {
+		h.renderOAuthCallback(c, "google")
+		return
+	}
 	h.ssoCallback(c, auth.SSOCallback{
 		Provider: models.IdentityProviderGoogle,
 		Code:     c.Query("code"),
@@ -134,11 +143,33 @@ type ssoExchangeRequest struct {
 func (h *Handler) SSOExchange(c *gin.Context) {
 	var req ssoExchangeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
 	result, err := h.AuthService.SSOExchange(c.Request.Context(), req.Code, req.Binding)
+	if err != nil {
+		errx.Handle(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// SSOLink takes the password for a federated sign-in that resolved to an
+// existing password account, attaches the identity and issues the session.
+// Public like /2fa/verify: the pending token is the proof of the completed
+// provider flow, and the password budget is enforced in the service.
+func (h *Handler) SSOLink(c *gin.Context) {
+	var data auth.SSOLinkData
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), authRequestTimeout)
+	defer cancel()
+
+	result, err := h.AuthService.SSOLinkConfirm(ctx, &data, c.ClientIP(), c.Request.UserAgent())
 	if err != nil {
 		errx.Handle(c, err)
 		return

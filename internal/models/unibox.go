@@ -1,6 +1,8 @@
 package models
 
 import (
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,6 +12,11 @@ type EmailMessage struct { // used for sending to the user
 	ID      uuid.UUID `json:"id"`       // Gmail
 	GmailID string    `json:"gmail_id"` // Gmail
 	UID     uint32    `json:"uid"`      // IMAP
+
+	// EmailID is the connected mailbox the message belongs to.
+	EmailID uuid.UUID `json:"email_id"`
+	// Folder is the canonical folder (Folder* consts) the message sits in.
+	Folder string `json:"folder"`
 
 	ParentID string `json:"parent_id"`
 	ThreadID string `json:"thread_id"`
@@ -42,6 +49,25 @@ type EmailMessage struct { // used for sending to the user
 	// BodyPlain holds only the preview snippet. Clients show a notice instead
 	// of presenting a partial message as the whole thing.
 	BodyTruncated bool `json:"body_truncated"`
+}
+
+// ForwardedMessage is a stored message as a forward carries it: the envelope
+// and the body as synced, before any rendering.
+type ForwardedMessage struct {
+	// EmailID is the mailbox the message belongs to.
+	EmailID uuid.UUID
+	// ThreadID is the Unibox conversation the message is in, where the forward
+	// is filed once sent.
+	ThreadID string
+	From     []string
+	To       []string
+	CC       []string
+	Subject  string
+	Date     time.Time
+	// BodyHTML is the stored HTML, unsanitized; empty when the message has none.
+	BodyHTML string
+	// BodyPlain is the preview snippet when the full body is not stored.
+	BodyPlain string
 }
 
 type EmailMessageData struct { // used when for kafka when an email arrives
@@ -92,50 +118,68 @@ type EmailMessageData struct { // used when for kafka when an email arrives
 }
 
 type EmailMessageStoreData struct {
-	ID      uuid.UUID `json:"id"`
-	EmailID uuid.UUID `json:"email_id"`
+	ID      uuid.UUID `json:"id" avro:"id"`
+	EmailID uuid.UUID `json:"email_id" avro:"email_id"`
 	// Mailbox is the source folder's UIDVALIDITY at sync time, which is the
 	// generation UID belongs to. It is not the folder's identity: see
 	// FolderPath.
-	Mailbox uint32 `json:"mailbox"`
+	Mailbox uint32 `json:"mailbox" avro:"mailbox"`
 	// FolderPath is the source folder's name, the identity IMAP actually
 	// guarantees. Empty on events from workers predating the field and on
 	// providers with no folders (Gmail).
-	FolderPath string `json:"folder_path,omitempty"`
+	FolderPath string `json:"folder_path,omitempty" avro:"folder_path"`
 	// Folder is the canonical folder (see the Folder* constants) the message
 	// was in at sync time. Empty on events from workers predating the field;
 	// the consumer normalizes before storing.
-	Folder string `json:"folder,omitempty"`
+	Folder string `json:"folder,omitempty" avro:"folder"`
 	// ProviderFolder is where the PROVIDER last reported the message, which
 	// Folder stops tracking once the user files the message in Warmbly. The
 	// two are compared to tell a real provider move from a flag scan that
 	// keeps naming the folder the provider still has it in.
-	ProviderFolder string    `json:"provider_folder,omitempty"`
-	ThreadID       string    `json:"thread_id"`
-	MessageID      string    `json:"message_id"`
-	GmailID        string    `json:"gmail_id"`
-	ParentID       string    `json:"parent_id"`
-	UID            uint32    `json:"uid"`
-	ModSeq         uint64    `json:"mod_seq"`
-	Flags          []string  `json:"flags"`
-	BCC            []string  `json:"bcc"`
-	CC             []string  `json:"cc"`
-	FromAddr       []string  `json:"from_addr"`
-	InReplyTo      []string  `json:"in_reply_to"`
-	ReplyTo        []string  `json:"reply_to"`
-	ToAddr         []string  `json:"to_addr"`
-	Subject        string    `json:"subject"`
-	Size           int64     `json:"size"`
-	InternalDate   time.Time `json:"internal_date"`
-	SentDate       time.Time `json:"sent_date"`
-	Snippet        string    `json:"snippet"`
-	Seen           bool      `json:"seen"`
+	ProviderFolder string    `json:"provider_folder,omitempty" avro:"provider_folder"`
+	ThreadID       string    `json:"thread_id" avro:"thread_id"`
+	MessageID      string    `json:"message_id" avro:"message_id"`
+	GmailID        string    `json:"gmail_id" avro:"gmail_id"`
+	ParentID       string    `json:"parent_id" avro:"parent_id"`
+	UID            uint32    `json:"uid" avro:"uid"`
+	ModSeq         uint64    `json:"mod_seq" avro:"mod_seq"`
+	Flags          []string  `json:"flags" avro:"flags"`
+	BCC            []string  `json:"bcc" avro:"bcc"`
+	CC             []string  `json:"cc" avro:"cc"`
+	FromAddr       []string  `json:"from_addr" avro:"from_addr"`
+	InReplyTo      []string  `json:"in_reply_to" avro:"in_reply_to"`
+	ReplyTo        []string  `json:"reply_to" avro:"reply_to"`
+	ToAddr         []string  `json:"to_addr" avro:"to_addr"`
+	Subject        string    `json:"subject" avro:"subject"`
+	Size           int64     `json:"size" avro:"size"`
+	InternalDate   time.Time `json:"internal_date" avro:"internal_date"`
+	SentDate       time.Time `json:"sent_date" avro:"sent_date"`
+	Snippet        string    `json:"snippet" avro:"snippet"`
+	Seen           bool      `json:"seen" avro:"seen"`
 	// BodyText is a bounded plain-text rendering of the message, carried on the
 	// new-email event so the consumer can make the message findable by what it
 	// says. The full body goes to object storage, never here.
-	BodyText  string    `json:"body_text,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
-	CreatedAt time.Time `json:"created_at"`
+	BodyText  string    `json:"body_text,omitempty" avro:"body_text"`
+	UpdatedAt time.Time `json:"updated_at" avro:"updated_at"`
+	CreatedAt time.Time `json:"created_at" avro:"created_at"`
+}
+
+// ValidText makes every text field storable: Postgres refuses invalid UTF-8
+// and NUL, and an unlabelled 8-bit header or body carries both.
+func (e *EmailMessageStoreData) ValidText() {
+	for _, s := range []*string{&e.FolderPath, &e.Folder, &e.ProviderFolder, &e.ThreadID, &e.MessageID,
+		&e.GmailID, &e.ParentID, &e.Subject, &e.Snippet, &e.BodyText} {
+		*s = validText(*s)
+	}
+	for _, list := range [][]string{e.Flags, e.BCC, e.CC, e.FromAddr, e.InReplyTo, e.ReplyTo, e.ToAddr} {
+		for i := range list {
+			list[i] = validText(list[i])
+		}
+	}
+}
+
+func validText(s string) string {
+	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
 }
 
 type EmailMessageStoreDataPreview struct {
@@ -166,6 +210,11 @@ type EmailMessageStoreDataPreview struct {
 	// id/title/color so the row renders chips without a second lookup).
 	// Always non-nil so it marshals to [] not null.
 	Labels []MiniCategory `json:"labels"`
+
+	// AnswersMailboxID is the workspace mailbox that sent the email this
+	// message replies to, when that is not the mailbox holding it: a reply
+	// that landed in a shared reply inbox. Thread reads only.
+	AnswersMailboxID *uuid.UUID `json:"answers_mailbox_id,omitempty"`
 }
 
 // MessageGrounding is one message rendered for an AI prompt: the stored body
@@ -260,14 +309,43 @@ func NormalizeFolder(folder string, flags []string) string {
 		}
 	}
 	for _, f := range flags {
-		switch f {
-		case "SPAM", "\\Junk", "\\Spam", "Junk":
+		if IsSpamFlag(f) {
 			return FolderSpam
-		case "\\Draft":
+		}
+		if f == "\\Draft" {
 			return FolderDrafts
 		}
 	}
 	return FolderInbox
+}
+
+// IsSpamFlag reports whether a provider flag or label marks a message as spam:
+// Gmail's SPAM label, the Junk flag Graph and IMAP set, and the IMAP keywords.
+// The one list every spam check reads, so they cannot disagree.
+func IsSpamFlag(f string) bool {
+	switch f {
+	case "SPAM", "\\Junk", "\\Spam", "Junk":
+		return true
+	}
+	return false
+}
+
+// HasSpamFlag reports whether any flag marks the message as spam.
+func HasSpamFlag(flags []string) bool {
+	return slices.ContainsFunc(flags, IsSpamFlag)
+}
+
+func outboundOnlyFolder(folder string) bool {
+	return folder == FolderSent || folder == FolderDrafts
+}
+
+// MayBeInbound reports whether neither folder placement proves the message outbound.
+func (e *EmailMessageStoreData) MayBeInbound() bool {
+	if e == nil {
+		return false
+	}
+	return !outboundOnlyFolder(NormalizeFolder(e.Folder, e.Flags)) &&
+		!outboundOnlyFolder(e.ProviderFolder)
 }
 
 type MailSearchResult struct {
@@ -312,16 +390,28 @@ type MailSearchParams struct {
 	// Uncategorized, when true, narrows to threads carrying no
 	// conversation labels at all. nil = no filter.
 	Uncategorized *bool
+	// Automated narrows to conversations no person wrote in (true) or leaves
+	// them out (false). nil = both.
+	Automated *bool
 	// Folder narrows to one canonical folder (inbox/sent/drafts/archive/
-	// spam/trash). nil = every folder except spam and trash, so junk never
-	// bleeds into the combined view.
-	Folder   *string
-	PageSize int
-	Cursor   string
+	// spam/trash). nil = every working folder, so junk and filed mail never
+	// bleed into the combined view.
+	Folder *string
+	// IncludeArchived puts archived conversations back into an unscoped
+	// result. Filing is how a conversation leaves the working views, so it
+	// has to leave all of them; only "All mail" and reference reads (compose
+	// history) ask for it. Ignored when Folder names one.
+	IncludeArchived *bool
+	PageSize        int
+	Cursor          string
 }
 
 type MarkSeen struct {
 	EmailIDs []uuid.UUID `json:"email_ids"`
+	// ThreadIDs marks whole conversations, so a caller holding a list row
+	// does not have to fetch the thread to learn its message ids. Each entry
+	// is a thread id, or a message id for mail that never got one.
+	ThreadIDs []string `json:"thread_ids,omitempty"`
 	// Folder, when set, marks every unread message in that folder for the
 	// whole workspace instead of the explicit id list.
 	Folder string `json:"folder,omitempty"`
@@ -329,11 +419,16 @@ type MarkSeen struct {
 }
 
 // MoveFolder re-files messages into one canonical folder (Archive = archive,
-// Delete = trash, Move to inbox = inbox). Store-side only: the provider copy
-// is not moved, so the message stays where it is in the user's mail client.
+// Delete = trash, Move to inbox = inbox). The store changes first; the move
+// is then relayed to each mailbox that has relay_folder_moves on.
 type MoveFolder struct {
 	EmailIDs []uuid.UUID `json:"email_ids"`
-	Folder   string      `json:"folder"`
+	// ThreadIDs files whole conversations. A row in the list knows its thread
+	// but not the ids inside it, and filing half a conversation leaves it in
+	// the view it was filed out of. Each entry is a thread id, or a message id
+	// for mail that never got one.
+	ThreadIDs []string `json:"thread_ids,omitempty"`
+	Folder    string   `json:"folder"`
 }
 
 // UniboxSnooze hides a thread from the user's inbox until SnoozedUntil
@@ -399,12 +494,16 @@ type UniboxOverview struct {
 	Week          int64 `json:"week"`
 	Snoozed       int64 `json:"snoozed"`
 	AwaitingReply int64 `json:"awaiting_reply"`
+	// Automated counts conversations no person wrote in. They are left out of
+	// Unread, Today, Week, the Inbox folder and the mailbox and tag counts.
+	Automated       int64 `json:"automated"`
+	AutomatedUnread int64 `json:"automated_unread"`
 	// AwaitingAgentDraft is the count of threads with a pending inbox-agent draft
 	// waiting for human review (M10).
 	AwaitingAgentDraft int64 `json:"awaiting_agent_draft"`
 	ScheduledPending   int64 `json:"scheduled_pending"`
 	// ScheduledPendingMax is the hard cap on pending scheduled email
-	// tasks per user. The dashboard shows current/max so the user
+	// tasks per workspace. The dashboard shows current/max so the user
 	// sees how close they are to the limit before hitting it.
 	ScheduledPendingMax int64                    `json:"scheduled_pending_max"`
 	Folders             []UniboxFolderOverview   `json:"folders"`
@@ -447,4 +546,133 @@ type UniboxScheduledItem struct {
 
 	// Thread the reply will land in (when the user queued from unibox).
 	ThreadID *string `json:"thread_id,omitempty"`
+}
+
+// MessageSeenAction relays a read/unread change from the unibox to the
+// mailbox's provider, for one mailbox and up to SeenRelayChunk messages.
+//
+// The unibox used to be the only place that knew: a thread read here stayed
+// bold in Gmail and one archived here stayed in the inbox, which reads as a
+// broken client rather than a design decision. Only the explicit change
+// travels; nothing reconciles the two stores in the background, because the
+// provider's own state is what the next sync brings back anyway.
+type MessageSeenAction struct {
+	// EmailID is the mailbox, which is how the worker finds the live client.
+	EmailID uuid.UUID `json:"email_id" avro:"email_id"`
+	// Seen is the state to apply to every message in the batch.
+	Seen     bool             `json:"seen" avro:"seen"`
+	Messages []MessageSeenRef `json:"messages" avro:"messages"`
+}
+
+// MessageSeenRef names one message in whichever way its provider needs.
+// Every field is optional because the three providers use different halves:
+// Gmail and Graph a message id, IMAP a folder and a UID.
+type MessageSeenRef struct {
+	// ProviderID is the Gmail message id or the Graph message id. The column
+	// behind it is provider-agnostic despite its name.
+	ProviderID string `json:"provider_id,omitempty" avro:"provider_id"`
+	UID        uint32 `json:"uid,omitempty" avro:"uid"`
+	// Folder is the IMAP folder holding UID. UIDs are only unique within one.
+	Folder string `json:"folder,omitempty" avro:"folder"`
+	// RFCMessageID is the immutable Message-ID. Graph ids change when a
+	// message moves, so the worker re-resolves from this when it is present.
+	RFCMessageID string `json:"rfc_message_id,omitempty" avro:"rfc_message_id"`
+}
+
+// SeenRelayChunk bounds one MESSAGE_SEEN event. Gmail accepts 1000 ids per
+// batchModify; this leaves room under it and keeps one "mark all as read" on
+// a large folder from becoming a single enormous event on the bus.
+const SeenRelayChunk = 500
+
+// SeenRelayTarget is one message resolved for the relay: which mailbox it
+// belongs to, which worker holds that mailbox, and how its provider names it.
+type SeenRelayTarget struct {
+	EmailID  uuid.UUID
+	WorkerID uuid.UUID
+	// Seen is the state the row holds now, read back rather than taken from
+	// the request that caused the relay. Two people toggling the same
+	// conversation in opposite directions at once would otherwise be able to
+	// leave the provider holding the earlier answer.
+	Seen bool
+	Ref  MessageSeenRef
+}
+
+// MessageFolderAction relays a unibox filing to one mailbox's provider. The
+// worker answers each message it moved with a Relayed UPDATE_FOLDER.
+type MessageFolderAction struct {
+	EmailID uuid.UUID `json:"email_id" avro:"email_id"`
+	// Folder is the canonical destination: inbox, archive or trash.
+	Folder   string             `json:"folder" avro:"folder"`
+	Messages []MessageFolderRef `json:"messages" avro:"messages"`
+}
+
+// MessageFolderRef names one message to move, in every provider's terms.
+type MessageFolderRef struct {
+	// ID is the unibox row, named in the worker's answer.
+	ID           uuid.UUID `json:"id" avro:"id"`
+	ProviderID   string    `json:"provider_id,omitempty" avro:"provider_id"`
+	UID          uint32    `json:"uid,omitempty" avro:"uid"`
+	FolderPath   string    `json:"folder_path,omitempty" avro:"folder_path"`
+	RFCMessageID string    `json:"rfc_message_id,omitempty" avro:"rfc_message_id"`
+	// ThreadID re-keys a Graph message in the map under the id its move gives it.
+	ThreadID string `json:"thread_id,omitempty" avro:"thread_id"`
+	// ProviderFolder is where the provider last reported the message.
+	ProviderFolder string `json:"provider_folder,omitempty" avro:"provider_folder"`
+}
+
+// FiledMessage is one row a filing matched, and whether it left another
+// folder to get there.
+type FiledMessage struct {
+	ID    uuid.UUID
+	Moved bool
+}
+
+// FolderRelayChunk bounds one MESSAGE_FOLDER event, under Gmail's 1000 ids
+// per batchModify.
+const FolderRelayChunk = 500
+
+// FolderRelayTarget is one message resolved for the folder relay.
+type FolderRelayTarget struct {
+	EmailID  uuid.UUID
+	WorkerID uuid.UUID
+	Provider string
+	// Folder is the canonical folder the row holds now, read back rather than
+	// taken from the request, like SeenRelayTarget.Seen.
+	Folder string
+	Ref    MessageFolderRef
+}
+
+// RelaysFolderMove reports whether a filing has to happen at the provider. A
+// row the filing moved goes even when provider_folder agrees, since an Undo
+// can beat the previous filing's answer. Sent copies stay in Sent on IMAP and
+// Outlook; Gmail files whole conversations, and archiving a sent copy is a
+// no-op there. Drafts never move.
+func RelaysFolderMove(provider, providerFolder, folder string, moved bool) bool {
+	if !FilableFolder(folder) || (providerFolder == folder && !moved) {
+		return false
+	}
+	switch providerFolder {
+	case FolderDrafts:
+		return false
+	case FolderSent:
+		return provider == string(InboxProviderGoogle) && folder != FolderArchive
+	}
+	return true
+}
+
+// FlagSeen is the RFC 3501 read-state flag. Every provider is mapped onto it
+// before it reaches the platform: IMAP reports it directly, the Gmail sync
+// adds it when the UNREAD label is absent, and the Graph sync adds it for
+// isRead.
+const FlagSeen = `\Seen`
+
+// FlagFlagged is the star: Gmail STARRED, IMAP \Flagged.
+const FlagFlagged = `\Flagged`
+
+// SeenFromFlags reads a message's read state out of its flags. The stored
+// `seen` column has to follow the provider: mail the customer already read in
+// their own client is read in Warmbly, and a copy the worker files in Sent
+// (appended \Seen, since the sender wrote it) must never arrive as unread.
+func SeenFromFlags(flags []string) bool {
+	return slices.Contains(flags, FlagSeen)
 }

@@ -14,11 +14,13 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/crypt"
 	"github.com/warmbly/warmbly/internal/repository"
+	buildversion "github.com/warmbly/warmbly/internal/version"
 )
 
 var (
@@ -27,7 +29,11 @@ var (
 	// setup problem, not an attack.
 	ErrNoJoinToken = errors.New("no join token has been issued for this instance")
 	ErrBadToken    = errors.New("join token is not valid")
-	ErrBadRole     = errors.New("unknown node role")
+	// ErrJoinTokenExpired is the right token past its expiry.
+	ErrJoinTokenExpired = errors.New("join token has expired")
+	// ErrJoinTokenTTL is a requested lifetime above MaxJoinTokenTTL.
+	ErrJoinTokenTTL = errors.New("a join token can be valid for at most 30 days")
+	ErrBadRole      = errors.New("unknown node role")
 	// ErrRoleChanged is a node claiming an id that is already registered under
 	// the other role. Silently accepting it would leave a worker's mailboxes
 	// assigned to a machine that has stopped doing worker work.
@@ -79,33 +85,56 @@ func imageVariant() string {
 // version stays empty: "no opinion" must never become a bare "-kafka", which
 // the node would dutifully try to pull.
 func (s *Service) withVariant(version string) string {
-	if version == "" || s.variant == "" || strings.HasSuffix(version, s.variant) {
-		return version
+	if version == "" || s.CheckTarget(version) != nil {
+		return ""
 	}
-	return version + s.variant
+	return buildversion.FleetImageTag(strings.TrimSuffix(version, s.variant)) + s.variant
 }
 
-// IssueJoinToken mints a new instance join token, stores only its hash, and
-// returns the plaintext. The caller must show it once: it cannot be recovered.
+func (s *Service) CheckTarget(target string) error {
+	if s.variant != "" {
+		target = strings.TrimSuffix(target, s.variant)
+	}
+	return buildversion.CheckFleetTarget(buildversion.String(), target)
+}
+
+const (
+	// DefaultJoinTokenTTL is how long a join token works when none is asked for.
+	DefaultJoinTokenTTL = 7 * 24 * time.Hour
+	// MaxJoinTokenTTL bounds how long any join token may work.
+	MaxJoinTokenTTL = 30 * 24 * time.Hour
+)
+
+// IssueJoinToken mints a new instance join token, stores only its hash and
+// expiry, and returns the plaintext. The caller must show it once: it cannot
+// be recovered.
 //
-// Issuing replaces any previous token, which is also how you revoke one.
-// Existing nodes are unaffected — they are already enrolled, and the token
-// only gates joining.
-func (s *Service) IssueJoinToken(ctx context.Context) (string, error) {
+// The token joins any number of machines until it expires. Issuing replaces
+// any previous token, which is also how you revoke one. Existing nodes are
+// unaffected: they are already enrolled, and the token only gates joining.
+func (s *Service) IssueJoinToken(ctx context.Context, ttl time.Duration) (string, time.Time, error) {
+	if ttl <= 0 {
+		ttl = DefaultJoinTokenTTL
+	}
+	if ttl > MaxJoinTokenTTL {
+		return "", time.Time{}, ErrJoinTokenTTL
+	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
-	if err := s.settings.SetJoinTokenHash(ctx, crypt.SHA256(token)); err != nil {
-		return "", err
+	expiresAt := time.Now().Add(ttl).UTC().Truncate(time.Second)
+	if err := s.settings.SetJoinToken(ctx, crypt.SHA256(token), expiresAt); err != nil {
+		return "", time.Time{}, err
 	}
-	return token, nil
+	return token, expiresAt, nil
 }
 
-// VerifyJoinToken checks a presented token in constant time.
+// VerifyJoinToken checks a presented token in constant time, then its expiry.
+// A token stored without an expiry is refused as expired.
 func (s *Service) VerifyJoinToken(ctx context.Context, token string) error {
-	want, err := s.settings.GetJoinTokenHash(ctx)
+	want, expiresAt, err := s.settings.GetJoinToken(ctx)
 	if err != nil {
 		return err
 	}
@@ -115,6 +144,9 @@ func (s *Service) VerifyJoinToken(ctx context.Context, token string) error {
 	got := crypt.SHA256(strings.TrimSpace(token))
 	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 		return ErrBadToken
+	}
+	if expiresAt == nil || !time.Now().Before(*expiresAt) {
+		return ErrJoinTokenExpired
 	}
 	return nil
 }
@@ -165,6 +197,27 @@ func (s *Service) Heartbeat(ctx context.Context, beat models.NodeHeartbeat) (*mo
 	return reply, nil
 }
 
+// UpdateOnly answers a beat from a node still on INTERNAL_API_TOKEN with its
+// version and records nothing: the node is not marked live and nothing it
+// reports is stored. Only an enrolled node is told a version.
+func (s *Service) UpdateOnly(ctx context.Context, beat models.NodeHeartbeat) (*models.NodeHeartbeatReply, error) {
+	if !beat.Role.Valid() {
+		return nil, ErrBadRole
+	}
+	if beat.NodeID == uuid.Nil {
+		return nil, errors.New("node_id required")
+	}
+	reply := &models.NodeHeartbeatReply{LivenessSeconds: int(models.NodeLivenessWindow.Seconds())}
+	if beat.Stopping {
+		return reply, nil
+	}
+	if node, err := s.nodes.Get(ctx, beat.NodeID); err != nil || node == nil || node.Role != beat.Role {
+		return reply, nil
+	}
+	reply.DesiredVersion = s.desiredVersion(ctx, beat.NodeID)
+	return reply, nil
+}
+
 // desiredVersion resolves what this node should run: its own pin if it has
 // one, otherwise the fleet-wide resolved release.
 //
@@ -182,24 +235,12 @@ func (s *Service) desiredVersion(ctx context.Context, nodeID uuid.UUID) string {
 	return s.withVariant(state.DesiredVersion())
 }
 
-// DefaultJoinTag is what a machine joining an instance with no resolved
-// release is told to run. It has to be a tag this project actually publishes:
-// `latest` is not one, and a node sent there fails on the image pull before it
-// ever heartbeats. The floating release tag is `prod`.
-const DefaultJoinTag = "prod"
-
-// JoinVersion is what a machine joining right now should start on.
-//
-// It differs from the heartbeat's answer in exactly one way. To a node that is
-// already running something, an unresolved release means "no opinion" and must
-// stay empty, because the alternative is a control-plane hiccup rolling the
-// fleet. A joining node has nothing to keep running, so it has to be told a
-// tag, and the fallback is the published floating one.
+// JoinVersion falls back to the backend's exact release, never a floating tag.
 func (s *Service) JoinVersion(ctx context.Context, nodeID uuid.UUID) string {
 	if v := s.desiredVersion(ctx, nodeID); v != "" {
 		return v
 	}
-	return s.withVariant(DefaultJoinTag)
+	return s.withVariant(buildversion.FleetImageTag(buildversion.String()))
 }
 
 // List returns the fleet, with each node's resolved target attached so a

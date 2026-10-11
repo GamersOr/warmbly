@@ -3,7 +3,7 @@
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { AlertTriangleIcon, Loader2Icon, PauseIcon, PlayIcon } from "lucide-react";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
@@ -17,6 +17,7 @@ import {
 import { useConfirm } from "@/hooks/context/confirm";
 import { TableSurface, Toggle } from "../_components/SectionShell";
 import { providerLabel, providerSupported } from "./providers";
+import { cloudWarmupPaused } from "@/lib/cloudWarmup";
 
 export default function MailboxTable() {
     const rows = useCloudLinkMailboxes();
@@ -82,7 +83,7 @@ export default function MailboxTable() {
                         {list.map((row) => {
                             const supported = providerSupported(row.provider) || row.managed;
                             const cloud = row.cloud;
-                            const paused = !!cloud?.warmup?.paused;
+                            const paused = cloudWarmupPaused(cloud);
                             return (
                                 <motion.tr key={row.id} layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="bg-white">
                                     <td className="px-3 py-2.5">

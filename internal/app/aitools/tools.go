@@ -85,6 +85,11 @@ type Deps struct {
 	// ground an answer in what the Advisor has already diagnosed rather than
 	// re-deriving it from raw stats. Optional.
 	Advisor AdvisorReader
+	// WarmupScheduler seeds a mailbox's warmup chain after a tool turns it on. Optional.
+	WarmupScheduler func(ctx context.Context, accountID uuid.UUID) error
+	// Slack backs the Slack settings tools, added by RegisterSlackTools once
+	// the Slack app is built.
+	Slack SlackControl
 	// AppBaseURL is the dashboard origin used to build deep links in draft
 	// artifacts (e.g. https://app.warmbly.com). Empty falls back to a relative
 	// path.
@@ -136,6 +141,7 @@ func BuildRegistry(d Deps) *Registry {
 	d.registerWebhookTools(r)
 	d.registerWebTools(r)
 	d.registerSkillTools(r)
+	d.registerIntegrationTools(r)
 	// Advisor tools are registered separately, after the advisor service is
 	// constructed against this registry (see aitools.RegisterAdvisorTools).
 	return r

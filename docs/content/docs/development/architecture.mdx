@@ -46,7 +46,7 @@ flowchart LR
 
 ## Data flow
 
-The frontend talks to the backend over REST + JWT, and to the realtime service over WebSocket. Backend writes business state to Postgres. Backend, tracking, and workers publish to the event bus: NATS JetStream with JSON encoding by default, Kafka with Avro and Schema Registry as an opt-in build. The consumer reads the bus and updates Postgres (analytics, suppression, deliverability). Workers subscribe to a topic named for their worker UUID (`w.<uuid>`) and publish results to `jobs.worker-events`; see the [event system](/development/events/) for the full topic map.
+The frontend talks to the backend over REST + JWT, and to the realtime service over WebSocket. Backend writes business state to Postgres. Backend, tracking, and workers publish to the event bus: NATS JetStream with JSON encoding by default, Kafka with Avro and Schema Registry as an opt-in build. The consumer reads the bus and updates Postgres (analytics, suppression, deliverability). Workers subscribe to a topic named for their worker UUID (`w.<uuid>`) and publish results to `jobs.worker-events`; see the [event system](/development/events/) for the full topic map. The one exception is the credential check run before a mailbox is saved: someone is waiting on it, and a worker reads its topic one command at a time, so the backend offers it on the worker's Redis channel `email_validation_request:<uuid>` instead and gets the answer back on Redis. A worker that is not subscribed there (an older build) still gets the check over its topic.
 
 Realtime fanout is a separate channel: backend and consumer publish JSON events over Redis pub/sub (or Google Cloud Pub/Sub when `PUBSUB_ENABLED=true`); the Elixir realtime service subscribes and pushes to connected WebSocket clients.
 
@@ -89,7 +89,7 @@ The fleet is pull-based. A node joins by running one command with the instance j
 
 The heartbeat reply carries exactly one instruction: `desired_version`. The node writes it to a file and a systemd timer pulls and restarts, so the process being replaced is never the process doing the replacing. An empty `desired_version` means "no opinion", never "downgrade to nothing".
 
-The machine needs no inbound port, no SSH key and no cloud account. There is no restart, logs, reboot or uninstall action in the dashboard, because nothing reaches into a machine. The operator surface is `warmblyctl fleet` (join-token, list, show, remove, pin, version, channel) and the admin panel's Fleet section.
+The machine needs no inbound port, no SSH key and no cloud account. A worker does need outbound access to mail servers on `465`, `587` and `993` (and `143` where a mailbox uses STARTTLS IMAP). Many cloud providers block outbound `25` and `465` on new servers until asked; a worker that learns its `465` is blocked reports it on every heartbeat, and it shows on the worker's page in the admin panel (the **Has node error** filter finds it). There is no restart, logs, reboot or uninstall action in the dashboard, because nothing reaches into a machine. The operator surface is `warmblyctl fleet` (join-token, list, show, remove, pin, version, channel) and the admin panel's Fleet section.
 
 ### Why per-VPS instead of a Kubernetes DaemonSet
 
@@ -99,7 +99,7 @@ A k8s `DaemonSet` was the previous shape. It was removed because k8s nodes typic
 
 A node's id is assigned at enrolment and persisted on the machine, so re-running the join command re-joins under the same identity and the node keeps its history and its mailboxes.
 
-A machine with several public addresses can instead run one node per address: with `WORKER_BIND_IP` set and no `WORKER_ID`, the worker derives `UUIDv5(URL_namespace, public_ipv4)`. Same IP, same worker, with no state at the control plane needed to recover it, which is what lets each address be its own stable sending identity.
+A machine with several public addresses can instead run one node per address: with `WORKER_BIND_IP` set and no `WORKER_ID`, the worker derives `UUIDv5(URL_namespace, public_ipv4)`. Same IP, same worker, with no state at the control plane needed to recover it, which lets each address remain a stable provider-facing login identity.
 
 ## Worker placement
 
@@ -126,19 +126,29 @@ Placement scores every live worker and takes the best (`internal/app/worker/plac
 | Node youth | A worker that enrolled minutes ago has proved nothing, so it is probed gently rather than handed every placement for being empty |
 | Foreign tenants | Only for organizations entitled to isolated egress |
 
-Capacity is one number for every worker, in cold-mailbox equivalents, because each mailbox already declares its own cost: an `smtp_imap` mailbox weighs `1.0`, a Gmail or Outlook API mailbox `0.05`, and a warmup-only assignment `0.4`. The mailbox being placed counts against the target too, so the same nearly-full worker can be under target for a Gmail mailbox and over it for an `smtp_imap` one.
+Capacity is a per-worker assigned-mailbox planning target because a small shared VM and a dedicated host do not have the same headroom. It defaults to a conservative `100` and can be set per machine with `WARMBLY_WORKER_CAPACITY`. Every assigned mailbox counts as one. The value guides placement; it is not a tested maximum or a mailbox-provider sending quota. Provider limits remain attached to the mailbox, tenant, or API project.
 
-**Capacity is a target, not a ceiling.** Nothing refuses a placement for being over it. Going over costs more than any bonus a candidate can earn, so stickiness alone can never keep a mailbox on an over-target worker; it does not outweigh the penalty terms, so a worker with room but crowded with foreign tenants can still lose. Once no worker has room, the least-overloaded one wins with region, blast radius and provider crowding all applied. This is deliberate: the target is a flat `16` for every worker regardless of the machine, so refusing on it refuses on a guess, and refusing exactly when the fleet is full is when good placement matters most.
+The admin fleet view separates this target from measured CPU and RAM. A worker with 400 mailboxes at its planning target is not necessarily using all its machine resources. Linux nodes report CPU averaged between heartbeats, RAM used against a finite container limit when available (otherwise host RAM excluding reclaimable cache), and the Warmbly process's resident memory. CPU is normalized to available cores and labeled `container` when constrained by a CPU quota or CPU set, otherwise `host`. The scopes may differ when only one resource is constrained. Go runtime reserved memory is a separate allocation figure, not resident or host memory. CPU needs two samples; missing OS telemetry is unavailable, not zero. Stopped or unreachable nodes show stale resource readings. These snapshots arrive on heartbeats, not on every dashboard refresh.
+
+Mailbox share is each worker's fraction of all assigned mailboxes in the fleet. Send share is its fraction of provider send attempts in the rolling last 60 minutes. Send success means successful provider handoffs divided by attempts, not inbox placement or final delivery. No attempts means there is no success rate to calculate. Additional columns and CSV exports expose these metrics alongside bounces, complaints, authentication errors and the last heartbeat.
+
+Nodes report their public IPv4 independently of the backend proxy. A public `WORKER_PUBLIC_IP` takes precedence for workers; otherwise the agent discovers IPv4 egress over HTTPS using `api.ipify.org`, bound to the worker's local outbound address when one is configured, and refreshes it every ten minutes. The backend uses only the node-reported public address, never its observed client IP, so a reverse proxy cannot replace the worker identity. If discovery has never succeeded, the address is unavailable. A later discovery failure retains the last successful result for the running process. After a restart, the address stays unavailable until discovery succeeds again, rather than trusting an old backend-observed address. Private and reserved addresses are not public identity. If mail and HTTPS use different NAT gateways or routes, set `WORKER_PUBLIC_IP` explicitly to the mail egress IPv4; HTTPS discovery cannot verify the SMTP route.
+
+**Capacity is a target, not a ceiling.** Nothing refuses a placement for being over it. Going over costs more than any bonus a candidate can earn, so stickiness alone cannot keep a mailbox on an over-target worker. Once no worker has room, the least-overloaded one wins with region, blast radius and provider crowding all applied. A new worker keeps its full displayed target while node youth slows how quickly it fills. Recipient bounces and complaints remain mailbox and campaign signals; they do not shrink machine capacity or quarantine a worker.
 
 ### Moving a mailbox
 
-Rotation (`internal/app/worker/rotation.go`) is deliberately reluctant, and a fleet where nothing moves is a healthy one. Only mailboxes whose worker is dead, degraded, over capacity, or on the wrong side of an isolated-egress reservation are considered at all:
+Rotation (`internal/app/worker/rotation.go`) is deliberately reluctant. Mailbox outcomes never mark a machine unhealthy. The loop responds to liveness, workload, isolated-egress drift, and measurable provider or workspace concentration:
 
 | Urgency | Trigger | Residency floor | Destination bar |
 |---|---|---|---|
-| Immediate | Worker inactive, not heartbeating, blocked or quarantined | none | anything eligible |
-| Elevated | Worker throttled | 6 hours | anything eligible |
-| Opportunistic | Worker over 85% utilization, or isolated-egress drift | 72 hours | must score materially better |
+| Immediate | Worker inactive, not heartbeating, or externally marked blocked or quarantined | none | anything eligible |
+| Elevated | Worker externally marked throttled, or mailbox is on another workspace's reserved worker | 6 hours | anything eligible |
+| Opportunistic | Worker over 85% utilization, isolated-egress drift, or placement concentration | 72 hours | must score materially better |
+
+The externally managed health labels describe machine or operator state. Mailbox delivery outcomes do not set them.
+
+A worker that stops answering is a separate path (`internal/app/consumer/dead_worker.go`), and it waits before acting. The heartbeat key lives three minutes, which a version rollout can outlast while the container is replaced, so a missing key alone is not death: the worker also has to have been absent from the registry for `MailboxEvacuationGrace` (10 minutes) before its mailboxes are moved. Both signals are required, because during a cache outage every heartbeat key disappears at once while the registry stays current, and moving a mailbox is a real cost rather than a neutral rebalance: it changes the address the mailbox's provider sees and can earn a sign-in challenge.
 
 ### Isolated egress
 
@@ -165,7 +175,9 @@ An empty `desired_version` means "no opinion" and must never be read as "downgra
 
 The backend is deliberately excluded from this. It is what tells everyone else their version, and a self-update that goes wrong leaves nothing to recover with.
 
-Trigger model is push-driven, not poll-driven: a one-shot check on backend boot, a GitHub webhook (`POST /webhooks/github/releases`, HMAC-validated) on every release event, and an admin "Check now" button as a manual fallback. All configuration is env-driven (`RELEASES_GITHUB_REPO`, `RELEASES_WORKER_IMAGE_REPO`, `RELEASES_WEBHOOK_SECRET`, `RELEASES_ENABLED`) so self-hosters can point at their own fork and registry.
+On an instance that encodes the bus with Avro, the fleet also waits for the backend. A booting backend registers every schema its release publishes, and the fleet only moves to a release once the backend runs it and the Schema Registry has accepted those schemas. A refusal holds the fleet on the release it has and shows in the Fleet section, instead of reaching a worker that would then fail every event it reports.
+
+The release check runs once when the backend boots, and only with `RELEASES_ENABLED=true`: it is off by default, so a self-hosted fleet is never rolled onto a vendor image. An operator moves the fleet by hand from the admin panel's Fleet section or with `warmblyctl fleet version` and `warmblyctl fleet channel`, which set the channel or pin a tag directly. Configuration is env-driven (`RELEASES_ENABLED`, `RELEASES_GITHUB_REPO`, `RELEASES_WORKER_IMAGE_REPO`, `RELEASES_GITHUB_TOKEN`) so self-hosters can point at their own fork and registry.
 
 See `internal/app/releases/service.go`.
 
@@ -181,7 +193,7 @@ Cold-email throughput is mailbox-first, not worker-first. A worker's safe outbou
 
 Pool model: warmup traffic is segregated into `free` and `premium` pools (the `warmup_pools` tables in `internal/infrastructure/db/migrations/000001_baseline.up.sql`). Pool membership is a property of the mailbox, independent of which worker happens to be sending for it.
 
-Warmup content generation is an offline control-plane workload. The autonomous controller runs every six hours, derives a shared-bank target from seven-day send demand, maintains a 200-thread floor, scales up to 5,000 threads, and submits at most 250 replacements per batch within a 1,000-thread daily cap. It deliberately does not split generation by customer mailbox tags, which would create unbounded queues and smaller, more repetitive content cohorts. Scheduled top-ups use `gpt-5-mini` through durable provider batch jobs rather than synchronous model calls, with a database uniqueness guard that prevents duplicate in-flight scheduled batches when several backend replicas are running. Content with at least 20 sampled sends is automatically archived when it has at least 3 spam placements and a placement rate of 15% or more. The send path atomically selects and increments a least-used active conversation through an indexed query, then falls back to the static reviewed library if no generated content is available. Model availability therefore never gates a warmup send.
+Warmup content generation is an offline control-plane workload. The autonomous controller runs every six hours, derives a shared-bank target from seven-day send demand, maintains a 200-thread floor, scales up to 5,000 threads, and submits at most 250 replacements per batch within a 1,000-thread daily cap. It deliberately does not split generation by customer mailbox tags, which would create unbounded queues and smaller, more repetitive content cohorts. Scheduled top-ups use `gpt-6-luna` through durable provider batch jobs rather than synchronous model calls, with a database uniqueness guard that prevents duplicate in-flight scheduled batches when several backend replicas are running. Content with at least 20 sampled sends is automatically archived when it has at least 3 spam placements and a placement rate of 15% or more. The send path atomically selects and increments a least-used active conversation through an indexed query, then falls back to the static reviewed library if no generated content is available. Model availability therefore never gates a warmup send.
 
 ## Anti-abuse layers
 

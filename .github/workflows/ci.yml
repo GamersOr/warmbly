@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
 
 # Default token only gets `contents: read` on PRs from forks; the
 # dorny/paths-filter action needs to list PR files via the GitHub
@@ -32,10 +34,12 @@ jobs:
       admin: ${{ steps.filter.outputs.admin }}
       site: ${{ steps.filter.outputs.site }}
       forms: ${{ steps.filter.outputs.forms }}
+      qa: ${{ steps.filter.outputs.qa }}
       make: ${{ steps.filter.outputs.make }}
       ios: ${{ steps.filter.outputs.ios }}
       installer: ${{ steps.filter.outputs.installer }}
       cli-installer: ${{ steps.filter.outputs.cli-installer }}
+      pages: ${{ steps.filter.outputs.pages }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -43,6 +47,7 @@ jobs:
         with:
           filters: |
             go-services:
+              - '.github/workflows/ci.yml'
               - 'go.mod'
               - 'go.sum'
               - 'internal/**'
@@ -78,6 +83,8 @@ jobs:
               - 'web/src/components/app/forms/designCore.ts'
               - 'web/src/components/app/forms/form-theme.css'
               - 'scripts/check-forms-mirror.sh'
+            qa:
+              - 'qa/**'
             make:
               - 'integrations/make/**'
             ios:
@@ -92,6 +99,30 @@ jobs:
               - 'site/public/cli.ps1'
               - 'scripts/check-cli-installer.sh'
               - 'scripts/build-cli.sh'
+            pages:
+              - '.github/scripts/pages-*'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+              - 'web/docker-entrypoint.sh'
+              - 'admin/docker-entrypoint.sh'
+              - 'web/package.json'
+              - 'admin/package.json'
+              - 'site/package.json'
+              - 'docs/package.json'
+              - 'docs/next.config.mjs'
+
+  pages-ci:
+    name: Pages release configuration
+    needs: changes
+    if: needs.changes.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check production configuration import
+        run: node --test .github/scripts/pages-*.test.mjs
 
   migrations-ci:
     name: Migrations
@@ -112,6 +143,29 @@ jobs:
     needs: changes
     if: needs.changes.outputs.go-services == 'true'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: warmbly
+          POSTGRES_PASSWORD: warmbly
+          POSTGRES_DB: warmbly_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U warmbly -d warmbly_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -146,8 +200,158 @@ jobs:
         run: |
           go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
+      - name: Campaign send admission regressions (PostgreSQL)
+        env:
+          PRIMARY_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go run ./cmd/migrate
+          go test -race ./internal/app/behavior ./internal/repository ./internal/tasks -run 'TestDefaultPlan|TestLiveMailboxPlan|TestLiveCampaignAdmission|TestLiveSharedAdmission|TestLiveDeferredTicksDoNotSpendTheDailyBudget|TestLiveCampaignAtDailyCapWaitsForTomorrow' -count=1
+
+      - name: Shared mailbox pool pacing and send claim regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository ./internal/scheduler ./internal/tasks -run '^TestLive(MailboxSendClaim(AdmitsOnePerGap|WaitsOutAReservedSend)|BookedSendsLeaveOutCampaignWakeups|ParkedCampaignDoesNotThrottleItsPoolMate|BookedSendsStillSpaceTheCampaign|ClaimedMailboxIsPassedOver|CampaignsSharingAMailboxSendOncePerGap|LostMailboxClaimReschedulesWithoutSending)$' -count=1
+
+      - name: Invited signup atomic provisioning regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: go test -race ./internal/repository -run '^TestLiveInvitedSignup$' -count=1
+
+      - name: Scheduled-job retirement regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository -run '^TestLiveJobRun' -count=1
+          go test -race -p 1 ./internal/infrastructure/db -run '^TestLiveScheduledJobRetirementUpgradePreservesExecutionHistory$' -count=1
+
+      - name: Warmup dispatch, upgrade and admin-send regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race ./internal/repository -run '^TestLive(Monitoring|LastWarmupSendFailure|PersistentMailboxLoadingFailure|DispatchRetry|LineageQueueRevisions|AdminPlatformOverview|WarmupRecoversOldPreparation|WarmupPreparationRecoveryRetains|WarmupFilingRequiresAcknowledgement|WarmupFilingAuthority|WarmupTimeWindow|WarmupInvalidWindow)' -count=1
+          go test -race ./internal/tasks -run '^Test(LiveWarmup(SafetyHoldReschedules|Recovery|TaskDoesNotApplyResults|DispatchDefersInvalidHours)|WarmupSenderDistinguishes)' -count=1
+          go test -race ./internal/app/consumer -run '^TestLiveStoredSendResult' -count=1
+
+      - name: Monitoring database observation regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          set -euo pipefail
+          go test -race -v ./internal/repository -run '^TestLiveMonitoringDatabaseClock' -count=1 | tee monitoring-clock.log
+          if grep -q -- '--- SKIP:' monitoring-clock.log; then
+            echo "Monitoring database observation regressions must execute without skips"
+            exit 1
+          fi
+          for test in TestLiveMonitoringDatabaseClockAfterRequestStart \
+            TestLiveMonitoringDatabaseClockWarningSemantics \
+            TestLiveMonitoringDatabaseClockPredicateBoundaries \
+            TestLiveMonitoringDatabaseClockSingleSnapshot; do
+            grep -q "^--- PASS: $test " monitoring-clock.log
+          done
+
+      - name: Warmup charge and authoritative result regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race -v -p 1 ./internal/repository ./internal/app/consumer ./internal/tasks ./internal/app/orgtransfer -run '^TestLive(Warmup(ReservationPreservesOriginalChargeDay|RefundCASProtectsConcurrentAndRestampedTasks|RefundAndResultRollbackTogether|ReplyRefundUsesChargedShapeAfterParentDeletion|ChargeAndRefundUseUTCInNonUTCSession|ChargeProofRollsBackWhenCounterWriteFails|CancellationPathsRefundOnlyProvenCharge|GenericCompletionDoesNotProveChargedAccounting|SendFailureGivesTheDayBack|SendGiveBackIsIdempotent|SafetyHoldReschedulesInsteadOfBlockingTheDispatcher|Recovery(RetiresExistingUnstartedDispatchOnce|HandlesPartialReservations|PreservesExecutionAndReceiptEvidence|KeepsOtherUnknownAndRestrictiveHolds|AndBeginCannotBothWin))|AppliedWarmupFailureRepairsOnlyRefundedChargeDeadLetters|GiveBackDailySend(ReversesADispatchedWarmupSend|LeavesOtherDaysAlone)|AccountDailyUsage(CountsWarmupTasksNotTheStatisticsRow|ScopesWarmupToTypeAndDay)|ImportWarmupStatisticsCannotGrantChargeRefundAuthority|Legacy(FailedStatusCannotProveNonExecution|JSONAndAvroFailurePersistConservativeAdmission)|AuthoritativeDeadLetterResultsReconcileWithoutReplay|DeadLetterResultEffectsAndSettlementRollBackTogether|Campaign(DeadLetterWorkerResultReleasesReservationOnce|ForeignKeyCleanupDoesNotProveWakeupOnly)|UserEmailDeadLetterUsesUnderlyingSendTaskType|UnknownSendOperatorResolutionReconcilesAndAudits|RecordedWorkerOutcomeSurvivesLostEvent|UnreservedLegacyFailedTaskRetainsUnknownHold|UnknownResolutionRejectsMissingEvidenceAndLiveExecution|SendRecoveryResolutionRequiresEvidenceAndRetainsUnknown|UnstartedDispatchRetainsDeferredOutcomeConflict)$' -count=1
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveWarmupChargeUpgradeKeepsLegacyUnverifiedAndPreservesEvidence$' -count=1
+
+      - name: Warmup filing provider-floor regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race -v -p 1 ./internal/repository -run '^TestLiveWarmupFiling(ClaimProviderFloor|DeferralIsScopedCommittedAndMonotonic|DeferralRefusesStaleAndForeignWork|ProviderFloorSurvivesReassignment|ProviderFloorDoesNotShortenClaimLease|DeferralDatabaseErrorIsNotProof|DeferralLostHTTPResponseRetriesIdempotently)$' -count=1
+          go test -race -v -p 1 ./internal/repository -run '^TestLiveWarmupFilingAdmission(DeniesMissingOwnedRow|KeepsUntrackedLegacyAction)$' -count=1
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveWarmupFilingProviderFloorUpgradePreservesLegacyLeasesAndRollback$' -count=1
+
+      - name: Authoritative send-conflict and historical-origin regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveSendRecoveryConflict(CLIStartup|UpgradePreservesHistoricalEvidence|Production284UpgradePreservesHistoricalEvidence|HistoricalOnlyDownRefuses|EmptyDownUp)$' -count=1
+          go test -race -v -p 1 ./internal/repository ./internal/app/orgtransfer -run '^TestLive(DefinitiveConflictDirectionsDuplicatesAndRestrictiveHolds|PriorDefinitiveConflictWithoutOperatorResolution|AuthenticationRepairRetainsUnresolvedOutcomeConflict|ConcurrentAuthenticationRepairRetainsNewOutcomeConflict|UnstartedDispatchRetainsDeferredOutcomeConflict|HistoricalConfirmationRequiresFreshOrIndependentAuthority|ExpandedConflictSchemaRequiresUpgradedReadersAndWriters|OrdinarySendResultsNeedNoRecoveryConfirmation|ImportSendRecoveryHistoryCannotReconcileUnknownOutcome|ArchiveSendRecoveryLocalOriginResets|ImportedHistoryDoesNotRepeatAuthoritativeWorkerResult)$' -count=1
+          go test -race -v -p 1 ./internal/app/consumer -run '^TestLiveDelayedPreparationDuplicateMustNotCreateDefinitiveConflict$' -count=1
+
+          go test -race -v -p 1 ./internal/app/consumer -run '^TestLiveAdvancedBounceReconciliationRollbackAndReplayWithOneConnection$' -count=1
+
+      - name: Typed mailbox history, archive checkpoint and real-driver upgrade regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveMailTransport(CLIStartup|UpgradePreservesHistoryAndRollback)$' -count=1 | tee mailbox-transport-upgrade.log
+          grep -q '^--- PASS: TestLiveMailTransportCLIStartup ' mailbox-transport-upgrade.log
+          grep -q '^--- PASS: TestLiveMailTransportUpgradePreservesHistoryAndRollback ' mailbox-transport-upgrade.log
+          if grep -q -- '--- SKIP:' mailbox-transport-upgrade.log; then exit 1; fi
+          go test -race -v -p 1 ./internal/repository ./internal/app/orgtransfer ./internal/app/consumer ./internal/app/email -run '^TestLive(MailTransport.*|ImportMailTransport.*|WorkerMailboxLoadReadsOneGenerationWithSingleConnection)$' -count=1 | tee mailbox-transport-runtime.log
+          for test in TestLiveMailTransportNativeDomainExcludesHistory TestLiveMailTransportImportSerializesWithConfirmedResult TestLiveImportMailTransportCheckpointCountsAndUnchangedRows TestLiveMailTransportConfirmedSendReconcilesOnlySend TestLiveMailTransportUnreadableSyncStateCannotAcquireRecovery TestLiveImportMailTransportLateAndSpanningSuccess TestLiveImportMailTransportCredentialOnlyWritesRotateFence TestLiveImportMailTransportExportOmitsGeneration TestLiveImportMailTransportWholeArchiveOmitsGeneration TestLiveMailTransportSnapshotKeepsConfigurationAndGenerationTogether TestLiveWorkerMailboxLoadReadsOneGenerationWithSingleConnection TestLiveMailTransportOperatorConfirmationDoesNotRecover; do
+            grep -q "^--- PASS: $test " mailbox-transport-runtime.log
+          done
+          if grep -q -- '--- SKIP:' mailbox-transport-runtime.log; then exit 1; fi
+          grep -q '^--- PASS: TestLiveImportMailTransportWholeArchiveSendResultLockOrder ' mailbox-transport-runtime.log
+          for logfile in mailbox-transport-upgrade.log mailbox-transport-runtime.log; do
+            test "$(grep -c '^=== RUN' "$logfile")" -gt 0
+            printf '%s RUN=%s PASS=%s SKIP=0\n' "$logfile" "$(grep -c '^=== RUN' "$logfile")" "$(grep -c -- '--- PASS:' "$logfile")"
+          done
+          go test -race -v -p 1 ./internal/app/worker/wmail ./internal/app/worker/mailmanager ./internal/app/consumer -run '^Test(MailTransportGeneration.*|SyncState.*)$' -count=1 | tee mailbox-transport-worker.log
+          grep -q '^--- PASS: TestMailTransportGenerationRequiresFreshCompletedSyncPass ' mailbox-transport-worker.log
+          grep -q '^--- PASS: TestMailTransportGenerationReplacesUnchangedCredentialsAndDrains ' mailbox-transport-worker.log
+          if grep -q -- '--- SKIP:' mailbox-transport-worker.log; then exit 1; fi
+
+      - name: Typed mailbox JSON and native Avro registry compatibility
+        env:
+          SR_URL: http://127.0.0.1:18181
+        run: |
+          set -o pipefail
+          docker run -d --name mailbox-transport-registry -p 18181:8081 redpandadata/redpanda:v24.3.13 redpanda start --mode dev-container --smp 1 --memory 512M --reserve-memory 0M --node-id 0 --check=false
+          trap 'docker rm -f mailbox-transport-registry' EXIT
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl -fsS "$SR_URL/subjects" >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          go test -tags kafka -race -v -p 1 ./internal/infrastructure/codec -run '^TestMailTransportCodec.*Compatibility$' -count=1 | tee mailbox-transport-codec.log
+          grep -q '^--- PASS: TestMailTransportCodecJSONCompatibility ' mailbox-transport-codec.log
+          grep -q '^--- PASS: TestMailTransportCodecRegistryCompatibility ' mailbox-transport-codec.log
+          for testcase in add send sync error; do
+            grep -q -- "--- PASS: TestMailTransportCodecRegistryCompatibility/$testcase " mailbox-transport-codec.log
+          done
+          if grep -q -- '--- SKIP:' mailbox-transport-codec.log; then exit 1; fi
+          printf 'codec RUN=%s PASS=%s SKIP=0\n' "$(grep -c '^=== RUN' mailbox-transport-codec.log)" "$(grep -c -- '--- PASS:' mailbox-transport-codec.log)"
+
+      - name: Mailbox sync admission, replay, truthful state and upgrade regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository ./internal/app/consumer ./internal/app/orgtransfer ./internal/infrastructure/db -run '^TestLive(SyncArrival|SyncTruth|EmailErrorDedupe)' -count=1
+
+      - name: Payload-free arrival delivery diagnostics regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: go test -race -v -p 1 ./internal/observability/arrivaldiag ./internal/repository ./internal/app/consumer -run '^Test(ArrivalDiagnostics|LiveArrivalDiagnostics)' -count=1
+
+      - name: Restricted member summary, inbox and notification regressions (PostgreSQL)
+        env:
+          WARMBLY_TEST_DB: postgres://warmbly:warmbly@127.0.0.1:5432/warmbly_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository -run '^TestLive(OrganizationScopedCounts|UniboxVisibility|EmailCursorVisibility|NotificationAudience)' -count=1
+
+      - name: Notification digest authorization retries (Redis)
+        env:
+          WARMBLY_TEST_REDIS: redis://127.0.0.1:6379/15
+        run: go test -race ./internal/app/notification -run '^TestLivePushDigestAudienceRetries$' -count=1
+
+      - name: Test the Kafka codec, failed-handler replay and client lifecycle
+        run: go test -race -tags kafka ./internal/infrastructure/codec/ ./internal/infrastructure/kafka/ ./internal/infrastructure/eventbus/
+
+      # fail_ci_if_error does not cover the uploader crashing before it runs
+      # (a TLS handshake failure to Codecov failed jobs whose tests passed).
       - name: Upload coverage
         uses: codecov/codecov-action@v4
+        continue-on-error: true
         with:
           files: coverage.out
           flags: go
@@ -168,6 +372,9 @@ jobs:
         with:
           working-directory: web
 
+      - name: Pages route and asset separation
+        run: node scripts/check-pages-routing.mjs
+
       - name: Lint
         run: pnpm lint
 
@@ -179,6 +386,29 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  # The proof harness records against a live local stack, so CI only checks that it compiles and its flows load.
+  qa-ci:
+    name: QA harness CI
+    needs: changes
+    if: needs.changes.outputs.qa == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: qa
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          working-directory: qa
+          node-version: "24"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Flows load
+        run: pnpm exec playwright test --list
 
   admin-ci:
     name: Admin CI
@@ -222,6 +452,9 @@ jobs:
         with:
           working-directory: site
           node-version: "22"
+
+      - name: Exception filtering regressions
+        run: pnpm test
 
       - name: Build
         # Astro project; build catches type errors, broken imports,
@@ -324,9 +557,18 @@ jobs:
       # needs no librdkafka / libcurl / libsasl system headers. Those are only
       # required for the optional `--features kafka` build.
 
+      # Pinned to whatever the image builds with, not to `stable`. A dependency
+      # that raises its rust-version above the builder's is invisible to a
+      # `stable` job and surfaces only when the release tries to build the
+      # image, which is the worst place to find out.
+      - name: Read the builder's Rust version
+        id: rust-version
+        run: echo "version=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
           components: rustfmt, clippy
 
       - name: Cache Cargo
@@ -475,7 +717,7 @@ jobs:
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
-    needs: [changes, migrations-ci, go-ci, web-ci, admin-ci, site-ci, forms-ci, installer-ci, cli-installer-ci, make-ci, rust-ci, elixir-ci, ios-ci, frontend-images]
+    needs: [changes, migrations-ci, go-ci, web-ci, qa-ci, admin-ci, site-ci, forms-ci, installer-ci, cli-installer-ci, make-ci, rust-ci, elixir-ci, ios-ci, frontend-images, pages-ci]
     if: always()
     steps:
       - name: Check CI status

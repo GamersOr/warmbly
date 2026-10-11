@@ -94,7 +94,11 @@ Older builds returned the invite-only refusal with the text "This server is not 
 
 That default is deliberate. Emailing a code on every sign-in makes the mail relay a single point of failure for all authentication, and it is not a second factor: NIST SP 800-63B states that email is not to be used for out-of-band authentication, and OWASP ASVS says the same. Codes stay in use for what email is appropriate for, which is verifying an address at signup and recovering an account.
 
-Set `new_device` to require one only from a device that has not signed in before, or `always` for the hosted behavior. If the transport does not deliver, `always` is demoted to `new_device` at boot, because otherwise nobody could complete a login at all.
+Set `new_device` to require one only from a device the user has not asked to remember, or `always` to require one on every sign-in. If the transport does not deliver, `always` is demoted to `new_device` at boot, because otherwise nobody could complete a login at all.
+
+### Remembered devices
+
+Under `new_device` the code step offers **Remember this device for 30 days**. Ticking it returns a random 256-bit token that the browser keeps. The server stores only its SHA-256, bound to that account, and the next password sign-in that sends it skips the emailed code. Nothing else changes for that sign-in: the password, the captcha and two-factor authentication still apply, and a sign-in the risk assessment flags (a new country, impossible travel) gets the code anyway. The 30 days are counted from when the box was ticked and are not extended by later sign-ins. Every remembered device is forgotten when the password is reset or changed, and when the user signs out everywhere or signs out their other sessions. `always` ignores remembered devices.
 
 ### Excusing one account
 
@@ -109,7 +113,41 @@ warmblyctl user login-code-exempt --email reviewer@example.com \\
 
 A reason is required, and so is `--by`: this command talks to Postgres directly and has no signed-in operator, so the account accountable for the exemption is named explicitly. The admin panel records the acting admin and asks for nothing. The database refuses a blank reason either way. The exemption removes the emailed code and nothing else: the password, the captcha and the sign-in risk assessment all still apply, and a transport that cannot deliver still short-circuits ahead of it. A failed lookup is not read as an exemption.
 
-The admin panel has the same thing under **Testers**: create one, see the password once, and revoke an exemption when the reason no longer holds. The account survives a revoke, so anything it did stays attributable; it simply stops bypassing the code.
+The admin panel has the same thing under **Testers**: create one, see the password once, and revoke an exemption when the reason no longer holds. The password a tester is created with works for a period you choose, 1 to 90 days (30 by default), and stops working on that date; the list shows when. Revoking a tester ends the exemption, clears that password and signs out every session the account holds. The account itself survives a revoke, so anything it did stays attributable, and so does any workspace membership it was given: remove the member from the workspace, or ban the account, to end its access entirely. An account exempted with `warmblyctl` has no handed-out password, so revoking it from the panel ends the exemption and its sessions and leaves its own password alone.
+
+#### Which workspace a tester lands in
+
+A tester either gets a workspace of its own or joins one that already exists, and the choice is on the create form. Accounts created through **Testers** arrive with onboarding complete, regardless of that choice. Exempting an existing account with the CLI does not complete its onboarding or change its workspace plan.
+
+Its own is the default and the safer one. The reviewer connects their own mailbox and exercises the app without reaching anything of yours, which is usually all an OAuth verification needs to see. The workspace is categorized as **Test** in the admin organization list and gets a private managed Test plan: paid-product features, including mailbox OAuth, campaigns, warmup, Unibox and AI, with 100 test credits. The dashboard header reads **Test**, not a customer plan name, and the credit gauge labels its allowance **Test credits**. Its allowance includes 10,000 contacts, 100 campaigns (20 active), 10 team members and a workspace send budget of 1,000 emails per day. Mailbox send spacing, reputation checks, captcha, authentication and abuse controls still apply. The category is informational, not an authorization bypass.
+
+The managed plan expires when the handed-out password expires, and revoking the tester ends that grant immediately. Credits do not bypass feature gating after the grant ends. Existing dedicated reviewer workspaces recorded by tester creation are categorized on upgrade; still-active reviewers receive the grant and credits unless the workspace already has a Stripe subscription or an operator-managed plan. Legacy admin-created reviewers without a password expiry get the default 30-day lifetime measured from their original creation, not from the upgrade. Expired or revoked reviewers receive no renewed access. Existing memberships and data are not deleted.
+
+### Adding sample data
+
+In **Admins > Testers**, select **Add sample data** beside an active tester who owns a dedicated **Test** workspace, then confirm. This works for both newly created workspaces and existing dedicated Test workspaces after upgrading. Nothing is added automatically during deployment or account creation. The action requires the platform `manage_testers` permission and an MFA-verified admin session. The backend checks the Test category, the owner's current exemption and password expiry, and an unexpired managed Test grant. Testers attached to ordinary customer workspaces cannot use it.
+
+The dataset contains:
+
+- Six fictional, unsubscribed contacts with non-deliverable `@review.invalid` addresses, in one sample contact list.
+- One **draft** campaign with two connected email sequence steps, no sender mailbox and open/link tracking off.
+- Two reusable reply templates.
+- One native CRM pipeline with three stages, two open example deals, one unscheduled task and one contact note.
+
+Names clearly identify the examples as samples. The reviewer can open **Contacts**, **Campaigns**, **Templates** and **CRM** to inspect or edit them. Existing workspace records and the Test credit balance stay unchanged. The action adds everything in one transaction and records `seed_tester_workspace` in the admin audit log. Repeating it, including simultaneous requests, returns the original seed timestamp without duplicating data, overwriting edits or restoring deleted examples. The tester list shows when the sample data was added.
+
+No mailbox, provider credentials, inbox history, warmup activity, delivery events or sending tasks are created. No email is sent and no external integration is called. Connect a dedicated test mailbox manually for OAuth and inbox review; real inbox content must come from that mailbox. An empty mailbox or an unconnected one remains empty. Sample data does not isolate the backend or guarantee complete security-scan coverage.
+
+The examples are ordinary workspace records and follow the selected export groups. The one-time admin audit marker belongs to this instance and is not part of a workspace archive. Imported workspaces do not acquire a new managed Test grant automatically.
+
+Connecting Gmail still needs configured `BOX_GOOGLE_CLIENT_ID` and `BOX_GOOGLE_CLIENT_SECRET`, and the backend and frontend mailbox OAuth flags must permit new connections. A Test plan does not supply provider credentials or change those flags. Dashboard Google sign-in uses the separate `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` configuration. See [configuration](/development/configuration/).
+
+Joining an existing workspace is for a review judged on the app doing real work, where an empty workspace shows none of it. The tester becomes an ordinary member of that workspace and gets none of its own, so signing in lands straight in it: the dashboard skips its workspace picker only when someone belongs to exactly one. Two things follow from that, and both are the point rather than a side effect:
+
+- **You pick the role, and there is no default.** This is the one path that grants workspace access without anybody in that workspace asking for it, so the form will not submit until a role is named. The role decides everything the holder can reach, and it is recorded on the audit row as well as the members table, which the role can be changed out of later.
+- **The tester can see real data.** A role carrying `access_unibox` or `manage_emails` means real mail and real mailboxes, belonging to real people. Give the narrowest role the review actually needs, and revoke it when the review ends.
+
+The tester occupies a seat like any other member, so a workspace at its team member limit refuses the join rather than quietly exceeding it. Joining does not change the workspace category, grant a Test plan or add credits; its existing plan and the selected role still govern access.
 
 `warmblyctl status` lists every exempt account on each run with its reason and the date, because the way this goes wrong is not granting one, it is forgetting it. Remove one with:
 
@@ -164,6 +202,10 @@ Every invitation is backed by a link of the form `https://your-instance/invite?t
 
 The invitee opens the link, sees the workspace, the inviter and the roles they are being given, and clicks **Create an account**. They set a password and land inside your workspace.
 
+Signup accepts the invitation as part of account creation, with or without an emailed verification code. It goes straight to the dashboard rather than reopening the used link. An existing account instead signs in, returns to the invitation, and clicks **Accept invitation**. Restricted members land on a resource they can access.
+
+The account, workspace membership, roles and resource grants are saved together. If an invitation becomes invalid before an invite-only signup finishes, no account is left behind. Ask for a fresh invitation and retry with the same address. On an instance with open registration, an invalid invitation can still fall back to creating a personal workspace.
+
 This is the part worth being explicit about: **that signup succeeds under `invite_only` precisely because the link carries the invitation token.** The same person visiting the sign-up form directly, without the link, is refused with `registration_invite_only`. The token is the capability. Nothing else about the address is special.
 
 </Step>
@@ -206,7 +248,7 @@ The cleanest fix is still to point `MAIL_TRANSPORT` at a real relay. See [platfo
 | Re-inviting the same address | Replaces the row in place: one row per address per workspace, a rotated token, a reset expiry, and the previously copied link dead |
 | Copy link | Returns the token for a pending invitation so you can build and share the URL yourself |
 | Cancel | Revokes it immediately |
-| Expired rows | No longer shown in the dashboard. Re-inviting the address replaces the expired row |
+| Expired rows | No longer shown in the dashboard and do not block new invitations. Re-inviting the address replaces the expired row. A platform admin with `manage_organizations` can remove expired records across all workspaces from **Instance > Setup and health > Findings**, with confirmation and an audit entry. Active invitations and members are unchanged |
 | Turning links off | Set `invitations.links_enabled` to false under **Instance > Configuration > Settings** if invitations must arrive by mail and nowhere else. The copy action then fails with an explanation instead of returning a token. Only do this once mail actually delivers |
 
 Invitations join an existing workspace and never create one. To stand up a **second organization** you need `DISABLE_REGISTRATION=false`, or an administrator running `warmblyctl user create`.
@@ -363,7 +405,9 @@ Only works while the instance has no accounts. On a claimed instance it refuses 
 
 ### The browser reset path
 
-The ordinary **Forgot password** flow still works, if mail delivers. It is capped at **2 requests per address per 4 hours**, so repeated attempts during an outage will lock you out of the flow for a while.
+The ordinary **Forgot password** flow still works, if mail delivers. It is capped at **2 requests per address per 4 hours**, so repeated attempts during an outage will lock you out of the flow for a while. The emailed link is good for **1 hour**.
+
+The address is matched case-insensitively and surrounding whitespace is ignored, so `You@Example.com` finds the account created as `you@example.com`. An address with no account still answers `200` on purpose, so the form cannot be used to find out who has an account here; the backend logs the attempt, so an operator can tell a typo apart from a mail failure.
 
 <Callout type="warn" title="Do not flush Redis on an unclaimed instance">
 `redis-cli FLUSHDB` destroys the `bootstrap:setup_token` entry along with every pending auth session and rate limit counter. On an instance you have not claimed yet, that throws away the only way in. Delete the single key you meant to clear instead.

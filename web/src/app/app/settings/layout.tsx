@@ -8,9 +8,9 @@
 // unsaved auto-save changes is blocked by the dialog at the bottom.
 
 import React from "react";
-import { Navigate, NavLink, Outlet, useBlocker, useLocation } from "react-router-dom";
+import { Link, Outlet, useBlocker, useLocation } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import {
     AlertOctagonIcon,
     BellIcon,
@@ -31,11 +31,13 @@ import {
     UsersIcon,
     WebhookIcon,
     GlobeIcon,
+    TagsIcon,
 } from "lucide-react";
 import { UnsavedProvider, useUnsavedRegistry } from "@/hooks/context/unsaved";
-import { usePermission, type PermissionKey } from "@/hooks/usePermission";
+import { useAccessRestricted, usePermission, type PermissionKey } from "@/hooks/usePermission";
 import { Page, PageTopbar } from "@/components/layout/Page";
 import useFeatureAccess from "@/hooks/useFeatureAccess";
+import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
 
 interface SectionDef {
     path: string;
@@ -46,6 +48,11 @@ interface SectionDef {
     permission?: PermissionKey;
     /** Only meaningful when the deployment runs a billing provider. */
     billingOnly?: boolean;
+    /** What the entry is called on the hosted product, when that differs. */
+    hostedLabel?: string;
+    hostedDescription?: string;
+    /** Open to a member restricted to selected resources: their own account only. */
+    scoped?: boolean;
 }
 
 interface SectionGroup {
@@ -57,9 +64,9 @@ const GROUPS: SectionGroup[] = [
     {
         label: "Account",
         items: [
-            { path: "profile", label: "Profile", icon: UserIcon, description: "Personal information." },
-            { path: "notifications", label: "Notifications", icon: BellIcon, description: "What you get notified about." },
-            { path: "security", label: "Security", icon: ShieldIcon, description: "Password, 2FA, active sessions." },
+            { path: "profile", label: "Profile", icon: UserIcon, description: "Personal information.", scoped: true },
+            { path: "notifications", label: "Notifications", icon: BellIcon, description: "What you get notified about.", scoped: true },
+            { path: "security", label: "Security", icon: ShieldIcon, description: "Password, 2FA, active sessions.", scoped: true },
         ],
     },
     {
@@ -71,6 +78,7 @@ const GROUPS: SectionGroup[] = [
             { path: "workspace", label: "Workspace", icon: BriefcaseIcon, description: "Org-wide settings.", ownerOnly: true },
             { path: "sending", label: "Sending", icon: SendIcon, description: "When campaign mail reaches each recipient.", permission: "MANAGE_SETTINGS" },
             { path: "tracking", label: "Website tracking", icon: GlobeIcon, description: "Page views on your site, in the contact timeline.", permission: "MANAGE_SETTINGS" },
+            { path: "inbox-tagging", label: "Inbox tagging", icon: TagsIcon, description: "Label and score inbound mail automatically.", permission: "VIEW_ANALYTICS" },
             { path: "ai-skills", label: "AI skills", icon: SparklesIcon, description: "Playbooks your AI features follow.", permission: "MANAGE_SETTINGS" },
             { path: "billing", label: "Billing", icon: CreditCardIcon, description: "Plan, payment, invoices.", ownerOnly: true, billingOnly: true },
             { path: "referral", label: "Refer & earn", icon: GiftIcon, description: "Invite teams and earn account credit.", ownerOnly: true, billingOnly: true },
@@ -88,7 +96,7 @@ const GROUPS: SectionGroup[] = [
     {
         label: "Advanced",
         items: [
-            { path: "warmbly-cloud", label: "Warmbly Cloud", icon: CloudIcon, description: "Warm your mailboxes in the Warmbly pool.", permission: "MANAGE_SETTINGS" },
+            { path: "warmbly-cloud", label: "Warmbly Cloud", icon: CloudIcon, description: "Warm your mailboxes in the Warmbly pool.", permission: "MANAGE_SETTINGS", hostedLabel: "Linked instances", hostedDescription: "Self-hosted instances warming in this workspace." },
             { path: "data", label: "Data", icon: DatabaseIcon, description: "Export this workspace, or import one from another instance.", ownerOnly: true },
             { path: "danger", label: "Danger zone", icon: AlertOctagonIcon, description: "Irreversible actions." },
         ],
@@ -104,23 +112,28 @@ export default function SettingsLayout() {
 }
 
 function SettingsLayoutInner() {
-    const location = useLocation();
+    const pathname = useLocation({ select: (l) => l.pathname });
     const access = useFeatureAccess();
+    const hosted = useAuthConfig().data?.self_hosted === false;
     const canManageApiKeys = usePermission("MANAGE_API_KEYS");
     const canManageSettings = usePermission("MANAGE_SETTINGS");
+    const canViewAnalytics = usePermission("VIEW_ANALYTICS");
+    const restricted = useAccessRestricted();
     const navRef = React.useRef<HTMLElement>(null);
     const unsaved = useUnsavedRegistry();
     const [savingLeave, setSavingLeave] = React.useState(false);
 
     // Block in-app navigation away from a tab with unsaved/pending/failed
     // auto-save changes; the dialog below offers save or discard.
-    const blocker = useBlocker(
-        React.useCallback(
-            ({ currentLocation, nextLocation }: { currentLocation: { pathname: string }; nextLocation: { pathname: string } }) =>
-                !!unsaved?.anyDirty() && currentLocation.pathname !== nextLocation.pathname,
+    const blocker = useBlocker({
+        shouldBlockFn: React.useCallback(
+            ({ current, next }: { current: { pathname: string }; next: { pathname: string } }) =>
+                !!unsaved?.anyDirty() && current.pathname !== next.pathname,
             [unsaved],
         ),
-    );
+        withResolver: true,
+        enableBeforeUnload: false,
+    });
 
     // Native guard for hard navigations (reload / close tab).
     React.useEffect(() => {
@@ -158,27 +171,28 @@ function SettingsLayoutInner() {
         if (window.matchMedia("(min-width: 768px)").matches) return;
         const el = navRef.current?.querySelector<HTMLElement>('[aria-current="page"]');
         el?.scrollIntoView({ inline: "center", block: "nearest" });
-    }, [location.pathname]);
-
-    if (
-        location.pathname === "/app/settings" ||
-        location.pathname === "/app/settings/"
-    ) {
-        return <Navigate to="/app/settings/profile" replace />;
-    }
+    }, [pathname]);
 
     const visibleGroups = GROUPS.map((g) => ({
         ...g,
-        items: g.items.filter(
-            (s) =>
-                (!s.ownerOnly || access.isOwner) &&
-                (!s.billingOnly || access.billing) &&
-                (s.permission !== "MANAGE_API_KEYS" || canManageApiKeys) &&
-                (s.permission !== "MANAGE_SETTINGS" || canManageSettings),
-        ),
+        items: g.items
+            .filter(
+                (s) =>
+                    (!restricted || s.scoped) &&
+                    (!s.ownerOnly || access.isOwner) &&
+                    (!s.billingOnly || access.billing) &&
+                    (s.permission !== "MANAGE_API_KEYS" || canManageApiKeys) &&
+                    (s.permission !== "MANAGE_SETTINGS" || canManageSettings) &&
+                    (s.permission !== "VIEW_ANALYTICS" || canViewAnalytics),
+            )
+            .map((s) =>
+                hosted && s.hostedLabel
+                    ? { ...s, label: s.hostedLabel, description: s.hostedDescription ?? s.description }
+                    : s,
+            ),
     })).filter((g) => g.items.length > 0);
 
-    const currentPath = location.pathname.replace(/^\/app\/settings\//, "");
+    const currentPath = pathname.replace(/^\/app\/settings\//, "");
     const allItems = visibleGroups.flatMap((g) => g.items);
     const current =
         allItems.find((s) => s.path === currentPath || currentPath.startsWith(`${s.path}/`)) ??
@@ -214,7 +228,7 @@ function SettingsLayoutInner() {
                 <div className="flex-1 min-w-0 overflow-y-auto">
                     <AnimatePresence mode="wait" initial={false}>
                         <motion.div
-                            key={location.pathname}
+                            key={pathname}
                             initial={{ opacity: 0, y: 6 }}
                             animate={{ opacity: 1, y: 0 }}
                             exit={{ opacity: 0, y: -4 }}
@@ -227,7 +241,7 @@ function SettingsLayoutInner() {
             </div>
 
             <AnimatePresence>
-                {blocker.state === "blocked" && (
+                {blocker.status === "blocked" && (
                     <motion.div
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
@@ -283,14 +297,14 @@ function SettingsLayoutInner() {
 }
 
 function SectionLink({ section }: { section: SectionDef }) {
+    const to: string = `/app/settings/${section.path}`;
     return (
-        <NavLink
-            to={`/app/settings/${section.path}`}
-            className={({ isActive }) =>
-                `group relative shrink-0 md:w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12.5px] whitespace-nowrap text-left transition-colors ${
-                    isActive ? "text-slate-900 font-medium" : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/40"
-                }`
-            }
+        <Link
+            to={to}
+            activeOptions={{ includeSearch: false }}
+            className="group relative shrink-0 md:w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12.5px] whitespace-nowrap text-left transition-colors"
+            activeProps={{ className: "text-slate-900 font-medium" }}
+            inactiveProps={{ className: "text-slate-600 hover:text-slate-900 hover:bg-slate-200/40" }}
         >
             {({ isActive }) => (
                 <>
@@ -309,6 +323,6 @@ function SectionLink({ section }: { section: SectionDef }) {
                     <span className="relative z-10 truncate">{section.label}</span>
                 </>
             )}
-        </NavLink>
+        </Link>
     );
 }

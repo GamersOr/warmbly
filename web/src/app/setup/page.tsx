@@ -13,7 +13,8 @@
 // token there is no way into the instance at all.
 
 import { useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "@tanstack/react-router";
+import { useSearchParams } from "@/hooks/useSearchParams";
 import { useQueryClient } from "@tanstack/react-query";
 import {
     AlertCircleIcon,
@@ -23,14 +24,15 @@ import {
     RefreshCwIcon,
     ShieldCheckIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import claimSetup from "@/lib/api/client/auth/claimSetup";
 import getUser from "@/lib/api/client/auth/getUser";
 import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
 import { usePasswordStrength } from "@/hooks/usePasswordStrength";
 import { saveTokens } from "@/lib/auth";
-import { Label, TextInput } from "@/components/ui/field";
+import { FieldError, Label, TextInput } from "@/components/ui/field";
+import { PERSON_NAME_MAX, nameError, normalizeName } from "@/lib/displayName";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import type AuthConfig from "@/lib/api/models/auth/AuthConfig";
 
@@ -70,7 +72,7 @@ export default function SetupPage() {
         queryClient.setQueryData<AuthConfig>(["auth", "config"], (prev) =>
             prev ? { ...prev, setup_required: false } : prev,
         );
-        navigate("/auth/login");
+        navigate({ to: "/auth/login" });
     }
 
     async function onSubmit(e: React.FormEvent) {
@@ -79,6 +81,11 @@ export default function SetupPage() {
 
         if (!email.trim()) {
             toast.error("Enter the email address for the owner account.");
+            return;
+        }
+        const invalidName = nameError("Name", firstName, "person", true);
+        if (invalidName) {
+            toast.error(invalidName);
             return;
         }
         if (password.length < 8) {
@@ -102,7 +109,7 @@ export default function SetupPage() {
                 token,
                 email,
                 password,
-                first_name: firstName || undefined,
+                first_name: normalizeName(firstName) || undefined,
             });
             saveTokens(session as unknown as Record<string, unknown>);
             // Prime the profile with the new token before entering the gated
@@ -114,7 +121,7 @@ export default function SetupPage() {
                 // UserProvider retries and redirects on a genuine failure.
             }
             toast.success("This instance is yours.");
-            navigate("/app/emails");
+            navigate({ to: "/app/emails" });
         } catch (err) {
             setFailure(err as AppError);
         } finally {
@@ -198,8 +205,11 @@ export default function SetupPage() {
                         onChange={setFirstName}
                         autoComplete="given-name"
                         placeholder="Alex"
+                        invalid={!!nameError("Name", firstName, "person", true)}
+                        maxLength={PERSON_NAME_MAX}
                         className={FIELD}
                     />
+                    <FieldError message={nameError("Name", firstName, "person", true)} />
                 </div>
 
                 <div>

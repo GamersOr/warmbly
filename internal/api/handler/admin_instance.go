@@ -9,6 +9,8 @@ import (
 	"github.com/warmbly/warmbly/internal/app/instanceconfig"
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 )
 
 // The Instance surface answers the two questions a self-hoster cannot answer
@@ -52,7 +54,39 @@ func (h *Handler) AdminInstanceHealth(c *gin.Context) {
 		Forwarded: c.GetHeader("X-Forwarded-For") != "",
 	})
 
-	c.JSON(http.StatusOK, gin.H{"checks": checks, "summary": summary})
+	c.JSON(http.StatusOK, gin.H{"checks": checks, "summary": summary, "execution_coverage": "unreported", "operational_monitoring_path": "/admin/instance/monitoring"})
+}
+
+func (h *Handler) AdminInstanceMonitoring(c *gin.Context) {
+	permissions := middleware.GetAdminPermissions(c)
+	if !permissions.HasPermission(models.AdminPermViewAnalytics) {
+		errx.JSON(c, errx.ErrForbidden)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, h.Monitoring.Snapshot(c.Request.Context(), permissions))
+}
+
+func (h *Handler) AdminDeleteExpiredInvitations(c *gin.Context) {
+	adminID := middleware.GetAdminUserID(c)
+	if adminID == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	if h.OrgRepo == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "Invitation cleanup is not available on this deployment."))
+		return
+	}
+	if err := h.OrgRepo.DeleteExpiredInvitations(c.Request.Context()); err != nil {
+		errs.CaptureException(err)
+		errx.JSON(c, errx.InternalError())
+		return
+	}
+	if h.AdminService != nil {
+		h.AdminService.LogAdminAction(c.Request.Context(), *adminID, "delete_expired_invitations",
+			"organization_invitation", nil, nil, c.ClientIP(), c.Request.UserAgent())
+	}
+	c.JSON(http.StatusOK, gin.H{"cleaned": true})
 }
 
 // AdminGetInstanceSettings returns the database-backed settings document.
@@ -89,7 +123,7 @@ func (h *Handler) AdminPutInstanceSettings(c *gin.Context) {
 
 	var patch instancesettings.Patch
 	if err := c.ShouldBindJSON(&patch); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -129,6 +163,7 @@ func instanceSettingsAuditDetails(doc instancesettings.Document) map[string]any 
 		"retention_audit_log_days":           doc.Retention.AuditLogDays,
 		"tracking_machine_window_open":       doc.Tracking.MachineWindowOpenSeconds,
 		"tracking_machine_window_click":      doc.Tracking.MachineWindowClickSeconds,
+		"tracking_machine_window_probable":   doc.Tracking.MachineWindowProbableSeconds,
 		"deliverability_enforce_domain_auth": doc.Deliverability.EnforceDomainAuth,
 		"deliverability_auth_grace_hours":    doc.Deliverability.AuthGraceHours,
 		"notification_channels":              len(doc.Notifications.Channels),

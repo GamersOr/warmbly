@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
 )
@@ -159,14 +160,11 @@ func detectBounceRate(s *repository.AdvisorSnapshot) []Finding {
 func detectSpamPlacement(s *repository.AdvisorSnapshot) []Finding {
 	out := []Finding{}
 	for _, m := range s.Mailboxes {
-		// Warmup deliveries are the denominator: the mail we know landed
-		// somewhere, and could observe the folder for.
-		delivered := m.WarmupSent7d
-		if delivered < minWarmupDeliveriesForPlacement || m.WarmupSpam7d == 0 {
-			continue
-		}
-		r := rate(m.WarmupSpam7d, delivered)
-		if r < spamPlacementWarn {
+		// The same reading the pool's band takes: verified deliveries at
+		// Google, Microsoft and Yahoo over the last seven days.
+		p := m.WarmupPlacement
+		r, delivered := p.Judged()
+		if delivered < minWarmupDeliveriesForPlacement || r < spamPlacementWarn {
 			continue
 		}
 
@@ -193,8 +191,8 @@ func detectSpamPlacement(s *repository.AdvisorSnapshot) []Finding {
 			Impact:      clampImpact(45 + int(r)),
 			Title:       fmt.Sprintf("%s is landing in spam %s of the time", m.Email, pct(r)),
 			Detail: fmt.Sprintf(
-				"%d of %d warmup messages from %s were filed into spam by the receiving inbox in the last 7 days. Warmup placement is the earliest honest read on where cold mail is landing, because it is measured on mail the platform controls end to end.",
-				m.WarmupSpam7d, delivered, m.Email),
+				"Over the last 7 days %d of %d warmup messages from %s delivered at Google, Microsoft and Yahoo went to spam. Warmup placement is the earliest honest read on where cold mail is landing, because it is measured on mail the platform controls end to end. Other mail hosts run their own filters and are not counted.",
+				p.MajorSpam, p.MajorDelivered, m.Email),
 			Remedy: remedy,
 			Steps: []string{
 				"Check SPF, DKIM and DMARC on this domain first. Authentication is the single biggest cause of spam placement, and no amount of volume tuning compensates for it.",
@@ -204,23 +202,18 @@ func detectSpamPlacement(s *repository.AdvisorSnapshot) []Finding {
 				"Give it a week and check this number again before putting the mailbox back into full rotation.",
 			},
 			Evidence: map[string]any{
-				"mailbox":                 m.Email,
-				"warmup_spam_7d":          m.WarmupSpam7d,
-				"warmup_delivered_7d":     delivered,
-				"spam_placement_percent":  band(r),
-				"quarantine_band_percent": spamPlacementQuarantine,
-				"currently_sending_cold":  m.InActiveCampaign,
-				"current_daily_cap":       m.CampaignLimit,
+				"mailbox":                     m.Email,
+				"major_provider_spam_7d":      p.MajorSpam,
+				"major_provider_delivered_7d": p.MajorDelivered,
+				"spam_placement_percent":      band(r),
+				"quarantine_band_percent":     spamPlacementQuarantine,
+				"currently_sending_cold":      m.SendingCold(),
+				"current_daily_cap":           m.CampaignLimit,
 			},
 		}
 
-		if m.InActiveCampaign && r >= spamPlacementQuarantine {
-			f.Action = withUndo(mailboxAction(m.ID,
-				"Pause cold sending from this mailbox",
-				map[string]any{"status": "inactive"},
-				change("Mailbox status", "active", "inactive"),
-				change("Warmup", "running", "running (unchanged)"),
-			), map[string]any{"email_account_id": m.ID.String(), "status": "active"})
+		if m.SendingCold() && r >= spamPlacementQuarantine {
+			f.Action = mailboxHoldAction(m.ID, "Hold this mailbox out of campaigns")
 		}
 		out = append(out, f)
 	}
@@ -236,16 +229,18 @@ func detectDomainAuth(s *repository.AdvisorSnapshot) []Finding {
 		if m.AuthState == "unknown" || m.AuthState == "" {
 			continue
 		}
-		if m.AuthSPF && m.AuthDKIM && m.AuthDMARC {
+		if m.AuthSPF && m.AuthDMARC {
 			continue
 		}
 
+		// Only SPF and DMARC can be reported missing. A DKIM selector is not
+		// discoverable from DNS, so auth_dkim=false means the probe found no
+		// key at the selectors we know, which is not evidence there is none.
+		// Raising "missing DKIM" off that told every owner whose DKIM was fine
+		// that it was broken, on a domain that was otherwise passing.
 		missing := []string{}
 		if !m.AuthSPF {
 			missing = append(missing, "SPF")
-		}
-		if !m.AuthDKIM {
-			missing = append(missing, "DKIM")
 		}
 		if !m.AuthDMARC {
 			missing = append(missing, "DMARC")
@@ -257,8 +252,10 @@ func detectDomainAuth(s *repository.AdvisorSnapshot) []Finding {
 		if m.InActiveCampaign {
 			severity = models.AdvisorCritical
 			if len(missing) == 1 && !m.AuthDMARC {
-				// SPF+DKIM present, DMARC missing: filtered less aggressively,
-				// but still short of Google's bulk sender requirements.
+				// SPF present, DMARC missing: filtered less aggressively than
+				// mail with no SPF at all, but still short of Google's bulk
+				// sender requirements. DKIM cannot be in `missing`, so this is
+				// the only single-record case there is.
 				severity = models.AdvisorHigh
 			}
 		}
@@ -286,13 +283,13 @@ func detectDomainAuth(s *repository.AdvisorSnapshot) []Finding {
 				"The sending domain for %s has no valid %s record. Google's bulk sender rules require SPF, DKIM, and DMARC to be aligned, so unauthenticated cold mail is filtered on arrival regardless of how good the copy is.%s",
 				m.Email, joinWords(missing), gate),
 			Remedy:   "Add the missing DNS records at the domain's registrar, then re-check the domain from the mailbox to clear it immediately. This is the highest-leverage deliverability fix available and it costs nothing.",
-			Steps:    domainAuthSteps(missing),
-			Snippets: domainAuthSnippets(m, missing),
+			Steps:    domainAuthSteps(missing, !m.AuthDKIM),
+			Snippets: domainAuthSnippets(m, missing, !m.AuthDKIM),
 			Evidence: map[string]any{
 				"mailbox":                m.Email,
 				"missing":                missing,
 				"spf":                    m.AuthSPF,
-				"dkim":                   m.AuthDKIM,
+				"dkim_verified":          m.AuthDKIM,
 				"dmarc":                  m.AuthDMARC,
 				"dmarc_policy":           m.AuthDMARCPolicy,
 				"currently_sending_cold": m.InActiveCampaign,
@@ -371,17 +368,23 @@ func detectSharedTrackingDomain(s *repository.AdvisorSnapshot) []Finding {
 // domainAuthSteps builds the how-to for the specific records that are missing.
 // A generic "set up SPF, DKIM and DMARC" is exactly the advice someone who is
 // already stuck has read five times.
-func domainAuthSteps(missing []string) []string {
+//
+// dkimUnverified adds the DKIM step as something to confirm rather than
+// something to fix: the domain is already here for a record that IS missing,
+// and while someone is in their DNS panel it is worth checking the one record
+// the platform cannot see for itself.
+func domainAuthSteps(missing []string, dkimUnverified bool) []string {
 	steps := []string{"Open your DNS provider for the domain this mailbox sends from. The records to add are below, ready to paste."}
 	for _, record := range missing {
 		switch record {
 		case "SPF":
 			steps = append(steps, "Add the SPF record as a TXT record at the root of the domain. If an SPF record already exists, edit that one instead of adding a second: two SPF records is a failure, not a backup.")
-		case "DKIM":
-			steps = append(steps, "Generate a DKIM key in your mail provider's admin console, publish the record it gives you at the host below, then turn signing on. Publishing the key and enabling signing are two separate switches and missing the second is the usual cause.")
 		case "DMARC":
 			steps = append(steps, "Add the DMARC record as a TXT record at the _dmarc host. It starts at p=none, which monitors without affecting delivery; tighten it to quarantine once a few weeks of reports look clean.")
 		}
+	}
+	if dkimUnverified {
+		steps = append(steps, "While you are in there, confirm DKIM is on. Warmbly cannot see it for certain, because a DKIM key sits at a selector only your provider knows, so it is reported as unverified rather than missing either way. In your provider's console, generate a DKIM key, publish the record it gives you, then turn signing on: publishing the key and enabling signing are two separate switches and missing the second is the usual cause.")
 	}
 	return append(steps,
 		"Give DNS up to a few hours to propagate. Most providers are much faster.",
@@ -405,7 +408,7 @@ func trackingDomainSteps() []string {
 func trackingDomainSnippets(m repository.AdvisorMailbox, trackingHost string) []models.AdvisorSnippet {
 	host := m.TrackingDomain
 	if host == "" {
-		host = "track." + emailDomain(m.Email)
+		host = config.DefaultTrackingHost(emailDomain(m.Email))
 	}
 	out := []models.AdvisorSnippet{
 		{Label: "Record type", Value: "CNAME"},
@@ -456,8 +459,9 @@ func dkimHost(provider, domain string) (string, string) {
 	return "yourselector._domainkey." + domain, "Your provider's admin console generates both the selector name and the value."
 }
 
-// domainAuthSnippets renders the records to paste for whatever is missing.
-func domainAuthSnippets(m repository.AdvisorMailbox, missing []string) []models.AdvisorSnippet {
+// domainAuthSnippets renders the records to paste for whatever is missing, plus
+// where DKIM goes when it could not be verified.
+func domainAuthSnippets(m repository.AdvisorMailbox, missing []string, dkimUnverified bool) []models.AdvisorSnippet {
 	domain := emailDomain(m.Email)
 	out := []models.AdvisorSnippet{}
 
@@ -476,11 +480,6 @@ func domainAuthSnippets(m repository.AdvisorMailbox, missing []string) []models.
 				models.AdvisorSnippet{Label: "SPF host", Value: domain, Note: note},
 				models.AdvisorSnippet{Label: "SPF value", Value: value},
 			)
-		case "DKIM":
-			host, note := dkimHost(m.Provider, domain)
-			out = append(out,
-				models.AdvisorSnippet{Label: "DKIM host", Value: host, Note: note},
-			)
 		case "DMARC":
 			// p=none deliberately: a first DMARC record that quarantines can
 			// silently bin legitimate mail from a service nobody remembered was
@@ -495,6 +494,10 @@ func domainAuthSnippets(m repository.AdvisorMailbox, missing []string) []models.
 				},
 			)
 		}
+	}
+	if dkimUnverified {
+		host, note := dkimHost(m.Provider, domain)
+		out = append(out, models.AdvisorSnippet{Label: "DKIM host", Value: host, Note: note})
 	}
 	return out
 }

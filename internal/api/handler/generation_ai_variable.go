@@ -56,7 +56,7 @@ func (h *Handler) GenerateAIVariable(c *gin.Context) {
 
 	var req generationAIVariableRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.JSON(c, errx.ErrInvalid)
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 	req.Prompt = strings.TrimSpace(req.Prompt)
@@ -91,6 +91,11 @@ func (h *Handler) GenerateAIVariable(c *gin.Context) {
 		cid, perr := uuid.Parse(strings.TrimSpace(req.ContactID))
 		if perr != nil {
 			errx.JSON(c, errx.New(errx.BadRequest, "invalid contact_id"))
+			return
+		}
+		// The rendered prompt reads that contact's fields.
+		if xerr := h.hasAccess(c, models.PermViewContacts, models.APIPermReadContacts); xerr != nil {
+			errx.JSON(c, xerr)
 			return
 		}
 		if h.ContactRepo == nil {

@@ -142,7 +142,8 @@ func (d Deps) registerSegmentTools(r *Registry) {
 			"campaign_id": strProp("The campaign's UUID."),
 			"segment_ids": arrProp("The segment UUIDs to link, at most 20. An empty list detaches every segment.", map[string]any{"type": "string"}),
 		}, "campaign_id", "segment_ids"),
-		Risk: generation.RiskWrite,
+		Risk:      generation.RiskWrite,
+		AlwaysAsk: true,
 		// Linking an audience changes who a campaign mails.
 		RequiredOrgPerm: models.PermManageCampaigns,
 		RequiredAPIPerm: models.APIPermWriteCampaigns,
@@ -157,6 +158,7 @@ func (d Deps) registerSegmentTools(r *Registry) {
 			"campaign_id": strProp("The campaign to enrol them into."),
 		}, "segment_id", "campaign_id"),
 		Risk:            generation.RiskWrite,
+		AlwaysAsk:       true,
 		RequiredOrgPerm: models.PermManageCampaigns,
 		RequiredAPIPerm: models.APIPermWriteCampaigns,
 		Handler:         d.addSegmentToCampaign,
@@ -415,7 +417,7 @@ func (d Deps) setCampaignSegments(ctx context.Context, inv Invocation, args json
 	if in.SegmentIDs == nil {
 		return "", ErrInvalidArgs
 	}
-	links, added, xerr := d.Segments.SetCampaignSegments(ctx, inv.OrgID, cid, &models.CampaignSegmentsWrite{
+	links, added, change, xerr := d.Segments.SetCampaignSegments(ctx, inv.OrgID, cid, &models.CampaignSegmentsWrite{
 		SegmentIDs: *in.SegmentIDs,
 	})
 	if xerr != nil {
@@ -423,8 +425,9 @@ func (d Deps) setCampaignSegments(ctx context.Context, inv Invocation, args json
 	}
 	d.logAudit(ctx, inv, models.AuditActionUpdate, models.AuditEntityCampaign, &cid, map[string]string{
 		"segments": strconv.Itoa(len(links)), "added": strconv.Itoa(added),
+		"withdrawn": strconv.Itoa(change.Withdrawn),
 	})
-	return jsonResult(map[string]any{"data": links, "added": added})
+	return jsonResult(map[string]any{"data": links, "added": added, "withdrawn": change.Withdrawn, "contacted": change.Contacted})
 }
 
 func (d Deps) addSegmentToCampaign(ctx context.Context, inv Invocation, args json.RawMessage) (string, error) {

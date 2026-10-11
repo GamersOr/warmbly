@@ -4,9 +4,11 @@
 // row opens the builder.
 
 import React from "react";
-import { useNavigate } from "react-router-dom";
+import useBrowseState from "@/hooks/useBrowseState";
+import { browseSearchSchema, formsSortSchema, formsStatusSchema } from "@/lib/browse-other-lists";
+import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon, ClipboardListIcon, LinkIcon, Loader2Icon, MoreHorizontalIcon, PlusIcon, XIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import { EmptyBlock, Page, PageBody, PageTopbar, SectionBar, Stat, StatStrip, TopbarAction } from "@/components/layout/Page";
 import { NoAccess } from "@/components/layout/NoAccess";
@@ -28,6 +30,7 @@ import type Form from "@/lib/api/models/app/forms/Form";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 import timeAgo from "@/lib/helper/timeAgo";
+import { Checkbox } from "@/components/ui/checkbox";
 
 const STATUS_PILL: Record<Form["status"], string> = {
     draft: "bg-slate-100 text-slate-600",
@@ -85,10 +88,10 @@ function FormsList() {
     const categories = React.useMemo(() => user?.categories ?? [], [user?.categories]);
     const categoryById = React.useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
 
-    const [query, setQuery] = React.useState("");
-    const [status, setStatusFilter] = React.useState<StatusFilter>("all");
-    const [category, setCategory] = React.useState("");
-    const [sort, setSort] = React.useState<{ key: SortKey; dir: 1 | -1 }>({ key: "created", dir: -1 });
+    const [query, setQuery] = useBrowseState("forms.list.query", "", browseSearchSchema);
+    const [status, setStatusFilter] = useBrowseState<StatusFilter>("forms.list.status", "all", formsStatusSchema);
+    const [category, setCategory] = useBrowseState("forms.list.category", "", browseSearchSchema);
+    const [sort, setSort] = useBrowseState<{ key: SortKey; dir: 1 | -1 }>("forms.list.sort", { key: "created", dir: -1 }, formsSortSchema);
     const [selected, setSelected] = React.useState<string[]>([]);
     const [bulkBusy, setBulkBusy] = React.useState(false);
 
@@ -151,7 +154,7 @@ function FormsList() {
     async function createNew() {
         try {
             const f = await create.mutateAsync("Untitled form");
-            navigate(`/app/forms/${f.id}`);
+            navigate({ to: "/app/forms/$id", params: { id: f.id } });
         } catch (err) {
             toast.error(buildError(err as AppError));
         }
@@ -171,10 +174,11 @@ function FormsList() {
                     category_ids: f.category_ids,
                     allowed_domains: f.allowed_domains,
                     captcha_enabled: f.captcha_enabled,
+                    triage_enabled: f.triage_enabled,
                 },
             });
             toast.success(`Duplicated as ${copy.name}`);
-            navigate(`/app/forms/${copy.id}`);
+            navigate({ to: "/app/forms/$id", params: { id: copy.id } });
         } catch (err) {
             toast.error(buildError(err as AppError));
         }
@@ -275,15 +279,16 @@ function FormsList() {
                             </button>
                         ))}
                     </div>
-                    {categories.length > 0 && (
+                    {(categories.length > 0 || category) && (
                         <SelectMenu
                             value={category}
                             onChange={setCategory}
                             options={[
-                                { value: "", label: "All categories" },
+                                { value: "", label: "All labels" },
+                                ...(category && !categoryById.has(category) ? [{ value: category, label: "Unavailable label" }] : []),
                                 ...categories.map((c) => ({ value: c.id, label: c.title })),
                             ]}
-                            aria-label="Filter by category"
+                            aria-label="Filter by label"
                         />
                     )}
                     <SearchInput value={query} onChange={setQuery} placeholder="Search forms…" className="w-full sm:w-56" />
@@ -308,7 +313,7 @@ function FormsList() {
                                 body={
                                     filtered
                                         ? "Try a different search or filter."
-                                        : "Build a form, style it to match your site, and every submission becomes a contact — filed under your categories and optionally dropped straight into a campaign."
+                                        : "Build a form, style it to match your site, and every submission becomes a contact — filed under your labels and optionally dropped straight into a campaign."
                                 }
                                 cta={
                                     filtered ? undefined : (
@@ -325,15 +330,13 @@ function FormsList() {
                         <thead className="sticky top-0 bg-white z-[1]">
                             <tr className="border-b border-slate-200">
                                 <th className="pl-5 pr-2 py-2 w-9">
-                                    <input
-                                        type="checkbox"
-                                        className="w-3.5 h-3.5 rounded accent-sky-600"
+                                    <Checkbox
                                         checked={allSelected}
                                         onChange={toggleAll}
                                     />
                                 </th>
                                 <SortTh label="Name" k="name" sort={sort} onSort={sortBy} className="max-w-0 w-full md:max-w-none md:w-auto" />
-                                <Th className="w-40 hidden lg:table-cell">Categories</Th>
+                                <Th className="w-40 hidden lg:table-cell">Labels</Th>
                                 <Th className="w-24 hidden lg:table-cell">Trend</Th>
                                 <SortTh label="Views" k="views" sort={sort} onSort={sortBy} className="w-16 text-right" right />
                                 <SortTh label="Starts" k="starts" sort={sort} onSort={sortBy} className="w-16 text-right hidden md:table-cell" right />
@@ -350,15 +353,13 @@ function FormsList() {
                                 return (
                                     <tr
                                         key={f.id}
-                                        onClick={() => navigate(`/app/forms/${f.id}`)}
+                                        onClick={() => navigate({ to: "/app/forms/$id", params: { id: f.id } })}
                                         className={`h-11 border-b border-slate-100 cursor-pointer transition-colors ${
                                             isSel ? "bg-sky-50/60 hover:bg-sky-50/80" : "hover:bg-slate-50/80"
                                         }`}
                                     >
                                         <td className="pl-5 pr-2" onClick={(e) => e.stopPropagation()}>
-                                            <input
-                                                type="checkbox"
-                                                className="w-3.5 h-3.5 rounded accent-sky-600"
+                                            <Checkbox
                                                 checked={isSel}
                                                 onChange={(e) => toggleOne(f.id, e.target.checked)}
                                             />
@@ -417,11 +418,11 @@ function FormsList() {
                                                     </button>
                                                 </PopoverMenuTrigger>
                                                 <PopoverMenuContent minWidth={190}>
-                                                    <PopoverMenuItem onSelect={() => navigate(`/app/forms/${f.id}`)}>Open builder</PopoverMenuItem>
-                                                    <PopoverMenuItem onSelect={() => navigate(`/app/forms/${f.id}?tab=analytics`)}>
+                                                    <PopoverMenuItem onSelect={() => navigate({ to: "/app/forms/$id", params: { id: f.id } })}>Open builder</PopoverMenuItem>
+                                                    <PopoverMenuItem onSelect={() => navigate({ to: "/app/forms/$id", params: { id: f.id }, search: { tab: "analytics" } })}>
                                                         View analytics
                                                     </PopoverMenuItem>
-                                                    <PopoverMenuItem onSelect={() => navigate(`/app/forms/${f.id}?tab=submissions`)}>
+                                                    <PopoverMenuItem onSelect={() => navigate({ to: "/app/forms/$id", params: { id: f.id }, search: { tab: "submissions" } })}>
                                                         View submissions
                                                     </PopoverMenuItem>
                                                     {f.status === "published" && (

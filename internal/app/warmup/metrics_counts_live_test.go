@@ -38,6 +38,18 @@ func TestLiveCombinedMetricCountsSplitTheirTables(t *testing.T) {
 	event("bounce", "3 hours", 1)
 	event("open", "1 hour", 1)
 
+	// Two deletions and one spam flag after the floor, a deletion before it.
+	harm := func(kind, offset string, n int) {
+		exec(`INSERT INTO warmup_tampering_events (email_account_id, message_id, kind, created_at)
+		      SELECT $1, '<' || gen_random_uuid()::text || '@test.local>', $2, NOW() - $3::interval FROM generate_series(1, $4)`, f.account, kind, offset, n)
+	}
+	harm("deletion", "1 hour", 2)
+	harm("spam_flag", "1 hour", 1)
+	harm("deletion", "3 hours", 1)
+	t.Cleanup(func() {
+		execSQL(t, handle.Pool, `DELETE FROM warmup_tampering_events WHERE email_account_id = $1`, f.account)
+	})
+
 	row, err := repo.GetParticipantHealthForAccount(ctx, f.account)
 	if err != nil || row == nil {
 		t.Fatalf("participant row: %v", err)
@@ -46,9 +58,9 @@ func TestLiveCombinedMetricCountsSplitTheirTables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadMetrics: %v", err)
 	}
-	got := [4]int{metrics.SpamPlacementsLast7d, metrics.UserComplaintsLast7d, metrics.ComplaintsLast30d, metrics.BouncesLast30d}
-	if got != [4]int{3, 2, 2, 4} {
-		t.Fatalf("placements, complaints, external complaints, bounces = %v, want [3 2 2 4]", got)
+	got := [6]int{metrics.SpamPlacementsLast7d, metrics.UserComplaintsLast7d, metrics.ComplaintsLast30d, metrics.BouncesLast30d, metrics.DeletionsLast7d, metrics.SpamFlagsLast7d}
+	if got != [6]int{3, 2, 2, 4, 2, 1} {
+		t.Fatalf("placements, complaints, external complaints, bounces, deletions, spam flags = %v, want [3 2 2 4 2 1]", got)
 	}
 }
 
@@ -99,5 +111,36 @@ func TestLiveSweepListsTheStalestFirst(t *testing.T) {
 	}
 	if !(pos[never.account] < pos[stale.account] && pos[stale.account] < pos[fresh.account]) {
 		t.Fatalf("order never=%d stale=%d fresh=%d; want never, then stale, then fresh", pos[never.account], pos[stale.account], pos[fresh.account])
+	}
+}
+
+// Placement is read over verified deliveries, and only a Google, Microsoft or
+// Yahoo recipient's junk folder is judged; another host's is carried apart.
+func TestLivePlacementIsJudgedAtTheMajorProviders(t *testing.T) {
+	repo, handle := liveWarmupRepo(t)
+	ctx := context.Background()
+	sender := newFreePoolAccount(t, handle)
+	gmail := newFreePoolAccount(t, handle)
+	small := newFreePoolAccount(t, handle)
+	execSQL(t, handle.Pool, `UPDATE email_accounts SET provider = 'gmail' WHERE id = $1`, gmail.account)
+	execSQL(t, handle.Pool, `UPDATE warmup_pool_participants SET health_signals_from = NOW() - INTERVAL '1 day' WHERE email_account_id = $1`, sender.account)
+
+	deliverWarmup(t, handle, sender.account, gmail.account, "30 minutes", 18, false)
+	deliverWarmup(t, handle, sender.account, gmail.account, "30 minutes", 2, true)
+	deliverWarmup(t, handle, sender.account, small.account, "30 minutes", 10, true)
+	// Spam reported with no receipt behind it was never verifiably delivered.
+	insertSpamReports(t, handle, sender.account, "spam_placement", "10 minutes", 3)
+
+	row, err := repo.GetParticipantHealthForAccount(ctx, sender.account)
+	if err != nil || row == nil {
+		t.Fatalf("participant row: %v", err)
+	}
+	m, err := NewService(repo).(*service).loadMetrics(ctx, sender.account, row)
+	if err != nil {
+		t.Fatalf("loadMetrics: %v", err)
+	}
+	if m.PlacementSample != 20 || m.SpamPlacementRate != 10 || m.OtherDelivered != 10 || m.OtherSpamRate != 100 {
+		t.Fatalf("sample %d, rate %v, other %d at %v%%; want 20 at 10%%, other 10 at 100%%",
+			m.PlacementSample, m.SpamPlacementRate, m.OtherDelivered, m.OtherSpamRate)
 	}
 }

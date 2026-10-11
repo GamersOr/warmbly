@@ -4,9 +4,11 @@
 // pages are appended on demand.
 
 import React from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { browseSearchSchema, submissionsStatusSchema } from "@/lib/browse-other-lists";
 import { AnimatePresence, motion } from "framer-motion";
 import { CheckIcon, Loader2Icon, Trash2Icon, XIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import { EmptyBlock } from "@/components/layout/Page";
 import { SearchInput } from "@/components/ui/field";
@@ -15,7 +17,7 @@ import { useWriteGuard } from "@/hooks/usePermission";
 import { listFormSubmissions } from "@/lib/api/client/app/forms";
 import { useDeleteFormSubmission, useFormStats, useFormSubmissions } from "@/lib/api/hooks/app/forms";
 import type Form from "@/lib/api/models/app/forms/Form";
-import type { FormSubmission } from "@/lib/api/models/app/forms/Form";
+import type { FormSubmission, FormTriage } from "@/lib/api/models/app/forms/Form";
 import type { FormIdentifiedVisitor } from "@/lib/api/models/app/forms/FormStats";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
@@ -23,6 +25,7 @@ import timeAgo from "@/lib/helper/timeAgo";
 
 import { splitPages } from "./designCore";
 import { InitialsAvatar, MiniProgress, StatusPill } from "./RowBits";
+import { Checkbox } from "@/components/ui/checkbox";
 
 function answerText(v: string | string[] | undefined): string {
     if (v === undefined) return "";
@@ -33,7 +36,37 @@ type Row =
     | { kind: "submission"; key: string; time: number; sub: FormSubmission }
     | { kind: "visitor"; key: string; time: number; visitor: FormIdentifiedVisitor };
 
-type StatusFilter = "all" | "completed" | "in_progress";
+type StatusFilter = "all" | "completed" | "in_progress" | "junk";
+
+const TRIAGE_LABEL: Record<Exclude<FormTriage, "">, string> = {
+    buyer: "Buyer",
+    vendor: "Vendor",
+    job_seeker: "Job seeker",
+    other: "Other",
+    junk: "Junk",
+};
+
+const TRIAGE_TONE: Record<Exclude<FormTriage, "">, string> = {
+    buyer: "bg-emerald-50 text-emerald-700",
+    vendor: "bg-slate-100 text-slate-600",
+    job_seeker: "bg-slate-100 text-slate-600",
+    other: "bg-slate-100 text-slate-600",
+    junk: "bg-rose-50 text-rose-700",
+};
+
+// The triage verdict as a chip; nothing when the submission was not triaged.
+function TriageChip({ triage, confidence }: { triage?: FormTriage; confidence?: number }) {
+    if (!triage) return null;
+    const title = confidence ? `${TRIAGE_LABEL[triage]} (${Math.round(confidence * 100)}% confidence)` : TRIAGE_LABEL[triage];
+    return (
+        <span
+            title={title}
+            className={`inline-flex items-center h-4 px-1.5 rounded text-[10px] font-medium uppercase tracking-wide whitespace-nowrap shrink-0 ${TRIAGE_TONE[triage]}`}
+        >
+            {TRIAGE_LABEL[triage]}
+        </span>
+    );
+}
 
 export default function SubmissionsTab({ form }: { form: Form }) {
     const confirm = useConfirm();
@@ -52,8 +85,8 @@ export default function SubmissionsTab({ form }: { form: Form }) {
     const [loadingMore, setLoadingMore] = React.useState(false);
     const [selected, setSelected] = React.useState<FormSubmission | null>(null);
 
-    const [query, setQuery] = React.useState("");
-    const [status, setStatus] = React.useState<StatusFilter>("all");
+    const [query, setQuery] = useBrowseState(`forms.${form.id}.submissions.query`, "", browseSearchSchema);
+    const [status, setStatus] = useBrowseState<StatusFilter>(`forms.${form.id}.submissions.status`, "all", submissionsStatusSchema);
     const [checked, setChecked] = React.useState<string[]>([]);
     const [bulkBusy, setBulkBusy] = React.useState(false);
 
@@ -82,16 +115,21 @@ export default function SubmissionsTab({ form }: { form: Form }) {
         return out;
     }, [submissions, stats.data]);
 
+    // Junk is a completed submission the judge flagged; it sits under its own
+    // filter so the Completed view only carries responses worth reading.
     const counts = React.useMemo(() => {
-        const completed = rows.filter((r) => r.kind === "submission").length;
-        return { all: rows.length, completed, in_progress: rows.length - completed };
+        const junk = rows.filter((r) => r.kind === "submission" && r.sub.triage === "junk").length;
+        const completed = rows.filter((r) => r.kind === "submission").length - junk;
+        return { all: rows.length, completed, in_progress: rows.length - completed - junk, junk };
     }, [rows]);
 
     const visible = React.useMemo(() => {
         const q = query.trim().toLowerCase();
         return rows.filter((r) => {
-            if (status === "completed" && r.kind !== "submission") return false;
+            const junk = r.kind === "submission" && r.sub.triage === "junk";
+            if (status === "completed" && (r.kind !== "submission" || junk)) return false;
             if (status === "in_progress" && r.kind !== "visitor") return false;
+            if (status === "junk" && !junk) return false;
             if (!q) return true;
             if (r.kind === "submission") {
                 const s = r.sub;
@@ -206,6 +244,7 @@ export default function SubmissionsTab({ form }: { form: Form }) {
         { value: "all", label: "All" },
         { value: "completed", label: "Completed" },
         { value: "in_progress", label: "In progress" },
+        ...(form.triage_enabled || counts.junk > 0 || status === "junk" ? [{ value: "junk" as const, label: "Junk" }] : []),
     ];
 
     return (
@@ -242,9 +281,7 @@ export default function SubmissionsTab({ form }: { form: Form }) {
                     <thead className="sticky top-0 bg-white z-[1]">
                         <tr className="border-b border-slate-200">
                             <th className="pl-5 pr-2 py-2 w-9">
-                                <input
-                                    type="checkbox"
-                                    className="w-3.5 h-3.5 rounded accent-sky-600"
+                                <Checkbox
                                     checked={allChecked}
                                     onChange={toggleAll}
                                     disabled={visibleSubs.length === 0}
@@ -339,8 +376,11 @@ export default function SubmissionsTab({ form }: { form: Form }) {
                         >
                             <div className="shrink-0 h-12 px-4 flex items-center justify-between border-b border-slate-200">
                                 <div className="min-w-0">
-                                    <div className="text-[12.5px] font-medium text-slate-900 truncate">
-                                        {selected.contact_email || "Submission"}
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                        <div className="text-[12.5px] font-medium text-slate-900 truncate">
+                                            {selected.contact_email || "Submission"}
+                                        </div>
+                                        <TriageChip triage={selected.triage} confidence={selected.triage_confidence} />
                                     </div>
                                     <div className="text-[11px] text-slate-500">{new Date(selected.created_at).toLocaleString()}</div>
                                 </div>
@@ -419,9 +459,7 @@ function SubmissionRow({
             }`}
         >
             <td className="pl-5 pr-2" onClick={(e) => e.stopPropagation()}>
-                <input
-                    type="checkbox"
-                    className="w-3.5 h-3.5 rounded accent-sky-600"
+                <Checkbox
                     checked={checked}
                     onChange={(e) => onCheck(e.target.checked)}
                 />
@@ -430,8 +468,11 @@ function SubmissionRow({
                 <div className="flex items-center gap-2.5 min-w-0">
                     <InitialsAvatar name={sub.contact_name} email={sub.contact_email} />
                     <div className="min-w-0">
-                        <div className="text-[12.5px] font-medium text-slate-900 truncate leading-tight">
-                            {name || sub.contact_email || "Anonymous"}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                            <div className="text-[12.5px] font-medium text-slate-900 truncate leading-tight">
+                                {name || sub.contact_email || "Anonymous"}
+                            </div>
+                            <TriageChip triage={sub.triage} confidence={sub.triage_confidence} />
                         </div>
                         {sub.contact_email && name && (
                             <div className="text-[11px] text-slate-500 truncate">{sub.contact_email}</div>

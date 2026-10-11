@@ -5,12 +5,13 @@ import (
 	"math/rand"
 	"regexp"
 	"strings"
-	"sync"
 	"text/template"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/app/unsublink"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/generation"
 	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
 	"github.com/warmbly/warmbly/internal/pkg/tmplfuncs"
 	"github.com/warmbly/warmbly/internal/pkg/warmpersona"
@@ -19,19 +20,17 @@ import (
 // Conversation represents a warmup conversation for AI generation
 type Conversation struct {
 	ID          uuid.UUID
+	Version     string
+	Subject     string
 	Theme       string
 	Description string
 	Messages    []string
 }
 
-// TemplateVariables contains variables for template rendering
-type TemplateVariables struct {
-	FirstName string
-	LastName  string
-	Email     string
-	Company   string
-	Phone     string
-	Custom    map[string]string
+// TemplateContext holds typed per-send values, separate from contact fields.
+type TemplateContext struct {
+	Sender          TemplateSender
+	UnsubscribeLink string
 }
 
 // templateAction matches a single {{ ... }} action (no nested braces).
@@ -46,18 +45,15 @@ var templateAction = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 var spacedFieldRefAt = regexp.MustCompile(`^\.[A-Za-z0-9_]+(?:[ \-]+[A-Za-z0-9_]+)+`)
 
 // tmplCache caches parsed templates keyed by the raw template string. A stored
-// nil *template.Template is a "known-bad" sentinel: that body failed to parse,
-// so future renders skip straight to the naive fallback instead of re-parsing
-// on every recipient. *template.Template is safe for concurrent Execute once
-// parsed, so a single cached instance is reused across the whole send loop.
-var tmplCache sync.Map // map[string]*template.Template ; nil value = known-bad
+// nil is a "known-bad" sentinel: that body failed to compile, so future renders
+// skip straight to the naive fallback instead of re-parsing on every recipient.
+// *template.Template is safe for concurrent Execute once parsed, so a single
+// cached instance is reused across the whole send loop.
+var tmplCache tmplfuncs.Cache
 
-// buildTemplateData flattens the contact into the single map[string]string root
-// the template engine executes against. Standard fields use their established
-// dot-names so {{.FirstName}} keeps working; custom fields are merged in, with
-// standard fields winning a name collision.
-func buildTemplateData(contact models.Contact) map[string]string {
-	data := make(map[string]string, len(contact.CustomFields)+5)
+// Standard fields and the typed Sender namespace take precedence over custom fields.
+func buildTemplateData(contact models.Contact, context TemplateContext) map[string]any {
+	data := make(map[string]any, len(contact.CustomFields)+7)
 	for k, v := range contact.CustomFields {
 		data[k] = v
 	}
@@ -66,6 +62,8 @@ func buildTemplateData(contact models.Contact) map[string]string {
 	data["Email"] = contact.Email
 	data["Company"] = contact.Company
 	data["Phone"] = contact.Phone
+	data["Sender"] = context.Sender
+	data[UnsubscribeLinkVar] = context.UnsubscribeLink
 	return data
 }
 
@@ -107,7 +105,9 @@ func rewriteSpacedInAction(action string) string {
 			b.WriteByte(c)
 			i++
 		case c == '.':
-			if m := spacedFieldRefAt.FindString(action[i:]); m != "" {
+			// A nested struct selector must not consume the following function argument.
+			fieldStart := i == 0 || strings.ContainsRune("{( \t\r\n", rune(action[i-1]))
+			if m := spacedFieldRefAt.FindString(action[i:]); fieldStart && m != "" {
 				b.WriteString(`(index . "` + m[1:] + `")`)
 				i += len(m)
 				continue
@@ -123,18 +123,17 @@ func rewriteSpacedInAction(action string) string {
 }
 
 // compiledTemplate returns a parsed, cached template for tmpl, or nil if the
-// body is known-bad (caller falls back to naiveRenderTemplate). missingkey=zero
-// makes absent map keys render as "" and test false in {{if .X}}. text/template
+// body is known-bad (caller falls back to standalone actions). missingkey=zero
+// makes absent map keys test false in {{if .X}}. text/template
 // (not html/template) performs no escaping, so the author's HTML body is emitted
 // verbatim.
 func compiledTemplate(tmpl string) *template.Template {
-	if v, ok := tmplCache.Load(tmpl); ok {
-		t, _ := v.(*template.Template)
+	if t, ok := tmplCache.Load(tmpl); ok {
 		return t // may be nil (known-bad)
 	}
-	t, err := template.New("body").Funcs(tmplfuncs.FuncMap()).Option("missingkey=zero").Parse(tmpl)
+	t, err := tmplfuncs.Compile("body", tmpl)
 	if err != nil {
-		tmplCache.Store(tmpl, (*template.Template)(nil))
+		tmplCache.Store(tmpl, nil)
 		return nil
 	}
 	tmplCache.Store(tmpl, t)
@@ -151,64 +150,54 @@ func TemplateError(tmpl string) error {
 	if tmpl == "" {
 		return nil
 	}
-	_, err := template.New("validate").Funcs(tmplfuncs.FuncMap()).Option("missingkey=zero").Parse(rewriteSpacedFieldRefs(tmpl))
+	_, err := tmplfuncs.Compile("validate", rewriteSpacedFieldRefs(tmpl))
 	return err
 }
 
 // RenderTemplate renders a sequence template against a contact, supporting Go
 // text/template conditionals ({{if}}/{{else}}/{{eq}}), standard variables, and
 // custom fields. It NEVER hard-fails: any parse or execution error falls back to
-// the naive replacement path so a send always produces a body. Spintax is
+// standalone actions so a send always produces a body. Spintax is
 // intentionally left untouched here (single-brace {a|b} survives the template
 // pass) and expanded later in the pipeline where applicable.
 func RenderTemplate(tmpl string, contact models.Contact) string {
-	return RenderTemplateWith(tmpl, contact, nil)
+	return RenderTemplateWith(tmpl, contact, TemplateContext{})
 }
 
-// RenderTemplateWith is RenderTemplate with per-send values that are not
-// contact fields (today: the recipient's unsubscribe link). They win a name
-// collision with a custom field, like the standard fields do.
-func RenderTemplateWith(tmpl string, contact models.Contact, extra map[string]string) string {
+// RenderTemplateWith uses Go's native struct access for the sending mailbox.
+func RenderTemplateWith(tmpl string, contact models.Contact, context TemplateContext) string {
 	if tmpl == "" {
 		return tmpl
 	}
 
-	data := buildTemplateData(contact)
-	for k, v := range extra {
-		data[k] = v
-	}
+	data := buildTemplateData(contact, context)
 	prepared := rewriteSpacedFieldRefs(tmpl)
 
 	t := compiledTemplate(prepared)
 	if t == nil {
-		return naiveRenderTemplate(tmpl, contact, extra) // known-bad -> legacy path
+		return fallbackRenderTemplate(tmpl, data)
 	}
 
-	var b strings.Builder
-	if err := t.Execute(&b, data); err != nil {
-		return naiveRenderTemplate(tmpl, contact, extra)
+	out, err := tmplfuncs.Execute(t, data)
+	if err != nil {
+		return fallbackRenderTemplate(tmpl, data)
 	}
-	return b.String()
+	return strings.ReplaceAll(out, "<no value>", "")
 }
 
-// naiveRenderTemplate is the legacy renderer: a literal {{.Key}} -> value
-// substitution for the standard fields and every custom field. It is the
-// graceful fallback when text/template parsing or execution fails, so a body
-// always renders even for malformed conditional syntax.
-func naiveRenderTemplate(tmpl string, contact models.Contact, extra map[string]string) string {
-	result := tmpl
-	for k, v := range extra {
-		result = strings.ReplaceAll(result, fmt.Sprintf("{{.%s}}", k), v)
-	}
-	result = strings.ReplaceAll(result, "{{.FirstName}}", contact.FirstName)
-	result = strings.ReplaceAll(result, "{{.LastName}}", contact.LastName)
-	result = strings.ReplaceAll(result, "{{.Email}}", contact.Email)
-	result = strings.ReplaceAll(result, "{{.Company}}", contact.Company)
-	result = strings.ReplaceAll(result, "{{.Phone}}", contact.Phone)
-	for k, v := range contact.CustomFields {
-		result = strings.ReplaceAll(result, fmt.Sprintf("{{.%s}}", k), v)
-	}
-	return result
+// Recover standalone actions with the same engine, leaving broken control syntax literal.
+func fallbackRenderTemplate(tmpl string, data map[string]any) string {
+	return templateAction.ReplaceAllStringFunc(tmpl, func(action string) string {
+		t := compiledTemplate(rewriteSpacedFieldRefs(action))
+		if t == nil {
+			return action
+		}
+		out, err := tmplfuncs.Execute(t, data)
+		if err != nil {
+			return action
+		}
+		return strings.ReplaceAll(out, "<no value>", "")
+	})
 }
 
 // TemplatePreview is the result of rendering a campaign template against one
@@ -227,7 +216,9 @@ type TemplatePreview struct {
 }
 
 // PreviewUnsubscribeLink stands in for the per-recipient link in previews.
-const PreviewUnsubscribeLink = "https://example.com/unsubscribe/preview"
+// The same width as a real one, so a plain-text preview (where the address is
+// printed in full) reads as wide as the send will.
+const PreviewUnsubscribeLink = "https://example.com" + unsublink.Path + unsublink.ExampleTicket
 
 // unresolvedToken matches a {{…}} token still present after rendering (i.e. one
 // that failed to parse and fell through to literal substitution).
@@ -237,17 +228,15 @@ var unresolvedToken = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 // send path does (template render + spintax), and reports parse errors plus any
 // tokens that did not resolve.
 func PreviewTemplates(subject, bodyHTML, bodyPlain string, contact models.Contact) TemplatePreview {
-	return previewTemplatesWith(subject, bodyHTML, bodyPlain, contact, PreviewUnsubscribeLink)
+	return previewTemplatesWith(subject, bodyHTML, bodyPlain, contact, TemplateContext{UnsubscribeLink: PreviewUnsubscribeLink})
 }
 
-// previewTemplatesWith is PreviewTemplates with the unsubscribe link the
-// {{unsubscribe_link}} variable resolves to.
-func previewTemplatesWith(subject, bodyHTML, bodyPlain string, contact models.Contact, unsubscribeURL string) TemplatePreview {
-	extra := map[string]string{UnsubscribeLinkVar: unsubscribeURL}
+// previewTemplatesWith renders with the same sender context as a real send.
+func previewTemplatesWith(subject, bodyHTML, bodyPlain string, contact models.Contact, context TemplateContext) TemplatePreview {
 	p := TemplatePreview{
-		Subject:   expandSpintax(RenderTemplateWith(subject, contact, extra)),
-		BodyHTML:  expandSpintax(RenderTemplateWith(bodyHTML, contact, extra)),
-		BodyPlain: expandSpintax(RenderTemplateWith(bodyPlain, contact, extra)),
+		Subject:   expandSpintax(RenderTemplateWith(subject, contact, context)),
+		BodyHTML:  expandSpintax(RenderTemplateWith(bodyHTML, contact, context)),
+		BodyPlain: expandSpintax(RenderTemplateWith(bodyPlain, contact, context)),
 	}
 	for _, f := range []struct{ name, raw string }{{"subject", subject}, {"body", bodyHTML}, {"plain text", bodyPlain}} {
 		if err := TemplateError(f.raw); err != nil {
@@ -283,6 +272,26 @@ func AddSignature(body string, signature string, isHTML bool) string {
 	// footer: after it, a signature lands against the left edge of the window
 	// instead of under the copy it signs off (issue #462).
 	return mailhtml.AppendToContent(body, block)
+}
+
+// AppendForwarded puts the message a forward carries under the note and
+// signature, the order every mail client writes a forward in.
+func AppendForwarded(bodyHTML, bodyPlain, forwardedHTML, forwardedPlain string) (string, string) {
+	if forwardedHTML != "" {
+		if strings.TrimSpace(bodyHTML) == "" {
+			bodyHTML = forwardedHTML
+		} else {
+			bodyHTML = mailhtml.AppendToContent(bodyHTML, "<br>"+forwardedHTML)
+		}
+	}
+	if forwardedPlain != "" {
+		if note := strings.TrimRight(bodyPlain, " \t\r\n"); note == "" {
+			bodyPlain = forwardedPlain
+		} else {
+			bodyPlain = note + "\n\n" + forwardedPlain
+		}
+	}
+	return bodyHTML, bodyPlain
 }
 
 // AddOpenTrackingPixel adds an invisible tracking pixel to HTML email.
@@ -326,8 +335,8 @@ func GenerateConversationReplyEmail(conversation Conversation, account models.Em
 	if turn < 1 || turn > len(conversation.Messages) {
 		return "", false
 	}
-	body := spinClean(conversation.Messages[turn-1])
-	if body == "" {
+	body := strings.TrimSpace(conversation.Messages[turn-1])
+	if body == "" || strings.ContainsAny(body, "<>{}\x00\r") {
 		return "", false
 	}
 
@@ -336,88 +345,109 @@ func GenerateConversationReplyEmail(conversation Conversation, account models.Em
 		signature = account.Email
 	}
 
-	persona := warmpersona.For(account.ID)
-	signoffs := []string{"Best regards,", "Best,", "Cheers,", "Thanks,", "Talk soon,", "All the best,", "Speak soon,", "Take care,"}
-	signoff := personaPick(persona, "signoff", signoffs)
-
-	return body + "\n\n" + signoff + "\n" + signature, true
+	rendered, err := generation.RenderCanonicalTurn(body, signature)
+	return rendered, err == nil
 }
 
 // GenerateConversationOpeningEmail renders an AI opening without consuming a
 // pre-generated reply turn.
 func GenerateConversationOpeningEmail(conversation Conversation, account models.Email) string {
-	return generateConversationOpeningEmail(conversation, account, false)
+	return generateConversationOpeningEmail(conversation, account)
 }
 
-// GenerateConversationEmail retains the reviewed static-library renderer.
+// GenerateConversationEmail renders an opening or the first ordered reply.
 func GenerateConversationEmail(conversation Conversation, account models.Email, isReply bool) string {
 	if isReply {
-		if body, ok := GenerateConversationReplyEmail(conversation, account, 1); ok {
-			return body
-		}
+		body, _ := GenerateConversationReplyEmail(conversation, account, 1)
+		return body
 	}
-	return generateConversationOpeningEmail(conversation, account, true)
+	return generateConversationOpeningEmail(conversation, account)
 }
 
-// generateConversationOpeningEmail renders a plaintext opening. Reviewed
-// static content can append one question; AI openings keep all ordered reply
-// turns unused for the later back-and-forth.
-func generateConversationOpeningEmail(conversation Conversation, account models.Email, includeQuestion bool) string {
+// Openings never consume a future reply or append a random question.
+func generateConversationOpeningEmail(conversation Conversation, account models.Email) string {
 	signature := account.Name
 	if signature == "" {
 		signature = account.Email
 	}
 
-	persona := warmpersona.For(account.ID)
+	description := strings.TrimSpace(conversation.Description)
+	if description == "" || strings.ContainsAny(description, "<>{}\x00\r") {
+		return ""
+	}
+	rendered, _ := generation.RenderCanonicalTurn(description, signature)
+	return rendered
+}
 
-	greetings := []string{"Hi,", "Hey,", "Hi there,", "Hello,", "Hey there,", "Morning,", "Hello there,"}
-	signoffs := []string{"Best regards,", "Best,", "Cheers,", "Thanks,", "Talk soon,", "All the best,", "Speak soon,", "Take care,"}
+// VettedDiagnosticConversations uses a separate immutable source-ID namespace.
+func VettedDiagnosticConversations() []Conversation {
+	return []Conversation{
+		{ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-clock:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-clock", Subject: "Simulated diagnostic: fictional clock", Description: "Simulated diagnostic. In this fictional example, the clock reads 14:00, not 15:00. Which time does the example use?", Messages: []string{"The fictional example uses 14:00, not 15:00.", "Agreed. The example is closed; no real meeting was scheduled."}},
+		{ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-count:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-count", Subject: "Simulated diagnostic: sample count", Description: "Simulated diagnostic. This hypothetical sample contains 3 blue cards and 2 green cards. How many cards are in the sample?", Messages: []string{"There are 5 cards in the hypothetical sample: 3 blue and 2 green.", "That matches the hypothetical sample. This scenario is complete; no physical cards were exchanged."}},
+		{
+			ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-document:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-document", Subject: "Simulated diagnostic: hypothetical draft review",
+			Description: "Simulated diagnostic. In this hypothetical draft, Section A lists assumptions and Section B lists unknowns. An erroneous summary says inbox placement passed, but the draft contains no measured delivery results. Which claim needs correction?",
+			Messages: []string{
+				"The hypothetical inbox-placement claim needs correction: neither assumptions nor unknowns establish a measured result. Should the summary instead distinguish Section A from Section B?",
+				"Yes. Section A lists assumptions; Section B lists unknowns. Neither section proves inbox placement. Can we close the fictional review with that distinction?",
+				"Agreed. The fictional summary distinguishes assumptions from unknowns and makes no placement claim. This review scenario is closed; no real document was reviewed or changed.",
+			},
+		},
+		{
+			ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-summary:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-summary", Subject: "Simulated diagnostic: summary correction",
+			Description: "Simulated diagnostic. A fictional checklist has 12 items: 9 marked complete and 3 marked unknown, with none marked failed. A draft incorrectly calls all 12 complete. What should the corrected summary say?",
+			Messages: []string{
+				"The fictional checklist has 9 complete items and 3 unknown items, not 12 complete items. Does an unknown item count as failed or passed?",
+				"No. Unknown items are neither failed nor passed; the checklist has none marked failed. Should the corrected summary keep the 9 complete and 3 unknown counts separate?",
+				"Yes. The corrected hypothetical summary keeps 9 complete and 3 unknown items separate, with none marked failed. The example is closed; no actual provider check was performed.",
+			},
+		},
+		{
+			ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-timezone:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-timezone", Subject: "Simulated diagnostic: fixed-offset date note",
+			Description: "Simulated diagnostic. On 2026-10-08 the fictional clock reads 09:00 UTC, or 11:00 at the fixed offset UTC+02:00. This is not a meeting invitation. Which local date and time belong in the hypothetical note?",
+			Messages: []string{
+				"The note should use 2026-10-08 at 11:00 with the fixed offset UTC+02:00, corresponding to 09:00 UTC. Should it keep the fixed offset rather than guess a regional timezone?",
+				"Yes. Keep 2026-10-08, 09:00 UTC and 11:00 at UTC+02:00 unchanged. The example specifies no regional timezone or meeting. Can we close without creating an appointment?",
+				"Agreed. The fictional date remains 2026-10-08, with 09:00 UTC equal to 11:00 at UTC+02:00. This example is closed; no appointment was created.",
+			},
+		},
+		{
+			ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-plaintext:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-plaintext", Subject: "Simulated diagnostic: plaintext label review",
+			Description: "Simulated diagnostic. This constructed plaintext example uses written labels, not color or linked instructions. Its hypothetical items are Status: unknown and Next step: review. Can the labels be understood without opening a link?",
+			Messages: []string{
+				"Yes. Status: unknown and Next step: review are written in the example, without a link or color requirement. Does that alone prove how an email client displays a delivered message?",
+				"No. This is a locally constructed example, not a delivered-client accessibility test. Should the summary preserve the unknown status and that testing limit?",
+				"Yes. The example retains Status: unknown and Next step: review. This label-review scenario is closed; no delivered-client accessibility result is claimed.",
+			},
+		},
+		{
+			ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-conditional:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-conditional", Subject: "Simulated diagnostic: conditional wording",
+			Description: "Simulated diagnostic. In a hypothetical plan, a draft may be updated only if a reviewer approves it. No approval exists, and no update is promised for 2026-10-09. What should the draft status say?",
+			Messages: []string{
+				"The hypothetical status is pending review: no approval exists and the update is conditional. Should the wording promise an update on 2026-10-09?",
+				"No. The approval condition has not been met, so no update is promised for 2026-10-09. Can we keep pending review instead of implying an approval?",
+				"Agreed. The hypothetical draft remains pending review, without approval or a promised update for 2026-10-09. This scenario is closed; no real draft was changed or commitment made.",
+			},
+		},
+		{
+			ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmbly:diagnostic-summary-hu:v1")), Version: generation.DiagnosticScenarioVersion, Theme: "diagnostic-summary-hu", Subject: "Simulated diagnostic: magyar összefoglaló",
+			Description: "Simulated diagnostic. Ebben a kitalált jegyzetben 4 ellenőrzésből 3 eredménye ismeretlen, 1 pedig nincs elvégezve. Egyik sem igazolt siker. Hogyan őrizzük meg ezt a különbséget az összefoglalóban?",
+			Messages: []string{
+				"Az összefoglalóban 3 ismeretlen eredményt és 1 el nem végzett ellenőrzést írjunk; ne állítsunk sikert. Jelenthet-e az ismeretlen eredmény igazolt sikert?",
+				"Nem. Az ismeretlen nem igazolt siker, az el nem végzett ellenőrzés pedig továbbra sincs elvégezve. Maradjon ez kitalált példa, ne szolgáltatói mérés?",
+				"Igen. A kitalált példa lezárult: 3 eredmény ismeretlen, 1 ellenőrzés nincs elvégezve. Valós szolgáltatói tesztet nem végeztünk.",
+			},
+		},
+	}
+}
 
-	greeting := personaPick(persona, "greeting", greetings)
-	signoff := personaPick(persona, "signoff", signoffs)
-
-	pickMessage := func() string {
-		if len(conversation.Messages) == 0 {
-			return ""
+func ResolveDiagnosticConversation(id uuid.UUID) (Conversation, bool) {
+	for _, c := range VettedDiagnosticConversations() {
+		if c.ID == id {
+			return c, true
 		}
-		return spinClean(conversation.Messages[rand.Intn(len(conversation.Messages))])
 	}
-
-	description := spinClean(conversation.Description)
-	if description == "" {
-		description = "Just wanted to check in with a quick note."
-	}
-
-	openers := []string{
-		"Hope your week is going well.",
-		"Hope you're doing well.",
-		"Hope things are good on your end.",
-		"Hope you've had a good start to the week.",
-		"Hope all's well with you.",
-	}
-
-	var sb strings.Builder
-	sb.WriteString(greeting)
-	sb.WriteString("\n\n")
-	// ~60% include a short opener for a warmer, less terse message.
-	if rand.Float64() < 0.6 {
-		sb.WriteString(openers[rand.Intn(len(openers))])
-		sb.WriteString(" ")
-	}
-	sb.WriteString(description)
-
-	if includeQuestion {
-		if question := pickMessage(); question != "" {
-			sb.WriteString("\n\n")
-			sb.WriteString(question)
-		}
-	}
-
-	sb.WriteString("\n\n")
-	sb.WriteString(signoff)
-	sb.WriteString("\n")
-	sb.WriteString(signature)
-	return sb.String()
+	return Conversation{}, false
 }
 
 // ExtractPlainTextFromHTML derives the text/plain alternative that ships

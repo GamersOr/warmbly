@@ -2,6 +2,7 @@ package unibox
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/google/uuid"
@@ -9,12 +10,22 @@ import (
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
 func (s *uniboxService) GetByID(
 	ctx context.Context,
 	orgID, id uuid.UUID,
 ) (*models.EmailMessage, *errx.Error) {
+	return s.getByID(ctx, orgID, id, true)
+}
+
+// Peek is GetByID for a reader who must not change the shared read state.
+func (s *uniboxService) Peek(ctx context.Context, orgID, id uuid.UUID) (*models.EmailMessage, *errx.Error) {
+	return s.getByID(ctx, orgID, id, false)
+}
+
+func (s *uniboxService) getByID(ctx context.Context, orgID, id uuid.UUID, markSeen bool) (*models.EmailMessage, *errx.Error) {
 	var resp models.EmailMessage
 	var snippet string
 	var fixtureMessage bool
@@ -27,14 +38,30 @@ func (s *uniboxService) GetByID(
 	{
 		msg, owner, err := s.uniboxRepository.GetByIDForOrg(ctx, orgID, id)
 		if err != nil {
+			if errors.Is(err, repository.ErrEmailNotFound) {
+				return nil, errx.New(errx.NotFound, "message not found")
+			}
 			errs.CaptureException(err)
 			return nil, errx.InternalError()
 		}
 		ownerID = owner
 		accountID = msg.EmailID
+
+		// Opening a conversation is what marks it read, org-scoped so any
+		// member clears the shared unread state. Relayed like any other read
+		// state change, so the mailbox agrees: this is the path a developer
+		// hitting the API reaches, where nothing calls PATCH /unibox/seen.
+		if !msg.Seen && markSeen {
+			if changed, err := s.uniboxRepository.MarkSeenBulk(ctx, orgID, []uuid.UUID{id}, true); err == nil {
+				msg.Seen = true
+				s.relaySeen(ctx, orgID, changed)
+			}
+		}
 		resp.ID = msg.ID
 		resp.GmailID = msg.GmailID
 		resp.UID = msg.UID
+		resp.EmailID = msg.EmailID
+		resp.Folder = models.NormalizeFolder(msg.Folder, msg.Flags)
 
 		resp.ParentID = msg.ParentID
 		resp.ThreadID = msg.ThreadID
@@ -59,39 +86,38 @@ func (s *uniboxService) GetByID(
 	}
 
 	// Fetch body from object storage under the mailbox owner and account.
-	{
-		out, err := s.GetBody(ctx, ownerID, accountID, id)
-		if err != nil {
-			// A missing blob is a degraded read, not a broken endpoint: mail
-			// synced before body storage existed, or a blob that never landed,
-			// still has its preview text. Returning 500 made the whole message
-			// unopenable instead of showing what we have.
-			if !fixtureMessage {
-				errs.CaptureException(err)
-			}
-			resp.BodyPlain = snippet
-			resp.BodyTruncated = !fixtureMessage
-			return &resp, nil
-		}
-
-		resp.BodyPlain = string(out.PlainText)
-
-		htmlBody := string(out.HTMLBody)
-		if htmlBody != "" && !mailhtml.LooksLikeHTML(htmlBody) {
-			// Legacy rows: a sync from before the IMAP reader addressed parts
-			// individually stored the plain text under both bodies. Serving it
-			// as HTML is what collapsed the message to one line.
-			if resp.BodyPlain == "" {
-				resp.BodyPlain = htmlBody
-			}
-			htmlBody = ""
-		}
-		// The HTML body comes from the sender's mail client and is rendered in
-		// the dashboard, so it is sanitized here rather than at each call site.
-		resp.BodyHTML = mailhtml.Sanitize(htmlBody)
-	}
+	var htmlBody string
+	resp.BodyPlain, htmlBody, resp.BodyTruncated = s.storedBody(ctx, ownerID, accountID, id, snippet, fixtureMessage)
+	// The HTML body comes from the sender's mail client and is rendered in
+	// the dashboard, so it is sanitized here rather than at each call site.
+	resp.BodyHTML = mailhtml.Sanitize(htmlBody)
 
 	return &resp, nil
+}
+
+// storedBody reads a message's stored text and raw HTML. A missing blob is a
+// degraded read, not a failure: mail synced before body storage existed, or a
+// blob that never landed, still has its preview, returned as the text and
+// flagged truncated.
+func (s *uniboxService) storedBody(ctx context.Context, ownerID, accountID, id uuid.UUID, snippet string, fixture bool) (plain, rawHTML string, truncated bool) {
+	out, err := s.GetBody(ctx, ownerID, accountID, id)
+	if err != nil {
+		if !fixture {
+			errs.CaptureException(err)
+		}
+		return snippet, "", !fixture
+	}
+	plain, rawHTML = string(out.PlainText), string(out.HTMLBody)
+	if rawHTML != "" && !mailhtml.LooksLikeHTML(rawHTML) {
+		// Legacy rows: a sync from before the IMAP reader addressed parts
+		// individually stored the plain text under both bodies. Serving it
+		// as HTML is what collapsed the message to one line.
+		if plain == "" {
+			plain = rawHTML
+		}
+		rawHTML = ""
+	}
+	return plain, rawHTML, false
 }
 
 // isFixtureMessage reports whether a message came from the seed/sandbox

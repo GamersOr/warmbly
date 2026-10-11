@@ -120,16 +120,33 @@ type MailError struct {
 	ResolvedAt    *time.Time             `json:"resolved_at"`
 
 	Message string `json:"message"`
+	// Recipient is the one address a per-recipient refusal was about.
+	Recipient string `json:"recipient,omitempty"`
+
+	// RetryAfter is provider guidance for transient throttles. It stays local
+	// to the worker; persisted error records should not depend on a stale delay.
+	RetryAfter time.Duration `json:"-"`
+	Failure    *SendFailure  `json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Error names the failure, not the error object.
+//
+// It used to read "Email (<uuid>): ...", where the uuid was this struct's own
+// ID and not a mailbox at all. Every other "Email (%s)" in the codebase is a
+// mailbox id, so the message invited exactly one reading and it was wrong; the
+// sentinels are package-level, so their ID is minted once at init and looks
+// reassuringly stable while naming nothing. An hour went into looking up a
+// mailbox that had never existed. The code is what a reader actually wants,
+// and it groups these usefully in error tracking. The ID stays on the struct
+// for anyone who needs it.
 func (e *MailError) Error() string {
-	return fmt.Sprintf("Email (%s): %s", e.ID, e.Message)
+	return fmt.Sprintf("mail %s: %s", e.Code, e.Message)
 }
 
 func (e *MailError) Unwrap() error {
-	return fmt.Errorf("Email (%s): %s", e.ID, e.Message)
+	return fmt.Errorf("mail %s: %s", e.Code, e.Message)
 }
 
 func MError(eType MailErrorType, code MailErrorCode, message string, resolveMethod MailErrorResolveMethod) *MailError {
@@ -152,7 +169,29 @@ var (
 	ErrMailGoogleUnknown = func(code int, message string) *MailError {
 		return MError(MailErrorWarning, MailErrorCodeGoogleUnknown(code), message, MailErrorResolveMethodRetry)
 	}
-	ErrMailServerUnreachable     = MError(MailErrorWarning, MailErrorCodeServerUnreachable, "The connection to the mail server could not be established. The server may be offline or blocking the connection.", MailErrorResolveMethodRetry)
+	ErrMailServerUnreachable = MError(MailErrorWarning, MailErrorCodeServerUnreachable, "The connection to the mail server could not be established. The server may be offline or blocking the connection.", MailErrorResolveMethodRetry)
+	// ErrMailServerUnreachableAt preserves the stable code while exposing the failed stage.
+	ErrMailServerUnreachableAt = func(stage string, cause error) *MailError {
+		if stage == "" || cause == nil {
+			return ErrMailServerUnreachable
+		}
+		return MError(
+			MailErrorWarning,
+			MailErrorCodeServerUnreachable,
+			fmt.Sprintf("The connection to the mail server could not be established (%s: %s). The server may be offline or blocking the connection.", stage, cause),
+			MailErrorResolveMethodRetry,
+		)
+	}
+	// ErrMailSMTPSEgressBlocked keeps the retryable code but says the block is
+	// the worker's network, so the customer is not sent to debug a healthy server.
+	ErrMailSMTPSEgressBlocked = func(addr string) *MailError {
+		return MError(
+			MailErrorWarning,
+			MailErrorCodeServerUnreachable,
+			fmt.Sprintf("Warmbly's sending network currently blocks outbound port 465, so it could not reach %s, and the server did not answer on port 587 either. The block is on the sending side, not on your mail server. Sending resumes on its own once the port is open; if your server can also accept submission on port 587 with STARTTLS, turning that on gets this mailbox sending now.", addr),
+			MailErrorResolveMethodRetry,
+		)
+	}
 	ErrMailResourceNotFound      = MError(MailErrorWarning, MailErrorCodeNotFound, "The mail server does not have the folder or message that was requested.", MailErrorResolveMethodRetry)
 	ErrMailCondStoreNotSupported = MError(MailErrorCritical, MailErrorCodeUnsupported, "The mail server does not support the required CONDSTORE extension. Synchronization cannot continue.", MailErrorResolveMethodReload)
 	ErrMailInvalidCredentials    = MError(

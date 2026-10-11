@@ -12,15 +12,19 @@ package opsnotify
 // Event keys. Adding one means adding it to Catalog too, otherwise the admin
 // panel cannot subscribe a channel to it.
 const (
-	EventEnterpriseInquiry = "enterprise_inquiry.created"
-	EventLimitRequest      = "limit_request.created"
-	EventWarmupAppeal      = "warmup_appeal.created"
-	EventOrganizationNew   = "organization.created"
-	EventUserRegistered    = "user.registered"
-	EventWorkerOffline     = "worker.offline"
-	EventOrgRisk           = "org_risk.escalated"
-	EventSubscriptionIssue = "subscription.payment_failed"
-	EventTest              = "test"
+	EventEnterpriseInquiry     = "enterprise_inquiry.created"
+	EventLimitRequest          = "limit_request.created"
+	EventWarmupAppeal          = "warmup_appeal.created"
+	EventOrganizationNew       = "organization.created"
+	EventUserRegistered        = "user.registered"
+	EventWorkerOffline         = "worker.offline"
+	EventWarmupLoading         = "warmup.worker_loading"
+	EventWarmupDispatchOverdue = "warmup.dispatch_overdue"
+	EventOrgRisk               = "org_risk.escalated"
+	EventSubscriptionIssue     = "subscription.payment_failed"
+	EventAdminSignIn           = "admin.signed_in"
+	EventAdminAccess           = "admin.access_changed"
+	EventTest                  = "test"
 )
 
 // Severity drives the colour a chat transport renders.
@@ -42,11 +46,15 @@ type EventDef struct {
 	// SelfHostRelevant is false for events that only mean something on a
 	// commercial deployment, so a self-hosted panel can hide them.
 	SelfHostRelevant bool `json:"self_host_relevant"`
+	// OptIn events reach only channels that tick them, never a catch-all one.
+	OptIn bool `json:"opt_in"`
 }
 
 // Catalog is the inventory the admin panel renders. Declaration order is
 // display order.
 var Catalog = []EventDef{
+	{Key: EventWarmupLoading, Group: "Operations", Label: "Persistent warmup loading failures", Description: "Repeated recent worker-loading failures span at least an hour without a later confirmed warmup send. Grouped by worker or fleet and deduplicated for six hours.", Severity: SeverityUrgent, SelfHostRelevant: true},
+	{Key: EventWarmupDispatchOverdue, Group: "Operations", Label: "Warmup dispatch is overdue", Description: "Active mailboxes have warmup tasks over an hour past their intended schedule. Grouped by worker or fleet and deduplicated for six hours.", Severity: SeverityUrgent, SelfHostRelevant: true},
 	{
 		Key: EventEnterpriseInquiry, Group: "Sales",
 		Label:       "Enterprise inquiry submitted",
@@ -61,8 +69,8 @@ var Catalog = []EventDef{
 	},
 	{
 		Key: EventSubscriptionIssue, Group: "Sales",
-		Label:       "Payment failed",
-		Description: "A subscription went past due and sending is at risk.",
+		Label:       "Subscription billing issue",
+		Description: "A subscription invoice could not be finalized or paid, so sending may be at risk.",
 		Severity:    SeverityWarning,
 	},
 	{
@@ -82,6 +90,18 @@ var Catalog = []EventDef{
 		Label:       "Worker went offline",
 		Description: "A worker stopped heartbeating, so its mailboxes cannot send until it returns or they are reassigned.",
 		Severity:    SeverityUrgent, SelfHostRelevant: true,
+	},
+	{
+		Key: EventAdminSignIn, Group: "Security",
+		Label:       "Admin signed in",
+		Description: "An account holding platform admin access started a new session, in the admin panel or the dashboard. Sent only to channels that tick it.",
+		Severity:    SeverityInfo, SelfHostRelevant: true, OptIn: true,
+	},
+	{
+		Key: EventAdminAccess, Group: "Security",
+		Label:       "Admin access changed",
+		Description: "Platform admin permissions were granted to, changed for, or revoked from an account in the admin panel.",
+		Severity:    SeverityWarning, SelfHostRelevant: true,
 	},
 	{
 		Key: EventWarmupAppeal, Group: "Abuse",

@@ -3,8 +3,8 @@
 // confirmation copy, same toasts, same permission gate, same landing page
 // after a duplicate.
 
-import { useNavigate } from "react-router-dom";
-import toast from "react-hot-toast";
+import { useNavigate } from "@tanstack/react-router";
+import toast from "react-hot-toast/headless";
 import { useConfirm } from "@/hooks/context/confirm";
 import { checkPermission, showPermissionDenied, type PermissionKey } from "@/hooks/usePermission";
 import useDeleteCampaign from "@/lib/api/hooks/app/campaigns/useDeleteCampaign";
@@ -77,7 +77,7 @@ export function useCampaignActions() {
                 success: (copy) => `Created "${copy.name}" as a draft`,
                 error: (e: AppError) => buildError(e),
             });
-            navigate(`/app/campaigns/${created.id}/preferences`);
+            navigate({ to: "/app/campaigns/$id/preferences", params: { id: created.id } });
         } catch {
             /* toast.promise already surfaced */
         }

@@ -19,6 +19,8 @@ defmodule RealtimeWeb.OrgChannel do
 
   use Phoenix.Channel
 
+  intercept(["presence_diff"])
+
   require Logger
 
   alias Realtime.Auth
@@ -52,6 +54,7 @@ defmodule RealtimeWeb.OrgChannel do
 
   defp authorize_join(org_id, params, socket) do
     user_id = socket.assigns.user_id
+    checked_at = System.monotonic_time(:millisecond)
 
     case Auth.check_org_membership(user_id, org_id) do
       {:ok, member} ->
@@ -60,8 +63,7 @@ defmodule RealtimeWeb.OrgChannel do
         socket =
           socket
           |> assign(:org_id, org_id)
-          |> assign(:member, member)
-          |> assign(:permissions, Map.get(member, :permissions, 0))
+          |> ChannelGuard.remember_authorization(member, checked_at)
           # Org-wide presence privacy, read once at join. Re-read on rejoin, so a
           # settings change applies live once clients reconnect to the channel.
           |> assign(:presence_show_online, Map.get(member, :presence_show_online, true))
@@ -108,39 +110,46 @@ defmodule RealtimeWeb.OrgChannel do
 
   @impl true
   def handle_info(:after_join, socket) do
-    # No manual PubSub.subscribe here: joining already subscribed this process
-    # to "org:<id>", which is the topic the sequencer broadcasts on. Subscribing
-    # again delivered every event to handle_info twice, so each client received
-    # a duplicate of every org event and ran every invalidation twice.
+    case reread_membership(socket) do
+      {:error, _reason} ->
+        {:stop, :normal, socket}
 
-    # Track presence for human members only; developer API-key sockets are
-    # event consumers, not teammates. When the org has turned off "show who's
-    # online", we track no one — so nobody appears online for anybody — but
-    # still push the (empty) roster so the client's join-complete logic runs.
-    if Map.get(socket.assigns, :auth_type) == :jwt do
-      if socket.assigns[:presence_show_online] do
-        profile = Auth.get_user_profile(socket.assigns.user_id)
+      {:ok, socket} ->
+        ChannelGuard.schedule_authorization_refresh(socket)
+        # No manual PubSub.subscribe here: joining already subscribed this process
+        # to "org:<id>", which is the topic the sequencer broadcasts on. Subscribing
+        # again delivered every event to handle_info twice, so each client received
+        # a duplicate of every org event and ran every invalidation twice.
 
-        {:ok, _} =
-          Presence.track(socket, socket.assigns.user_id, %{
-            online_at: System.system_time(:second),
-            name: profile.name,
-            avatar: profile.avatar,
-            page: nil,
-            resource: nil,
-            action: nil
-          })
-      end
+        # Track presence for human members only; developer API-key sockets are
+        # event consumers, not teammates. When the org has turned off "show who's
+        # online", we track no one — so nobody appears online for anybody — but
+        # still push the (empty) roster so the client's join-complete logic runs.
+        if Map.get(socket.assigns, :auth_type) == :jwt and not restricted?(socket) do
+          if socket.assigns[:presence_show_online] do
+            profile = Auth.get_user_profile(socket.assigns.user_id)
 
-      push(socket, "presence_state", Presence.list(socket))
+            {:ok, _} =
+              Presence.track(socket, socket.assigns.user_id, %{
+                online_at: System.system_time(:second),
+                name: profile.name,
+                avatar: profile.avatar,
+                page: nil,
+                resource: nil,
+                action: nil
+              })
+          end
+
+          push(socket, "presence_state", Presence.list(socket))
+        end
+
+        # If the client reconnected with a resume token, replay the events it missed
+        # (re-applying the same permission + intent filter as live delivery), or tell
+        # it the buffer no longer covers its position so it should do a full resync.
+        maybe_replay(socket)
+
+        {:noreply, socket}
     end
-
-    # If the client reconnected with a resume token, replay the events it missed
-    # (re-applying the same permission + intent filter as live delivery), or tell
-    # it the buffer no longer covers its position so it should do a full resync.
-    maybe_replay(socket)
-
-    {:noreply, socket}
   end
 
   # Org-wide presence privacy changed. Re-gate THIS socket live instead of
@@ -151,6 +160,53 @@ defmodule RealtimeWeb.OrgChannel do
   # Not forwarded to web clients (the audit event refreshes the settings UI).
   @impl true
   def handle_info({:pubsub_event, %{"event_type" => "PRESENCE_POLICY_UPDATED"} = event}, socket) do
+    case refresh_membership(socket, event) do
+      {:ok, socket} -> update_presence_policy(socket, event)
+      {:error, _reason} -> {:stop, :normal, socket}
+    end
+  end
+
+  # Ephemeral live-collaboration fan-out (cursor / card drag). Pushed straight to
+  # the client with no ws_message rate limit (the sender's token bucket already
+  # bounds volume) and no sequence number (these are never resumed). Only human
+  # (JWT) members are collaborators; developer API-key sockets ignore them.
+  # Coordinates and node ids are non-sensitive and flow ungated, but cursor-chat
+  # TEXT is human content: it is stripped (cursor still delivered) for members
+  # the durable event gates would exclude from the frame's surface.
+  @impl true
+  def handle_info({:live_event, event}, socket) do
+    case refresh_membership(socket, event) do
+      {:ok, socket} -> deliver_live(socket, event)
+      {:error, _reason} -> {:stop, :normal, socket}
+    end
+  end
+
+  @impl true
+  def handle_info({:pubsub_event, event}, socket) do
+    case refresh_membership(socket, event) do
+      {:ok, socket} ->
+        deliver(socket, event)
+
+      {:error, _reason} ->
+        {:stop, :normal, socket}
+    end
+  end
+
+  def handle_info(:refresh_authorization, socket) do
+    case reread_membership(socket, true) do
+      {:ok, socket} ->
+        ChannelGuard.schedule_authorization_refresh(socket)
+        {:noreply, socket}
+
+      {:error, _reason} ->
+        {:stop, :normal, socket}
+    end
+  end
+
+  # Phoenix delivers socket broadcasts separately; intercepted presence uses handle_out/3.
+  def handle_info(%Phoenix.Socket.Broadcast{}, socket), do: {:noreply, socket}
+
+  defp update_presence_policy(socket, event) do
     show_online = event["presence_show_online"] != false
     show_activity = event["presence_show_activity"] != false
 
@@ -159,7 +215,7 @@ defmodule RealtimeWeb.OrgChannel do
       |> assign(:presence_show_online, show_online)
       |> assign(:presence_show_activity, show_activity)
 
-    if Map.get(socket.assigns, :auth_type) == :jwt do
+    if Map.get(socket.assigns, :auth_type) == :jwt and not restricted?(socket) do
       Presence.untrack(socket, socket.assigns.user_id)
 
       if show_online do
@@ -179,16 +235,8 @@ defmodule RealtimeWeb.OrgChannel do
     {:noreply, socket}
   end
 
-  # Ephemeral live-collaboration fan-out (cursor / card drag). Pushed straight to
-  # the client with no ws_message rate limit (the sender's token bucket already
-  # bounds volume) and no sequence number (these are never resumed). Only human
-  # (JWT) members are collaborators; developer API-key sockets ignore them.
-  # Coordinates and node ids are non-sensitive and flow ungated, but cursor-chat
-  # TEXT is human content: it is stripped (cursor still delivered) for members
-  # the durable event gates would exclude from the frame's surface.
-  @impl true
-  def handle_info({:live_event, event}, socket) do
-    if Map.get(socket.assigns, :auth_type) == :jwt do
+  defp deliver_live(socket, event) do
+    if Map.get(socket.assigns, :auth_type) == :jwt and not restricted?(socket) do
       event =
         if is_binary(event["chat"]) and not can_see_live_chat?(socket, event["resource"]) do
           Map.put(event, "chat", nil)
@@ -202,8 +250,53 @@ defmodule RealtimeWeb.OrgChannel do
     {:noreply, socket}
   end
 
-  @impl true
-  def handle_info({:pubsub_event, event}, socket) do
+  # Membership is read at join; a change to this member, to a role or to ownership re-reads it.
+  defp refresh_membership(socket, %{"event_type" => "AUDIT_CREATED"} = event) do
+    if affects_membership?(socket.assigns.user_id, event) or
+         (restricted?(socket) and affects_scope?(event)),
+       do: reread_membership(socket, true),
+       else: reread_membership(socket)
+  end
+
+  defp refresh_membership(socket, _event), do: reread_membership(socket)
+
+  @doc false
+  def affects_membership?(user_id, event) do
+    case {event["entity_type"], event["action"]} do
+      {"organization_member", _} -> event["entity_id"] == user_id
+      {"role", action} -> action in ["update", "delete"]
+      {"organization", "transfer"} -> true
+      _ -> false
+    end
+  end
+
+  # A restricted member's folder grants follow the folder's contents, so a
+  # campaign or folder change can move what they reach.
+  @doc false
+  def affects_scope?(event), do: event["entity_type"] in ["campaign", "folder"]
+
+  defp reread_membership(socket, force \\ false) do
+    case ChannelGuard.refresh_authorization(
+           socket,
+           fn ->
+             Auth.check_org_membership(socket.assigns.user_id, socket.assigns.org_id)
+           end,
+           force
+         ) do
+      {:ok, refreshed} ->
+        if not restricted?(socket) and restricted?(refreshed) do
+          Presence.untrack(refreshed, refreshed.assigns.user_id)
+          push(refreshed, "presence_state", %{})
+        end
+
+        {:ok, refreshed}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp deliver(socket, event) do
     # Rate limit outbound messages
     user_id = socket.assigns.user_id
     limits = Map.get(socket.assigns, :rate_limits, %{})
@@ -229,19 +322,17 @@ defmodule RealtimeWeb.OrgChannel do
     {:noreply, socket}
   end
 
-  # Swallow the duplicate %Broadcast{} our manual PubSub subscription delivers
-  # to the channel process (the fastlane copy is what reaches the client).
-  @impl true
-  def handle_info(%Phoenix.Socket.Broadcast{}, socket), do: {:noreply, socket}
-
-  # Presence diffs arrive as channel out-events. Phoenix routes them to
-  # handle_out/3, so we must define it (its absence crashed the channel and
-  # dropped the socket). Push presence_state/presence_diff straight to the
-  # client — they are low-volume and not permission-sensitive.
+  # Intercept presence before the fastlane so delivery uses current membership.
   @impl true
   def handle_out(event, payload, socket) do
-    push(socket, event, payload)
-    {:noreply, socket}
+    case reread_membership(socket) do
+      {:ok, socket} ->
+        unless restricted?(socket), do: push(socket, event, payload)
+        {:noreply, socket}
+
+      {:error, _reason} ->
+        {:stop, :normal, socket}
+    end
   end
 
   @impl true
@@ -258,7 +349,7 @@ defmodule RealtimeWeb.OrgChannel do
   @impl true
   def handle_in("live:" <> kind, payload, socket) when kind in @live_kinds and is_map(payload) do
     cond do
-      Map.get(socket.assigns, :auth_type) != :jwt ->
+      Map.get(socket.assigns, :auth_type) != :jwt or restricted?(socket) ->
         {:noreply, socket}
 
       not socket.assigns[:presence_show_online] or not socket.assigns[:presence_show_activity] ->
@@ -433,7 +524,8 @@ defmodule RealtimeWeb.OrgChannel do
   # Gate org-broadcast events on member permissions. Event types are
   # normalized (upcased, separators collapsed to "_") so both the legacy
   # lowercase names and the Go publisher's UPPER_SNAKE names match.
-  defp can_see_event?(socket, event) do
+  @doc false
+  def can_see_event?(socket, event) do
     event_type =
       event
       |> Map.get("event_type", "")
@@ -441,6 +533,46 @@ defmodule RealtimeWeb.OrgChannel do
       |> String.upcase()
       |> String.replace(~r/[.:\s-]+/, "_")
 
+    (not restricted?(socket) or
+       scoped_event?(socket.assigns.member, socket.assigns.user_id, event_type, event)) and
+      permitted_event?(socket, event_type)
+  end
+
+  defp restricted?(socket), do: match?(%{scope: %{}}, socket.assigns[:member])
+
+  # A restricted member sees an event only when it names something they were
+  # granted: inbox content needs its mailbox, campaign activity its campaign or
+  # sending mailbox, and an audit entry its entity. Everything else is dropped.
+  @doc false
+  def scoped_event?(member, user_id, event_type, event) do
+    mailbox = event["email_account_id"]
+    campaign = event["campaign_id"]
+
+    cond do
+      event_type == "AUDIT_CREATED" ->
+        case event["entity_type"] do
+          "organization_member" -> event["entity_id"] == user_id
+          "campaign" -> Auth.in_scope?(member, :campaigns, event["entity_id"])
+          "folder" -> Auth.in_scope?(member, :folders, event["entity_id"])
+          "email_account" -> Auth.in_scope?(member, :mailboxes, event["entity_id"])
+          _ -> false
+        end
+
+      inbox_event?(event_type) ->
+        Auth.in_scope?(member, :mailboxes, mailbox)
+
+      true ->
+        (is_binary(campaign) and Auth.in_scope?(member, :campaigns, campaign)) or
+          (is_binary(mailbox) and Auth.in_scope?(member, :mailboxes, mailbox))
+    end
+  end
+
+  defp inbox_event?(event_type) do
+    String.contains?(event_type, "INBOX") or String.contains?(event_type, "AI_DRAFT") or
+      event_type in ["EMAIL_RECEIVED", "EMAIL_UPDATED", "EMAIL_DELETED"]
+  end
+
+  defp permitted_event?(socket, event_type) do
     permissions = socket.assigns.permissions
     has = fn perm -> Auth.has_permission?(%{permissions: permissions}, Auth.permission(perm)) end
 
@@ -463,6 +595,13 @@ defmodule RealtimeWeb.OrgChannel do
         String.contains?(event_type, "AI_DRAFT") or
           event_type in ["EMAIL_RECEIVED", "EMAIL_UPDATED", "EMAIL_DELETED"] ->
         has.(:access_unibox)
+
+      String.contains?(event_type, "DIRECT_EMAIL_") ->
+        has.(:view_analytics)
+
+      # Inbox placement tests: results sit behind the analytics read endpoints.
+      String.contains?(event_type, "PLACEMENT_TEST") ->
+        has.(:view_analytics)
 
       # Campaign activity: lifecycle, task progress, send/open/click/reply pulses
       String.contains?(event_type, "CAMPAIGN") or String.contains?(event_type, "TASK_PROGRESS") or
@@ -487,8 +626,9 @@ defmodule RealtimeWeb.OrgChannel do
       String.contains?(event_type, "RESEARCH") ->
         has.(:view_contacts)
 
-      # Mailbox account + warmup health transitions
-      String.contains?(event_type, "ACCOUNT") or String.contains?(event_type, "WARMUP") ->
+      # Mailbox account + warmup health transitions, and mailbox import progress
+      String.contains?(event_type, "ACCOUNT") or String.contains?(event_type, "WARMUP") or
+          String.contains?(event_type, "MAILBOX_IMPORT") ->
         has.(:manage_emails)
 
       # Developer "fire event" custom events: the org's own automation/campaign
@@ -550,7 +690,8 @@ defmodule RealtimeWeb.OrgChannel do
   # (nothing to update); if "show activity" is off we keep them online but strip
   # the viewing/editing/page detail so teammates never see what they're doing.
   defp handle_client_event("presence:update", payload, socket) do
-    if Map.get(socket.assigns, :auth_type) == :jwt and socket.assigns[:presence_show_online] do
+    if Map.get(socket.assigns, :auth_type) == :jwt and socket.assigns[:presence_show_online] and
+         not restricted?(socket) do
       patch =
         if socket.assigns[:presence_show_activity] do
           sanitize_presence(payload)

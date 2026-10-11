@@ -8,6 +8,8 @@
 // pipeline. Cards click-open into the same dialog for editing.
 
 import React from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { crmBrowseSearchSchema, dealBoardPipelineSchema, dealBrowseViewSchema } from "@/lib/browse-crm";
 import {
     CircleDollarSignIcon,
     LayoutGridIcon,
@@ -21,7 +23,7 @@ import {
     XIcon,
     CalendarIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { AnimatePresence, motion } from "framer-motion";
 import {
     Page,
@@ -40,7 +42,7 @@ import {
     PopoverMenuContent,
     PopoverMenuItem,
 } from "@/components/ui/popover-menu";
-import usePipelines from "@/lib/api/hooks/app/crm/pipelines/usePipelines";
+import useBrowsePipelines from "@/components/app/crm/useBrowsePipelines";
 import useSearchDeals from "@/lib/api/hooks/app/crm/deals/useSearchDeals";
 import useDealsSummary from "@/lib/api/hooks/app/crm/deals/useDealsSummary";
 import { EMPTY_DEAL_SEARCH } from "@/lib/api/models/app/crm/SearchDeals";
@@ -56,10 +58,26 @@ import { useLivePatch } from "@/hooks/useLivePatch";
 import { cursorColor } from "@/hooks/useLiveCursors";
 import ResourceViewers from "@/components/app/presence/ResourceViewers";
 import type Deal from "@/lib/api/models/app/crm/Deal";
+import type { DealWrite } from "@/lib/api/models/app/crm/Deal";
 import type { Stage } from "@/lib/api/models/app/crm/Pipeline";
 import type { AppError } from "@/lib/api/client/normalizeError";
-import buildError from "@/lib/helper/buildError";
-import DealsTable from "@/components/app/crm/DealsTable";
+import DealsTable, { DealOwner } from "@/components/app/crm/DealsTable";
+import { Link } from "@tanstack/react-router";
+import useCrmProvider from "@/hooks/useCrmProvider";
+import useMembers from "@/lib/api/hooks/app/organizations/useMembers";
+import type OrganizationMember from "@/lib/api/models/app/organizations/OrganizationMember";
+import { CRM_INFO, type CrmInfo, CrmMark, CrmSyncedAt, OpenInCrm } from "@/components/app/crm/crmProviders";
+import { CrmHeaderStatus, CrmOwnerMappingLink } from "@/components/app/crm/crmMode";
+import { crmErrorMessage, useCrmOwnerIndex } from "@/components/app/crm/crmModeUtils";
+import { cn } from "@/lib/utils";
+
+// Provider mode for the board and dialog: who owns a deal, and whether to show
+// links into the connected CRM. Native mode leaves it at the default.
+const DealsCrmContext = React.createContext<{ isExternal: boolean; crm: CrmInfo; memberByUser: Map<string, OrganizationMember> }>({
+    isExternal: false,
+    crm: CRM_INFO.hubspot,
+    memberByUser: new Map(),
+});
 
 const STATUS_LABEL = {
     open: { label: "Open",  tone: "text-slate-700",   dot: "bg-slate-400" },
@@ -68,26 +86,36 @@ const STATUS_LABEL = {
 } as const;
 
 export default function DealsPage() {
-    const pipelines = usePipelines();
+    const pipelines = useBrowsePipelines();
+    const { isExternal, crm } = useCrmProvider();
+    const { data: members } = useMembers();
+    const crmCtx = React.useMemo(() => {
+        const m = new Map<string, OrganizationMember>();
+        for (const mem of members ?? []) m.set(mem.user_id, mem);
+        return { isExternal, crm, memberByUser: m };
+    }, [isExternal, crm, members]);
     // Memoised so it's a stable dependency for the effect + memos below
     // (a fresh `?? []` each render would re-fire them every time).
     const list = React.useMemo(() => pipelines.data ?? [], [pipelines.data]);
 
-    const [pipelineId, setPipelineId] = React.useState<string | undefined>(undefined);
+    const [pipelineId, setPipelineId] = useBrowseState("crm.deals.board.pipeline", undefined, dealBoardPipelineSchema);
     React.useEffect(() => {
-        if (!pipelineId && list.length > 0) setPipelineId(list[0].id);
-    }, [list, pipelineId]);
+        if (!pipelines.isSuccess || pipelines.isPlaceholderData) return;
+        if (!list.some((pipeline) => pipeline.id === pipelineId) && pipelineId !== list[0]?.id) {
+            setPipelineId(list[0]?.id);
+        }
+    }, [list, pipelineId, pipelines.isSuccess, pipelines.isPlaceholderData, setPipelineId]);
 
     const currentPipeline = list.find((p) => p.id === pipelineId);
     const stages = [...(currentPipeline?.stages ?? [])].sort((a, b) => a.position - b.position);
     const updateDeal = useUpdateDeal();
 
-    const [search, setSearch] = React.useState("");
+    const [search, setSearch] = useBrowseState("crm.deals.board.search", "", crmBrowseSearchSchema);
     const [newOpen, setNewOpen] = React.useState(false);
     const [editing, setEditing] = React.useState<Deal | null>(null);
     // Table = the cross-pipeline, server-driven "see everything" view (default).
     // Board = the focused single-pipeline kanban for moving deals through stages.
-    const [view, setView] = React.useState<"table" | "board">("table");
+    const [view, setView] = useBrowseState("crm.deals.view", "table", dealBrowseViewSchema);
 
     // When editing a deal opened from the cross-pipeline table, scope the stage
     // picker to that deal's OWN pipeline, not whichever pipeline the board has
@@ -159,8 +187,8 @@ export default function DealsPage() {
     async function moveDeal(dealId: string, newStageId: string) {
         try {
             await toast.promise(
-                updateDeal.mutateAsync({ id: dealId, data: { stage_id: newStageId } as Partial<Deal> }),
-                { loading: "Moving…", success: "Moved", error: (e: AppError) => buildError(e) },
+                updateDeal.mutateAsync({ id: dealId, data: { stage_id: newStageId } as DealWrite }),
+                { loading: "Moving…", success: "Moved", error: (e: AppError) => crmErrorMessage(e) },
             );
             // Nudge teammates on the same board to update now (the audit refetch is
             // the durable backstop if this best-effort frame is dropped).
@@ -171,17 +199,21 @@ export default function DealsPage() {
     }
 
     return (
+        <DealsCrmContext.Provider value={crmCtx}>
         <Page>
             <PageTopbar
                 eyebrow="Deals"
                 subtitle={
                     list.length === 0
-                        ? "Create a pipeline first to start tracking deals."
+                        ? isExternal
+                            ? `Waiting for your ${crm.name} pipelines.`
+                            : "Create a pipeline first to start tracking deals."
                         : view === "board"
                           ? (currentPipeline?.name ?? "—")
                           : "Every deal, across all pipelines"
                 }
             >
+                {isExternal && <CrmHeaderStatus />}
                 {list.length > 0 && (
                     <>
                         <ViewToggle view={view} onChange={setView} />
@@ -211,7 +243,7 @@ export default function DealsPage() {
                 </PageBody>
             ) : list.length === 0 ? (
                 <PageBody className="px-5 py-5">
-                    <NoPipelinesYet />
+                    {isExternal ? <ProviderNoPipelinesYet /> : <NoPipelinesYet />}
                 </PageBody>
             ) : view === "table" ? (
                 <DealsTable pipelines={list} onOpenDeal={(d) => setEditing(d)} />
@@ -244,7 +276,7 @@ export default function DealsPage() {
                     </SectionBar>
                     <PageBody className="px-5 py-5">
                         {!currentPipeline || stages.length === 0 ? (
-                            <NoStagesYet />
+                            <NoStagesYet provider={isExternal ? crm.name : undefined} />
                         ) : (
                             <Board
                                 pipelineId={pipelineId}
@@ -275,6 +307,7 @@ export default function DealsPage() {
                 editing={editing ?? undefined}
             />
         </Page>
+        </DealsCrmContext.Provider>
     );
 }
 
@@ -476,6 +509,7 @@ function DealCard({
     onDragLive?: (dealId: string, on: boolean) => void;
 }) {
     const status = STATUS_LABEL[deal.status];
+    const { isExternal, crm, memberByUser } = React.useContext(DealsCrmContext);
     return (
         <div
             draggable
@@ -487,7 +521,7 @@ function DealCard({
             onDragEnd={() => onDragLive?.(deal.id, false)}
             onClick={() => onOpen(deal)}
             style={peerColor ? { boxShadow: `0 0 0 2px ${peerColor}` } : undefined}
-            className={`cursor-pointer rounded-md bg-white border px-2.5 py-2 transition-all ${
+            className={`group cursor-pointer rounded-md bg-white border px-2.5 py-2 transition-all ${
                 peerColor
                     ? "border-transparent opacity-80 animate-pulse"
                     : "border-slate-200 hover:border-slate-300 hover:shadow-sm"
@@ -501,6 +535,14 @@ function DealCard({
                     <span className={`text-[9.5px] uppercase tracking-[0.08em] font-semibold ${status.tone}`}>
                         {status.label}
                     </span>
+                )}
+                {isExternal && (
+                    <OpenInCrm
+                        external={deal.external}
+                        label={`Open deal in ${crm.name}`}
+                        compact
+                        className="-my-1 -mr-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 focus-visible:opacity-100"
+                    />
                 )}
             </div>
             {deal.contact?.email && (
@@ -522,6 +564,15 @@ function DealCard({
                     <span className="inline-flex items-center gap-1 text-slate-400 ml-auto">
                         <CalendarIcon className="w-2.5 h-2.5" />
                         {fmtDate(deal.expected_close_date)}
+                    </span>
+                )}
+                {isExternal && (deal.assigned_to || deal.external?.owner_name) && (
+                    <span className={deal.expected_close_date ? "shrink-0" : "ml-auto shrink-0"}>
+                        <DealOwner
+                            deal={deal}
+                            owner={deal.assigned_to ? memberByUser.get(deal.assigned_to) : undefined}
+                            compact
+                        />
                     </span>
                 )}
             </div>
@@ -624,11 +675,41 @@ function NoPipelinesYet() {
     );
 }
 
-function NoStagesYet() {
+function ProviderNoPipelinesYet() {
+    const { needsReconnect, crm } = useCrmProvider();
+    return (
+        <div className="rounded-md border border-dashed border-slate-300 bg-slate-50/40 p-8 text-center">
+            <div className="mx-auto size-9 rounded-md bg-white border border-slate-200 flex items-center justify-center mb-3">
+                {needsReconnect ? (
+                    <CrmMark provider={crm.id} className="w-4 h-4" />
+                ) : (
+                    <Loader2Icon className="w-4 h-4 text-slate-400 animate-spin" />
+                )}
+            </div>
+            <h3 className="text-[13px] font-semibold text-slate-900 mb-1">
+                {needsReconnect ? `Reconnect ${crm.name} to sync deals` : `Fetching your ${crm.name} pipelines...`}
+            </h3>
+            <p className="text-[12px] text-slate-500 max-w-md mx-auto mb-4 leading-relaxed">
+                Deals live in {crm.name} pipelines. They show up here as soon as the first sync finishes.
+            </p>
+            <Link
+                to={crm.settingsPath}
+                className="h-7 px-3 rounded-md bg-slate-900 hover:bg-slate-800 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors"
+            >
+                <CrmMark provider={crm.id} className="w-3 h-3" />
+                {crm.name} settings
+            </Link>
+        </div>
+    );
+}
+
+function NoStagesYet({ provider }: { provider?: string }) {
     return (
         <div className="rounded-md border border-dashed border-slate-300 bg-slate-50/40 p-6 text-center">
             <p className="text-[12px] text-slate-600 leading-relaxed">
-                This pipeline has no stages yet. Add at least one in the Pipelines tab.
+                {provider
+                    ? `This pipeline has no deal stages yet. Add them in ${provider} and they sync here.`
+                    : "This pipeline has no stages yet. Add at least one in the Pipelines tab."}
             </p>
         </div>
     );
@@ -664,14 +745,24 @@ function DealDialog({
     const [status, setStatus] = React.useState<"open" | "won" | "lost">("open");
     const [contactEmail, setContactEmail] = React.useState("");
 
+    // Provider mode: the deal owner is written to the CRM, so it is only sent
+    // when changed (an owner there who is not a member must not be cleared).
+    const { isExternal, crm, memberByUser } = React.useContext(DealsCrmContext);
+    const [ownerId, setOwnerId] = React.useState("");
+    const [ownerTouched, setOwnerTouched] = React.useState(false);
+    const [saveError, setSaveError] = React.useState<{ message: string; code?: string } | null>(null);
+
     React.useEffect(() => {
         if (!open) return;
+        setOwnerId(editing?.assigned_to ?? "");
+        setOwnerTouched(false);
+        setSaveError(null);
         if (editing) {
             setName(editing.name);
             setStageId(editing.stage_id);
             setValue(editing.value !== undefined && editing.value !== null ? String(editing.value) : "");
             setCurrency(editing.currency || "USD");
-            setCloseDate(editing.expected_close_date ? String(editing.expected_close_date).split("T")[0] : "");
+            setCloseDate(editing.expected_close_date ? new Date(editing.expected_close_date).toISOString().slice(0, 10) : "");
             setStatus(editing.status);
             setContactEmail(editing.contact?.email ?? "");
         } else {
@@ -694,7 +785,7 @@ function DealDialog({
             toast.error("Pick a stage");
             return;
         }
-        const data: Partial<Deal> = {
+        const data: DealWrite = {
             pipeline_id: pipelineId,
             stage_id: stageId,
             name: name.trim(),
@@ -711,23 +802,60 @@ function DealDialog({
         if (closeDate) data.expected_close_date = new Date(closeDate).toISOString();
         if (editing) data.status = status;
 
+        // The CRM answers in sentences worth reading, so they stay in the dialog.
+        if (isExternal) {
+            if (ownerTouched && ownerId) data.assigned_to = ownerId;
+            setSaveError(null);
+            try {
+                if (editing) await update.mutateAsync({ id: editing.id, data });
+                else await create.mutateAsync(data);
+                toast.success(editing ? `Deal saved to ${crm.name}` : `Deal created in ${crm.name}`);
+                onClose();
+            } catch (e) {
+                setSaveError({ message: crmErrorMessage(e), code: (e as AppError)?.code });
+            }
+            return;
+        }
+
         try {
             if (editing) {
                 await toast.promise(update.mutateAsync({ id: editing.id, data }), {
                     loading: "Saving…",
                     success: "Deal updated",
-                    error: (e: AppError) => buildError(e),
+                    error: (e: AppError) => crmErrorMessage(e),
                 });
             } else {
                 await toast.promise(create.mutateAsync(data), {
                     loading: "Creating deal…",
                     success: "Deal created",
-                    error: (e: AppError) => buildError(e),
+                    error: (e: AppError) => crmErrorMessage(e),
                 });
             }
             onClose();
         } catch {
             /* surfaced */
+        }
+    }
+
+    // In HubSpot, won and lost are closed deal stages: picking one sets the
+    // other. Pipedrive keeps the stage and marks the deal won or lost.
+    const stagesClose = isExternal && crm.wonLostAreStages;
+    const wonStage = stages.find((s) => s.closed && s.won);
+    const lostStage = stages.find((s) => s.closed && !s.won);
+    function pickStage(id: string) {
+        setStageId(id);
+        if (!stagesClose) return;
+        const st = stages.find((s) => s.id === id);
+        setStatus(st?.closed ? (st.won ? "won" : "lost") : "open");
+    }
+    function pickStatus(next: "open" | "won" | "lost") {
+        setStatus(next);
+        if (!stagesClose) return;
+        if (next === "won" && wonStage) setStageId(wonStage.id);
+        else if (next === "lost" && lostStage) setStageId(lostStage.id);
+        else if (next === "open" && stages.find((s) => s.id === stageId)?.closed) {
+            const firstOpen = stages.find((s) => !s.closed);
+            if (firstOpen) setStageId(firstOpen.id);
         }
     }
 
@@ -738,7 +866,7 @@ function DealDialog({
                 await toast.promise(del.mutateAsync(editing.id), {
                     loading: "Deleting…",
                     success: "Deal deleted",
-                    error: (e: AppError) => buildError(e),
+                    error: (e: AppError) => crmErrorMessage(e),
                 });
                 onClose();
             } catch {
@@ -791,25 +919,40 @@ function DealDialog({
                                     <TrashIcon className="w-3 h-3" />
                                 </button>
                             )}
+                            {isExternal && editing?.external?.url && (
+                                <OpenInCrm external={editing.external} compact className="ml-auto" />
+                            )}
                             <button
                                 type="button"
                                 onClick={onClose}
                                 aria-label="Close"
-                                className="ml-auto size-7 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 inline-flex items-center justify-center transition-colors"
+                                className={cn(
+                                    "size-7 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 inline-flex items-center justify-center transition-colors",
+                                    !(isExternal && editing?.external?.url) && "ml-auto",
+                                )}
                             >
                                 <XIcon className="w-3.5 h-3.5" />
                             </button>
                         </div>
 
                         <div className="px-4 py-4 space-y-3 min-h-0 overflow-y-auto">
+                            {isExternal && (
+                                <div className="flex items-center gap-1.5 text-[11.5px] text-slate-500">
+                                    <CrmMark provider={crm.id} className="w-3 h-3" />
+                                    <span>{editing ? `Changes save to this deal in ${crm.name}.` : `This deal is created in ${crm.name}.`}</span>
+                                    {editing?.external?.synced_at && (
+                                        <CrmSyncedAt at={editing.external.synced_at} provider={crm.id} className="ml-auto hidden sm:inline-flex" />
+                                    )}
+                                </div>
+                            )}
                             <div>
                                 <Label>Deal name</Label>
                                 <TextInput value={name} onChange={setName} placeholder="e.g. Q1 outbound · Acme" autoFocus className="w-full" />
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                 <div>
-                                    <Label>Stage</Label>
-                                    <StagePill stages={stages} value={stageId} onChange={setStageId} />
+                                    <Label>{isExternal ? "Deal stage" : "Stage"}</Label>
+                                    <StagePill stages={stages} value={stageId} onChange={pickStage} />
                                 </div>
                                 {editing && (
                                     <div>
@@ -819,7 +962,7 @@ function DealDialog({
                                                 <button
                                                     key={s}
                                                     type="button"
-                                                    onClick={() => setStatus(s)}
+                                                    onClick={() => pickStatus(s)}
                                                     className={`flex-1 h-6 px-2 rounded text-[11px] font-medium transition-colors ${
                                                         status === s
                                                             ? "bg-white text-slate-900 shadow-sm"
@@ -833,9 +976,16 @@ function DealDialog({
                                     </div>
                                 )}
                             </div>
+                            {stagesClose && editing && (
+                                <p className="-mt-1 text-[11px] leading-relaxed text-slate-500">
+                                    {wonStage || lostStage
+                                        ? `In HubSpot, won and lost are deal stages. Won moves the deal to "${wonStage?.name ?? "Closed won"}", lost to "${lostStage?.name ?? "Closed lost"}".`
+                                        : "In HubSpot, won and lost are deal stages. This pipeline has no closed stage to move the deal to."}
+                                </p>
+                            )}
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                                 <div className="sm:col-span-2">
-                                    <Label>Value</Label>
+                                    <Label>{isExternal ? crm.words.amount : "Value"}</Label>
                                     <TextInput value={value} onChange={setValue} placeholder="12000" className="w-full" />
                                 </div>
                                 <div>
@@ -845,7 +995,7 @@ function DealDialog({
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                 <div>
-                                    <Label>Expected close</Label>
+                                    <Label>{isExternal ? crm.words.closeDate : "Expected close"}</Label>
                                     <DatePicker value={closeDate} onChange={setCloseDate} placeholder="Pick a date" className="w-full" />
                                 </div>
                                 <div>
@@ -853,6 +1003,34 @@ function DealDialog({
                                     <TextInput value={contactEmail} onChange={setContactEmail} disabled placeholder="—" className="w-full" />
                                 </div>
                             </div>
+                            {isExternal && (
+                                <div>
+                                    <Label>Deal owner</Label>
+                                    <DealOwnerPicker
+                                        value={ownerId}
+                                        externalOwner={!ownerTouched ? editing?.external?.owner_name : undefined}
+                                        memberByUser={memberByUser}
+                                        onChange={(id) => {
+                                            setOwnerId(id);
+                                            setOwnerTouched(true);
+                                            setSaveError(null);
+                                        }}
+                                    />
+                                </div>
+                            )}
+                            {saveError && (
+                                <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[11.5px] leading-relaxed text-red-700">
+                                    {saveError.message}
+                                    {(saveError.code === "crm_reauth_required" || saveError.code === "crm_owner_unmapped") && (
+                                        <>
+                                            {" "}
+                                            <Link to={crm.settingsPath} className="font-medium underline underline-offset-2 hover:text-red-900">
+                                                Open {crm.name} settings
+                                            </Link>
+                                        </>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         <div className="px-3 h-12 shrink-0 border-t border-slate-200 flex items-center gap-1.5">
@@ -879,6 +1057,82 @@ function DealDialog({
                 </motion.div>
             )}
         </AnimatePresence>
+    );
+}
+
+// Deal owner for provider mode: members only, and only those the CRM knows as
+// owners. Members without one are shown but cannot be picked.
+function DealOwnerPicker({
+    value,
+    externalOwner,
+    memberByUser,
+    onChange,
+}: {
+    value: string;
+    externalOwner?: string;
+    memberByUser: Map<string, OrganizationMember>;
+    onChange: (userId: string) => void;
+}) {
+    const [open, setOpen] = React.useState(false);
+    const { isMapped } = useCrmOwnerIndex();
+    const { crm } = useCrmProvider();
+    const members = [...memberByUser.values()];
+    const cur = value ? memberByUser.get(value) : undefined;
+    const label = (m?: OrganizationMember) => m?.name?.trim() || m?.email?.trim() || "Member";
+    const anyUnmapped = members.some((m) => !isMapped(m.user_id));
+
+    return (
+        <PopoverMenu open={open} onOpenChange={setOpen} align="start">
+            <PopoverMenuTrigger asChild>
+                <button
+                    type="button"
+                    className="h-7 w-full px-2.5 rounded-md border border-slate-200 hover:border-slate-300 bg-white text-[12px] text-slate-700 hover:text-slate-900 transition-colors inline-flex items-center gap-1.5"
+                >
+                    <UserIcon className="w-3 h-3 text-slate-400 shrink-0" />
+                    {cur ? (
+                        <span className="truncate">{label(cur)}</span>
+                    ) : value ? (
+                        <span className="truncate">Member {value.slice(0, 6)}</span>
+                    ) : externalOwner ? (
+                        <span className="truncate">
+                            {externalOwner} <span className="text-slate-400">({crm.name} {crm.words.owner})</span>
+                        </span>
+                    ) : (
+                        <span className="text-slate-400">No owner</span>
+                    )}
+                    <span className="ml-auto text-slate-400">▾</span>
+                </button>
+            </PopoverMenuTrigger>
+            <PopoverMenuContent minWidth={240} className="max-h-64 overflow-y-auto">
+                {members.length === 0 ? (
+                    <div className="px-3 py-1.5 text-[11.5px] text-slate-400">No members</div>
+                ) : (
+                    members.map((m) => {
+                        const mapped = isMapped(m.user_id);
+                        return (
+                            <PopoverMenuItem
+                                key={m.user_id}
+                                onSelect={() => onChange(m.user_id)}
+                                selected={m.user_id === value}
+                                disabled={!mapped}
+                                trailing={
+                                    mapped ? undefined : (
+                                        <span className="text-[10px] text-slate-400">Not in {crm.name}</span>
+                                    )
+                                }
+                            >
+                                {label(m)}
+                            </PopoverMenuItem>
+                        );
+                    })
+                )}
+                {anyUnmapped && (
+                    <div className="mt-1 border-t border-slate-100">
+                        <CrmOwnerMappingLink onNavigate={() => setOpen(false)} />
+                    </div>
+                )}
+            </PopoverMenuContent>
+        </PopoverMenu>
     );
 }
 
@@ -949,7 +1203,7 @@ function formatMoney(n: number | undefined, currency = "USD") {
     }
 }
 
-function fmtDate(d: string | undefined) {
+function fmtDate(d: string | Date | undefined) {
     if (!d) return "—";
     try {
         return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric" });

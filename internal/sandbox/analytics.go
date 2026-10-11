@@ -63,9 +63,9 @@ func seedTeam(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO users (id, first_name, last_name, email, password_hash)
-		VALUES ($1, 'Marco', 'Diaz', $2, $3)
-		ON CONFLICT (id) DO NOTHING`,
+		INSERT INTO users (id, first_name, last_name, email, password_hash, onboarding_completed_at)
+		VALUES ($1, 'Marco', 'Diaz', $2, $3, NOW())
+		ON CONFLICT (id) DO UPDATE SET onboarding_completed_at = COALESCE(users.onboarding_completed_at, NOW())`,
 		sandboxUser2, sandboxUser2Em, hash); err != nil {
 		return err
 	}
@@ -256,7 +256,7 @@ func seedDeliverabilityEvents(ctx context.Context, pool *pgxpool.Pool) error {
 			INSERT INTO deliverability_events
 				(organization_id, campaign_id, contact_id, event_type, provider, recipient_email, reason, idempotency_key, created_at)
 			VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, NOW() - INTERVAL '%f days')
-			ON CONFLICT (idempotency_key) DO NOTHING`, e.daysAgo)
+			ON CONFLICT (organization_id, idempotency_key) DO NOTHING`, e.daysAgo)
 		if _, err := pool.Exec(ctx, sql, sandboxOrg, e.campaign, e.contact, e.eventType, e.email, e.reason, e.key); err != nil {
 			return fmt.Errorf("deliverability %s: %w", e.key, err)
 		}

@@ -2,8 +2,14 @@ package msgraph
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/warmbly/warmbly/internal/errx"
 )
 
 // Warmup mailbox actions. These mirror the goog/imap warmup actions so the
@@ -72,7 +78,7 @@ func (c *Client) wellKnownFolderID(ctx context.Context, name string) (string, er
 	var folder struct {
 		ID string `json:"id"`
 	}
-	if err := c.doJSON(ctx, "GET", graphBase+"/me/mailFolders/"+url.PathEscape(name)+"?$select=id", nil, &folder); err != nil {
+	if err := c.doJSON(ctx, "GET", c.root()+"/mailFolders/"+url.PathEscape(name)+"?$select=id", nil, &folder); err != nil {
 		return "", err
 	}
 	c.cacheFolder(name, folder.ID)
@@ -90,12 +96,46 @@ func (c *Client) messageParentFolder(ctx context.Context, messageID string) (str
 	return msg.ParentFolderID, nil
 }
 
+func (c *Client) IsMessageInFolder(ctx context.Context, messageID, folder string) (bool, error) {
+	folderID, err := c.wellKnownFolderID(ctx, folder)
+	if err != nil {
+		return false, err
+	}
+	parentID, err := c.messageParentFolder(ctx, messageID)
+	return parentID == folderID, err
+}
+
 // MoveToFolder moves the message into a named folder, creating it if needed.
-// Used for the "Warmbly" sorting folder. Returns the message's new id.
+// Used for the warmup sorting folder. Returns the message's new id.
 func (c *Client) MoveToFolder(ctx context.Context, messageID, folderName string) (string, error) {
 	folderID, err := c.ensureFolder(ctx, folderName)
 	if err != nil {
 		return "", err
+	}
+	parentID, err := c.messageParentFolder(ctx, messageID)
+	if err != nil {
+		return "", err
+	}
+	if parentID == folderID {
+		return messageID, nil
+	}
+	return c.move(ctx, messageID, folderID)
+}
+
+// MoveToArchive moves the message into the mailbox's Archive, the destination
+// for the warmup placement that wants the mail out of sight without a folder of
+// its own. Returns the message's new id.
+func (c *Client) MoveToArchive(ctx context.Context, messageID string) (string, error) {
+	folderID, err := c.wellKnownFolderID(ctx, FolderArchive)
+	if err != nil {
+		return "", err
+	}
+	parentID, err := c.messageParentFolder(ctx, messageID)
+	if err != nil {
+		return "", err
+	}
+	if parentID == folderID {
+		return messageID, nil
 	}
 	return c.move(ctx, messageID, folderID)
 }
@@ -116,26 +156,85 @@ func (c *Client) move(ctx context.Context, messageID, destinationID string) (str
 // ResolveMessageID returns the current Graph message id for the message with the
 // given immutable RFC 5322 internetMessageId, searching across folders. Graph
 // ids change on move, so warmup actions re-resolve against this stable key.
-// Returns an empty string (no error) when the message can't be found.
+// Only an explicit terminal empty collection establishes absence.
 func (c *Client) ResolveMessageID(ctx context.Context, internetMessageID string) (string, error) {
-	filter := "internetMessageId eq '" + strings.ReplaceAll(internetMessageID, "'", "''") + "'"
-	u := graphBase + "/me/messages?$select=id&$top=1&$filter=" + url.QueryEscape(filter)
+	if strings.TrimSpace(internetMessageID) == "" {
+		return "", errMessageLookupIncomplete
+	}
+	u := c.messagesByInternetID(internetMessageID, "id", 1)
 	var resp struct {
-		Value []struct {
-			ID string `json:"id"`
-		} `json:"value"`
+		Value    []GraphMessage  `json:"value"`
+		NextLink json.RawMessage `json:"@odata.nextLink"`
 	}
 	if err := c.doJSON(ctx, "GET", u, nil, &resp); err != nil {
+		if errors.Is(err, errGraphTrailingJSON) {
+			return "", errMessageLookupIncomplete
+		}
 		return "", err
+	}
+	// Never follow a continuation or infer absence from an incomplete page.
+	if resp.Value == nil || resp.NextLink != nil || len(resp.Value) > 1 {
+		return "", errMessageLookupIncomplete
 	}
 	if len(resp.Value) == 0 {
 		return "", nil
 	}
-	return resp.Value[0].ID, nil
+	id := resp.Value[0].ID
+	if id == "" || strings.TrimSpace(id) != id {
+		return "", errMessageLookupIncomplete
+	}
+	return id, nil
+}
+
+var errMessageLookupIncomplete = errx.MError(errx.MailErrorWarning, errx.MailErrorCodeServerUnreachable, "The message lookup could not establish a complete identity or confirmed absence. Retry later.", errx.MailErrorResolveMethodRetry)
+
+// LocateRFCMessageID reports whether any folder still holds the message, and
+// whether every copy is in Deleted Items. Delta reports a move as a removal.
+func (c *Client) LocateRFCMessageID(ctx context.Context, internetMessageID string) (found, trashed bool, err error) {
+	id := strings.TrimSpace(internetMessageID)
+	if id == "" {
+		return false, false, errors.New("msgraph: no message id to look up")
+	}
+	deletedID, err := c.wellKnownFolderID(ctx, FolderDeletedItems)
+	if err != nil {
+		return false, false, err
+	}
+	// Graph stores the id bracketed; a bare one is tried both ways.
+	forms := []string{id}
+	if !strings.HasPrefix(id, "<") {
+		forms = append(forms, "<"+id+">")
+	}
+	for _, form := range forms {
+		u := c.messagesByInternetID(form, "id,parentFolderId", 10)
+		var resp struct {
+			Value []struct {
+				ParentFolderID string `json:"parentFolderId"`
+			} `json:"value"`
+		}
+		if err := c.doJSON(ctx, "GET", u, nil, &resp); err != nil {
+			return false, false, err
+		}
+		for _, m := range resp.Value {
+			found = true
+			if m.ParentFolderID != deletedID {
+				return true, false, nil
+			}
+		}
+		if found {
+			return true, true, nil
+		}
+	}
+	return false, false, nil
+}
+
+// messagesByInternetID lists the mailbox's messages carrying one internetMessageId.
+func (c *Client) messagesByInternetID(internetMessageID, fields string, top int) string {
+	filter := "internetMessageId eq '" + strings.ReplaceAll(internetMessageID, "'", "''") + "'"
+	return c.root() + "/messages?$select=" + fields + "&$top=" + itoa(top) + "&$filter=" + url.QueryEscape(filter)
 }
 
 func (c *Client) messageURL(messageID string) string {
-	return graphBase + "/me/messages/" + url.PathEscape(messageID)
+	return c.root() + "/messages/" + url.PathEscape(messageID)
 }
 
 // ensureFolder resolves a top-level mail folder id by display name, creating the
@@ -149,7 +248,7 @@ func (c *Client) ensureFolder(ctx context.Context, name string) (string, error) 
 	c.mu.Unlock()
 
 	// Look for an existing folder with this display name.
-	listURL := graphBase + "/me/mailFolders?$select=id,displayName&$top=100"
+	listURL := c.root() + "/mailFolders?$select=id,displayName&$top=100"
 	var list struct {
 		Value []struct {
 			ID          string `json:"id"`
@@ -170,7 +269,7 @@ func (c *Client) ensureFolder(ctx context.Context, name string) (string, error) 
 	var created struct {
 		ID string `json:"id"`
 	}
-	if err := c.doJSON(ctx, "POST", graphBase+"/me/mailFolders", map[string]any{"displayName": name}, &created); err != nil {
+	if err := c.doJSON(ctx, "POST", c.root()+"/mailFolders", map[string]any{"displayName": name}, &created); err != nil {
 		return "", err
 	}
 	c.cacheFolder(name, created.ID)
@@ -181,4 +280,32 @@ func (c *Client) cacheFolder(name, id string) {
 	c.mu.Lock()
 	c.folderIDs[name] = id
 	c.mu.Unlock()
+}
+
+// SetSeen flips the read state of one message. Graph has no batch equivalent
+// of Gmail's batchModify that is worth the complexity here, so the caller
+// loops.
+func (c *Client) SetSeen(ctx context.Context, messageID string, seen bool) error {
+	return c.doJSON(ctx, "PATCH", c.messageURL(messageID), map[string]any{"isRead": seen}, nil)
+}
+
+// Delete removes a message the way Outlook's Delete key does: into Deleted
+// Items, where the mailbox's own retention policy takes it from. Exchange
+// answers a message that is already gone with 404, which is the state being
+// asked for, so that is not an error here.
+func (c *Client) Delete(ctx context.Context, messageID string) error {
+	resp, err := c.do(ctx, http.MethodDelete, c.messageURL(messageID), "", nil)
+	if err != nil {
+		return transportError(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return HandleError(resp)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }

@@ -17,7 +17,7 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CheckIcon, Loader2Icon, PlusIcon, XIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import { useUserProfile } from "@/hooks/context/user";
 import useClickOutside from "@/hooks/useClickOutside";
@@ -25,6 +25,9 @@ import useFlipPlacement from "@/hooks/useFlipPlacement";
 import clippedTitle from "@/lib/helper/clippedTitle";
 import useCreateCategory from "@/lib/api/hooks/app/categories/useCreateCategory";
 import type Category from "@/lib/api/models/app/Category";
+import { TagMeaningTooltip } from "@/components/ui/tag-meaning-tooltip";
+import { errorMessage } from "@/lib/errors/message";
+import { labelInk } from "@/lib/utils";
 
 interface Props {
     // Selected ids — kept as ids so the consumer can store them in the
@@ -37,14 +40,16 @@ interface Props {
     // Disable inline category creation. Useful in contexts where the
     // user shouldn't be inventing tags (e.g. legacy import flows).
     allowCreate?: boolean;
+    showMissing?: boolean;
 }
 
 export default function CategoryPicker({
     value,
     onChange,
-    placeholder = "Click to add categories…",
+    placeholder = "Click to add labels…",
     className,
     allowCreate = true,
+    showMissing = false,
 }: Props) {
     const { user } = useUserProfile();
     const categories = user.categories ?? [];
@@ -54,13 +59,11 @@ export default function CategoryPicker({
     const [query, setQuery] = React.useState("");
     const ref = React.useRef<HTMLDivElement>(null);
     const triggerRef = React.useRef<HTMLDivElement>(null);
-    useClickOutside(ref, () => setOpen(false));
+    useClickOutside(open, () => setOpen(false), ref);
     // ~270px: 33px search input + 56 max-h list (224px) + borders.
     const placement = useFlipPlacement(triggerRef, open, 270);
 
-    // Map id → category for chip rendering. We don't render orphaned
-    // ids — if the underlying category was deleted, the chip just
-    // disappears on next render, which is the right behaviour.
+    // Browse filters retain removable chips while workspace metadata is unavailable.
     const byId = React.useMemo(() => {
         const m = new Map<string, Category>();
         for (const c of categories) m.set(c.id, c);
@@ -68,8 +71,8 @@ export default function CategoryPicker({
     }, [categories]);
 
     const selectedChips = value
-        .map((id) => byId.get(id))
-        .filter((c): c is Category => !!c);
+        .map((id) => byId.get(id) ?? (showMissing ? { id, title: "Selected label", color: "#64748b" } : undefined))
+        .filter((c) => c !== undefined);
 
     const filtered = React.useMemo(() => {
         const q = query.trim().toLowerCase();
@@ -99,7 +102,7 @@ export default function CategoryPicker({
             onChange([...value, c.id]);
             setQuery("");
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Failed to create category");
+            toast.error(errorMessage(err, "Failed to create label"));
         }
     }
 
@@ -158,7 +161,7 @@ export default function CategoryPicker({
                         <div className="max-h-56 overflow-y-auto py-1">
                             {filtered.length === 0 && !allowCreate && (
                                 <div className="px-3 py-3 text-[11.5px] text-slate-400 text-center">
-                                    No categories.
+                                    No labels.
                                 </div>
                             )}
                             {filtered.map((c) => {
@@ -225,38 +228,40 @@ export function CategoryChip({
     compact?: boolean;
 }) {
     return (
-        <span
-            className={`inline-flex items-center gap-1 min-w-0 ${compact ? "h-4 pl-1 pr-1 text-[10px]" : "h-5 pl-1.5 pr-1 text-[11px]"} rounded font-medium`}
-            style={{
-                backgroundColor: hexToRgba(category.color, 0.12),
-                color: category.color,
-                border: `1px solid ${hexToRgba(category.color, 0.25)}`,
-            }}
-        >
+        <TagMeaningTooltip title={category.title}>
             <span
-                className={`${compact ? "size-1.5" : "size-2"} rounded-full shrink-0`}
-                style={{ backgroundColor: category.color }}
-            />
-            <span
-                className="truncate min-w-0 max-w-[72px] md:max-w-none"
-                {...clippedTitle}
+                className={`inline-flex items-center gap-1 min-w-0 ${compact ? "h-4 pl-1 pr-1 text-[10px]" : "h-5 pl-1.5 pr-1 text-[11px]"} rounded font-medium`}
+                style={{
+                    backgroundColor: hexToRgba(category.color, 0.12),
+                    color: labelInk(category.color),
+                    border: `1px solid ${hexToRgba(category.color, 0.25)}`,
+                }}
             >
-                {category.title}
-            </span>
-            {onRemove && (
-                <button
-                    type="button"
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onRemove();
-                    }}
-                    className="opacity-70 hover:opacity-100"
-                    aria-label={`Remove ${category.title}`}
+                <span
+                    className={`${compact ? "size-1.5" : "size-2"} rounded-full shrink-0`}
+                    style={{ backgroundColor: category.color }}
+                />
+                <span
+                    className="truncate min-w-0 max-w-[72px] md:max-w-none"
+                    {...clippedTitle}
                 >
-                    <XIcon className="w-2.5 h-2.5" />
-                </button>
-            )}
-        </span>
+                    {category.title}
+                </span>
+                {onRemove && (
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onRemove();
+                        }}
+                        className="opacity-70 hover:opacity-100"
+                        aria-label={`Remove ${category.title}`}
+                    >
+                        <XIcon className="w-2.5 h-2.5" />
+                    </button>
+                )}
+            </span>
+        </TagMeaningTooltip>
     );
 }
 

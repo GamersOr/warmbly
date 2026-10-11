@@ -15,6 +15,7 @@ import (
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +31,18 @@ import (
 // large message to a slow relay is legitimate, and it exists so a peer that
 // stops answering cannot hold a send goroutine forever.
 const sendTimeout = 90 * time.Second
+
+// errNoSTARTTLS distinguishes a missing upgrade from a network failure.
+var errNoSTARTTLS = errors.New("the server does not offer STARTTLS")
+
+// dialCause removes local and duplicated remote addresses from a dial error.
+func dialCause(err error) error {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Err != nil {
+		return op.Err
+	}
+	return err
+}
 
 // ehloName is the domain to announce in EHLO, taken from the sender's own
 // address. Empty leaves net/smtp's default in place.
@@ -125,6 +138,12 @@ func (c *Client) Send(
 		}
 	}
 
+	for k, v := range headers {
+		if err := mailhdr.CheckHeader(k, v); err != nil {
+			return nil, errx.MError(errx.MailErrorWarning, errx.MailErrorCodeUnsupported, k+": "+err.Error(), errx.MailErrorResolveMethodNone)
+		}
+	}
+
 	var msg bytes.Buffer
 	if len(attachments) > 0 {
 		c.writeMixedBody(&msg, headers, bodyPlain, bodyHTML, attachments)
@@ -142,19 +161,64 @@ func (c *Client) Send(
 	return raw, c.sendRaw(ctx, from.Address, recipients, raw)
 }
 
-// writeAlternativeBody writes a multipart/alternative message (text/plain +
-// optional text/html) including the top-level headers.
+// writeAlternativeBody writes the message with its top-level headers: a single
+// text part when there is only one body, else multipart/alternative. An
+// alternative wrapper around one part is a filter signal (rspamd MIME_MA_MISSING_HTML).
 func (c *Client) writeAlternativeBody(msg *bytes.Buffer, headers map[string]string, bodyPlain, bodyHTML string) {
+	if bodyPlain == "" || bodyHTML == "" {
+		contentType, body := "text/plain; charset=UTF-8", bodyPlain
+		if bodyPlain == "" {
+			contentType, body = "text/html; charset=UTF-8", bodyHTML
+		}
+		headers["Content-Type"] = contentType
+		headers["Content-Transfer-Encoding"] = "quoted-printable"
+		writeHeaders(msg, headers)
+		qp := quotedprintable.NewWriter(msg)
+		qp.Write([]byte(body))
+		qp.Close()
+		return
+	}
+
 	writer := multipart.NewWriter(msg)
 	headers["Content-Type"] = fmt.Sprintf("multipart/alternative; boundary=%s", writer.Boundary())
-
-	for k, v := range headers {
-		fmt.Fprintf(msg, "%s: %s\r\n", k, v)
-	}
-	fmt.Fprint(msg, "\r\n")
+	writeHeaders(msg, headers)
 
 	writeTextParts(writer, bodyPlain, bodyHTML)
 	writer.Close()
+}
+
+// headerOrder is the order top-level headers go on the wire, the one mail
+// clients use. Anything not listed follows, sorted, so no two sends differ.
+var headerOrder = []string{
+	"Date", "From", "To", "Cc", "Message-ID", "In-Reply-To", "References", "Subject",
+	"MIME-Version", "Content-Type", "Content-Transfer-Encoding",
+}
+
+// writeHeaders writes headers in headerOrder, then a blank line.
+func writeHeaders(msg *bytes.Buffer, headers map[string]string) {
+	rank := make(map[string]int, len(headerOrder))
+	for i, k := range headerOrder {
+		rank[k] = i
+	}
+	keys := make([]string, 0, len(headers))
+	for k := range headers {
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		ri, iok := rank[keys[i]]
+		rj, jok := rank[keys[j]]
+		switch {
+		case iok && jok:
+			return ri < rj
+		case iok != jok:
+			return iok
+		}
+		return keys[i] < keys[j]
+	})
+	for _, k := range keys {
+		fmt.Fprintf(msg, "%s: %s\r\n", k, headers[k])
+	}
+	fmt.Fprint(msg, "\r\n")
 }
 
 // writeMixedBody writes a multipart/mixed message: a multipart/alternative
@@ -163,22 +227,22 @@ func (c *Client) writeAlternativeBody(msg *bytes.Buffer, headers map[string]stri
 func (c *Client) writeMixedBody(msg *bytes.Buffer, headers map[string]string, bodyPlain, bodyHTML string, attachments []Attachment) {
 	mixed := multipart.NewWriter(msg)
 	headers["Content-Type"] = fmt.Sprintf("multipart/mixed; boundary=%s", mixed.Boundary())
+	writeHeaders(msg, headers)
 
-	for k, v := range headers {
-		fmt.Fprintf(msg, "%s: %s\r\n", k, v)
+	if bodyPlain == "" || bodyHTML == "" {
+		// One body is a direct child: filters read nested parts too.
+		writeTextParts(mixed, bodyPlain, bodyHTML)
+	} else {
+		var altBuf bytes.Buffer
+		alt := multipart.NewWriter(&altBuf)
+		writeTextParts(alt, bodyPlain, bodyHTML)
+		alt.Close()
+
+		altPart, _ := mixed.CreatePart(textproto.MIMEHeader{
+			"Content-Type": {fmt.Sprintf("multipart/alternative; boundary=%s", alt.Boundary())},
+		})
+		altPart.Write(altBuf.Bytes())
 	}
-	fmt.Fprint(msg, "\r\n")
-
-	// multipart/alternative sub-tree for the text bodies.
-	var altBuf bytes.Buffer
-	alt := multipart.NewWriter(&altBuf)
-	writeTextParts(alt, bodyPlain, bodyHTML)
-	alt.Close()
-
-	altPart, _ := mixed.CreatePart(textproto.MIMEHeader{
-		"Content-Type": {fmt.Sprintf("multipart/alternative; boundary=%s", alt.Boundary())},
-	})
-	altPart.Write(altBuf.Bytes())
 
 	// One attachment part per file.
 	for _, a := range attachments {
@@ -271,11 +335,6 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 
-	var conn net.Conn
-	var err error
-	// Implicit TLS (SMTPS) means the server speaks TLS from the first byte, so
-	// a plaintext dial + STARTTLS never gets past the greeting. The mode is
-	// the mailbox's stored choice, falling back to the port convention.
 	resolved := models.ResolveSMTPSecurity(security, port)
 	// The unencrypted mode is checked before the dial and again against the
 	// peer we actually got, because only the second one is a fact about this
@@ -283,27 +342,43 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 	if resolved == models.MailSecurityNone && !models.CleartextMailAllowed(host) {
 		return errx.ErrMailInsecureRemoteHost
 	}
-	implicitTLS := resolved == models.MailSecurityTLS
-	if implicitTLS {
-		conn, err = netbind.TLSDialer(c.BindIP, tlsConf).DialContext(ctx, "tcp", addr)
-	} else {
-		conn, err = netbind.Dialer(c.BindIP).DialContext(ctx, "tcp", addr)
+	// The socket may be 587 with STARTTLS when the mailbox's 465 never
+	// answered; the mode to speak is the one the dial reports.
+	dialed, err := DialSubmission(ctx, c.BindIP, host, port, security)
+	if errors.Is(err, ErrSMTPSEgressBlocked) {
+		return errx.ErrMailSMTPSEgressBlocked(addr)
 	}
-	if err != nil {
-		return errx.ErrMailServerUnreachable
+	if err != nil || dialed.Conn == nil {
+		if err == nil {
+			err = errors.New("dial returned no connection")
+		}
+		return sendFailure(errx.ErrMailServerUnreachableAt("dial "+addr, dialCause(err)), err, "dial", "mailbox")
 	}
+	conn := dialed.Conn
 	defer conn.Close()
+	resolved = dialed.Security
 	if resolved == models.MailSecurityNone && !netbind.LoopbackPeer(conn) {
 		return errx.ErrMailInsecureRemoteHost
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
+	// Implicit TLS (SMTPS) means the server speaks TLS from the first byte,
+	// so a plaintext dial + STARTTLS never gets past the greeting. Its
+	// handshake failure is reported at the dial stage, where it always was.
+	implicitTLS := resolved == models.MailSecurityTLS
+	if implicitTLS {
+		tlsConn := tls.Client(conn, tlsConf)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			return sendFailure(errx.ErrMailServerUnreachableAt("dial "+addr, err), err, "dial", "mailbox")
+		}
+		conn = tlsConn
+	}
 
 	// Use the resolved host: c.Credentials is nil for OAuth2-configured clients.
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
-		return errx.ErrMailServerUnreachable
+		return sendFailure(errx.ErrMailServerUnreachable, err, "greeting", "mailbox")
 	}
 	defer client.Quit()
 
@@ -311,7 +386,7 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 	// alone, which relays read as a spam signal.
 	if name := ehloName(c.Email); name != "" {
 		if err := client.Hello(name); err != nil {
-			return errx.ErrMailServerUnreachable
+			return sendFailure(errx.ErrMailServerUnreachable, err, "ehlo", "mailbox")
 		}
 	}
 
@@ -324,10 +399,10 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 	if !implicitTLS && resolved != models.MailSecurityNone {
 		if ok, _ := client.Extension("STARTTLS"); ok {
 			if err := client.StartTLS(tlsConf); err != nil {
-				return errx.ErrMailServerUnreachable
+				return sendFailure(errx.ErrMailServerUnreachable, err, "starttls", "mailbox")
 			}
 		} else if !netbind.InsecureTLS() && !c.plaintext {
-			return errx.ErrMailServerUnreachable
+			return sendFailure(errx.ErrMailServerUnreachableAt("starttls", errNoSTARTTLS), errNoSTARTTLS, "starttls", "mailbox")
 		}
 	}
 
@@ -360,9 +435,9 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 				// backend it cannot reach); only a 5xx means the credentials
 				// themselves are refused.
 				if !permanentReply(err) {
-					return errx.ErrMailServerUnreachable
+					return sendFailure(errx.ErrMailServerUnreachable, err, "auth", "mailbox")
 				}
-				return errx.ErrMailInvalidCredentials
+				return sendFailure(errx.ErrMailInvalidCredentials, err, "auth", "mailbox")
 			}
 		}
 	case models.AuthOAuth2:
@@ -371,7 +446,7 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 			var rErr *oauth2.RetrieveError
 			if errors.As(err, &rErr) {
 				if rErr.Response.StatusCode >= 500 {
-					return errx.ErrMailServerUnreachable
+					return sendFailure(errx.ErrMailServerUnreachable, err, "oauth2 token", "mailbox")
 				}
 			}
 			return errx.ErrMailAuthenticationFailed
@@ -379,7 +454,10 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 
 		auth := newOAuth2Auth(c.Email, tk.AccessToken)
 		if err := client.Auth(auth); err != nil {
-			return errx.ErrMailAuthenticationFailed
+			if !permanentReply(err) {
+				return sendFailure(errx.ErrMailServerUnreachable, err, "auth", "mailbox")
+			}
+			return sendFailure(errx.ErrMailAuthenticationFailed, err, "auth", "mailbox")
 		}
 	}
 
@@ -389,46 +467,52 @@ func (c *Client) sendRaw(ctx context.Context, from string, to []string, data []b
 		// reports an outage that is not happening.
 		if permanentReply(err) {
 			if isDomainAuthRejection(err) {
-				return errx.ErrMailDomainAuthRejected
+				return sendFailure(errx.ErrMailDomainAuthRejected, err, "mail from", "mailbox")
 			}
-			return errx.ErrMailSendRejected(err.Error())
+			return sendFailure(errx.ErrMailSendRejected("The SMTP server refused the sender"), err, "mail from", "mailbox")
 		}
-		return errx.ErrMailServerUnreachable
+		return sendFailure(errx.ErrMailServerUnreachable, err, "mail from", "mailbox")
 	}
 	for _, r := range to {
 		if err := client.Rcpt(r); err != nil {
 			// A domain-authentication refusal is about OUR domain, not this
 			// recipient; suppressing the address would punish the wrong party.
-			if isDomainAuthRejection(err) {
-				return errx.ErrMailDomainAuthRejected
+			if permanentReply(err) && isDomainAuthRejection(err) {
+				return sendFailure(errx.ErrMailDomainAuthRejected, err, "rcpt to", "mailbox")
 			}
 			// A refused RCPT is a recipient problem (bad address, policy
 			// rejection), not a dead server; classifying it as unreachable
 			// hid rejections from bounce accounting. A 4xx is greylisting or
 			// a busy server, which is worth another attempt.
 			if !permanentReply(err) {
-				return errx.ErrMailServerUnreachable
+				return sendFailure(errx.ErrMailServerUnreachable, err, "rcpt to", "recipient")
 			}
-			return errx.ErrMailRecipientRejected(err.Error())
+			refused := sendFailure(errx.ErrMailRecipientRejected("The SMTP server refused this recipient"), err, "rcpt to", "recipient")
+			refused.Recipient = r
+			return refused
 		}
 	}
 	w, err := client.Data()
 	if err != nil {
-		return errx.ErrMailServerUnreachable
+		base := errx.ErrMailServerUnreachable
+		if permanentReply(err) {
+			base = errx.ErrMailSendRejected("The SMTP server refused the message")
+		}
+		return sendFailure(base, err, "data", "mailbox")
 	}
 	if _, err := w.Write(data); err != nil {
-		return errx.ErrMailServerUnreachable
+		return sendFailure(errx.ErrMailServerUnreachable, err, "message body", "mailbox")
 	}
 	if err := w.Close(); err != nil {
 		// The server's verdict on the whole message lands here, which is where
 		// Microsoft returns 5.7.515. Retrying it as an outage never succeeds.
-		if isDomainAuthRejection(err) {
-			return errx.ErrMailDomainAuthRejected
+		if permanentReply(err) && isDomainAuthRejection(err) {
+			return sendFailure(errx.ErrMailDomainAuthRejected, err, "message accept", "mailbox")
 		}
 		if permanentReply(err) {
-			return errx.ErrMailSendRejected(err.Error())
+			return sendFailure(errx.ErrMailSendRejected("The SMTP server refused the message"), err, "message accept", "mailbox")
 		}
-		return errx.ErrMailServerUnreachable
+		return sendFailure(errx.ErrMailServerUnreachable, err, "message accept", "mailbox")
 	}
 
 	return nil

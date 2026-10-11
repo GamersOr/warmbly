@@ -2,7 +2,7 @@
 // workspace and the pool allowance they share.
 
 import React from "react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { Loader2Icon, ServerIcon } from "lucide-react";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
@@ -30,8 +30,8 @@ export default function LinkedInstances() {
             {plan && (
                 <p className="text-[12.5px] text-slate-500">
                     {plan.mailbox_limit === null
-                        ? `Unlimited linked mailboxes · ${plan.enrolled} enrolled`
-                        : `${plan.enrolled} of ${plan.mailbox_limit} free linked mailboxes used`}
+                        ? `Unlimited mailboxes · ${plan.enrolled} warming`
+                        : `${plan.enrolled} of ${plan.mailbox_limit} free mailboxes used, counting the ones connected here and through instances`}
                 </p>
             )}
             {list.length === 0 ? (

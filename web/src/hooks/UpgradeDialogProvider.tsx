@@ -5,8 +5,8 @@
 
 import React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
-import toast from "react-hot-toast";
+import { useSearchParams } from "@/hooks/useSearchParams";
+import toast from "react-hot-toast/headless";
 import UpgradeDialog from "@/components/layout/UpgradeDialog";
 import { UpgradeDialogContext, type UpgradeRequest } from "./context/upgrade";
 

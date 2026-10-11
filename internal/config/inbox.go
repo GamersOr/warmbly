@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"strconv"
+	"strings"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -13,18 +15,41 @@ type Oauth2Inbox struct {
 	Outlook *oauth2.Config
 }
 
+// GoogleOAuthConnect reports whether a NEW Gmail mailbox may be connected with
+// Google sign-in. Configured clients default on; an explicit flag overrides it.
+// Existing mailboxes can still be re-authorized regardless of this gate.
+func GoogleOAuthConnect() bool {
+	if strings.TrimSpace(os.Getenv("BOX_GOOGLE_CLIENT_ID")) == "" || strings.TrimSpace(os.Getenv("BOX_GOOGLE_CLIENT_SECRET")) == "" {
+		return false
+	}
+	value := strings.TrimSpace(os.Getenv("BOX_GOOGLE_OAUTH_CONNECT"))
+	if value == "" {
+		return true
+	}
+	b, err := strconv.ParseBool(value)
+	return err == nil && b
+}
+
 func GoogleOauth2Inbox(baseURL string) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     os.Getenv("BOX_GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("BOX_GOOGLE_CLIENT_SECRET"),
 		RedirectURL:  baseURL + "/addresses/google/callback",
+		// The smallest set that does the job. Gmail's scopes nest:
+		// gmail.modify already confers readonly, send, compose and metadata, so
+		// asking for those as well widened the consent screen and the list of
+		// restricted scopes under review without granting anything extra.
+		//
+		// gmail.settings.basic is separate and is not implied: it is what reads
+		// the send-as identities, so a mailbox sending from an alias is set up
+		// correctly rather than rewritten to the primary address.
+		//
+		// Existing grants are unaffected. scopeSatisfiedBy in
+		// internal/app/email/onboarding.go resolves the nesting both ways, so a
+		// mailbox connected under the old six-scope consent still verifies.
 		Scopes: []string{
-			gmail.GmailComposeScope,
-			gmail.GmailMetadataScope,
 			gmail.GmailModifyScope,
-			gmail.GmailSendScope,
 			gmail.GmailSettingsBasicScope,
-			gmail.GmailReadonlyScope,
 		},
 		Endpoint: google.Endpoint,
 	}

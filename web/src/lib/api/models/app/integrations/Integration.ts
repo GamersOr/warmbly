@@ -15,6 +15,8 @@ export type IntegrationProvider =
     | "calendly"
     | "cal_com"
     | "google_sheets"
+    | "apollo"
+    | "clay"
     | "millionverifier"
     | "cleanmylist";
 
@@ -62,6 +64,8 @@ export interface IntegrationCatalogEntry {
     capability?: ProviderCapability;
     /** Whether the server has OAuth client credentials wired for this provider. */
     configured: boolean;
+    /** Popularity on this instance, 1 = most used. */
+    rank: number;
 }
 
 export type SyncDirection = "push" | "pull" | "both";
@@ -121,7 +125,7 @@ export interface IntegrationFieldMapping {
     transform: string;
     static_value: string;
     is_default: boolean;
-    created_at: string;
+    created_at: Date;
 }
 
 export interface IntegrationConnection {
@@ -136,15 +140,15 @@ export interface IntegrationConnection {
     external_account_id?: string;
     external_account_name?: string;
     granted_scopes?: string[];
-    token_expires_at?: string | null;
+    token_expires_at?: Date | null;
     health: IntegrationHealth;
     health_detail?: string | null;
-    health_checked_at?: string | null;
-    last_synced_at?: string | null;
+    health_checked_at?: Date | null;
+    last_synced_at?: Date | null;
     last_error?: string | null;
-    last_error_at?: string | null;
-    created_at: string;
-    updated_at: string;
+    last_error_at?: Date | null;
+    created_at: Date;
+    updated_at: Date;
 
     /** Per-connection onboarding/capability snapshot (selected use-cases, picker
      *  selections, scheduling_url for meeting providers). */
@@ -164,6 +168,7 @@ export type IntegrationAction =
     | "salesforce.upsert_contact"
     | "close.upsert_lead"
     | "webhook.ping"
+    | "clay.send_row"
     // Native (Warmbly built-in) automation actions — no external connection.
     | "warmbly.add_tag"
     | "warmbly.remove_tag"
@@ -187,8 +192,8 @@ export interface IntegrationEventSubscription {
     action: IntegrationAction;
     config: Record<string, unknown>;
     enabled: boolean;
-    created_at: string;
-    updated_at: string;
+    created_at: Date;
+    updated_at: Date;
 }
 
 export interface IntegrationSyncRun {
@@ -199,8 +204,8 @@ export interface IntegrationSyncRun {
     status: "running" | "success" | "error";
     detail: string;
     records_processed: number;
-    started_at: string;
-    finished_at?: string | null;
+    started_at: Date;
+    finished_at?: Date | null;
 }
 
 export interface IntegrationOAuthStartResponse {
@@ -226,8 +231,8 @@ export interface MeetingBooking {
     invitee_name: string;
     event_name: string;
     event_type?: string;
-    scheduled_for?: string;
-    end_time?: string;
+    scheduled_for?: Date;
+    end_time?: Date;
     join_url?: string;
     location?: string;
     cancel_url?: string;
@@ -236,8 +241,8 @@ export interface MeetingBooking {
     contact_id?: string;
     campaign_id?: string;
     contact_name?: string;
-    created_at: string;
-    updated_at?: string;
+    created_at: Date;
+    updated_at?: Date;
 }
 
 export interface MeetingsSummary {
@@ -305,6 +310,7 @@ export const REPLY_INTENT_OPTIONS: { value: string; label: string }[] = [
     { value: "neutral", label: "Neutral" },
     { value: "negative", label: "Negative" },
     { value: "out_of_office", label: "Out of office" },
+    { value: "automated", label: "Automated" },
 ];
 
 // Human labels for the Warmbly event vocabulary (subset surfaced as triggers).
@@ -338,6 +344,8 @@ export function defaultActionForProvider(provider: IntegrationProvider): Integra
             return "salesforce.upsert_contact";
         case "close":
             return "close.upsert_lead";
+        case "clay":
+            return "clay.send_row";
         default:
             return "webhook.ping";
     }
@@ -365,6 +373,8 @@ export const PROVIDER_LABELS: Record<IntegrationProvider, string> = {
     calendly: "Calendly",
     cal_com: "Cal.com",
     google_sheets: "Google Sheets",
+    apollo: "Apollo",
+    clay: "Clay",
     millionverifier: "MillionVerifier",
     cleanmylist: "CleanMyList",
 };

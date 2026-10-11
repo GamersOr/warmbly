@@ -4,9 +4,11 @@ import (
 	"context"
 	"github.com/warmbly/warmbly/internal/app/cloudlink"
 	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
+	"github.com/warmbly/warmbly/internal/app/slackapp"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,19 +19,25 @@ import (
 	awsconf "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/advanced"
+	"github.com/warmbly/warmbly/internal/app/audit"
 	"github.com/warmbly/warmbly/internal/app/cipher"
 	jobs "github.com/warmbly/warmbly/internal/app/consumer"
 	"github.com/warmbly/warmbly/internal/app/contact"
 	"github.com/warmbly/warmbly/internal/app/credits"
 	"github.com/warmbly/warmbly/internal/app/creditwatch"
+	"github.com/warmbly/warmbly/internal/app/crmmode"
 	"github.com/warmbly/warmbly/internal/app/feature"
+	"github.com/warmbly/warmbly/internal/app/hubspot"
 	"github.com/warmbly/warmbly/internal/app/inboxagent"
+	"github.com/warmbly/warmbly/internal/app/inboxtag"
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
 	"github.com/warmbly/warmbly/internal/app/integration"
 	"github.com/warmbly/warmbly/internal/app/nativeactions"
 	"github.com/warmbly/warmbly/internal/app/notification"
 	"github.com/warmbly/warmbly/internal/app/opsnotify"
+	"github.com/warmbly/warmbly/internal/app/pipedrive"
 	"github.com/warmbly/warmbly/internal/app/replyclassify"
+	"github.com/warmbly/warmbly/internal/app/salesforce"
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/webhook"
 	workerapp "github.com/warmbly/warmbly/internal/app/worker"
@@ -54,6 +62,7 @@ import (
 	"github.com/warmbly/warmbly/internal/pkg/generation"
 	"github.com/warmbly/warmbly/internal/pkg/geo"
 	"github.com/warmbly/warmbly/internal/pkg/nodeagent"
+	"github.com/warmbly/warmbly/internal/pkg/typesafe"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -92,6 +101,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Println("Waiting for backend database migrations...")
+	if err := db.WaitForSchema(ctx, primaryDB); err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Database schema ready")
 
 	// Redis
 	primaryRedis, err := cfg.LoadPrimaryRedisEndpoint(ctx)
@@ -180,10 +194,10 @@ func main() {
 			errs.CaptureFatal(err)
 			log.Fatal("Failed to provision Pub/Sub topics/subscriptions: ", err)
 		}
-		streamingPublisher = pubsub.NewStreamingPublisher(pubsubClient)
+		streamingPublisher = pubsub.NewStreamingPublisher(pubsubClient, repository.NewEventAudienceRepository(primaryDB.Pool))
 	}
 	if streamingPublisher == nil {
-		streamingPublisher = pubsub.NewStreamingPublisher(pubsub.NewRedisBus(redisCache.Client, ""))
+		streamingPublisher = pubsub.NewStreamingPublisher(pubsub.NewRedisBus(redisCache.Client, ""), repository.NewEventAudienceRepository(primaryDB.Pool))
 		log.Println("Realtime events bridged over Redis (Pub/Sub disabled)")
 	}
 
@@ -225,7 +239,7 @@ func main() {
 	// integration actions in-process (cipher + Postgres are available here; the
 	// consumer is control-plane, not a worker). Suppression already lives in the
 	// advanced repo, so no separate suppression repo is wired here.
-	webhookRepoC := repository.NewWebhookRepository(primaryDB.Pool)
+	webhookRepoC := repository.NewWebhookRepositorySealed(primaryDB.Pool, credEncrypter)
 	webhookService := webhook.NewService(webhookRepoC)
 	// The consumer dispatches lower-volume reply/warmup events (not per-contact
 	// campaign fan-out), so a generous static cap is enough here; the plan-based
@@ -234,6 +248,19 @@ func main() {
 	integrationRepoC := repository.NewIntegrationRepository(primaryDB.Pool)
 	integrationServiceC := integration.NewService(integrationRepoC, cipherService, integration.NewOAuthManager())
 	webhookService.WireDispatchSink(integrationServiceC.DispatchAny)
+	// Replies, opens and clicks are raised here, so the Salesforce outbox
+	// records them here too; the backend drains it. Automation upserts take
+	// the native path as well.
+	salesforceC := salesforce.NewService(salesforce.Deps{
+		Repo:         repository.NewSalesforceRepository(primaryDB.Pool),
+		Integrations: integrationServiceC,
+		Cipher:       cipherService,
+		Holds:        campaignProgressRepo,
+		Suppression:  advancedRepo,
+		Subscription: contactRepo,
+	})
+	integrationServiceC.SetSalesforce(salesforceC)
+	webhookService.WireRecordSink(salesforceC.Recorder().Record)
 	// AI automation nodes + reply-classifier Layer 3 run in THIS process (reply /
 	// warmup / bounce events dispatch here). Build the credit ledger + provider so
 	// the ai_step / ai_switch nodes can charge + call, and so the classifier's
@@ -269,6 +296,12 @@ func main() {
 	}
 	integrationServiceC.SetAI(aiProviderC, creditServiceC)
 	integrationServiceC.SetAISearch(aiSearchC)
+	// One TypeSafe client for every typed judgment in this process. Nil when
+	// no key is configured, and every feature that reads it stays off.
+	var typeSafeClient *typesafe.Client
+	if key := config.TypeSafeAPIKey(); key != "" {
+		typeSafeClient = typesafe.NewClient(key, typesafe.WithBillingRedis(redisCache.Client))
+	}
 	if aiProviderC != nil {
 		replyclassify.SetModelClassifier(func(ctx context.Context, system, user string) (string, error) {
 			res, err := aiProviderC.Complete(ctx, generation.CompletionRequest{System: system, Prompt: user, MaxTokens: 16, Temperature: generation.Deterministic()})
@@ -304,6 +337,45 @@ func main() {
 		aware.WireSegments(repository.NewSegmentRepository(primaryDB))
 	}
 	advancedService.WireDispatcher(webhookService)
+
+	// HubSpot as the workspace CRM: replies and bounces dispatched here log to
+	// HubSpot, reply tasks reach it, and this process drains the CRM outbox and
+	// runs the pull that keeps the mirror current.
+	hubspotService := hubspot.New(hubspot.Deps{
+		Repo:         repository.NewCRMProviderRepository(primaryDB.Pool),
+		CRM:          crmRepo,
+		Tokens:       integrationServiceC,
+		Contacts:     contactRepo,
+		Holds:        campaignProgressRepo,
+		Suppress:     advancedRepo,
+		Realtime:     streamingPublisher,
+		Cache:        redisCache,
+		AppURL:       os.Getenv("APP_URL"),
+		ClientSecret: strings.TrimSpace(os.Getenv("HUBSPOT_OAUTH_CLIENT_SECRET")),
+	})
+	// Pipedrive mode: the same in this process, on Pipedrive's records.
+	pipedriveService := pipedrive.New(pipedrive.Deps{
+		Repo:         repository.NewCRMProviderRepository(primaryDB.Pool),
+		CRM:          crmRepo,
+		Tokens:       integrationServiceC,
+		Contacts:     contactRepo,
+		Holds:        campaignProgressRepo,
+		Suppress:     advancedRepo,
+		Realtime:     streamingPublisher,
+		Cache:        redisCache,
+		AppURL:       os.Getenv("APP_URL"),
+		PublicURL:    config.BackendPublicURL(),
+		ClientSecret: strings.TrimSpace(os.Getenv("PIPEDRIVE_OAUTH_CLIENT_SECRET")),
+	})
+	crmModes := crmmode.New(repository.NewCRMProviderRepository(primaryDB.Pool), integrationServiceC, hubspotService, pipedriveService)
+	webhookService.WireRecordSink(hubspotService.OnEvent)
+	webhookService.WireRecordSink(pipedriveService.OnEvent)
+	advancedService.WireCRMOutbox(crmModes)
+	integrationServiceC.SetCRMModeCheck(crmModes.Mode)
+	go hubspotService.RunDrainer(ctx)
+	go hubspotService.RunPuller(ctx)
+	go pipedriveService.RunDrainer(ctx)
+	go pipedriveService.RunPuller(ctx)
 	// Replies, bounces, opens and clicks teach verification what real mail
 	// showed about each address.
 	verificationEvidence := emailverifyapp.NewEvidence(repository.NewVerificationEvidenceRepository(primaryDB))
@@ -353,7 +425,8 @@ func main() {
 	} else {
 		log.Printf("Warning: notification email disabled, EMAIL_NAME/EMAIL_ADDRESS not set: %v", ecErr)
 	}
-	notificationService.WireDelivery(notifEmail, integrationServiceC, repository.NewUserRepostory(primaryDB, kmsClient), orgRepoConsumer)
+	slackRepoC := repository.NewSlackRepository(primaryDB)
+	notificationService.WireDelivery(notifEmail, slackapp.NewNotifier(integrationServiceC, slackRepoC), repository.NewUserRepostory(primaryDB, kmsClient), orgRepoConsumer)
 
 	// Operator alerts. The dead-worker detector runs in this process, and a
 	// stranded fleet is the operator's problem, not a tenant's. Reads the same
@@ -384,6 +457,8 @@ func main() {
 	advancedService.WireNotifier(notificationService)
 	// Reply pulses fire in THIS process too (inbox ingest classifies replies).
 	advancedService.WireRealtime(streamingPublisher)
+	// A lifted reply opt-out is recorded like a member lifting one by hand.
+	advancedService.WireAudit(audit.NewService(repository.NewAuditRepository(primaryDB.Pool), streamingPublisher))
 	// Inbox agent (M10): inbound human replies are ingested + classified in THIS
 	// process, so the agent that drafts a suggested reply must be wired here. It
 	// is paid + opt-in (checked inside) and self-detaches, so a slow model never
@@ -400,6 +475,11 @@ func main() {
 		streamingPublisher,
 	)
 	advancedService.WireInboxAgent(inboxAgentServiceC)
+	if typeSafeClient != nil {
+		// A bounce whose reason does not name the recipient is classified, so a
+		// reputation or policy block does not suppress a good address.
+		advancedService.WireBounceJudge(typeSafeClient)
+	}
 
 	eventsPublisher := events.NewPublisher(consumerBus, s3Client, consumerCodec, cipherService)
 
@@ -408,6 +488,35 @@ func main() {
 	jobrun.Configure(repository.NewJobRunRepository(primaryDB), "consumer")
 
 	// JobsService
+	// Follow-up labels use stored mailbox facts and run without TypeSafe.
+	// Message classification still requires both the key and opt-in switch.
+	tagCategories := repository.NewTagCategoryStore(primaryDB.Pool)
+	inboxTagRepo := repository.NewInboxTagRepository(primaryDB.Pool)
+	var tagAsker inboxtag.Asker
+	classify := config.InboxTaggingEnabled() && typeSafeClient != nil
+	if classify {
+		tagAsker = inboxtag.NewAsker(typeSafeClient)
+		log.Printf("automatic inbox tagging enabled (model %s)", inboxtag.Model)
+	} else {
+		log.Printf("automatic inbox classification off; timestamp-based follow-up labels still run locally")
+	}
+	inboxTagger := inboxtag.NewService(
+		tagAsker,
+		inboxTagRepo,
+		tagCategories,
+		tagCategories,
+		classify,
+	)
+	inboxTagger.WireSettings(advancedRepo)
+	if typeSafeClient != nil {
+		// The reply classifier's model layer and the inbox agent's gate both
+		// read the verdict the tagger stored moments earlier, so a reply is
+		// paid for once. Without tagging the classifier asks one question.
+		replyclassify.SetTypedClassifier(inboxtag.ReplyClassifier(typeSafeClient, inboxTagRepo))
+		inboxAgentServiceC.WireDraftGate(inboxtag.NewDraftGate(inboxTagRepo))
+	}
+	advancedService.WireInboxTags(inboxTagRepo)
+
 	jobsService := &jobs.JobsService{
 		Bus:                         consumerBus,
 		Codec:                       consumerCodec,
@@ -417,12 +526,16 @@ func main() {
 		EmailHistoryIDRepository:    emailHistoryIDRepo,
 		EmailGraphDeltaRepository:   emailGraphDeltaRepo,
 		EmailSyncStateRepository:    repository.NewEmailSyncStateRepository(primaryDB),
+		ArrivalOutbox:               repository.NewDurableEmailMessageMapRepository(primaryDB, cipherService),
 		EmailAccountErrorRepository: emailAccountErrorRepo,
 		WarmupRepo:                  warmupRepo,
 		PoolLinkRepo:                repository.NewPoolLinkRepository(primaryDB.Pool),
 		CloudLink:                   cloudlink.NewService(repository.NewCloudLinkRepository(primaryDB.Pool, credEncrypter), emailRepo, nil),
 		WarmupContentRepo:           repository.NewWarmupContentRepository(primaryDB.Pool),
 		WarmupEngagementRepo:        repository.NewWarmupEngagementRepository(primaryDB.Pool),
+		WarmupRecoveryRepo:          repository.NewWarmupRecoveryRepository(primaryDB.Pool),
+		WarmupPlacementRepo:         repository.NewWarmupPlacementRepository(primaryDB),
+		PlacementRepo:               repository.NewPlacementRepository(primaryDB),
 		WarmupService:               warmupService,
 		WorkerRepo:                  workerRepo,
 		FleetNodeRepo:               repository.NewFleetNodeRepository(primaryDB),
@@ -430,7 +543,9 @@ func main() {
 		Publisher:                   eventsPublisher,
 		StreamingPublisher:          streamingPublisher,
 		AdvancedService:             advancedService,
+		InboxTagger:                 inboxTagger,
 		Cache:                       redisCache,
+		Retention:                   instancesettings.NewService(instancesettings.NewStore(primaryDB.Pool)),
 		AdminRepo:                   repository.NewAdminRepository(primaryDB.Pool),
 		AssignmentService:           workerAssignmentSvc,
 		Notifier:                    notificationService,
@@ -443,6 +558,12 @@ func main() {
 		Evidence:                    verificationEvidence,
 	}
 
+	// Inbox arrivals are mirrored into the workspace's Slack inbox channel here.
+	jobsService.SlackInbox = slackapp.NewInboxPoster(slackapp.InboxDeps{
+		Integrations: integrationServiceC, Repo: slackRepoC, Redis: redisCache.Client,
+		Threads: uniboxRepo, Tasks: taskRepo, Campaigns: campaignRepo,
+		Users: repository.NewUserRepostory(primaryDB, kmsClient),
+	})
 	jobsService.InitEvents()
 
 	// Graceful shutdown
@@ -469,6 +590,26 @@ func main() {
 	// recipient-side dwell survives worker restarts. Short interval keeps the
 	// effective dwell close to the requested value.
 	go jobsService.StartWarmupEngagementPoller(ctx, 30*time.Second)
+	go jobsService.StartWarmupInboxCleanup(ctx)
+	go jobsService.StartWarmupFilingRecovery(ctx)
+	// Deletes warmup mail past its retention window from the mailbox itself
+	// and prunes the per-message warmup records after theirs.
+	go jobsService.StartWarmupMailRetention(ctx)
+	// Searches the mailbox for deletion strikes recorded before removals were
+	// checked, withdrawing any whose message is still there.
+	go jobsService.StartWarmupTamperingRecheck(ctx)
+	// Attributes each warmup email moved to spam once the activity around it settles.
+	go jobsService.StartWarmupSpamMoveAttribution(ctx)
+	go jobsService.StartWarmupPlacementSweep(ctx)
+	go jobsService.StartPendingWarmupVerification(ctx)
+	// Re-offers inbound mail that reply processing never claimed, so a
+	// reply refused by a since-fixed check is still attributed to its lead.
+	go jobsService.StartIncomingReplyRepair(ctx)
+	go jobsService.StartReplyOptOutRecheck(ctx)
+
+	// Mirrors Warmbly Cloud's warmup verdicts onto the mailboxes it warms, so
+	// a cloud quarantine pauses their campaigns here too. No-op when unlinked.
+	go jobsService.StartCloudStandingSync(ctx, 5*time.Minute)
 
 	// Start dead worker detection (every 5 minutes)
 	go jobsService.StartDeadWorkerDetection(ctx, 5*time.Minute)
@@ -507,12 +648,12 @@ func main() {
 	// (Avro on Kafka, JSON on NATS).
 	// GeoIP is optional here as on the backend: it only turns an open or
 	// click's source network into a country and city on the logs.
+	// Nothing waits for the database: opens and clicks are recorded either way
+	// and only their country and city label depends on it, so a mirror that is
+	// slow or gone must not delay this service coming up.
 	geoPath, _ := cfg.LoadGeoDBPath(ctx)
-	geoloc, gerr := geo.New(geoPath)
-	if gerr != nil {
-		log.Printf("GeoIP database not found at %s; engagement locations are disabled.", geoPath)
-		geoloc, _ = geo.New("")
-	}
+	geoloc, _ := geo.New("")
+	geo.Start(ctx, geoloc, geoPath, cfg.LoadGeoDBURL(ctx))
 	if trackingCfg, terr := cfg.LoadTrackingConsumerConfig(ctx); terr != nil {
 		log.Println("tracking consumer config unavailable; opens/clicks not consumed:", terr)
 	} else if trackingConsumer, terr := jobs.NewTrackingConsumer(
@@ -543,6 +684,7 @@ func main() {
 		trackingSettings := instancesettings.NewService(instancesettings.NewStore(primaryDB.Pool))
 		trackingConsumer.WireRetention(trackingSettings)
 		trackingConsumer.WireTrackingPolicy(trackingSettings)
+		trackingConsumer.WireDirectMail(emailRepo)
 		defer trackingConsumer.Close()
 		go func() {
 			if err := trackingConsumer.Start(ctx); err != nil {
@@ -589,7 +731,7 @@ func newConsumerAgent() *nodeagent.Agent {
 		Region:            os.Getenv("WARMBLY_NODE_REGION"),
 		Version:           os.Getenv("WARMBLY_VERSION"),
 		BaseURL:           consumerBackendURL(),
-		Token:             os.Getenv("INTERNAL_API_TOKEN"),
+		Token:             config.NodeAPIToken(),
 		TargetVersionPath: os.Getenv("WARMBLY_TARGET_VERSION_PATH"),
 	})
 }

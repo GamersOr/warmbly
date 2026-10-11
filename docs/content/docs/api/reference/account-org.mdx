@@ -123,7 +123,7 @@ Same shape as `/auth/login`: `email`, `password`, `turnstile`.
 
 `POST /auth/register/confirm`
 
-Confirms the emailed code, creates the account and signs it in: the response is the same shape as a completed `/auth/login` (a `token` pair, or a `two_fa_required` challenge), so the client lands in the dashboard without a second sign-in. `/auth/register` itself returns that shape directly when the deployment does not require email verification.
+Confirms the emailed code, creates the account and signs it in: the response is the same shape as a completed `/auth/login` (a `token` pair, or a `two_fa_required` challenge), so the client lands in the dashboard without a second sign-in. `/auth/register` itself returns that shape directly when the deployment does not require email verification. An address that already has an account is refused with `409` `conflict` (see [error codes](/api/error-codes/#409-conflict)).
 
 Auth: public (not available to API keys).
 
@@ -168,6 +168,8 @@ Auth: public (not available to API keys).
 
 A new token pair, same shape as the login confirm success response (`access_token`, `access_token_expires_at`, `refresh_token`, `refresh_token_expires_at`).
 
+Every refresh rotates the pair: store the new refresh token and discard the old one. A refresh token that has already been exchanged is refused with `401`. If it is presented again more than two minutes after it was exchanged, it has been used twice, so the whole session is ended and every token issued to it stops working. Inside those two minutes it is treated as two callers refreshing at once and only that request is refused.
+
 ### Start password reset
 
 `POST /auth/reset-password`
@@ -191,7 +193,7 @@ Auth: public (not available to API keys).
 
 `POST /auth/reset-password/confirm`
 
-Sets a new password using the emailed reset code (carried inside the signed `session` token).
+Sets a new password using the emailed reset code (carried inside the signed `session` token). A reset token is single-use and bound to the password it was requested against: once the password is written by any path (this endpoint, the signed-in change, or an operator reset), every reset token issued before that write answers `401` however long its own expiry has left.
 
 Auth: public (not available to API keys).
 
@@ -289,8 +291,11 @@ A browser cannot authenticate with the provider itself, so it is sent there and 
 | `POST /auth/apple/callback` | form post | Where Apple returns the browser. Apple uses `response_mode=form_post` because the flow requests the email scope, so this arrives as a form rather than a redirect; it also accepts `GET` for a refusal. |
 | `GET /auth/oidc/callback` | none | Where the OpenID Connect provider returns the browser. |
 | `POST /auth/sso/exchange` | `code` and `binding` (both required) | Swaps the single-use handoff code from any callback for the session. `POST /auth/oidc/exchange` is the older name for the same endpoint. |
+| `POST /auth/sso/link` | `pending_token` and `password` (both required) | Completes a sign-in that the exchange answered with `link_required`. Takes the password of the existing account, attaches the provider identity to it, and returns the session (or a two-factor challenge). |
 
 The callback never returns a token. It hands the browser an opaque, single-use code with a 60 second lifetime and the client exchanges it over `POST`, so no token lands in a URL, browser history, `Referer` header or proxy log. The exchange returns a token pair, or a two-factor challenge when the account has TOTP enrolled.
+
+The exchange has a third outcome. A provider identity is bound to an account by its `(issuer, subject)` pair; the first sign-in with a new identity falls back to the verified email address to find an existing account. When that account has a password, the exchange returns `link_required: true` with a `pending_token` (ten minute lifetime), `link_email` and `link_provider`, and nothing is linked and no session exists yet. The client asks for the account's password and posts it with the token to `POST /auth/sso/link`; a correct password attaches the identity and returns the session, so every later sign-in with that provider resolves directly. When the account has TOTP enrolled the answer is a two-factor challenge instead, and the identity is attached only once `POST /auth/2fa/verify` passes. A wrong password is refused with the same `Invalid email or password.` as sign-in and counts against the same per-address budget; three wrong answers, or ten minutes, end the challenge with [`sso_link_expired`](/api/error-codes/) and the sign-in starts over. An account with no password (one created through a provider or an invitation) has nothing to ask for and links on the first sign-in. The native `POST /auth/google` and `POST /auth/apple` return the same `link_required` result and complete through the same endpoint.
 
 The exchange also requires the `binding` secret that `begin` returned. A one-time `state` proves the callback answers a request this server made; it does not prove it answers one this browser made. Without the binding, someone could run the flow with their own provider account and send you the resulting link, signing you into their workspace. The binding never travels to the provider and never appears in a URL, so a forwarded link arrives without it and is refused with [`sso_wrong_browser`](/api/error-codes/).
 
@@ -304,7 +309,7 @@ Self-service session management for the signed-in user. Revoking by id can only 
 
 `POST /auth/logout`
 
-Revokes the current session. Returns `204 No Content`.
+Revokes the current session and closes the user's open realtime connections. Returns `204 No Content`.
 
 Auth: Session only (not available to API keys).
 
@@ -312,7 +317,7 @@ Auth: Session only (not available to API keys).
 
 `POST /auth/logout-all`
 
-Revokes every session for the user. Returns `204 No Content`.
+Revokes every session for the user, this one included, and closes their open realtime connections. A revoked session can no longer be refreshed. Returns `204 No Content`.
 
 Auth: Session only (not available to API keys).
 
@@ -372,9 +377,9 @@ Auth: Session only (not available to API keys).
 
 `GET /auth/me`
 
-Returns the signed-in user, including admin flags and the label registries (folders, tags, categories) the dashboard needs on initial load.
+Returns the signed-in user, including admin flags and the label registries (folders, tags, and the workspace labels returned as `categories`) the dashboard needs on initial load.
 
-The registries belong to the workspace, not to the caller: every member of an organization sees the same folders, tags and categories, whoever created them. They are read for the session's currently selected workspace, so switching workspaces changes what comes back.
+The registries belong to the workspace, not to the caller: every member of an organization sees the same folders, tags and labels, whoever created them. They are read for the session's currently selected workspace, so switching workspaces changes what comes back.
 
 Auth: Session only (not available to API keys).
 
@@ -480,7 +485,9 @@ Auth: Session only (not available to API keys).
 
 `POST /auth/me/password`
 
-Updates the signed-in user's password. Returns `200 OK`.
+Updates the signed-in user's password. Every session the account holds is ended, the one making the request included, and the response is the token pair of a new session for the calling device. Tokens issued before the change are refused after it, so the client must replace its stored pair with the one returned. Returns `200 OK`.
+
+If the new password was stored but the device could not be issued a new session, the response is `409` with code `password_changed_sign_in_again`. The old tokens are not valid in that case either: discard them and sign in with the new password.
 
 Auth: Session only (not available to API keys).
 
@@ -495,6 +502,17 @@ Auth: Session only (not available to API keys).
 {
   "current_password": "correct horse battery staple",
   "new_password": "a longer better passphrase"
+}
+```
+
+#### Response
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiJ9...",
+  "access_token_expires_at": "2026-09-21T22:00:00Z",
+  "refresh_token": "eyJhbGciOiJIUzI1NiJ9...",
+  "refresh_token_expires_at": "2026-10-21T10:00:00Z"
 }
 ```
 
@@ -525,6 +543,9 @@ Auth: Session only (not available to API keys).
     "billing_alert": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
     "team_activity": { "enabled": true, "channels": { "in_app": true, "email": false, "slack": false, "push": true } },
     "campaign_paused": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
+    "placement_finished": { "enabled": true, "channels": { "in_app": true, "email": false, "slack": false, "push": true } },
+    "placement_alert": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
+    "inbox_action_required": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
     "email_digest_minutes": 30
   }
 }
@@ -557,6 +578,9 @@ Auth: Session only (not available to API keys).
     "billing_alert": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
     "team_activity": { "enabled": true, "channels": { "in_app": true, "email": false, "slack": false, "push": true } },
     "campaign_paused": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
+    "placement_finished": { "enabled": true, "channels": { "in_app": true, "email": false, "slack": false, "push": true } },
+    "placement_alert": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
+    "inbox_action_required": { "enabled": true, "channels": { "in_app": true, "email": true, "slack": false, "push": true } },
     "email_digest_minutes": 30
   }
 }
@@ -684,21 +708,28 @@ TOTP-based 2FA. Enrollment and management require a live session. The login chal
 
 `GET /auth/2fa/status`
 
-Reports whether the caller has 2FA enabled.
+Reports whether the caller has 2FA enabled, when it was confirmed, and how many recovery codes are left. `confirmed_at` is omitted while 2FA is off.
 
 Auth: Session only (not available to API keys).
 
 #### Response
 
 ```json
-{ "enabled": false }
+{
+  "enabled": true,
+  "confirmed_at": "2026-09-19T10:24:00Z",
+  "recovery_codes_remaining": 8,
+  "recovery_codes_total": 10
+}
 ```
 
 ### Begin enrollment
 
 `POST /auth/2fa/enroll/start`
 
-Generates a TOTP secret and the `otpauth://` provisioning URI (returned once). The client renders the URI as a QR code.
+Generates a TOTP secret and the `otpauth://` provisioning URI (returned once). The client renders the URI as a QR code; the remaining fields spell out the same parameters for manual entry.
+
+Requires a recent confirmation (`POST /auth/reauth`), like confirming enrollment below; without one it answers `403 reauth_required`. An account with neither a password nor 2FA cannot confirm, so it is accepted instead from a session signed in within the last five minutes, and an older session answers `400 reauth_no_factor`.
 
 Auth: Session only (not available to API keys).
 
@@ -707,7 +738,12 @@ Auth: Session only (not available to API keys).
 ```json
 {
   "secret": "JBSWY3DPEHPK3PXP",
-  "otpauth_uri": "otpauth://totp/Warmbly:alex@acme.com?secret=JBSWY3DPEHPK3PXP&issuer=Warmbly"
+  "otpauth_uri": "otpauth://totp/Warmbly:alex@acme.com?secret=JBSWY3DPEHPK3PXP&issuer=Warmbly&algorithm=SHA1&digits=6&period=30",
+  "issuer": "Warmbly",
+  "account": "alex@acme.com",
+  "algorithm": "SHA1",
+  "digits": 6,
+  "period": 30
 }
 ```
 
@@ -715,7 +751,7 @@ Auth: Session only (not available to API keys).
 
 `POST /auth/2fa/enroll/confirm`
 
-Verifies a TOTP code, enables 2FA, and returns the one-time recovery codes (shown once).
+Verifies a TOTP code, enables 2FA, and returns the one-time recovery codes (shown once). A code that does not match answers `400` with code `two_fa_invalid_code`. Needs the same recent confirmation as beginning enrollment.
 
 Auth: Session only (not available to API keys).
 
@@ -733,11 +769,33 @@ Auth: Session only (not available to API keys).
 }
 ```
 
+### Regenerate recovery codes
+
+`POST /auth/2fa/recovery-codes`
+
+Replaces every recovery code with a fresh set, returned once. Requires a current TOTP or recovery code in the body; a code that does not match answers `400` with code `two_fa_invalid_code`. The previous codes stop working as soon as the new set is issued. Wrong codes here and on `DELETE /auth/2fa` count against the same per-account attempt budget as `POST /auth/reauth`; once it is spent both answer `400` with "Too many attempts" until it resets. No `Idempotency-Key` is needed: the proof code is single-use, so a retried request is refused rather than rotating the set twice.
+
+Auth: Session only (not available to API keys).
+
+#### Request body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `code` | string | yes | A current TOTP or recovery code. |
+
+#### Response
+
+```json
+{
+  "recovery_codes": ["a1b2-c3d4", "e5f6-g7h8", "..."]
+}
+```
+
 ### Disable 2FA
 
 `DELETE /auth/2fa`
 
-Turns off 2FA. Requires a current TOTP or recovery code in the body.
+Turns off 2FA. Requires a current TOTP or recovery code in the body; a code that does not match answers `400` with code `two_fa_invalid_code`.
 
 Auth: Session only (not available to API keys).
 
@@ -946,7 +1004,7 @@ The organization is the workspace tenant. These endpoints handle creating and sw
 
 ### Get the workspace sending posture
 
-`GET /organizations/current/risk`
+`GET /organization/current/risk`
 
 Returns the workspace's abuse posture and, when it is restricted, why. Readable by any member: a workspace whose sending is limited should be able to see that it is.
 
@@ -985,9 +1043,10 @@ Auth: Session only (not available to API keys).
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | 1 to 255 characters. |
+| `timezone` | string | no | Workspace timezone, an IANA name such as `America/New_York`. New campaigns start their schedule in it, and a mailbox with no timezone of its own reads its warmup hours and working hours in it. The dashboard sends the browser's zone. |
 
 ```json
-{ "name": "Acme Outbound" }
+{ "name": "Acme Outbound", "timezone": "America/New_York" }
 ```
 
 #### Response
@@ -1003,6 +1062,7 @@ The created organization object.
   "owner_user_id": "9c2a...",
   "presence_show_online": true,
   "presence_show_activity": true,
+  "timezone": "America/New_York",
   "created_at": "2026-06-12T09:00:00Z",
   "updated_at": "2026-06-12T09:00:00Z"
 }
@@ -1073,6 +1133,7 @@ Auth: Session only (not available to API keys).
   "owner_user_id": "9c2a...",
   "presence_show_online": true,
   "presence_show_activity": true,
+  "timezone": "America/New_York",
   "created_at": "2026-06-12T09:00:00Z",
   "updated_at": "2026-06-12T09:00:00Z",
   "limits": {
@@ -1096,7 +1157,7 @@ Auth: Session only (not available to API keys).
 
 `PATCH /organization/current`
 
-Updates the current organization (name, slug, presence privacy toggles). A presence privacy change re-gates connected sockets live.
+Updates the current organization (name, slug, timezone, presence privacy toggles). A presence privacy change re-gates connected sockets live.
 
 Auth: Session only (not available to API keys). **Org permission** `manage_settings`.
 
@@ -1108,10 +1169,12 @@ Auth: Session only (not available to API keys). **Org permission** `manage_setti
 | `slug` | string | no | New workspace slug. |
 | `presence_show_online` | boolean | no | When false the realtime service tracks no member (nobody appears online). |
 | `presence_show_activity` | boolean | no | When false online is still shown but viewing/editing detail is stripped. |
+| `timezone` | string | no | Workspace timezone, an IANA name. New campaigns default to it and mailboxes with no timezone of their own read their hours in it. Send an empty string to clear it, after which those fall back to UTC. |
 
 ```json
 {
   "name": "Acme Outbound",
+  "timezone": "America/New_York",
   "presence_show_activity": false
 }
 ```
@@ -1250,7 +1313,7 @@ The updated member object (same shape as a list-members entry).
 
 `DELETE /organization/members/:id`
 
-Removes a member from the organization.
+Removes a member from the organization. The member's sessions stop selecting it at once, so their next request that needs a workspace answers `400` until they switch to another one. Every OAuth app authorization the member granted in the workspace is revoked. API keys stay, because they belong to the workspace rather than to the member who created them.
 
 Auth: Session only (not available to API keys). **Org permission** `manage_team`.
 
@@ -1402,7 +1465,7 @@ Auth: Session only (not available to API keys). **Org permission** `manage_team`
 
 `GET /organization/invitations/:id/link`
 
-Returns the shareable accept token for a pending invitation so a team manager can copy a real accept link.
+Mints a shareable accept token for a pending invitation so a team manager can copy a real accept link. Invitation tokens are stored only as digests, so each call issues a new link token and the previously copied link stops working; the emailed link keeps working alongside it.
 
 Auth: Session only (not available to API keys). **Org permission** `manage_team`.
 
@@ -1518,6 +1581,8 @@ Auth: Session only (not available to API keys). Requires a selected organization
 `POST /organization/:orgId/limit-requests`
 
 Submits a request to raise one of the organization's limits. The current effective value is captured server-side at submission time. Returns `201 Created`.
+
+A workspace without a plan that sends (a free workspace, or one on the Warmup plan) can only request `max_email_accounts`; any other field returns `400 bad_request`, because none of those limits applies until the workspace sends. A `daily_campaign_limit` request from a workspace whose daily sends are already unlimited also returns `400 bad_request`, since an approved value would impose a cap rather than raise one.
 
 Auth: Session only (not available to API keys).
 
@@ -1879,7 +1944,7 @@ Auth: Session only (not available to API keys). Requires a selected organization
 
 Creates a Stripe checkout session for a price and returns the redirect URL.
 
-Auth: Session only (not available to API keys). Requires a selected organization.
+Auth: Session only (not available to API keys). **Org permission** `manage_billing`.
 
 #### Request body
 
@@ -1946,7 +2011,7 @@ When invalid, `valid` is `false` and `reason` explains why.
 
 Creates a Stripe billing portal session for the organization's customer and returns the portal URL.
 
-Auth: Session only (not available to API keys). Requires a selected organization.
+Auth: Session only (not available to API keys). **Org permission** `manage_billing`.
 
 #### Request body
 
@@ -1970,7 +2035,7 @@ Auth: Session only (not available to API keys). Requires a selected organization
 
 Cancels the organization's subscription, either at period end or immediately.
 
-Auth: Session only (not available to API keys). Requires a selected organization.
+Auth: Session only (not available to API keys). **Org permission** `manage_billing`.
 
 #### Request body
 
@@ -2114,7 +2179,7 @@ Auth: any authenticated caller (JWT or API key).
 
 `GET /timezones`
 
-Returns the supported timezone identifiers (for campaign schedule windows and the like).
+Returns the timezone list the dashboard pickers offer, each with a display name carrying its current UTC offset. Any IANA name is accepted wherever a timezone is written (a campaign schedule, a mailbox, the workspace), so the list is a convenience rather than the set of valid values.
 
 Auth: any authenticated caller (JWT or API key).
 

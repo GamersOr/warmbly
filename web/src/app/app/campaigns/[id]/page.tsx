@@ -1,14 +1,19 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { useAccessRestricted } from "@/hooks/usePermission";
+import { campaignPeriodSchema, hiddenMetricsSchema } from "@/lib/browse-contacts-campaigns";
 import {
     MailCheckIcon,
     MousePointerClickIcon,
     ReplyIcon,
     SendIcon,
+    ThumbsUpIcon,
     TriangleAlertIcon,
+    UserCheckIcon,
 } from "lucide-react";
 import { useCampaign } from "@/hooks/context/campaign";
 import useCampaignAnalytics from "@/lib/api/hooks/app/analytics/useCampaignAnalytics";
-import type { CampaignEngagementBreakdown, EngagementBucket } from "@/lib/api/models/app/analytics/CampaignAnalytics";
+import type { CampaignEngagementBreakdown, CampaignSummary, EngagementBucket } from "@/lib/api/models/app/analytics/CampaignAnalytics";
 import useCampaignDailyStats from "@/lib/api/hooks/app/analytics/useCampaignDailyStats";
 import { SectionBar, Stat, StatStrip } from "@/components/layout/Page";
 import { MultiTrend, type TrendSeries } from "@/components/ui/charts";
@@ -16,22 +21,27 @@ import { TONE_DOT } from "@/components/ui/tones";
 import type { DitherTone } from "@/components/ui/dither";
 import AnalyticsShareButton from "@/components/app/analytics/AnalyticsShareButton";
 import TaskPreview from "@/components/app/campaigns/TaskPreview";
+import SendPlanCard from "@/components/app/campaigns/SendPlanCard";
+import DraftSetupCard from "@/components/app/campaigns/DraftSetupCard";
 import CampaignFormsPanel from "@/components/app/campaigns/CampaignFormsPanel";
 import AnimatedNumber from "@/components/ui/AnimatedNumber";
 import AdvisorStrip from "@/components/app/advisor/AdvisorStrip";
+import CampaignPeriodPicker from "@/components/app/campaigns/CampaignPeriodPicker";
+import { formatWindow, loadCampaignPeriod, periodWindow, utcDay, utcToday, type CampaignPeriod, type DayWindow } from "@/lib/campaignPeriod";
 
-const AUTO_OPENS_TIP = "Auto-opens: pixel fetches from privacy proxies (e.g. Apple Mail) or within seconds of sending, not a person reading";
+const AUTO_OPENS_TIP = "Auto-opens: pixel fetches from privacy proxies (e.g. Apple Mail) or within seconds of sending, not a person reading. Logged as delivery proof, not counted as opens";
 const AUTO_CLICKS_TIP = "Auto-clicks: links followed by a security gateway scanning the email, not a person; not counted as clicks";
 
 const pctFmt = (v: number) => `${v.toFixed(1)}%`;
 
-type Metric = "sent" | "opens" | "clicks" | "replies";
+type Metric = "sent" | "opens" | "clicks" | "replies" | "positive_replies";
 
 const METRICS: { key: Metric; label: string; tone: DitherTone }[] = [
     { key: "sent", label: "Sent", tone: "sky" },
     { key: "opens", label: "Opens", tone: "emerald" },
     { key: "clicks", label: "Clicks", tone: "violet" },
     { key: "replies", label: "Replies", tone: "amber" },
+    { key: "positive_replies", label: "Positive", tone: "lime" },
 ];
 
 function pct(v: number | undefined): string {
@@ -44,12 +54,35 @@ function num(v: number | undefined): string {
 export default function CampaignOverview() {
     const campaign = useCampaign();
     const id = campaign?.id ?? "";
+    // The send plan names mailboxes and the forms panel reads contacts, neither in a restricted scope.
+    const restricted = useAccessRestricted();
 
-    const analytics = useCampaignAnalytics(id);
-    const daily = useCampaignDailyStats(id);
+    // One period drives every figure on the page: summary, steps, engagement
+    // and the chart all read the same sends.
+    const [period, setPeriod] = useBrowseState<CampaignPeriod>(`campaigns:${id}:analytics:period`, loadCampaignPeriod, campaignPeriodSchema);
+    // A preset ends today, so a page left open rolls over at UTC midnight.
+    const [today, setToday] = useState(utcToday);
+    useEffect(() => {
+        const t = window.setInterval(() => setToday(utcToday()), 60_000);
+        return () => window.clearInterval(t);
+    }, []);
+    const asked = useMemo(() => periodWindow(period, today), [period, today]);
+    const analytics = useCampaignAnalytics(id, asked);
+    // All time charts from the campaign's creation day, before any send, so
+    // the chart loads alongside the summary instead of after it.
+    const created = campaign?.created_at ? new Date(campaign.created_at) : null;
+    const createdDay = created && !Number.isNaN(created.getTime()) ? created.toISOString().slice(0, 10) : null;
+    const chartWindow: DayWindow | null = asked ?? (createdDay ? { from: createdDay, to: today } : null);
+    const daily = useCampaignDailyStats(id, chartWindow);
+    // The days the figures cover, as the summary resolved them.
+    const covered: DayWindow | null = useMemo(() => {
+        if (asked) return asked;
+        const r = analytics.isPlaceholderData ? undefined : analytics.data?.date_range;
+        return r ? { from: utcDay(r.from), to: utcDay(r.to) } : null;
+    }, [asked, analytics.isPlaceholderData, analytics.data?.date_range]);
 
     // Legend toggles: every metric charts together; hidden ones drop out.
-    const [hiddenMetrics, setHiddenMetrics] = useState<Metric[]>([]);
+    const [hiddenMetrics, setHiddenMetrics] = useBrowseState<Metric[]>(`campaigns:${id}:analytics:hidden-metrics`, [], hiddenMetricsSchema);
     const toggleMetric = (k: Metric) =>
         setHiddenMetrics((cur) => {
             if (cur.includes(k)) return cur.filter((x) => x !== k);
@@ -73,19 +106,31 @@ export default function CampaignOverview() {
         return { labels: rows.map((d) => d.date), series };
     }, [daily.data, hiddenMetrics]);
 
-    const loading = analytics.isPending || daily.isPending;
+    // A previous period's figures kept on screen while the new one loads must
+    // not sit under the new period's label or reach a share export.
+    const loading =
+        analytics.isPending ||
+        analytics.isPlaceholderData ||
+        (!!chartWindow && (daily.isPending || daily.isPlaceholderData));
     const hasSends = (summary?.emails_sent ?? 0) > 0;
+    const allTime = period.key === "all";
+    const periodLabel = covered ? formatWindow(covered) : null;
 
+    const shared = loading ? undefined : summary;
     const shareData = {
         title: campaign?.name ?? "Campaign",
-        subtitle: "Campaign",
+        subtitle: periodLabel ? `${allTime ? "All time, " : ""}${periodLabel}` : "Campaign",
         metrics: [
-            { label: "Sent", value: num(summary?.emails_sent), sub: "emails" },
-            { label: "Open rate", value: pct(summary?.open_rate) },
-            { label: "Reply rate", value: pct(summary?.reply_rate) },
-            { label: "Bounce rate", value: pct(summary?.bounce_rate) },
+            { label: "Sent", value: shared ? num(shared.emails_sent) : "—", sub: "emails" },
+            { label: "Open rate", value: pct(shared?.open_rate) },
+            { label: "Reply rate", value: pct(shared?.reply_rate) },
+            {
+                label: "Positive rate",
+                value: pct(shared?.positive_reply_rate),
+                sub: shared ? `${num(shared.positive_replies)} positive` : undefined,
+            },
         ],
-        daily: dailyStats.map((d) => ({ label: d.date, value: d.sent })),
+        daily: loading ? [] : dailyStats.map((d) => ({ label: d.date, value: d.sent })),
     };
 
     if (!campaign) {
@@ -103,9 +148,11 @@ export default function CampaignOverview() {
 
     const breakdown = [
         { label: "Sent", value: summary?.emails_sent, icon: SendIcon, dot: "bg-slate-400" },
-        { label: "Opens", value: summary?.unique_opens, icon: MailCheckIcon, dot: "bg-emerald-500", note: summary?.machine_opens ? `${summary.machine_opens} auto` : undefined, noteTitle: AUTO_OPENS_TIP },
+        { label: "Opens", value: summary?.unique_opens, icon: MailCheckIcon, dot: "bg-emerald-500", note: summary?.machine_opens ? `${summary.machine_opens} auto, not counted` : undefined, noteTitle: AUTO_OPENS_TIP },
         { label: "Clicks", value: summary?.unique_clicks, icon: MousePointerClickIcon, dot: "bg-violet-500", note: summary?.machine_clicks ? `${summary.machine_clicks} auto` : undefined, noteTitle: AUTO_CLICKS_TIP },
         { label: "Replies", value: summary?.replies, icon: ReplyIcon, dot: "bg-amber-500" },
+        { label: "Positive replies", value: summary?.positive_replies, icon: ThumbsUpIcon, dot: "bg-lime-500" },
+        { label: "Interested leads", value: summary?.interested_leads, icon: UserCheckIcon, dot: "bg-lime-500" },
         { label: "Bounces", value: summary?.bounces, icon: TriangleAlertIcon, dot: "bg-rose-500" },
     ];
 
@@ -114,6 +161,13 @@ export default function CampaignOverview() {
             {/* What the Advisor has found about THIS campaign, above the numbers
                 that motivated it. Renders nothing when there is nothing wrong. */}
             <AdvisorStrip entityType="campaign" entityId={id} title="" limit={3} compact />
+
+            <DraftSetupCard campaign={campaign} leads={analytics.isPlaceholderData ? undefined : summary?.total_contacts} />
+
+            {/* What will actually go out today and every limit that decided
+                it, read through the scheduler's own gates. This is the number
+                the caps added up used to misstate (issue #606). */}
+            {!restricted && <SendPlanCard campaignId={id} />}
 
             <div className="grid lg:grid-cols-[1fr_340px] gap-5 items-start">
                 {/* Main analytics column */}
@@ -129,12 +183,18 @@ export default function CampaignOverview() {
                                     Live
                                 </span>
                             )}
+                            {periodLabel && period.key !== "custom" && (
+                                <span className="hidden md:inline text-[10.5px] text-slate-400 tabular-nums mr-1" title="UTC days">
+                                    {periodLabel}
+                                </span>
+                            )}
+                            <CampaignPeriodPicker value={period} onChange={setPeriod} resolved={covered} />
                             <AnalyticsShareButton
                                 data={shareData}
                                 filename={`warmbly-${campaign.id}.png`}
                             />
                         </SectionBar>
-                        <StatStrip cols={5}>
+                        <StatStrip cols={6}>
                             <Stat
                                 label="Sent"
                                 value={loading ? "—" : <AnimatedNumber value={summary?.emails_sent ?? 0} />}
@@ -154,7 +214,12 @@ export default function CampaignOverview() {
                             <Stat
                                 label="Reply rate"
                                 value={loading ? "—" : <AnimatedNumber value={summary?.reply_rate ?? 0} format={pctFmt} />}
-                                sub="incl. positive"
+                                sub="human replies"
+                            />
+                            <Stat
+                                label="Positive rate"
+                                value={loading ? "—" : <AnimatedNumber value={summary?.positive_reply_rate ?? 0} format={pctFmt} />}
+                                sub={loading ? undefined : `${num(summary?.interested_leads)} interested`}
                             />
                             <Stat
                                 label="Bounce rate"
@@ -205,7 +270,9 @@ export default function CampaignOverview() {
                                         emptyLabel={
                                             hasSends
                                                 ? "No activity in this window yet"
-                                                : "No sends yet — start the campaign to see performance"
+                                                : allTime
+                                                  ? "No sends yet. Start the campaign to see performance"
+                                                  : "Nothing was sent in this period"
                                         }
                                     />
                                 )}
@@ -233,7 +300,7 @@ export default function CampaignOverview() {
                             <div className="px-5 py-10 text-center">
                                 <p className="text-[12.5px] text-slate-700 font-medium mb-1">No step data yet</p>
                                 <p className="text-[11.5px] text-slate-400 max-w-[34ch] mx-auto leading-relaxed">
-                                    Once steps start sending, per-step opens, clicks, and replies show up here.
+                                    Once steps start sending, per-step opens, clicks, replies and positive replies show up here.
                                 </p>
                             </div>
                         ) : (
@@ -245,6 +312,7 @@ export default function CampaignOverview() {
                                     <span className="w-16 text-right">Opens</span>
                                     <span className="w-16 text-right hidden md:block">Clicks</span>
                                     <span className="w-16 text-right">Replies</span>
+                                    <span className="w-16 text-right">Positive</span>
                                     <span className="w-16 text-right hidden md:block">Bounces</span>
                                 </div>
                                 {sequences.map((s) => (
@@ -253,7 +321,9 @@ export default function CampaignOverview() {
                                             <span className="font-mono text-[10.5px] text-slate-400 tabular-nums shrink-0">
                                                 {s.position}
                                             </span>
-                                            <span className="text-[12.5px] text-slate-900 truncate">{s.name}</span>
+                                            <span className="text-[12.5px] text-slate-900 truncate">
+                                                {s.name?.trim() || `Email ${s.position}`}
+                                            </span>
                                         </span>
                                         <span className="w-14 text-right font-mono text-[11.5px] text-slate-700 tabular-nums">
                                             <AnimatedNumber value={s.emails_sent ?? 0} />
@@ -285,6 +355,13 @@ export default function CampaignOverview() {
                                             tone="text-amber-600"
                                         />
                                         <StepMetric
+                                            label="Positive replies"
+                                            count={s.positive_replies ?? 0}
+                                            rate={s.positive_reply_rate}
+                                            sent={s.emails_sent ?? 0}
+                                            tone="text-lime-600"
+                                        />
+                                        <StepMetric
                                             label="Bounces"
                                             count={s.bounces ?? 0}
                                             rate={s.bounce_rate}
@@ -298,9 +375,9 @@ export default function CampaignOverview() {
                         )}
                     </div>
 
-                    <EngagementAudience breakdown={analytics.data?.engagement ?? null} loading={loading} />
+                    <EngagementAudience breakdown={analytics.data?.engagement ?? null} loading={loading} scoped={!allTime} />
 
-                    <CampaignFormsPanel campaignId={id} />
+                    {!restricted && <CampaignFormsPanel campaignId={id} />}
 
                     {/* quick breakdown strip below sequence table, mobile-friendly summary */}
                     <div className="rounded-md border border-slate-200 overflow-hidden bg-white lg:hidden">
@@ -325,6 +402,8 @@ export default function CampaignOverview() {
                             ))}
                         </div>
                     </div>
+
+                    <ReplyQuality summary={summary} loading={loading} className="lg:hidden" />
                 </div>
 
                 {/* Live panel */}
@@ -353,6 +432,8 @@ export default function CampaignOverview() {
                             ))}
                         </div>
                     </div>
+
+                    <ReplyQuality summary={summary} loading={loading} className="hidden lg:block" />
                 </aside>
             </div>
         </div>
@@ -410,6 +491,82 @@ function StepMetric({
     );
 }
 
+// What the replies said, by the classifier's verdict. The human rows add up
+// to the reply count; automated answers are listed apart and never counted.
+function ReplyQuality({
+    summary,
+    loading,
+    className,
+}: {
+    summary: CampaignSummary | undefined;
+    loading: boolean;
+    className: string;
+}) {
+    const b = summary?.reply_breakdown;
+    const replies = summary?.replies ?? 0;
+    const human = [
+        { label: "Positive", value: b?.positive, dot: "bg-lime-500" },
+        { label: "Neutral", value: b?.neutral, dot: "bg-slate-400" },
+        { label: "Negative", value: b?.negative, dot: "bg-rose-500" },
+        { label: "Asked to stop", value: b?.unsubscribe, dot: "bg-amber-500" },
+        { label: "Unclassified", value: b?.unclassified, dot: "bg-slate-200" },
+    ];
+    const automated = [
+        { label: "Out of office", value: b?.out_of_office },
+        { label: "Auto-reply", value: b?.auto_reply },
+    ];
+    return (
+        <div className={`rounded-md border border-slate-200 overflow-hidden bg-white ${className}`}>
+            <SectionBar label="Reply quality" />
+            {!loading && replies > 0 && (
+                <div className="px-5 pt-3">
+                    <div className="flex h-1.5 rounded-full overflow-hidden bg-slate-100">
+                        {human.map((r) =>
+                            r.value ? (
+                                <span
+                                    key={r.label}
+                                    className={r.dot}
+                                    style={{ width: `${(r.value / replies) * 100}%` }}
+                                    title={`${r.label}: ${r.value}`}
+                                />
+                            ) : null,
+                        )}
+                    </div>
+                </div>
+            )}
+            <div className="divide-y divide-slate-200/60">
+                {human.map((r) => (
+                    <div key={r.label} className="h-9 px-5 flex items-center gap-2">
+                        <span className={`size-1.5 rounded-full ${r.dot}`} />
+                        <span className="text-[12px] text-slate-700">{r.label}</span>
+                        <span className="ml-auto font-mono text-[11px] text-slate-500 tabular-nums">
+                            {loading ? "—" : <AnimatedNumber value={r.value ?? 0} />}
+                        </span>
+                        <span className="w-12 text-right font-mono text-[10px] text-slate-400 tabular-nums">
+                            {loading || replies === 0 ? "—" : `${(((r.value ?? 0) / replies) * 100).toFixed(0)}%`}
+                        </span>
+                    </div>
+                ))}
+                {automated.map((r) => (
+                    <div
+                        key={r.label}
+                        className="h-9 px-5 flex items-center gap-2"
+                        title="Automated answers never count as a reply"
+                    >
+                        <span className="size-1.5 rounded-full border border-slate-300" />
+                        <span className="text-[12px] text-slate-500">{r.label}</span>
+                        <span className="text-[9.5px] text-slate-400 font-mono">not counted</span>
+                        <span className="ml-auto font-mono text-[11px] text-slate-400 tabular-nums">
+                            {loading ? "—" : <AnimatedNumber value={r.value ?? 0} />}
+                        </span>
+                        <span className="w-12" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 // Country names from the browser's own locale data; the code stays as the
 // fallback for anything it does not know.
 const REGION_NAMES = (() => {
@@ -429,10 +586,25 @@ function countryName(code: string): string {
     }
 }
 
+const SURFACE_LABELS: Record<string, string> = {
+    mobile_app: "Mobile app",
+    desktop_app: "Desktop app",
+    tablet_app: "Tablet app",
+    webmail: "Webmail",
+    mobile: "Mobile",
+    desktop: "Desktop",
+    tablet: "Tablet",
+    hidden: "Hidden by image proxy",
+};
+
+const SURFACE_HINTS: Record<string, string> = {
+    hidden: "Gmail, Yahoo Mail, Apple Mail Privacy Protection and a few other providers load images through their own servers, which hides the reader's device.",
+};
+
 function bucketLabel(kind: "countries" | "clients" | "devices", key: string): string {
     if (kind === "countries") return countryName(key);
     if (!key) return "Unknown";
-    if (kind === "devices") return key.charAt(0).toUpperCase() + key.slice(1);
+    if (kind === "devices") return SURFACE_LABELS[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
     return key;
 }
 
@@ -442,14 +614,17 @@ function bucketLabel(kind: "countries" | "clients" | "devices", key: string): st
 function EngagementAudience({
     breakdown,
     loading,
+    scoped,
 }: {
     breakdown: CampaignEngagementBreakdown | null;
     loading: boolean;
+    // A period is selected, so an empty list means none of its sends engaged.
+    scoped: boolean;
 }) {
     const columns: { kind: "countries" | "clients" | "devices"; label: string; rows: EngagementBucket[] }[] = [
         { kind: "countries", label: "Country", rows: breakdown?.countries ?? [] },
         { kind: "clients", label: "Mail client", rows: breakdown?.clients ?? [] },
-        { kind: "devices", label: "Device", rows: breakdown?.devices ?? [] },
+        { kind: "devices", label: "Device", rows: breakdown?.surfaces ?? breakdown?.devices ?? [] },
     ];
     const empty = columns.every((c) => c.rows.length === 0);
     return (
@@ -459,7 +634,9 @@ function EngagementAudience({
                 <div className="h-24 animate-pulse bg-slate-50" />
             ) : empty ? (
                 <div className="px-5 py-8 text-center">
-                    <p className="text-[12.5px] text-slate-700 font-medium mb-1">No opens or clicks yet</p>
+                    <p className="text-[12.5px] text-slate-700 font-medium mb-1">
+                        {scoped ? "No opens or clicks on this period's sends" : "No opens or clicks yet"}
+                    </p>
                     <p className="text-[11.5px] text-slate-400 max-w-[36ch] mx-auto leading-relaxed">
                         Once people open and click, this shows which countries, mail clients and devices they did it from.
                     </p>
@@ -479,7 +656,10 @@ function EngagementAudience({
                                 <div className="divide-y divide-slate-200/60">
                                     {c.rows.map((r) => (
                                         <div key={r.key || "unknown"} className="h-9 px-5 flex items-center gap-3">
-                                            <span className="flex-1 min-w-0 text-[12px] text-slate-700 truncate" title={r.key || undefined}>
+                                            <span
+                                                className="flex-1 min-w-0 text-[12px] text-slate-700 truncate"
+                                                title={(c.kind === "devices" && SURFACE_HINTS[r.key]) || r.key || undefined}
+                                            >
                                                 {bucketLabel(c.kind, r.key)}
                                             </span>
                                             <span className="w-12 text-right font-mono text-[11.5px] text-emerald-600 tabular-nums">

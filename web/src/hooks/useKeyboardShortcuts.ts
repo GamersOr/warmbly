@@ -10,10 +10,10 @@
 // shown dead.
 
 import { useCallback, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { useNavigate, type NavigateFunction } from 'react-router-dom'
+import { useNavigate } from '@tanstack/react-router'
 import { useAppStore } from '@/stores'
 import { useComposeStore } from '@/hooks/useComposeStore'
-import { checkPermission } from '@/hooks/usePermission'
+import { checkPermission, isAccessRestricted } from '@/hooks/usePermission'
 import { shortcutAction, type ShortcutActions } from '@/hooks/useShortcutActions'
 
 export type ShortcutGroupId = 'navigation' | 'list' | 'actions' | 'assistant'
@@ -29,7 +29,7 @@ export interface ShortcutRow {
   available?: () => boolean
 }
 
-type Ctx = { navigate: NavigateFunction }
+type Ctx = { navigate: ReturnType<typeof useNavigate> }
 
 export interface GlobalShortcut extends ShortcutRow {
   /** Single-press form. */
@@ -41,10 +41,17 @@ export interface GlobalShortcut extends ShortcutRow {
   run: (ctx: Ctx) => void
 }
 
+// KeyboardEvent.key is not guaranteed: password managers, IME composition and
+// extension-dispatched events all deliver a keydown with no key, and reading
+// .toLowerCase() off it throws out of a global listener, which is an unhandled
+// error on whatever page the user happened to be on.
+const keyOf = (e: KeyboardEvent) =>
+  typeof e.key === "string" ? e.key.toLowerCase() : ""
+
 // A bare key with no modifier held. Every single-press shortcut goes through
 // this, so none of them can collide with a Ctrl/Cmd combo.
 const plain = (k: string) => (e: KeyboardEvent) =>
-  !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === k
+  !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && keyOf(e) === k
 
 const mod = (e: KeyboardEvent) => e.ctrlKey || e.metaKey
 
@@ -102,11 +109,11 @@ export const globalShortcuts: GlobalShortcut[] = [
   // ── The assistant, which is reachable while typing ───────────────────────
   {
     keys: ['Ctrl', 'i'],
-    description: 'Open / close the assistant',
+    description: 'Open / close Remie',
     group: 'assistant',
     whileTyping: true,
     available: () => checkPermission('USE_AI'),
-    match: (e) => mod(e) && e.key.toLowerCase() === 'i',
+    match: (e) => mod(e) && keyOf(e) === 'i',
     run: () => {
       const s = useAppStore.getState()
       // Minimized means docked to the status bar, so the combo restores it
@@ -125,7 +132,7 @@ export const globalShortcuts: GlobalShortcut[] = [
     description: `Go to ${label}`,
     group: 'navigation',
     sequence: ['g', key],
-    run: ({ navigate }) => navigate(path),
+    run: ({ navigate }) => navigate({ to: path }),
   })),
 
   // ── List navigation: only on screens that register a list ─────────────────
@@ -158,7 +165,7 @@ export const globalShortcuts: GlobalShortcut[] = [
     description: 'Go to last item',
     group: 'list',
     needs: 'listEdge',
-    match: (e) => !mod(e) && !e.altKey && e.shiftKey && e.key.toLowerCase() === 'g',
+    match: (e) => !mod(e) && !e.altKey && e.shiftKey && keyOf(e) === 'g',
     run: () => shortcutAction('listEdge')?.('last'),
   },
   {
@@ -176,6 +183,22 @@ export const globalShortcuts: GlobalShortcut[] = [
     needs: 'listDeselect',
     match: (e) => e.key === 'Escape' && !layerOpen(),
     run: () => shortcutAction('listDeselect')?.(),
+  },
+  {
+    keys: ['x'],
+    description: 'Select / deselect the focused row',
+    group: 'list',
+    needs: 'listToggleSelect',
+    match: plain('x'),
+    run: () => shortcutAction('listToggleSelect')?.(),
+  },
+  {
+    keys: ['e'],
+    description: 'Archive the selection',
+    group: 'list',
+    needs: 'listArchive',
+    match: plain('e'),
+    run: () => shortcutAction('listArchive')?.(),
   },
   {
     keys: ['c'],
@@ -207,7 +230,10 @@ export const globalShortcuts: GlobalShortcut[] = [
     description: 'Compose a new email',
     group: 'actions',
     match: plain('n'),
-    run: () => useComposeStore.getState().openCompose(),
+    run: () => {
+      if (isAccessRestricted(useAppStore.getState().currentOrganization)) return
+      useComposeStore.getState().openCompose()
+    },
   },
   {
     keys: ['b'],
@@ -230,7 +256,7 @@ export const globalShortcuts: GlobalShortcut[] = [
     description: 'Command palette',
     group: 'actions',
     whileTyping: true,
-    match: (e) => mod(e) && e.key.toLowerCase() === 'k',
+    match: (e) => mod(e) && keyOf(e) === 'k',
     run: () => useAppStore.getState().setCommandPaletteOpen(true),
   },
 ]
@@ -349,7 +375,7 @@ export const shortcutGroupTitles: Record<ShortcutGroupId, string> = {
   navigation: 'Navigation',
   list: 'Lists',
   actions: 'Actions',
-  assistant: 'Assistant',
+  assistant: 'Remie',
 }
 
 const allRows: ShortcutRow[] = [...globalShortcuts, ...panelShortcuts]
@@ -381,7 +407,8 @@ export function useKeyboardShortcuts() {
           target.isContentEditable ||
           !!target.closest?.('[role="textbox"]'))
 
-      const key = event.key.toLowerCase()
+      const key = keyOf(event)
+      if (!key) return
       const ctx = { navigate }
 
       // Escape always abandons a half-typed sequence, typing or not.

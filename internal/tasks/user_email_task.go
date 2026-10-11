@@ -3,13 +3,17 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/observability/errs"
+	"github.com/warmbly/warmbly/internal/pkg/mailhdr"
 	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
+	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/tasks/proto"
 )
 
@@ -141,29 +145,15 @@ func (s *tasksService) HandleUserEmailTask(task *proto.ProcessTask) *errx.Error 
 		return errx.InternalError()
 	}
 
-	// STEP 6: Add signature if SignatureSync
-	bodyHTML := emailTask.BodyHTML
-	bodyPlain := emailTask.BodyPlain
+	// STEP 6: Add signature if SignatureSync, then any forwarded message under it
+	bodyHTML, bodyPlain := userEmailBodies(emailTask, account)
 
-	if account.SignatureSync {
-		if bodyHTML != "" {
-			bodyHTML = AddSignature(bodyHTML, account.SignatureHTML, true)
-		}
-		if bodyPlain != "" {
-			bodyPlain = AddSignature(bodyPlain, account.SignaturePlain, false)
-		}
-	}
-
-	// Signature included, so a stylesheet in either half lands on the elements
-	// it matches. A no-op for a body with no <style>.
-	bodyHTML = mailhtml.InlineCSS(bodyHTML)
-
-	// STEP 7: Generate Message-ID
-	messageID := generateMessageID(account.Email)
+	// STEP 7: Generate Message-ID, on the domain the message is From.
+	messageID := generateMessageID(account.SendFrom())
 
 	// STEP 8: Build InReplyTo string
 	var inReplyTo string
-	if len(emailTask.InReplyTo) > 0 {
+	if len(emailTask.InReplyTo) > 0 && mailhdr.ValidMessageID(emailTask.InReplyTo[0]) {
 		inReplyTo = emailTask.InReplyTo[0]
 	}
 
@@ -172,6 +162,19 @@ func (s *tasksService) HandleUserEmailTask(task *proto.ProcessTask) *errx.Error 
 	var threadID string
 	if emailTask.ThreadID != nil {
 		threadID = *emailTask.ThreadID
+	}
+	// The row names the conversation; only Gmail has a provider handle, and a
+	// mailbox may only use its own. Without one the reply threads on In-Reply-To.
+	if threadID != "" && account.Provider != string(models.InboxProviderGoogle) {
+		threadID = ""
+	} else if threadID != "" {
+		handle, herr := s.taskRepo.ProviderThreadForMailbox(ctx, account.ID, threadID)
+		if herr != nil {
+			// Gmail refusing a handle it does not know is retried without one.
+			log.Warn().Err(herr).Str("task_id", taskID.String()).Msg("user_email: could not resolve the mailbox's own thread; keeping the conversation's")
+		} else {
+			threadID = handle
+		}
 	}
 
 	// STEP 9: Build EmailMessage and send via worker
@@ -190,6 +193,9 @@ func (s *tasksService) HandleUserEmailTask(task *proto.ProcessTask) *errx.Error 
 		Tracking:  nil,
 	}
 
+	if err := s.sendAdmission(ctx, account); err != nil {
+		return errx.InternalError()
+	}
 	if err := s.emailSender.Send(ctx, taskID, emailMsg, *account); err != nil {
 		s.taskRepo.RecordTaskFailure(ctx, taskID, "Send failed", err.Error())
 		if s.advanced != nil {
@@ -217,4 +223,29 @@ func (s *tasksService) HandleUserEmailTask(task *proto.ProcessTask) *errx.Error 
 
 	executionStatus = "completed"
 	return nil
+}
+
+// userEmailBodies assembles what a unibox send puts on the wire: the body, the
+// mailbox signature when it syncs, then the message a forward carries.
+func userEmailBodies(emailTask *repository.EmailTask, account *models.Email) (bodyHTML, bodyPlain string) {
+	bodyHTML = emailTask.BodyHTML
+	bodyPlain = emailTask.BodyPlain
+	forwarding := emailTask.ForwardedHTML != "" || emailTask.ForwardedPlain != ""
+
+	if account.SignatureSync {
+		// A forward is signed even with no note, above the message it carries.
+		if bodyHTML != "" || forwarding {
+			bodyHTML = AddSignature(bodyHTML, account.SignatureHTML, true)
+		}
+		if bodyPlain != "" {
+			bodyPlain = AddSignature(bodyPlain, account.SignaturePlain, false)
+		} else if forwarding {
+			bodyPlain = strings.TrimLeft(AddSignature("", account.SignaturePlain, false), "\n")
+		}
+	}
+	bodyHTML, bodyPlain = AppendForwarded(bodyHTML, bodyPlain, emailTask.ForwardedHTML, emailTask.ForwardedPlain)
+
+	// Signature included, so a stylesheet in either half lands on the elements
+	// it matches. A no-op for a body with no <style>.
+	return mailhtml.InlineCSS(bodyHTML), bodyPlain
 }

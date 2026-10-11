@@ -4,7 +4,9 @@
 // spine.
 
 import React from "react";
-import { useNavigate } from "react-router-dom";
+import useBrowseState from "@/hooks/useBrowseState";
+import { formAnalyticsRangeSchema } from "@/lib/browse-other-lists";
+import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon } from "lucide-react";
 
 import { EmptyBlock } from "@/components/layout/Page";
@@ -33,7 +35,7 @@ function flagEmoji(code: string): string {
 
 export default function AnalyticsTab({ form }: { form: Form }) {
     const navigate = useNavigate();
-    const [range, setRange] = React.useState<FormStatsRange>("30d");
+    const [range, setRange] = useBrowseState<FormStatsRange>(`forms.${form.id}.analytics.range`, "30d", formAnalyticsRangeSchema);
     const stats = useFormStats(form.id, range);
     const totalPages = React.useMemo(() => splitPages(form.fields).length, [form.fields]);
 
@@ -193,7 +195,7 @@ export default function AnalyticsTab({ form }: { form: Form }) {
                                     <tr
                                         key={v.contact_id}
                                         // No per-contact deep link exists yet, so the row lands on the contacts list.
-                                        onClick={() => navigate("/app/contacts")}
+                                        onClick={() => navigate({ to: "/app/contacts" })}
                                         className="h-11 border-b border-slate-100 last:border-b-0 hover:bg-slate-50/80 cursor-pointer transition-colors"
                                     >
                                         <td className="px-3 max-w-0 w-full">

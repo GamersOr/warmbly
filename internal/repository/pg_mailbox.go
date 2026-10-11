@@ -41,33 +41,35 @@ func (r *mailboxRepository) CreateEntry(ctx context.Context, userId, emailId uui
 	mb.UpdatedAt = time.Now()
 
 	query := `
-		INSERT INTO unibox_mailboxes (email_id, uid_validity, mailbox, attributes, highestmodseq, uid_next, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO unibox_mailboxes (email_id, uid_validity, mailbox, attributes, highestmodseq, uid_next, updated_at, delim)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (email_id, mailbox) DO UPDATE SET
 			uid_validity = EXCLUDED.uid_validity,
 			attributes = EXCLUDED.attributes,
 			highestmodseq = EXCLUDED.highestmodseq,
 			uid_next = EXCLUDED.uid_next,
-			updated_at = EXCLUDED.updated_at
+			updated_at = EXCLUDED.updated_at,
+			delim = EXCLUDED.delim
 	`
 
 	// attributes is NOT NULL; a nil slice binds as SQL NULL. See textArray.
 	_, err := r.db.Exec(ctx, query,
-		emailId, mb.UIDValidity, mb.Name, textArray(mb.Attrs), mb.HighestModSeq, mb.UIDNext, mb.UpdatedAt,
+		emailId, mb.UIDValidity, mb.Name, textArray(mb.Attrs), mb.HighestModSeq, mb.UIDNext, mb.UpdatedAt, mb.Delim,
 	)
+	// A deleted mailbox refuses this as a foreign-key violation; the consumer evicts it.
 	return err
 }
 
 func (r *mailboxRepository) GetMailbox(ctx context.Context, userId, emailId uuid.UUID, name string) (*models.Mailbox, error) {
 	query := `
-		SELECT mailbox, attributes, uid_validity, highestmodseq, uid_next, updated_at
+		SELECT mailbox, attributes, uid_validity, highestmodseq, uid_next, updated_at, delim
 		FROM unibox_mailboxes
 		WHERE email_id = $1 AND mailbox = $2
 	`
 
 	var mb models.Mailbox
 	err := r.db.QueryRow(ctx, query, emailId, name).Scan(
-		&mb.Name, &mb.Attrs, &mb.UIDValidity, &mb.HighestModSeq, &mb.UIDNext, &mb.UpdatedAt,
+		&mb.Name, &mb.Attrs, &mb.UIDValidity, &mb.HighestModSeq, &mb.UIDNext, &mb.UpdatedAt, &mb.Delim,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -81,7 +83,7 @@ func (r *mailboxRepository) GetMailbox(ctx context.Context, userId, emailId uuid
 
 func (r *mailboxRepository) ListMailboxes(ctx context.Context, userId, emailId uuid.UUID) ([]models.Mailbox, error) {
 	query := `
-		SELECT mailbox, attributes, uid_validity, highestmodseq, uid_next, updated_at
+		SELECT mailbox, attributes, uid_validity, highestmodseq, uid_next, updated_at, delim
 		FROM unibox_mailboxes
 		WHERE email_id = $1
 	`
@@ -95,7 +97,7 @@ func (r *mailboxRepository) ListMailboxes(ctx context.Context, userId, emailId u
 	var mailboxes []models.Mailbox
 	for rows.Next() {
 		var mb models.Mailbox
-		if err := rows.Scan(&mb.Name, &mb.Attrs, &mb.UIDValidity, &mb.HighestModSeq, &mb.UIDNext, &mb.UpdatedAt); err != nil {
+		if err := rows.Scan(&mb.Name, &mb.Attrs, &mb.UIDValidity, &mb.HighestModSeq, &mb.UIDNext, &mb.UpdatedAt, &mb.Delim); err != nil {
 			return nil, err
 		}
 		mailboxes = append(mailboxes, mb)

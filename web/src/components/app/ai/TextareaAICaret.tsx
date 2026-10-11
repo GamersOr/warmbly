@@ -20,7 +20,7 @@ import {
     SparklesIcon,
     Undo2Icon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import useGenerateWrite from "@/lib/api/hooks/app/generation/useGenerateWrite";
 import { usePermission } from "@/hooks/usePermission";
 import useAiMetered from "@/hooks/useAiMetered";
@@ -30,6 +30,7 @@ import ShortcutTooltip, { Kbd } from "@/components/ui/shortcut-tooltip";
 import textareaRangeRect, { type RangeRect } from "./textareaRange";
 import useTypewriter from "./useTypewriter";
 import formatUsage from "./usage";
+import AgentMark from "@/components/app/agent/AgentMark";
 
 // Context window around the caret sent with freeform prompts, so long drafts
 // don't blow past the endpoint's prompt cap.
@@ -177,7 +178,7 @@ export default function TextareaAICaret({
         const ta = textareaRef.current;
         if (!ta) return;
         const onKey = (e: KeyboardEvent) => {
-            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
+            if ((e.metaKey || e.ctrlKey) && e.key?.toLowerCase() === "j") {
                 // A non-collapsed selection belongs to the edit pill's ⌘J.
                 if (ta.selectionStart !== ta.selectionEnd) return;
                 e.preventDefault();
@@ -405,7 +406,7 @@ export default function TextareaAICaret({
                     >
                         {phase === "busy" ? (
                             <div className="px-3 py-2.5 flex items-center gap-2">
-                                <SparklesIcon className="w-3.5 h-3.5 text-sky-500 animate-pulse shrink-0" />
+                                <AgentMark variant="bare" size={14} state="thinking" />
                                 <span className="ai-shimmer-text text-[12px] font-medium">Writing…</span>
                                 <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-slate-400">
                                     <Kbd combo="esc" variant="light" /> cancel

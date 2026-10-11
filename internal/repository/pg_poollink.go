@@ -36,6 +36,9 @@ type PoolLinkRepository interface {
 	GetMailboxByRemote(ctx context.Context, instanceID, remoteID uuid.UUID) (*models.PoolLinkMailbox, error)
 	GetMailboxByAccount(ctx context.Context, accountID uuid.UUID) (*models.PoolLinkMailbox, error)
 	ListMailboxes(ctx context.Context, instanceID uuid.UUID) ([]models.PoolLinkMailbox, error)
+	ListReportMailboxes(ctx context.Context, instanceID uuid.UUID, remoteIDs []uuid.UUID) ([]models.PoolLinkMailbox, error)
+	// ListStanding is every enrolled mailbox's warmup standing in one read.
+	ListStanding(ctx context.Context, instanceID uuid.UUID) ([]models.PoolLinkMailboxStanding, error)
 	DeleteMailbox(ctx context.Context, instanceID, remoteID uuid.UUID) error
 	// TouchMailboxToken records when a managed mailbox last drew an access token.
 	TouchMailboxToken(ctx context.Context, instanceID, remoteID uuid.UUID) error
@@ -51,11 +54,11 @@ func NewPoolLinkRepository(db *pgxpool.Pool) PoolLinkRepository {
 	return &poolLinkRepository{db: db}
 }
 
-const poolLinkCodeColumns = `id, user_code, instance_name, instance_url, instance_version, status, organization_id, instance_id, expires_at, created_at`
+const poolLinkCodeColumns = `id, user_code, instance_name, instance_url, instance_version, status, organization_id, instance_id, expires_at, created_at, remote_organization_id`
 
 func scanPoolLinkCode(row pgx.Row) (*models.PoolLinkCode, error) {
 	var c models.PoolLinkCode
-	if err := row.Scan(&c.ID, &c.UserCode, &c.InstanceName, &c.InstanceURL, &c.InstanceVersion, &c.Status, &c.OrganizationID, &c.InstanceID, &c.ExpiresAt, &c.CreatedAt); err != nil {
+	if err := row.Scan(&c.ID, &c.UserCode, &c.InstanceName, &c.InstanceURL, &c.InstanceVersion, &c.Status, &c.OrganizationID, &c.InstanceID, &c.ExpiresAt, &c.CreatedAt, &c.RemoteOrganizationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -66,10 +69,10 @@ func scanPoolLinkCode(row pgx.Row) (*models.PoolLinkCode, error) {
 
 func (r *poolLinkRepository) CreateCode(ctx context.Context, deviceCodeHash, userCode string, req models.PoolLinkStartRequest, expiresAt time.Time) (*models.PoolLinkCode, error) {
 	query := `
-		INSERT INTO pool_link_codes (device_code_hash, user_code, instance_name, instance_url, instance_version, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO pool_link_codes (device_code_hash, user_code, instance_name, instance_url, instance_version, expires_at, remote_organization_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING ` + poolLinkCodeColumns
-	c, err := scanPoolLinkCode(r.db.QueryRow(ctx, query, deviceCodeHash, userCode, req.InstanceName, req.InstanceURL, req.InstanceVersion, expiresAt))
+	c, err := scanPoolLinkCode(r.db.QueryRow(ctx, query, deviceCodeHash, userCode, req.InstanceName, req.InstanceURL, req.InstanceVersion, expiresAt, req.RemoteOrganizationID))
 	if err != nil {
 		db.CaptureError(err, query, nil, "queryrow")
 		return nil, err
@@ -124,9 +127,9 @@ func (r *poolLinkRepository) ClaimCode(ctx context.Context, deviceCodeHash strin
 			SET status = 'claimed', instance_token = NULL
 			FROM picked
 			WHERE p.id = picked.id
-			RETURNING p.id, p.user_code, p.instance_name, p.instance_url, p.instance_version, p.status, p.organization_id, p.instance_id, p.expires_at, p.created_at, picked.instance_token AS token
+			RETURNING p.id, p.user_code, p.instance_name, p.instance_url, p.instance_version, p.status, p.organization_id, p.instance_id, p.expires_at, p.created_at, p.remote_organization_id, picked.instance_token AS token
 		)
-		SELECT id, user_code, instance_name, instance_url, instance_version, status, organization_id, instance_id, expires_at, created_at, COALESCE(token, '') FROM claimed
+		SELECT id, user_code, instance_name, instance_url, instance_version, status, organization_id, instance_id, expires_at, created_at, remote_organization_id, COALESCE(token, '') FROM claimed
 		UNION ALL
 		SELECT ` + poolLinkCodeColumns + `, '' FROM pool_link_codes
 		WHERE device_code_hash = $1 AND expires_at > NOW() AND NOT EXISTS (SELECT 1 FROM claimed)
@@ -134,7 +137,7 @@ func (r *poolLinkRepository) ClaimCode(ctx context.Context, deviceCodeHash strin
 	`
 	var c models.PoolLinkCode
 	var token string
-	err := r.db.QueryRow(ctx, query, deviceCodeHash).Scan(&c.ID, &c.UserCode, &c.InstanceName, &c.InstanceURL, &c.InstanceVersion, &c.Status, &c.OrganizationID, &c.InstanceID, &c.ExpiresAt, &c.CreatedAt, &token)
+	err := r.db.QueryRow(ctx, query, deviceCodeHash).Scan(&c.ID, &c.UserCode, &c.InstanceName, &c.InstanceURL, &c.InstanceVersion, &c.Status, &c.OrganizationID, &c.InstanceID, &c.ExpiresAt, &c.CreatedAt, &c.RemoteOrganizationID, &token)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, "", nil
@@ -166,11 +169,11 @@ func (r *poolLinkRepository) DeleteExpiredCodes(ctx context.Context) error {
 	return err
 }
 
-const poolLinkInstanceColumns = `id, organization_id, name, url, version, created_by, created_at, last_seen_at, revoked_at`
+const poolLinkInstanceColumns = `id, organization_id, name, url, version, created_by, created_at, last_seen_at, revoked_at, remote_organization_id`
 
 func scanPoolLinkInstance(row pgx.Row) (*models.PoolLinkInstance, error) {
 	var i models.PoolLinkInstance
-	if err := row.Scan(&i.ID, &i.OrganizationID, &i.Name, &i.URL, &i.Version, &i.CreatedBy, &i.CreatedAt, &i.LastSeenAt, &i.RevokedAt); err != nil {
+	if err := row.Scan(&i.ID, &i.OrganizationID, &i.Name, &i.URL, &i.Version, &i.CreatedBy, &i.CreatedAt, &i.LastSeenAt, &i.RevokedAt, &i.RemoteOrganizationID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -179,21 +182,37 @@ func scanPoolLinkInstance(row pgx.Row) (*models.PoolLinkInstance, error) {
 	return &i, nil
 }
 
+var ErrCloudWorkspaceLinked = errors.New("cloud workspace already has an active link")
+
 func (r *poolLinkRepository) CreateInstance(ctx context.Context, inst *models.PoolLinkInstance, tokenHash string) error {
-	query := `
-		INSERT INTO pool_link_instances (id, organization_id, name, url, version, token_hash, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING created_at
-	`
-	if err := r.db.QueryRow(ctx, query, inst.ID, inst.OrganizationID, inst.Name, inst.URL, inst.Version, tokenHash, inst.CreatedBy).Scan(&inst.CreatedAt); err != nil {
-		db.CaptureError(err, query, nil, "queryrow")
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	return nil
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Serialize approvals per Cloud workspace, including checks against legacy links.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, inst.OrganizationID.String()); err != nil {
+		return err
+	}
+	var linked bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pool_link_instances WHERE organization_id = $1 AND revoked_at IS NULL)`, inst.OrganizationID).Scan(&linked); err != nil {
+		return err
+	}
+	if linked {
+		return ErrCloudWorkspaceLinked
+	}
+	query := `INSERT INTO pool_link_instances (id, organization_id, name, url, version, token_hash, created_by, remote_organization_id)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING created_at`
+	if err := tx.QueryRow(ctx, query, inst.ID, inst.OrganizationID, inst.Name, inst.URL, inst.Version, tokenHash, inst.CreatedBy, inst.RemoteOrganizationID).Scan(&inst.CreatedAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *poolLinkRepository) GetInstanceByTokenHash(ctx context.Context, tokenHash string) (*models.PoolLinkInstance, error) {
-	query := `SELECT ` + poolLinkInstanceColumns + ` FROM pool_link_instances WHERE token_hash = $1 AND revoked_at IS NULL`
+	// A link stops working once the member who approved it is banned from signing in.
+	query := `SELECT ` + poolLinkInstanceColumns + ` FROM pool_link_instances WHERE token_hash = $1 AND revoked_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = pool_link_instances.created_by AND (u.ban_scope & 1) <> 0)`
 	i, err := scanPoolLinkInstance(r.db.QueryRow(ctx, query, tokenHash))
 	if err != nil {
 		db.CaptureError(err, query, nil, "queryrow")
@@ -214,7 +233,7 @@ func (r *poolLinkRepository) GetInstance(ctx context.Context, id uuid.UUID) (*mo
 
 func (r *poolLinkRepository) ListInstances(ctx context.Context, orgID uuid.UUID) ([]models.PoolLinkInstance, error) {
 	query := `
-		SELECT i.id, i.organization_id, i.name, i.url, i.version, i.created_by, i.created_at, i.last_seen_at, i.revoked_at,
+		SELECT i.id, i.organization_id, i.name, i.url, i.version, i.created_by, i.created_at, i.last_seen_at, i.revoked_at, i.remote_organization_id,
 		       (SELECT COUNT(*) FROM pool_link_mailboxes m WHERE m.instance_id = i.id)
 		FROM pool_link_instances i
 		WHERE i.organization_id = $1 AND i.revoked_at IS NULL
@@ -229,7 +248,7 @@ func (r *poolLinkRepository) ListInstances(ctx context.Context, orgID uuid.UUID)
 	out := []models.PoolLinkInstance{}
 	for rows.Next() {
 		var i models.PoolLinkInstance
-		if err := rows.Scan(&i.ID, &i.OrganizationID, &i.Name, &i.URL, &i.Version, &i.CreatedBy, &i.CreatedAt, &i.LastSeenAt, &i.RevokedAt, &i.MailboxCount); err != nil {
+		if err := rows.Scan(&i.ID, &i.OrganizationID, &i.Name, &i.URL, &i.Version, &i.CreatedBy, &i.CreatedAt, &i.LastSeenAt, &i.RevokedAt, &i.RemoteOrganizationID, &i.MailboxCount); err != nil {
 			return nil, err
 		}
 		out = append(out, i)
@@ -247,6 +266,12 @@ func (r *poolLinkRepository) RevokeInstance(ctx context.Context, id uuid.UUID) e
 	query := `UPDATE pool_link_instances SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL`
 	if _, err := r.db.Exec(ctx, query, id); err != nil {
 		db.CaptureError(err, query, []any{id}, "exec")
+		return err
+	}
+	// Redirects Cloud served for the instance end with its link.
+	release := `DELETE FROM domain_redirects WHERE linked_instance_id = $1`
+	if _, err := r.db.Exec(ctx, release, id); err != nil {
+		db.CaptureError(err, release, []any{id}, "exec")
 		return err
 	}
 	return nil
@@ -325,6 +350,65 @@ func (r *poolLinkRepository) ListMailboxes(ctx context.Context, instanceID uuid.
 	return out, rows.Err()
 }
 
+func (r *poolLinkRepository) ListStanding(ctx context.Context, instanceID uuid.UUID) ([]models.PoolLinkMailboxStanding, error) {
+	// The pool row when there is one; otherwise a quarantine or block the
+	// address still holds, so a mailbox that left the pool keeps its standing.
+	// Neither is healthy: no hold is in force, and the instance must not keep one.
+	query := `
+		SELECT m.remote_id, COALESCE(s.health_state, 'healthy'), s.pool_type, s.last_health_reason,
+		       COALESCE(s.last_health_score, 0), s.blocked_until, s.last_health_evaluated_at
+		  FROM pool_link_mailboxes m
+		  LEFT JOIN LATERAL (
+		        SELECT st.* FROM (
+		            SELECT wpp.health_state::text AS health_state, wp.pool_type::text AS pool_type,
+		                   wpp.last_health_reason, wpp.last_health_score, wpp.blocked_until,
+		                   wpp.last_health_evaluated_at
+		              FROM warmup_pool_participants wpp
+		              JOIN warmup_pools wp ON wp.id = wpp.pool_id
+		             WHERE wpp.email_account_id = m.email_account_id
+		            UNION ALL
+		            SELECT l.health_state, NULL, l.last_health_reason, l.last_health_score,
+		                   l.blocked_until, l.recorded_at
+		              FROM email_accounts a
+		              JOIN warmup_reputation_ledger l
+		                ON l.organization_id = a.organization_id AND l.email = lower(btrim(a.email))
+		             WHERE a.id = m.email_account_id
+		               AND l.health_state IN ('quarantined', 'blocked')
+		               AND (l.blocked_until IS NULL OR l.blocked_until > NOW())
+		               AND NOT EXISTS (
+		                   SELECT 1 FROM warmup_pool_participants x WHERE x.email_account_id = m.email_account_id)
+		        ) st
+		         ORDER BY ` + warmupStandingRankSQL("st.health_state") + ` DESC
+		         LIMIT 1
+		  ) s ON true
+		 WHERE m.instance_id = $1
+	`
+	rows, err := r.db.Query(ctx, query, instanceID)
+	if err != nil {
+		db.CaptureError(err, query, []any{instanceID}, "query")
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.PoolLinkMailboxStanding{}
+	for rows.Next() {
+		var st models.PoolLinkMailboxStanding
+		var h models.WarmupHealthInfo
+		var poolType, reason *string
+		if err := rows.Scan(&st.RemoteID, &h.State, &poolType, &reason, &h.Score, &h.BlockedUntil, &h.EvaluatedAt); err != nil {
+			return nil, err
+		}
+		if poolType != nil {
+			h.PoolType = *poolType
+		}
+		if reason != nil {
+			h.Reason = *reason
+		}
+		st.Health = &h
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
 func (r *poolLinkRepository) DeleteMailbox(ctx context.Context, instanceID, remoteID uuid.UUID) error {
 	query := `DELETE FROM pool_link_mailboxes WHERE instance_id = $1 AND remote_id = $2`
 	if _, err := r.db.Exec(ctx, query, instanceID, remoteID); err != nil {
@@ -346,6 +430,7 @@ func (r *poolLinkRepository) ListAdoptableMailboxes(ctx context.Context, orgID u
 		WHERE a.organization_id = $1
 		  AND a.status = 'active'
 		  AND a.provider IN ('gmail', 'outlook')
+		  AND a.auth_method <> 'delegated'
 		  AND NOT EXISTS (SELECT 1 FROM pool_link_mailboxes m WHERE m.email_account_id = a.id)
 		ORDER BY a.created_at
 	`

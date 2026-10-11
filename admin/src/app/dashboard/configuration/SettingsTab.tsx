@@ -5,25 +5,20 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Save } from "lucide-react";
+import { Check, Save } from "lucide-react";
 import { ErrorState } from "@/components/ErrorState";
 import { Button } from "@/components/ui/button";
-import {
-    Card,
-    CardContent,
-    CardDescription,
-    CardHeader,
-    CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { StatusDot } from "@/components/ui/kit";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 import {
     getInstanceSettings,
     putInstanceSettings,
     type InstanceSettings,
 } from "@/lib/api/client/admin/instance";
+import { RangeHint, SettingsGroup, SettingsRow } from "./SettingsLayout";
 
 const SETTINGS_KEY = ["admin", "instance", "settings"];
 
@@ -85,19 +80,36 @@ const RETENTION_FIELDS = [
         key: "engagementDays",
         setting: "engagement_event_days",
         label: "Opens and clicks (days)",
+        min: RETENTION_MIN_DAYS,
         help: "Per-event open and click logs, with the client, device and approximate location of each. Campaign counts and routing read a separate summary that is never pruned, so shortening this changes what a contact's timeline can show, not what a campaign does.",
     },
     {
         key: "formDays",
         setting: "form_event_days",
         label: "Form funnel events (days)",
+        min: RETENTION_MIN_DAYS,
         help: "Views, starts, field-level drop-off and submissions for hosted forms. Funnel reports range up to 90 days, so anything below that shortens the report too. Submitted contacts are unaffected.",
     },
     {
         key: "auditDays",
         setting: "audit_log_days",
         label: "Audit log (days)",
+        min: RETENTION_MIN_DAYS,
         help: "Who did what, from which IP address and user agent, with the change payload. This window is how long that record is held, and it is the one most likely to be set by a retention policy.",
+    },
+    {
+        key: "warmupMailDays",
+        setting: "warmup_mail_days",
+        label: "Warmup mail in mailboxes (days)",
+        min: 3,
+        help: "How long warmup mail stays in each mailbox before Warmbly deletes it, wherever the mailbox's filing setting keeps it (Trash on Gmail), with the stored copy of its body. A mailbox may set its own window in its drawer; this is the one every other mailbox follows. The floor leaves room for the engagement and a reply in the thread to finish.",
+    },
+    {
+        key: "warmupEventDays",
+        setting: "warmup_event_days",
+        label: "Warmup records (days)",
+        min: 30,
+        help: "Per-message warmup records: tokens, receipts, tampering events and spam reports. The pool health bands read the last 30 days, which is the floor. The daily sent and received counts behind the analytics are separate and never pruned.",
     },
 ] as const;
 
@@ -108,14 +120,26 @@ const RETENTION_PRESETS = [
     {
         id: "default",
         label: "Defaults",
-        description: "365 / 180 / 90 days",
-        values: { engagementDays: "365", formDays: "180", auditDays: "90" },
+        description: "365 / 180 / 90 days, warmup 30 / 365",
+        values: {
+            engagementDays: "365",
+            formDays: "180",
+            auditDays: "90",
+            warmupMailDays: "30",
+            warmupEventDays: "365",
+        },
     },
     {
         id: "minimal",
         label: "Minimal retention",
-        description: "30 / 30 / 30 days",
-        values: { engagementDays: "30", formDays: "30", auditDays: "30" },
+        description: "30 / 30 / 30 days, warmup 7 / 30",
+        values: {
+            engagementDays: "30",
+            formDays: "30",
+            auditDays: "30",
+            warmupMailDays: "7",
+            warmupEventDays: "30",
+        },
     },
 ] as const;
 
@@ -125,23 +149,130 @@ const RETENTION_PRESETS = [
 // cover provider queueing and transit before the recipient's gateway sees it.
 const MACHINE_WINDOW_MIN_SECONDS = 1;
 const MACHINE_WINDOW_MAX_SECONDS = 900;
+// The probable window has bounds of its own and reaches a day, because how
+// long a security vendor takes to detonate a link is the vendor's property,
+// not this instance's.
+const PROBABLE_WINDOW_MAX_SECONDS = 86400;
 
 const TRACKING_FIELDS = [
     {
         key: "machineWindowOpen",
         setting: "machine_window_open_seconds",
         label: "Automated open window (seconds)",
+        min: MACHINE_WINDOW_MIN_SECONDS,
+        max: MACHINE_WINDOW_MAX_SECONDS,
         help: "An open arriving this soon after a send was dispatched is recorded as automated. Raise it when delivery-time scanners are being counted as opens, lower it when recipients who read immediately are being missed.",
     },
     {
         key: "machineWindowClick",
         setting: "machine_window_click_seconds",
         label: "Automated click window (seconds)",
+        min: MACHINE_WINDOW_MIN_SECONDS,
+        max: MACHINE_WINDOW_MAX_SECONDS,
         help: "The same window for clicks, kept separate because the two mistakes cost different things: a misjudged open loses a metric, a misjudged click loses the automation behind an interested lead.",
+    },
+    {
+        key: "machineWindowProbable",
+        setting: "machine_window_probable_seconds",
+        label: "Probable-scanner window (seconds)",
+        min: MACHINE_WINDOW_MIN_SECONDS,
+        max: PROBABLE_WINDOW_MAX_SECONDS,
+        help: "Used instead of the two above when the request came from a mail-security network that also renders clicked pages for people, which Proofpoint and Mimecast do through browser isolation. Inside this window the event is classified as the delivery-time scan; past it, as the recipient who got to the mail later. A recipient behind one of those vendors who really does click inside it is recorded as automated, so raise it if their scans still count as engagement and lower it if fast recipients are being missed. It is never applied shorter than the windows above.",
     },
 ] as const;
 
 type TrackingFieldKey = (typeof TRACKING_FIELDS)[number]["key"];
+
+// Inbox placement test allowance and pacing, mirroring internal/config/constants.go.
+const PLACEMENT_FIELDS = [
+    {
+        key: "testsTrial",
+        setting: "tests_per_month_trial",
+        label: "Free tests per month on trial",
+        min: 1,
+        max: 100000,
+        help: "How many free tests a workspace without a paid plan may run on the metered panels each calendar month. A trial has no credits, so it waits for next month after these.",
+    },
+    {
+        key: "testsPaid",
+        setting: "tests_per_month_paid",
+        label: "Free tests per month on paid plans",
+        min: 1,
+        max: 100000,
+        help: "The same free allowance for a workspace with an active subscription. Past it, a test on the instance panel costs credits.",
+    },
+    {
+        key: "seedsPerTest",
+        setting: "seeds_per_test",
+        label: "Seeds per test",
+        min: 1,
+        max: 100,
+        help: "The most seeds one test sends to, which is also how many sends it takes from the sending mailbox's daily limit. A test is sized down to what the mailbox has left today, and refused below five seeds.",
+    },
+    {
+        key: "spacingSeconds",
+        setting: "spacing_seconds",
+        label: "Spacing between copies (seconds)",
+        min: 5,
+        max: 600,
+        help: "The gap between two copies from one mailbox, jittered, so a test never leaves as a burst. A test someone starts as quick uses the smaller of this and 8 seconds.",
+    },
+    {
+        key: "creditsPerTest",
+        setting: "credits_per_test",
+        label: "Credits per paid test",
+        min: 0,
+        max: 10000,
+        help: "What a test costs in credits once a workspace has used its free tests for the month. The workspace agrees to the price before each paid test, and a test that delivers no copy is refunded. 0 turns paid tests off, so a workspace waits for next month instead. Only a hosted (DEPLOYMENT_MODE=cloud) instance charges.",
+    },
+    {
+        key: "batchSendersMax",
+        setting: "batch_senders_max",
+        label: "Most senders in one batch",
+        min: 1,
+        max: 100000,
+        help: "The largest sender list one placement batch may hold. It limits how big a batch can be, not how many senders run at once, so it can sit well above any fleet a workspace runs.",
+    },
+    {
+        key: "batchSenderConcurrency",
+        setting: "batch_sender_concurrency",
+        label: "Batch senders sending at once",
+        min: 1,
+        max: 500,
+        help: "How many of one workspace's batch senders may be sending their copies at the same time, across all its batches. The next sender starts when one has sent every copy. Each mailbox still keeps its own daily limit and spacing.",
+    },
+    {
+        key: "batchInstanceConcurrency",
+        setting: "batch_instance_concurrency",
+        label: "Batch senders sending at once, instance-wide",
+        min: 1,
+        max: 5000,
+        help: "The same limit across every workspace together. It bounds how much batch mail the instance seed panel receives at once, so a seed never takes in enough in an hour to trip the sync flood rule that deactivates a mailbox.",
+    },
+    {
+        key: "batchStartsPerMinute",
+        setting: "batch_starts_per_minute",
+        label: "Batch senders started per minute",
+        min: 1,
+        max: 600,
+        help: "How fast one batch starts its senders, so a large batch ramps up instead of starting its whole concurrency at once.",
+    },
+] as const;
+
+type PlacementFieldKey = (typeof PLACEMENT_FIELDS)[number]["key"];
+
+// A backend from before the placement section omits it; the form shows the compiled defaults.
+const PLACEMENT_DEFAULTS: InstanceSettings["placement"] = {
+    tests_per_month_trial: 3,
+    tests_per_month_paid: 40,
+    seeds_per_test: 20,
+    spacing_seconds: 60,
+    credits_per_test: 25,
+    batch_senders_max: 10000,
+    batch_sender_concurrency: 20,
+    batch_instance_concurrency: 200,
+    batch_starts_per_minute: 10,
+};
 
 interface FormState {
     linksEnabled: boolean;
@@ -150,11 +281,13 @@ interface FormState {
     sync: Record<SyncFieldKey, string>;
     retention: Record<RetentionFieldKey, string>;
     tracking: Record<TrackingFieldKey, string>;
+    placement: Record<PlacementFieldKey, string>;
     enforceDomainAuth: boolean;
     authGraceHours: string;
 }
 
 function toForm(s: InstanceSettings): FormState {
+    const placement = s.placement ?? PLACEMENT_DEFAULTS;
     return {
         linksEnabled: s.invitations.links_enabled,
         ttlHours: String(s.invitations.ttl_hours),
@@ -169,10 +302,24 @@ function toForm(s: InstanceSettings): FormState {
             engagementDays: String(s.retention.engagement_event_days),
             formDays: String(s.retention.form_event_days),
             auditDays: String(s.retention.audit_log_days),
+            warmupMailDays: String(s.retention.warmup_mail_days),
+            warmupEventDays: String(s.retention.warmup_event_days),
         },
         tracking: {
             machineWindowOpen: String(s.tracking.machine_window_open_seconds),
             machineWindowClick: String(s.tracking.machine_window_click_seconds),
+            machineWindowProbable: String(s.tracking.machine_window_probable_seconds),
+        },
+        placement: {
+            testsTrial: String(placement.tests_per_month_trial),
+            testsPaid: String(placement.tests_per_month_paid),
+            seedsPerTest: String(placement.seeds_per_test),
+            spacingSeconds: String(placement.spacing_seconds),
+            creditsPerTest: String(placement.credits_per_test ?? PLACEMENT_DEFAULTS.credits_per_test),
+            batchSendersMax: String(placement.batch_senders_max ?? PLACEMENT_DEFAULTS.batch_senders_max),
+            batchSenderConcurrency: String(placement.batch_sender_concurrency ?? PLACEMENT_DEFAULTS.batch_sender_concurrency),
+            batchInstanceConcurrency: String(placement.batch_instance_concurrency ?? PLACEMENT_DEFAULTS.batch_instance_concurrency),
+            batchStartsPerMinute: String(placement.batch_starts_per_minute ?? PLACEMENT_DEFAULTS.batch_starts_per_minute),
         },
         enforceDomainAuth: s.deliverability.enforce_domain_auth,
         authGraceHours: String(s.deliverability.auth_grace_hours),
@@ -232,6 +379,13 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
         !!server &&
         !!form &&
         TRACKING_FIELDS.some((f) => form.tracking[f.key] !== String(server.tracking[f.setting]));
+    const placementDirty =
+        !!server &&
+        !!form &&
+        PLACEMENT_FIELDS.some(
+            (f) =>
+                form.placement[f.key] !== String(server.placement?.[f.setting] ?? PLACEMENT_DEFAULTS[f.setting]),
+        );
     const dirty =
         !!server &&
         !!form &&
@@ -242,6 +396,7 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
             form.authGraceHours !== String(server.deliverability.auth_grace_hours) ||
             retentionDirty ||
             trackingDirty ||
+            placementDirty ||
             syncDirty);
 
     useEffect(() => {
@@ -252,19 +407,15 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
         form !== null && SYNC_FIELDS.every((f) => syncFieldValid(form.sync[f.key], f.min, f.max));
     const retentionValid =
         form !== null &&
-        RETENTION_FIELDS.every((f) =>
-            syncFieldValid(form.retention[f.key], RETENTION_MIN_DAYS, RETENTION_MAX_DAYS),
-        );
+        RETENTION_FIELDS.every((f) => syncFieldValid(form.retention[f.key], f.min, RETENTION_MAX_DAYS));
 
     const trackingValid =
         form !== null &&
-        TRACKING_FIELDS.every((f) =>
-            syncFieldValid(
-                form.tracking[f.key],
-                MACHINE_WINDOW_MIN_SECONDS,
-                MACHINE_WINDOW_MAX_SECONDS,
-            ),
-        );
+        TRACKING_FIELDS.every((f) => syncFieldValid(form.tracking[f.key], f.min, f.max));
+
+    const placementValid =
+        form !== null &&
+        PLACEMENT_FIELDS.every((f) => syncFieldValid(form.placement[f.key], f.min, f.max));
 
     const authGrace = form ? Number(form.authGraceHours) : NaN;
     const authGraceValid =
@@ -296,14 +447,18 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
         }
         if (!retentionValid) {
             toast.error(
-                `Every retention window must be a whole number of days between ${RETENTION_MIN_DAYS} and ${RETENTION_MAX_DAYS.toLocaleString()}`,
+                `Every retention window must be a whole number of days up to ${RETENTION_MAX_DAYS.toLocaleString()}, and not below the floor shown under it`,
             );
             return;
         }
         if (!trackingValid) {
             toast.error(
-                `Every automated-engagement window must be a whole number of seconds between ${MACHINE_WINDOW_MIN_SECONDS} and ${MACHINE_WINDOW_MAX_SECONDS}`,
+                "Every automated-engagement window must be a whole number of seconds inside the range shown under it",
             );
+            return;
+        }
+        if (!placementValid) {
+            toast.error("Every placement test setting must be a whole number inside the range shown under it");
             return;
         }
         if (!authGraceValid) {
@@ -325,22 +480,36 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
                 engagement_event_days: Number(form.retention.engagementDays),
                 form_event_days: Number(form.retention.formDays),
                 audit_log_days: Number(form.retention.auditDays),
+                warmup_mail_days: Number(form.retention.warmupMailDays),
+                warmup_event_days: Number(form.retention.warmupEventDays),
             },
             tracking: {
                 machine_window_open_seconds: Number(form.tracking.machineWindowOpen),
                 machine_window_click_seconds: Number(form.tracking.machineWindowClick),
+                machine_window_probable_seconds: Number(form.tracking.machineWindowProbable),
             },
             deliverability: {
                 enforce_domain_auth: form.enforceDomainAuth,
                 auth_grace_hours: authGrace,
+            },
+            placement: {
+                tests_per_month_trial: Number(form.placement.testsTrial),
+                tests_per_month_paid: Number(form.placement.testsPaid),
+                seeds_per_test: Number(form.placement.seedsPerTest),
+                spacing_seconds: Number(form.placement.spacingSeconds),
+                credits_per_test: Number(form.placement.creditsPerTest),
+                batch_senders_max: Number(form.placement.batchSendersMax),
+                batch_sender_concurrency: Number(form.placement.batchSenderConcurrency),
+                batch_instance_concurrency: Number(form.placement.batchInstanceConcurrency),
+                batch_starts_per_minute: Number(form.placement.batchStartsPerMinute),
             },
         });
     }
 
     return (
         <div>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <p className="max-w-2xl text-sm text-muted-foreground">
+            <div className="mb-8 flex flex-wrap items-start justify-between gap-3">
+                <p className="max-w-2xl text-[13px] leading-relaxed text-muted-foreground">
                     Stored in the database and never read from the environment. Everything the
                     environment owns is on the Environment tab.
                 </p>
@@ -349,15 +518,19 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
                     onClick={save}
                     disabled={!dirty || saveMut.isPending || !form}
                 >
-                    <Save className="size-4" />
+                    <Save />
                     {saveMut.isPending ? "Saving..." : "Save changes"}
                 </Button>
             </div>
 
             {settingsQ.isLoading && (
-                <div className="space-y-3">
-                    <Skeleton className="h-40 w-full" />
-                    <Skeleton className="h-28 w-full" />
+                <div className="space-y-10">
+                    {[0, 1, 2].map((i) => (
+                        <div key={i}>
+                            <Skeleton className="mb-3 h-4 w-32" />
+                            <Skeleton className="h-32 w-full rounded-lg" />
+                        </div>
+                    ))}
                 </div>
             )}
 
@@ -370,98 +543,60 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
             )}
 
             {form && (
-                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    <Card>
-                        <CardHeader>
-                            <CardTitle>Invitations</CardTitle>
-                            <CardDescription>
-                                How people are brought into a workspace from Settings, Members in
-                                the dashboard.
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-3 pt-0">
-                            <div className="flex items-center justify-between gap-3 rounded-md border border-border p-3">
-                                <div className="min-w-0">
-                                    <p className="text-sm font-medium">Invitation links</p>
-                                    <p className="text-xs text-muted-foreground">
-                                        Show a copyable link next to each pending invitation. Leave
-                                        this on when the platform mail transport does not deliver,
-                                        otherwise an invited person never receives anything.
-                                    </p>
-                                </div>
-                                <Switch
-                                    checked={form.linksEnabled}
-                                    onCheckedChange={(v) =>
-                                        setForm({ ...form, linksEnabled: v })
-                                    }
-                                />
-                            </div>
+                <div>
+                    <SettingsGroup
+                        title="Invitations"
+                        description="How people are brought into a workspace from Settings, Members in the dashboard."
+                    >
+                        <SettingsRow
+                            label="Invitation links"
+                            description="Show a copyable link next to each pending invitation. Leave this on when the platform mail transport does not deliver, otherwise an invited person never receives anything."
+                        >
+                            <Switch
+                                checked={form.linksEnabled}
+                                onCheckedChange={(v) => setForm({ ...form, linksEnabled: v })}
+                            />
+                        </SettingsRow>
+                        <NumberRow
+                            id="ttl-hours"
+                            label="Invitation validity (hours)"
+                            help="Existing invitations keep the expiry they were issued with."
+                            range={`Between ${TTL_MIN_HOURS} and ${TTL_MAX_HOURS} hours (30 days).`}
+                            value={form.ttlHours}
+                            onChange={(v) => setForm({ ...form, ttlHours: v })}
+                            valid={ttlValid}
+                            error={`Enter a whole number of hours between ${TTL_MIN_HOURS} and ${TTL_MAX_HOURS}.`}
+                        />
+                    </SettingsGroup>
 
-                            <div>
-                                <Label htmlFor="ttl-hours">Invitation validity (hours)</Label>
-                                {/* Text, not number: the native spinner is not ours, and the value is already validated as a string. */}
-                                <Input
-                                    id="ttl-hours"
-                                    type="text"
-                                    inputMode="numeric"
-                                    autoComplete="off"
-                                    value={form.ttlHours}
-                                    onChange={(e) =>
-                                        setForm({ ...form, ttlHours: e.target.value })
-                                    }
-                                    aria-invalid={!ttlValid}
-                                    className="mt-1"
-                                />
-                                <p className="mt-1 text-xs text-muted-foreground">
-                                    Between {TTL_MIN_HOURS} and {TTL_MAX_HOURS} hours (30 days).
-                                    Existing invitations keep the expiry they were issued with.
-                                </p>
-                                {!ttlValid && (
-                                    <p className="mt-1 text-xs text-red-600">
-                                        Enter a whole number of hours between {TTL_MIN_HOURS} and{" "}
-                                        {TTL_MAX_HOURS}.
-                                    </p>
-                                )}
-                            </div>
-                        </CardContent>
-                    </Card>
-
-                    <Card>
-                        <CardHeader>
-                            <CardTitle>Access</CardTitle>
-                            <CardDescription>
+                    <SettingsGroup
+                        title="Access"
+                        description={
+                            <>
                                 Who may create an account on this instance. The registration mode
                                 itself is owned by the environment and is listed under{" "}
                                 <TabLink onClick={() => onSwitchTab?.("environment")}>
                                     Environment
                                 </TabLink>
                                 .
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="pt-0">
-                            <div className="flex items-center justify-between gap-3 rounded-md border border-border p-3">
-                                <div className="min-w-0">
-                                    <p className="text-sm font-medium">Allow invited sign-up</p>
-                                    <p className="text-xs text-muted-foreground">
-                                        Someone holding a valid invitation can create an account
-                                        even though open sign-ups are closed. Turning this off
-                                        means only existing accounts can sign in.
-                                    </p>
-                                </div>
-                                <Switch
-                                    checked={form.allowInvitedSignup}
-                                    onCheckedChange={(v) =>
-                                        setForm({ ...form, allowInvitedSignup: v })
-                                    }
-                                />
-                            </div>
-                        </CardContent>
-                    </Card>
+                            </>
+                        }
+                    >
+                        <SettingsRow
+                            label="Allow invited sign-up"
+                            description="Someone holding a valid invitation can create an account even though open sign-ups are closed. Turning this off means only existing accounts can sign in."
+                        >
+                            <Switch
+                                checked={form.allowInvitedSignup}
+                                onCheckedChange={(v) => setForm({ ...form, allowInvitedSignup: v })}
+                            />
+                        </SettingsRow>
+                    </SettingsGroup>
 
-                    <Card className="lg:col-span-2">
-                        <CardHeader>
-                            <CardTitle>Mailbox sync fair use</CardTitle>
-                            <CardDescription>
+                    <SettingsGroup
+                        title="Mailbox sync fair use"
+                        description={
+                            <>
                                 What a connected mailbox imports and how much new mail it may
                                 store. Mail over a budget waits and is picked up when the window
                                 rolls; nothing is dropped, and replies to the mailbox&apos;s own
@@ -469,61 +604,34 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
                                 loaded onto a worker (within a few minutes). The fixed pacing
                                 numbers are listed under{" "}
                                 <TabLink onClick={() => onSwitchTab?.("limits")}>Limits</TabLink>.
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="grid grid-cols-1 gap-3 pt-0 md:grid-cols-2">
-                            {SYNC_FIELDS.map((f) => {
-                                const valid = syncFieldValid(form.sync[f.key], f.min, f.max);
-                                return (
-                                    <div key={f.key}>
-                                        <Label htmlFor={`sync-${f.key}`}>{f.label}</Label>
-                                        <Input
-                                            id={`sync-${f.key}`}
-                                            type="text"
-                                            inputMode="numeric"
-                                            autoComplete="off"
-                                            value={form.sync[f.key]}
-                                            onChange={(e) =>
-                                                setForm({
-                                                    ...form,
-                                                    sync: { ...form.sync, [f.key]: e.target.value },
-                                                })
-                                            }
-                                            aria-invalid={!valid}
-                                            className="mt-1"
-                                        />
-                                        <p className="mt-1 text-xs text-muted-foreground">
-                                            {f.help} Between {f.min.toLocaleString()} and{" "}
-                                            {f.max.toLocaleString()}.
-                                        </p>
-                                        {!valid && (
-                                            <p className="mt-1 text-xs text-red-600">
-                                                Enter a whole number between {f.min.toLocaleString()}{" "}
-                                                and {f.max.toLocaleString()}.
-                                            </p>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </CardContent>
-                    </Card>
+                            </>
+                        }
+                    >
+                        {SYNC_FIELDS.map((f) => (
+                            <NumberRow
+                                key={f.key}
+                                id={`sync-${f.key}`}
+                                label={f.label}
+                                help={f.help}
+                                range={`Between ${f.min.toLocaleString()} and ${f.max.toLocaleString()}.`}
+                                value={form.sync[f.key]}
+                                onChange={(v) => setForm({ ...form, sync: { ...form.sync, [f.key]: v } })}
+                                valid={syncFieldValid(form.sync[f.key], f.min, f.max)}
+                                error={`Enter a whole number between ${f.min.toLocaleString()} and ${f.max.toLocaleString()}.`}
+                            />
+                        ))}
+                    </SettingsGroup>
 
-                    <Card className="lg:col-span-2">
-                        <CardHeader>
-                            <CardTitle>Data retention</CardTitle>
-                            <CardDescription>
-                                How long event-level history is kept on this instance. Every window
-                                below is also how long the personal data in that log is held, so
-                                these are the settings a retention or privacy policy applies to. A
-                                sweep runs a few times a day and reads these values each pass, so a
-                                change takes effect without a restart. Deletion is permanent:
-                                shortening a window removes what already sits outside it on the
-                                next sweep.
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-4 pt-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-xs text-muted-foreground">Presets</span>
+                    <SettingsGroup
+                        title="Data retention"
+                        description="How long event-level history is kept on this instance. Every window below is also how long the personal data in that log is held, so these are the settings a retention or privacy policy applies to. A sweep runs a few times a day and reads these values each pass, so a change takes effect without a restart. Deletion is permanent: shortening a window removes what already sits outside it on the next sweep."
+                    >
+                        <SettingsRow
+                            label="Presets"
+                            description="Fill every window below from a common choice."
+                            className="sm:flex-col sm:items-stretch sm:gap-3"
+                        >
+                            <div className="flex flex-wrap gap-1.5">
                                 {RETENTION_PRESETS.map((preset) => {
                                     const active = RETENTION_FIELDS.every(
                                         (f) => form.retention[f.key] === preset.values[f.key],
@@ -533,7 +641,12 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
                                             key={preset.id}
                                             type="button"
                                             size="sm"
-                                            variant={active ? "default" : "outline"}
+                                            variant="outline"
+                                            aria-pressed={active}
+                                            className={cn(
+                                                active &&
+                                                    "border-[color-mix(in_oklab,var(--admin-accent)_40%,transparent)] bg-[var(--admin-accent-weak)] text-[var(--admin-accent-strong)] hover:bg-[var(--admin-accent-soft)] dark:bg-[var(--admin-accent-weak)] dark:hover:bg-[var(--admin-accent-soft)]",
+                                            )}
                                             onClick={() =>
                                                 setForm({
                                                     ...form,
@@ -541,205 +654,173 @@ export function SettingsTab({ onDirtyChange, onSwitchTab }: SettingsTabProps) {
                                                 })
                                             }
                                         >
+                                            {active && <Check />}
                                             {preset.label}
-                                            <span className="ml-1.5 text-[11px] opacity-70">
+                                            <span className="text-[11px] font-normal opacity-70">
                                                 {preset.description}
                                             </span>
                                         </Button>
                                     );
                                 })}
                             </div>
-                            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                                {RETENTION_FIELDS.map((f) => {
-                                    const valid = syncFieldValid(
-                                        form.retention[f.key],
-                                        RETENTION_MIN_DAYS,
-                                        RETENTION_MAX_DAYS,
-                                    );
-                                    return (
-                                        <div key={f.key}>
-                                            <Label htmlFor={`retention-${f.key}`}>{f.label}</Label>
-                                            <Input
-                                                id={`retention-${f.key}`}
-                                                type="text"
-                                                inputMode="numeric"
-                                                autoComplete="off"
-                                                value={form.retention[f.key]}
-                                                onChange={(e) =>
-                                                    setForm({
-                                                        ...form,
-                                                        retention: {
-                                                            ...form.retention,
-                                                            [f.key]: e.target.value,
-                                                        },
-                                                    })
-                                                }
-                                                aria-invalid={!valid}
-                                                className="mt-1"
-                                            />
-                                            <p className="mt-1 text-xs text-muted-foreground">
-                                                {f.help} Between {RETENTION_MIN_DAYS} and{" "}
-                                                {RETENTION_MAX_DAYS.toLocaleString()} days.
-                                            </p>
-                                            {!valid && (
-                                                <p className="mt-1 text-xs text-red-600">
-                                                    Enter a whole number of days between{" "}
-                                                    {RETENTION_MIN_DAYS} and{" "}
-                                                    {RETENTION_MAX_DAYS.toLocaleString()}.
-                                                </p>
-                                            )}
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        </CardContent>
-                    </Card>
+                        </SettingsRow>
+                        {RETENTION_FIELDS.map((f) => (
+                            <NumberRow
+                                key={f.key}
+                                id={`retention-${f.key}`}
+                                label={f.label}
+                                help={f.help}
+                                range={`Between ${f.min} and ${RETENTION_MAX_DAYS.toLocaleString()} days.`}
+                                value={form.retention[f.key]}
+                                onChange={(v) =>
+                                    setForm({ ...form, retention: { ...form.retention, [f.key]: v } })
+                                }
+                                valid={syncFieldValid(form.retention[f.key], f.min, RETENTION_MAX_DAYS)}
+                                error={`Enter a whole number of days between ${f.min} and ${RETENTION_MAX_DAYS.toLocaleString()}.`}
+                            />
+                        ))}
+                    </SettingsGroup>
 
-                    <Card className="lg:col-span-2">
-                        <CardHeader>
-                            <CardTitle>Automated engagement</CardTitle>
-                            <CardDescription>
-                                Security gateways fetch the tracking pixel and walk every link
-                                when a message arrives, using an ordinary browser&apos;s user
-                                agent. An open or click landing inside these windows is recorded
-                                as automated: still kept as delivery evidence and still shown on
-                                the timeline, but it does not count as engagement, fire a branch
-                                or automation, or send a webhook. Nothing is discarded either way.
-                                The clock starts when the send is handed to a worker, so the
-                                window also covers the provider&apos;s queue and the transit to
-                                the recipient. Known scanner networks are matched separately and
-                                are not bounded by time. A change applies within a minute and
-                                only to events recorded after it: opens and clicks already
-                                stored keep the label they were given when they arrived.
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="grid grid-cols-1 gap-3 pt-0 md:grid-cols-2">
-                            {TRACKING_FIELDS.map((f) => {
-                                const valid = syncFieldValid(
-                                    form.tracking[f.key],
-                                    MACHINE_WINDOW_MIN_SECONDS,
-                                    MACHINE_WINDOW_MAX_SECONDS,
-                                );
-                                return (
-                                    <div key={f.key}>
-                                        <Label htmlFor={`tracking-${f.key}`}>{f.label}</Label>
-                                        <Input
-                                            id={`tracking-${f.key}`}
-                                            type="text"
-                                            inputMode="numeric"
-                                            autoComplete="off"
-                                            value={form.tracking[f.key]}
-                                            onChange={(e) =>
-                                                setForm({
-                                                    ...form,
-                                                    tracking: {
-                                                        ...form.tracking,
-                                                        [f.key]: e.target.value,
-                                                    },
-                                                })
-                                            }
-                                            aria-invalid={!valid}
-                                            className="mt-1"
-                                        />
-                                        <p className="mt-1 text-xs text-muted-foreground">
-                                            {f.help} Between {MACHINE_WINDOW_MIN_SECONDS} and{" "}
-                                            {MACHINE_WINDOW_MAX_SECONDS.toLocaleString()} seconds.
-                                        </p>
-                                        {!valid && (
-                                            <p className="mt-1 text-xs text-red-600">
-                                                Enter a whole number between{" "}
-                                                {MACHINE_WINDOW_MIN_SECONDS} and{" "}
-                                                {MACHINE_WINDOW_MAX_SECONDS.toLocaleString()}.
-                                            </p>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </CardContent>
-                    </Card>
+                    <SettingsGroup
+                        title="Automated engagement"
+                        description="Security gateways fetch the tracking pixel and walk every link when a message arrives, using an ordinary browser's user agent. An open or click landing inside these windows is recorded as automated: still kept as delivery evidence and still shown on the timeline, but it does not count as engagement, fire a branch or automation, or send a webhook. Nothing is discarded either way. The clock starts when the send is handed to a worker, so the window also covers the provider's queue and the transit to the recipient. A network that only ever filters mail is matched by name and is not bounded by time; one that can also carry a person gets the probable window below. A change applies within a minute and only to events recorded after it: opens and clicks already stored keep the label they were given when they arrived."
+                    >
+                        {TRACKING_FIELDS.map((f) => (
+                            <NumberRow
+                                key={f.key}
+                                id={`tracking-${f.key}`}
+                                label={f.label}
+                                help={f.help}
+                                range={`Between ${f.min} and ${f.max.toLocaleString()} seconds.`}
+                                value={form.tracking[f.key]}
+                                onChange={(v) =>
+                                    setForm({ ...form, tracking: { ...form.tracking, [f.key]: v } })
+                                }
+                                valid={syncFieldValid(form.tracking[f.key], f.min, f.max)}
+                                error={`Enter a whole number between ${f.min} and ${f.max.toLocaleString()}.`}
+                            />
+                        ))}
+                    </SettingsGroup>
 
-                    <Card className="lg:col-span-2">
-                        <CardHeader>
-                            <CardTitle>Sending-domain authentication</CardTitle>
-                            <CardDescription>
-                                Gmail, Yahoo, and Outlook reject or spam-filter mail from a domain
-                                without SPF and DMARC, and one unauthenticated sender damages the
-                                reputation of every mailbox in the shared warmup pool. Warmbly
-                                checks each sending domain daily and can stop cold sending and
-                                warmup from a domain that keeps failing. The grace period is how
-                                long a domain may keep failing first, so a DNS outage cannot stop
-                                a customer&apos;s campaigns and the owner is warned throughout it.
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-4 pt-0">
-                            <div className="flex items-start justify-between gap-4">
-                                <div className="space-y-0.5">
-                                    <Label>Stop sending from unauthenticated domains</Label>
-                                    <p className="text-xs text-muted-foreground">
-                                        Off keeps the check informational: domains are still
-                                        checked, shown on the mailbox, and raised by the advisor,
-                                        but nothing is ever blocked.
-                                    </p>
-                                </div>
-                                <Switch
-                                    checked={form.enforceDomainAuth}
-                                    onCheckedChange={(v) =>
-                                        setForm({ ...form, enforceDomainAuth: v })
-                                    }
-                                />
-                            </div>
-                            <div className="md:max-w-sm">
-                                <Label htmlFor="auth-grace-hours">Grace period (hours)</Label>
-                                <Input
-                                    id="auth-grace-hours"
-                                    type="text"
-                                    inputMode="numeric"
-                                    autoComplete="off"
-                                    value={form.authGraceHours}
-                                    onChange={(e) =>
-                                        setForm({ ...form, authGraceHours: e.target.value })
-                                    }
-                                    aria-invalid={!authGraceValid}
-                                    disabled={!form.enforceDomainAuth}
-                                    className="mt-1"
-                                />
-                                <p className="mt-1 text-xs text-muted-foreground">
-                                    How long a domain must stay failing before its mailboxes stop
-                                    sending. Between {AUTH_GRACE_MIN_HOURS} and{" "}
-                                    {AUTH_GRACE_MAX_HOURS.toLocaleString()}.
-                                </p>
-                                {!authGraceValid && (
-                                    <p className="mt-1 text-xs text-red-600">
-                                        Enter a whole number between {AUTH_GRACE_MIN_HOURS} and{" "}
-                                        {AUTH_GRACE_MAX_HOURS.toLocaleString()}.
-                                    </p>
-                                )}
-                            </div>
-                        </CardContent>
-                    </Card>
+                    <SettingsGroup
+                        title="Inbox placement tests"
+                        description="A placement test sends one copy of a template to each seed on a panel and reports where it landed. The monthly allowances count tests on the instance panel and on Warmbly Cloud's; tests on a workspace's own seed inboxes are never counted, and a self-hosted instance does not meter tests at all. A tracking comparison counts as two tests. The seeds themselves are managed on the Seed panel page."
+                    >
+                        {PLACEMENT_FIELDS.map((f) => (
+                            <NumberRow
+                                key={f.key}
+                                id={`placement-${f.key}`}
+                                label={f.label}
+                                help={f.help}
+                                range={`Between ${f.min.toLocaleString()} and ${f.max.toLocaleString()}.`}
+                                value={form.placement[f.key]}
+                                onChange={(v) =>
+                                    setForm({ ...form, placement: { ...form.placement, [f.key]: v } })
+                                }
+                                valid={syncFieldValid(form.placement[f.key], f.min, f.max)}
+                                error={`Enter a whole number between ${f.min.toLocaleString()} and ${f.max.toLocaleString()}.`}
+                            />
+                        ))}
+                    </SettingsGroup>
+
+                    <SettingsGroup
+                        title="Sending-domain authentication"
+                        description="Gmail, Yahoo, and Outlook reject or spam-filter mail from a domain without SPF and DMARC, and one unauthenticated sender damages the reputation of every mailbox in the shared warmup pool. Warmbly checks each sending domain daily and can stop cold sending and warmup from a domain that keeps failing. The grace period is how long a domain may keep failing first, so a DNS outage cannot stop a customer's campaigns and the owner is warned throughout it."
+                    >
+                        <SettingsRow
+                            label="Stop sending from unauthenticated domains"
+                            description="Off keeps the check informational: domains are still checked, shown on the mailbox, and raised by the advisor, but nothing is ever blocked."
+                        >
+                            <Switch
+                                checked={form.enforceDomainAuth}
+                                onCheckedChange={(v) => setForm({ ...form, enforceDomainAuth: v })}
+                            />
+                        </SettingsRow>
+                        <NumberRow
+                            id="auth-grace-hours"
+                            label="Grace period (hours)"
+                            help="How long a domain must stay failing before its mailboxes stop sending."
+                            range={`Between ${AUTH_GRACE_MIN_HOURS} and ${AUTH_GRACE_MAX_HOURS.toLocaleString()}.`}
+                            value={form.authGraceHours}
+                            onChange={(v) => setForm({ ...form, authGraceHours: v })}
+                            valid={authGraceValid}
+                            disabled={!form.enforceDomainAuth}
+                            error={`Enter a whole number between ${AUTH_GRACE_MIN_HOURS} and ${AUTH_GRACE_MAX_HOURS.toLocaleString()}.`}
+                        />
+                    </SettingsGroup>
                 </div>
             )}
 
             {form && dirty && (
-                <div className="mt-4 flex items-center gap-2">
-                    <Button size="sm" onClick={save} disabled={saveMut.isPending}>
-                        <Save className="size-4" />
-                        {saveMut.isPending ? "Saving..." : "Save changes"}
-                    </Button>
+                <div className="sticky bottom-4 z-10 mt-8 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-popover px-3 py-2 shadow-popover">
+                    <span className="mr-auto flex items-center gap-2 text-xs text-muted-foreground">
+                        <StatusDot tone="warning" />
+                        Saving records the change in the admin audit log.
+                    </span>
                     <Button
                         size="sm"
-                        variant="outline"
+                        variant="ghost"
                         onClick={() => server && setForm(toForm(server))}
                         disabled={saveMut.isPending}
                     >
                         Discard
                     </Button>
-                    <span className="text-xs text-muted-foreground">
-                        Saving records the change in the admin audit log.
-                    </span>
+                    <Button size="sm" onClick={save} disabled={saveMut.isPending}>
+                        <Save />
+                        {saveMut.isPending ? "Saving..." : "Save changes"}
+                    </Button>
                 </div>
             )}
         </div>
+    );
+}
+
+// One whole-number setting: the field sits on the right, the range under the help.
+function NumberRow({
+    id,
+    label,
+    help,
+    range,
+    value,
+    onChange,
+    valid,
+    error,
+    disabled,
+}: {
+    id: string;
+    label: string;
+    help: string;
+    range: string;
+    value: string;
+    onChange: (v: string) => void;
+    valid: boolean;
+    error: string;
+    disabled?: boolean;
+}) {
+    return (
+        <SettingsRow
+            label={label}
+            htmlFor={id}
+            description={
+                <>
+                    {help} <RangeHint>{range}</RangeHint>
+                </>
+            }
+            error={!valid ? error : undefined}
+        >
+            {/* Text, not number: the native spinner is not ours, and the value is already validated as a string. */}
+            <Input
+                id={id}
+                type="text"
+                inputMode="numeric"
+                autoComplete="off"
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                aria-invalid={!valid}
+                disabled={disabled}
+                className="w-full text-right tabular-nums sm:w-28"
+            />
+        </SettingsRow>
     );
 }
 

@@ -2,7 +2,8 @@
 //
 // Nodes are pull-based: they enrol with the join token, heartbeat, and ask what
 // version they should be running. Nothing here reaches into a machine, so there
-// is no install, restart, logs or reboot call to make.
+// is no install, restart or reboot call to make. Redacted submitted evidence
+// is read through the generic node diagnostics API.
 
 import { Request } from "@/lib/api/client";
 
@@ -13,6 +14,11 @@ export interface NodeUsage {
     memory_mb?: number;
     goroutines?: number;
     uptime_seconds?: number;
+    cpu_scope?: "host" | "container";
+    memory_scope?: "host" | "container";
+    memory_used_mb?: number;
+    memory_limit_mb?: number;
+    resident_mb?: number;
 }
 
 export interface FleetNode {
@@ -22,6 +28,8 @@ export interface FleetNode {
     notes: string;
     region: string;
     address: string;
+    /** Operator-set assigned-mailbox target reported by a worker. */
+    capacity_target: number;
     /** What the node reports it is running. */
     version: string;
     /** Set when this one node is held at a version, overriding the fleet target. */
@@ -49,9 +57,10 @@ export function listFleetNodes(role?: NodeRole): Promise<{ data: FleetNode[] }> 
     });
 }
 
-// The token is returned once and never again: only its hash is stored. Issuing
-// a new one revokes the previous token; nodes already enrolled are unaffected.
-export function issueJoinToken(): Promise<{ token: string; note: string }> {
+// The token is returned once and never again: only its hash is stored. It joins
+// any number of machines until expires_at; issuing a new one revokes the
+// previous token. Nodes already enrolled are unaffected.
+export function issueJoinToken(): Promise<{ token: string; expires_at: string; note: string }> {
     return Request({
         method: "POST",
         url: "/admin/fleet/join-token",

@@ -1,19 +1,21 @@
 package scheduler
 
 import (
+	"hash/fnv"
 	"math"
 	"math/rand"
 	"sort"
-	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/behavior"
+	"github.com/warmbly/warmbly/internal/bitmask"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/mailhost"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
-// findNextValidDay finds the next valid day based on campaign days bitmask
-// Bit 0 = Sunday, Bit 1 = Monday, ..., Bit 6 = Saturday
+// findNextValidDay finds the next day the Monday-first days mask allows.
 func findNextValidDay(from time.Time, daysBitmask uint8, tz *time.Location) time.Time {
 	if daysBitmask == 0 {
 		// If no days specified, allow all days
@@ -24,8 +26,7 @@ func findNextValidDay(from time.Time, daysBitmask uint8, tz *time.Location) time
 
 	// Try up to 7 days
 	for i := 0; i < 7; i++ {
-		dayOfWeek := int(candidate.Weekday())
-		if (daysBitmask & (1 << dayOfWeek)) != 0 {
+		if bitmask.HasWeekday(daysBitmask, candidate.Weekday()) {
 			return candidate
 		}
 		candidate = candidate.Add(24 * time.Hour)
@@ -174,28 +175,29 @@ func calculateFirstSlotTomorrowAt(timezone, startTime string) time.Time {
 	return finalSlot(firstSlot.Add(time.Minute * time.Duration(jitter)))
 }
 
-// humanizeSeconds randomises the sub-minute component of a scheduled time. All
-// jitter above is minute-granular and every time.Date construction lands on
-// second :00, so without this the whole platform sends at second zero — a
-// fleet-wide fingerprint in Received headers. Applied as the last step of the
-// schedulers.
-//
-// It truncates DOWN to the minute before re-randomising, so on its own it can
-// move a slot up to 59 seconds EARLIER. Callers that are producing a real
-// scheduled_at must therefore use finalSlot, which clamps afterwards; this
-// helper deliberately stays a pure formatter.
+// humanizeSeconds moves a slot sitting on second :00 (every time.Date build and
+// minute-granular jitter) 1-59s later, so the fleet never sends at second zero.
+// A slot already off :00 keeps its exact time and the pacing that produced it.
 func humanizeSeconds(t time.Time) time.Time {
-	return t.Truncate(time.Minute).Add(time.Duration(rand.Intn(60)) * time.Second)
+	if t.Second() != 0 {
+		return t
+	}
+	return t.Add(time.Duration(1+rand.Intn(59)) * time.Second)
 }
 
-// finalSlot is the last thing a scheduler does to a candidate: randomise its
-// sub-minute component, then guarantee the result is still in the future.
-//
-// Both halves matter. Without the randomisation the whole fleet sends at second
-// :00, which is a fingerprint in Received headers. Without the clamp, that same
-// randomisation — plus the symmetric jitter each scheduler applies — can land a
-// near-term send in the past, where it fires immediately with none of the
-// spacing it was placed with, or gets cancelled outright by the overdue sweep.
+// poolSendInterval is a campaign chain's gap to its next send: the window left
+// over the pool's budget left, varied 0.55-1.45x by draw so sends come in bursts
+// and lulls. The floor is the pool's spacing (one mailbox gap over the pool
+// size), never the chosen mailbox's, whose own gap STEP 10 enforces.
+func poolSendInterval(remainingMinutes, remainingEmails, gapSeconds, poolSize int, draw float64) time.Duration {
+	perSend := float64(remainingMinutes) / float64(max(1, remainingEmails))
+	interval := time.Duration(perSend * (0.55 + draw*0.9) * float64(time.Minute))
+	floor := time.Second * time.Duration(gapSeconds) / time.Duration(max(1, poolSize))
+	return max(interval, floor)
+}
+
+// finalSlot is the last thing a scheduler does to a candidate: take it off
+// second :00, then clamp a slot the jitter left in the past to the near future.
 func finalSlot(t time.Time) time.Time {
 	return notBefore(humanizeSeconds(t))
 }
@@ -409,24 +411,29 @@ func campaignRampCeiling(enabled bool, start, increment, ceiling, level int) int
 	return v
 }
 
-// providerForEmailDomain maps a recipient email address to a coarse ESP bucket
-// for provider matching. Pure string work — never dials MX. Unknown/other
-// domains return "" so matching never blocks the first contact.
-func providerForEmailDomain(email string) string {
-	at := strings.LastIndex(email, "@")
-	if at < 0 || at == len(email)-1 {
-		return ""
+// senderESP is a mailbox's family for ESP matching: its email_provider, or
+// for an smtp_imap mailbox on Google or Microsoft (an app-password import)
+// that host's family.
+func senderESP(acct models.Email) string {
+	if acct.Provider == "smtp_imap" {
+		if esp := mailhost.ESPFamily(mailhost.Host(acct.MailHost)); esp == "gmail" || esp == "outlook" {
+			return esp
+		}
 	}
-	domain := strings.ToLower(strings.TrimSpace(email[at+1:]))
-	switch domain {
-	case "gmail.com", "googlemail.com":
-		return "gmail"
-	case "outlook.com", "hotmail.com", "live.com", "msn.com", "office365.com", "microsoft.com":
-		return "outlook"
+	return acct.Provider
+}
+
+// recipientESP is the provider family ESP matching compares against a
+// mailbox's email_provider: "gmail", "outlook", or "" for anything else,
+// which matches every mailbox. A contact the provider sweep has not reached
+// yet is read from its domain alone.
+func recipientESP(c *models.Contact) string {
+	esp := c.ESPProvider
+	if c.MailHost == "" && esp == "" {
+		esp = mailhost.ESPFamily(mailhost.KnownDomain(c.Email))
 	}
-	// Subdomain / suffix heuristics for hosted Google/Microsoft mail.
-	if strings.HasSuffix(domain, ".onmicrosoft.com") {
-		return "outlook"
+	if esp == "gmail" || esp == "outlook" {
+		return esp
 	}
 	return ""
 }
@@ -487,38 +494,38 @@ func effectiveWeight(c AccountCandidate) float64 {
 
 // selectAccountLeastRecentlyUsed picks the viable candidate (Weight>0) whose
 // sender last_sent_at is oldest; a nil last_sent_at (never used) sorts first.
-// Ties broken by account id for determinism.
-func selectAccountLeastRecentlyUsed(candidates []AccountCandidate) *AccountCandidate {
+// Ties go to tieRank under the campaign's salt.
+func selectAccountLeastRecentlyUsed(candidates []AccountCandidate, salt uuid.UUID) *AccountCandidate {
 	var best *AccountCandidate
 	for i := range candidates {
 		if candidates[i].Weight <= 0 {
 			continue
 		}
-		if best == nil || lruLess(&candidates[i], best) {
+		if best == nil || lruLess(&candidates[i], best, salt) {
 			best = &candidates[i]
 		}
 	}
 	return best
 }
 
-func lruLess(a, b *AccountCandidate) bool {
+func lruLess(a, b *AccountCandidate, salt uuid.UUID) bool {
 	switch {
 	case a.SenderLastSentAt == nil && b.SenderLastSentAt == nil:
-		return a.Account.ID.String() < b.Account.ID.String()
+		return tieRank(salt, a.Account.ID) < tieRank(salt, b.Account.ID)
 	case a.SenderLastSentAt == nil:
 		return true
 	case b.SenderLastSentAt == nil:
 		return false
 	case a.SenderLastSentAt.Equal(*b.SenderLastSentAt):
-		return a.Account.ID.String() < b.Account.ID.String()
+		return tieRank(salt, a.Account.ID) < tieRank(salt, b.Account.ID)
 	default:
 		return a.SenderLastSentAt.Before(*b.SenderLastSentAt)
 	}
 }
 
 // selectAccountRoundRobin picks the viable candidate (Weight>0) with the lowest
-// rotation_position; ties broken by account id for determinism.
-func selectAccountRoundRobin(candidates []AccountCandidate) *AccountCandidate {
+// rotation_position; ties go to tieRank under the campaign's salt.
+func selectAccountRoundRobin(candidates []AccountCandidate, salt uuid.UUID) *AccountCandidate {
 	var best *AccountCandidate
 	for i := range candidates {
 		if candidates[i].Weight <= 0 {
@@ -527,11 +534,20 @@ func selectAccountRoundRobin(candidates []AccountCandidate) *AccountCandidate {
 		if best == nil ||
 			candidates[i].RotationPosition < best.RotationPosition ||
 			(candidates[i].RotationPosition == best.RotationPosition &&
-				candidates[i].Account.ID.String() < best.Account.ID.String()) {
+				tieRank(salt, candidates[i].Account.ID) < tieRank(salt, best.Account.ID)) {
 			best = &candidates[i]
 		}
 	}
 	return best
+}
+
+// tieRank orders tied mailboxes per campaign: stable for one campaign, but
+// different campaigns sharing a pool do not all reach for the same mailbox.
+func tieRank(salt, id uuid.UUID) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write(salt[:])
+	_, _ = h.Write(id[:])
+	return h.Sum64()
 }
 
 // needsRotationFallback reports whether a rotation mode depends on per-sender
@@ -543,13 +559,14 @@ func needsRotationFallback(rotationMode string) bool {
 
 // selectAccountByRotationMode dispatches to the chosen rotation strategy. For
 // explicit-strategy campaigns rotationMode is one of weighted / round_robin /
-// least_recently_used; anything else falls back to weighted.
-func selectAccountByRotationMode(rotationMode string, candidates []AccountCandidate) *AccountCandidate {
+// least_recently_used; anything else falls back to weighted. salt is the
+// campaign id, which decides ties.
+func selectAccountByRotationMode(rotationMode string, candidates []AccountCandidate, salt uuid.UUID) *AccountCandidate {
 	switch rotationMode {
 	case "round_robin":
-		return selectAccountRoundRobin(candidates)
+		return selectAccountRoundRobin(candidates, salt)
 	case "least_recently_used":
-		return selectAccountLeastRecentlyUsed(candidates)
+		return selectAccountLeastRecentlyUsed(candidates, salt)
 	default:
 		return selectAccountWeighted(candidates)
 	}

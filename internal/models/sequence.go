@@ -26,10 +26,9 @@ type Sequence struct {
 	// the contact has already received an email from this campaign.
 	ThreadReply bool `json:"thread_reply"`
 
-	// X/Y are the step's canvas coordinates in the sequence builder. Persisted
-	// so the arrangement sticks across visits; 0/0 means "not placed yet" (the
-	// editor auto-arranges until a step is first dragged). Written only through
-	// the layout endpoint, never the audited content update.
+	// X/Y are canvas coordinates set through the layout endpoint, never the
+	// audited content update. The dashboard lays steps out from their branches
+	// and does not read them.
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
 
@@ -241,8 +240,8 @@ type UpdateSequence struct {
 	ThreadReply *bool `json:"thread_reply"`
 
 	// Conditions, when non-nil, replaces the step's branching tree. Send `{}`
-	// (or an object with an empty `branches` array) to clear branching and fall
-	// back to linear progression.
+	// (or an object with an empty `branches` array) to clear branching, which
+	// ends the contact's flow at this step.
 	Conditions *BranchConditions `json:"conditions"`
 
 	// Kind / Action, when non-nil, switch the node between email and action/wait.
@@ -321,11 +320,16 @@ type BranchCondition struct {
 	// "ai_label" (operator "is", value in Label) matches when the AI step that
 	// owns this branch stored that label for the contact — deterministic at
 	// schedule time, no model call.
+	//
+	// "reply_intent" (operator "is", value in Label) matches when automatic inbox
+	// tagging stored that intent for the contact's human reply; also decided
+	// at schedule time with no model call.
 	Field string `json:"field"`
 	// Operator is the comparison. "within_days" (the signal occurred in the last
 	// Value days) and "ever" (the signal occurred at all). For the not_* fields
 	// the meaning inverts (did NOT happen within / ever). The reply_* fields take
-	// operator "ever" (no Value). "is" pairs with "ai_label" (compare to Label).
+	// operator "ever" (no Value). "is" pairs with "ai_label" or "reply_intent"
+	// (compare to Label).
 	Operator string `json:"operator"`
 	// Value is the day window for "within_days". nil for operators that take no
 	// argument (e.g. "ever").

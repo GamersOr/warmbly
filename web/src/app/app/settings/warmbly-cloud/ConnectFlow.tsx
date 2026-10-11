@@ -1,10 +1,10 @@
-// The three-step link flow: link this instance to a Warmbly Cloud workspace,
+// Link the selected local workspace to its own Warmbly Cloud workspace,
 // pick the mailboxes the cloud should warm, done. Steps slide directionally
 // like NewCampaignDialog; a step cannot be skipped ahead of.
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { ArrowRightIcon, CheckIcon, CloudIcon, FlameIcon, InboxIcon, Loader2Icon, SparklesIcon } from "lucide-react";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";

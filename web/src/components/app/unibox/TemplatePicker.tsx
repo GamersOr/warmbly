@@ -4,31 +4,48 @@
 // and error states. The host mounts it inside its own PopoverMenu.
 
 import React from "react";
-import { Link } from "react-router-dom";
+import useBrowseState from "@/hooks/useBrowseState";
+import { inboxSearchSchema } from "@/lib/browse-inbox";
+import { Link } from "@tanstack/react-router";
 import { FileTextIcon, SearchIcon, SettingsIcon, XIcon } from "lucide-react";
 import type useTemplates from "@/lib/api/hooks/app/templates/useTemplates";
 import type Template from "@/lib/api/models/app/templates/Template";
+import { htmlHasContent, htmlToPlain } from "@/lib/email/composerBody";
+
+// What a row previews and search matches (the plain body, else the HTML's text), parsed once per list.
+interface TemplateMeta {
+    text: string;
+    hasHtml: boolean;
+}
+
+function templateMeta(t: Template): TemplateMeta {
+    const hasHtml = htmlHasContent(t.body_html ?? "");
+    return { hasHtml, text: t.body_plain?.trim() ? t.body_plain : hasHtml ? htmlToPlain(t.body_html) : "" };
+}
 
 export default function TemplatePickerContent({
+    browseKey = "compose",
     query,
     onPick,
     onClose,
 }: {
+    browseKey?: string;
     query: ReturnType<typeof useTemplates>;
     onPick: (t: Template) => void;
     onClose: () => void;
 }) {
-    const [search, setSearch] = React.useState("");
+    const [search, setSearch] = useBrowseState(`unibox.templates.${browseKey}.search`, "", inboxSearchSchema);
     const all = React.useMemo(() => query.data ?? [], [query.data]);
-    const showSearch = all.length > 5;
+    const meta = React.useMemo(() => new Map(all.map((t) => [t.id, templateMeta(t)])), [all]);
+    const showSearch = all.length > 5 || !!search;
     const filtered = React.useMemo(() => {
         const q = search.trim().toLowerCase();
         if (!q) return all;
         return all.filter((t) => {
-            const hay = `${t.name} ${t.subject} ${t.body_plain}`.toLowerCase();
+            const hay = `${t.name} ${t.subject} ${meta.get(t.id)?.text ?? ""}`.toLowerCase();
             return hay.includes(q);
         });
-    }, [all, search]);
+    }, [all, meta, search]);
 
     return (
         <div className="w-[340px] max-w-[92vw]">
@@ -105,6 +122,7 @@ export default function TemplatePickerContent({
                         <TemplateRow
                             key={t.id}
                             template={t}
+                            meta={meta.get(t.id) ?? templateMeta(t)}
                             onPick={() => {
                                 onPick(t);
                                 onClose();
@@ -139,15 +157,15 @@ export default function TemplatePickerContent({
 // background alone.
 function TemplateRow({
     template,
+    meta,
     onPick,
 }: {
     template: Template;
+    meta: TemplateMeta;
     onPick: () => void;
 }) {
-    const bodyPreview = (template.body_plain ?? "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 120);
+    const bodyPreview = meta.text.replace(/\s+/g, " ").trim().slice(0, 120);
+    const { hasHtml } = meta;
 
     return (
         <button
@@ -155,8 +173,18 @@ function TemplateRow({
             onClick={onPick}
             className="w-full text-left rounded-md px-2.5 py-1.5 flex flex-col gap-0.5 hover:bg-slate-50 active:bg-slate-100 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
         >
-            <span className="text-[12.5px] font-medium text-slate-900 truncate">
-                {template.name}
+            <span className="flex items-center gap-1.5 min-w-0">
+                <span className="text-[12.5px] font-medium text-slate-900 truncate">
+                    {template.name}
+                </span>
+                {hasHtml && (
+                    <span
+                        className="shrink-0 h-4 px-1 rounded bg-sky-50 text-sky-700 text-[9.5px] font-medium inline-flex items-center"
+                        title="Has an HTML body, which is inserted with its formatting"
+                    >
+                        HTML
+                    </span>
+                )}
             </span>
             {bodyPreview && (
                 <span className="text-[11px] text-slate-400 truncate leading-snug">

@@ -16,12 +16,15 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/warmbly/warmbly/internal/api/middleware"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/formwire"
 )
 
@@ -71,6 +74,7 @@ type Config struct {
 }
 
 type Server struct {
+	redirects *redirects
 	client    *backendClient
 	views     *ttlSet
 	limits    *ipLimiter
@@ -109,8 +113,10 @@ func New(cfg Config) (*Server, error) {
 	if limit <= 0 {
 		limit = submitDefaultLimit
 	}
+	client := newBackendClient(strings.TrimRight(cfg.BackendURL, "/"), cfg.InternalToken)
 	return &Server{
-		client:    newBackendClient(strings.TrimRight(cfg.BackendURL, "/"), cfg.InternalToken),
+		redirects: newRedirects(client),
+		client:    client,
 		views:     newTTLSet(viewDedupeTTL),
 		limits:    newIPLimiter(limit, submitWindow),
 		events:    newIPLimiter(eventWindowLimit, submitWindow),
@@ -121,7 +127,20 @@ func New(cfg Config) (*Server, error) {
 }
 
 func (s *Server) Router(trustedProxies []string) (*gin.Engine, error) {
-	r := gin.Default()
+	// Not gin.Default(): its logger prints the full request URI, and the form
+	// page carries the per-contact prefill ticket as ?t=<uuid>. That ticket
+	// discloses the contact's name, address, company and phone to whoever
+	// holds it, so it must not be written to an access log.
+	//
+	// Release mode too, unless the operator asked for otherwise: this is an
+	// internet-facing service, and debug mode prints the route table and a
+	// warning banner on every start.
+	if env := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))); os.Getenv("GIN_MODE") == "" &&
+		env != "" && env != "dev" && env != "development" && env != "local" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+	r := gin.New()
+	r.Use(middleware.RequestLogger(), gin.Recovery(), middleware.PageHeaders(formsHost()))
 	// Same posture as the backend: trust no proxy unless the operator names
 	// it, so a forged X-Forwarded-For cannot dodge the submit limiter.
 	if len(trustedProxies) > 0 {
@@ -131,9 +150,21 @@ func (s *Server) Router(trustedProxies []string) (*gin.Engine, error) {
 	} else if err := r.SetTrustedProxies(nil); err != nil {
 		return nil, err
 	}
+	r.Use(s.domainRedirect)
 	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	r.GET("/", rootPage)
 	r.GET("/forms.js", s.ServeFormsEmbedJS)
 	r.GET("/f/:publicID", s.ServeFormShell)
+
+	// A scripted caller under /api expects JSON; a human anywhere else gets the
+	// page.
+	r.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
+			return
+		}
+		notFoundPage(c)
+	})
 
 	// Hashed filenames, so the bundles are immutable by construction.
 	assets := r.Group("/assets", func(c *gin.Context) {
@@ -403,4 +434,13 @@ func (s *Server) SubmitForm(c *gin.Context) {
 func (s *Server) ServeFormsEmbedJS(c *gin.Context) {
 	c.Header("Cache-Control", "public, max-age=3600")
 	c.Data(http.StatusOK, "application/javascript; charset=utf-8", formsEmbedJS)
+}
+
+// formsHost is the hostname of FORMS_DOMAIN, the one host the forms service sends HSTS for.
+func formsHost() string {
+	u, err := url.Parse(config.FormsBaseURL())
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/warmbly/warmbly/internal/api/middleware"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
 )
 
 type completeOnboardingRequest struct {
@@ -49,19 +50,16 @@ var validTeamSizes = map[string]bool{
 func (h *Handler) CompleteOnboarding(c *gin.Context) {
 	var req completeOnboardingRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
-	if req.FirstName == "" || req.LastName == "" {
-		errx.Handle(c, errx.New(errx.BadRequest, "First name and last name are required."))
+	first, last, xerr := validatePersonName(req.FirstName, req.LastName)
+	if xerr != nil {
+		errx.Handle(c, xerr)
 		return
 	}
-
-	if len(req.FirstName) > 50 || len(req.LastName) > 50 {
-		errx.Handle(c, errx.New(errx.BadRequest, "Name must be 50 characters or less."))
-		return
-	}
+	req.FirstName, req.LastName = first, last
 
 	if !validReferralSources[req.ReferralSource] {
 		errx.Handle(c, errx.New(errx.BadRequest, "Invalid referral source."))
@@ -104,18 +102,16 @@ type updateProfileRequest struct {
 func (h *Handler) UpdateUserProfile(c *gin.Context) {
 	var req updateProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
-	if req.FirstName == "" || req.LastName == "" {
-		errx.Handle(c, errx.New(errx.BadRequest, "First name and last name are required."))
+	first, last, xerr := validatePersonName(req.FirstName, req.LastName)
+	if xerr != nil {
+		errx.Handle(c, xerr)
 		return
 	}
-	if len(req.FirstName) > 50 || len(req.LastName) > 50 {
-		errx.Handle(c, errx.New(errx.BadRequest, "Name must be 50 characters or less."))
-		return
-	}
+	req.FirstName, req.LastName = first, last
 
 	userID := middleware.GetUserID(c)
 	uid, err := uuid.Parse(userID)
@@ -142,7 +138,7 @@ type updateSendPreferencesRequest struct {
 func (h *Handler) UpdateSendPreferences(c *gin.Context) {
 	var req updateSendPreferencesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	if req.UndoSendSeconds < config.UndoSendSecondsMin || req.UndoSendSeconds > config.UndoSendSecondsMax {
@@ -166,4 +162,36 @@ func (h *Handler) UpdateSendPreferences(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"undo_send_seconds": req.UndoSendSeconds})
+}
+
+// CompleteProductTour records that the caller finished or skipped the product
+// tour. Repeating it is harmless: the first time is kept.
+func (h *Handler) CompleteProductTour(c *gin.Context) {
+	uid, err := uuid.Parse(middleware.GetUserID(c))
+	if err != nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	at, xerr := h.UserService.CompleteProductTour(c.Request.Context(), uid)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"product_tour_completed_at": at})
+}
+
+// validatePersonName applies the display-name rules to a first and last name,
+// returning their stored forms.
+func validatePersonName(first, last string) (string, string, *errx.Error) {
+	first, xerr := displayname.Validate("First name", first, displayname.Person, false)
+	if xerr != nil {
+		return "", "", xerr
+	}
+	last, xerr = displayname.Validate("Last name", last, displayname.Person, false)
+	if xerr != nil {
+		return "", "", xerr
+	}
+	return first, last, nil
 }

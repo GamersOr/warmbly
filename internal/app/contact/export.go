@@ -70,7 +70,13 @@ func (s *contactService) Export(
 		searchFilters = req.Filters
 	}
 	if searchFilters != nil {
+		if err := validateSort(*searchFilters); err != nil {
+			return "", "", 0, err
+		}
 		if err := validateLeadFilters(*searchFilters); err != nil {
+			return "", "", 0, err
+		}
+		if err := validateMailHosts(*searchFilters); err != nil {
 			return "", "", 0, err
 		}
 	}
@@ -188,7 +194,7 @@ func fieldHeader(f string) string {
 	case models.ContactExportFieldSubscribed:
 		return "Subscribed"
 	case models.ContactExportFieldCategories:
-		return "Categories"
+		return "Labels"
 	case models.ContactExportFieldCampaigns:
 		return "Campaigns"
 	case models.ContactExportFieldCreatedAt:

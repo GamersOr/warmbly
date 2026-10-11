@@ -21,7 +21,10 @@ func (h *Handler) ListTemplates(c *gin.Context) {
 	}
 
 	var q models.ListReplyTemplatesQuery
-	_ = c.ShouldBindQuery(&q)
+	if err := c.ShouldBindQuery(&q); err != nil {
+		errx.Handle(c, errx.InvalidQuery(err))
+		return
+	}
 
 	templates, xerr := h.TemplateService.List(c.Request.Context(), *orgID, q.Search)
 	if xerr != nil {
@@ -49,7 +52,7 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 
 	var data models.CreateReplyTemplate
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -105,7 +108,7 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 
 	var data models.UpdateReplyTemplate
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -190,7 +193,7 @@ func (h *Handler) ReorderTemplates(c *gin.Context) {
 
 	var data models.ReorderReplyTemplates
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 

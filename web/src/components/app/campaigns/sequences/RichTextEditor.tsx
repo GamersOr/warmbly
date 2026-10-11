@@ -54,7 +54,7 @@ import {
     PencilLineIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import useClickOutside from "@/hooks/useClickOutside";
 import { useAnchoredFloating } from "@/hooks/useAnchoredFloating";
 import { useConfirm } from "@/hooks/context/confirm";
@@ -62,6 +62,7 @@ import RichTextAIEdit from "@/components/app/ai/RichTextAIEdit";
 import RichTextAICaret from "@/components/app/ai/RichTextAICaret";
 import { useForms } from "@/lib/api/hooks/app/forms";
 import { EmailImage } from "./nodes/EmailImageNode";
+import { EmailImagePreviews } from "./nodes/EmailImagePreviews";
 import { EmailButton } from "./nodes/EmailButtonNode";
 import { ImageBubble, ImageMenu } from "./ImageControls";
 import { ButtonBubble, ButtonInsert } from "./ButtonControls";
@@ -164,6 +165,7 @@ export default function RichTextEditor({
     placeRef.current = placeImageFiles;
 
     const editor = useEditor({
+        injectCSS: false,
         extensions: [
             Document,
             EmailParagraph,
@@ -179,6 +181,7 @@ export default function RichTextEditor({
             ListItem,
             Link.configure({ openOnClick: false, autolink: true }),
             EmailImage,
+            EmailImagePreviews,
             EmailButton,
             // Real email markup: table layout, <div> containers, colours,
             // fonts and alignment. Without these a pasted design keeps its
@@ -323,7 +326,7 @@ export default function RichTextEditor({
                     )}
                 </div>
                 {/* Type `{{` → variable type-ahead at the caret. */}
-                <EditorSuggest editor={editor} links={links} />
+                <EditorSuggest editor={editor} variables={variables} links={links} />
             </div>
         );
     }
@@ -360,7 +363,7 @@ export default function RichTextEditor({
                     {/* Collapsed caret → sparkle companion + ⌘J to write with AI. */}
                     <RichTextAICaret editor={editor} />
                     {/* Type `{{` → variable type-ahead at the caret. */}
-                    <EditorSuggest editor={editor} links={links} />
+                    <EditorSuggest editor={editor} variables={variables} links={links} />
                 </>
             )}
         </div>
@@ -439,6 +442,9 @@ function Toolbar({
 }) {
     const [linkOpen, setLinkOpen] = React.useState(false);
     const [linkUrl, setLinkUrl] = React.useState("");
+    const linkBtnRef = React.useRef<HTMLSpanElement>(null);
+    const linkPanelRef = React.useRef<HTMLDivElement>(null);
+    useClickOutside(linkOpen, () => setLinkOpen(false), [linkBtnRef, linkPanelRef]);
 
     const applyLink = () => {
         const url = linkUrl.trim();
@@ -516,16 +522,18 @@ function Toolbar({
             <Btn active={editor.isActive("orderedList")} onClick={() => editor.chain().focus().toggleOrderedList().run()} title="Numbered list">
                 <ListOrderedIcon className="w-3.5 h-3.5" />
             </Btn>
-            <Btn
-                active={editor.isActive("link")}
-                onClick={() => {
-                    setLinkUrl(editor.getAttributes("link").href ?? "");
-                    setLinkOpen((o) => !o);
-                }}
-                title="Link"
-            >
-                <Link2Icon className="w-3.5 h-3.5" />
-            </Btn>
+            <span ref={linkBtnRef} className="contents">
+                <Btn
+                    active={editor.isActive("link")}
+                    onClick={() => {
+                        setLinkUrl(editor.getAttributes("link").href ?? "");
+                        setLinkOpen((o) => !o);
+                    }}
+                    title="Link"
+                >
+                    <Link2Icon className="w-3.5 h-3.5" />
+                </Btn>
+            </span>
             <ImageMenu editor={editor} />
             <ButtonInsert editor={editor} />
             <Divider />
@@ -574,6 +582,7 @@ function Toolbar({
             <AnimatePresence>
                 {linkOpen && (
                     <motion.div
+                        ref={linkPanelRef}
                         initial={{ opacity: 0, y: -4 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -4 }}
@@ -588,8 +597,6 @@ function Toolbar({
                                 if (e.key === "Enter") {
                                     e.preventDefault();
                                     applyLink();
-                                } else if (e.key === "Escape") {
-                                    setLinkOpen(false);
                                 }
                             }}
                             placeholder="https://…"
@@ -681,7 +688,7 @@ export function VariableMenu({
     const ref = React.useRef<HTMLDivElement>(null);
     // Ignores clicks inside the portaled [data-floating] panel, so only a click
     // truly outside the trigger+panel closes it.
-    useClickOutside(ref, () => setOpen(false));
+    useClickOutside(open, () => setOpen(false), ref);
     // floating-ui keeps the panel glued to the trigger through scroll/resize.
     const { setReference, setFloating, floatingStyle } = useAnchoredFloating(open, {
         placement: "bottom-start",
@@ -731,22 +738,25 @@ export function VariableMenu({
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
                                 transition={{ duration: 0.12 }}
-                                className="z-[60] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-md border border-slate-200 bg-white shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)]"
+                                className="z-[150] w-[340px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-md border border-slate-200 bg-white shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)]"
                             >
                         <div className="px-3 py-2 border-b border-slate-100">
                             <p className="text-[12px] font-medium text-slate-800">Personalization</p>
                             <p className="text-[10.5px] text-slate-400 mt-0.5">
-                                Replaced per contact on send · click to insert · hover for what each does
+                                Replaced on send · click to insert · hover for what each does
                             </p>
                         </div>
 
-                        {/* Contact fields — compact 2-column grid (description on hover). */}
-                        <div className="px-2 pt-2">
+                        {[
+                            { label: "Contact fields", tokens: variables.filter((v) => !v.includes(".Sender.")) },
+                            { label: "Sender fields", tokens: variables.filter((v) => v.includes(".Sender.")) },
+                        ].filter((group) => group.tokens.length > 0).map((group) => (
+                        <div key={group.label} className="px-2 pt-2">
                             <div className="px-1 pb-1 text-[10px] uppercase tracking-[0.14em] text-slate-400">
-                                Contact fields
+                                {group.label}
                             </div>
                             <div className="grid grid-cols-2 gap-1">
-                                {variables.map((v) => {
+                                {group.tokens.map((v) => {
                                     const meta = TOKEN_META[v];
                                     return (
                                         <button
@@ -771,6 +781,7 @@ export function VariableMenu({
                                 })}
                             </div>
                         </div>
+                        ))}
 
                         {links.length > 0 && (
                             <div className="px-2 pt-2">
@@ -893,7 +904,7 @@ export function VariableMenu({
 function FormMenu({ onPick }: { onPick: (publicId: string) => void }) {
     const [open, setOpen] = React.useState(false);
     const ref = React.useRef<HTMLDivElement | null>(null);
-    useClickOutside(ref, () => setOpen(false));
+    useClickOutside(open, () => setOpen(false), ref);
     const { setReference, setFloating, floatingStyle } = useAnchoredFloating(open, {
         placement: "bottom-start",
         gap: 6,
@@ -939,7 +950,7 @@ function FormMenu({ onPick }: { onPick: (publicId: string) => void }) {
                                 animate={{ opacity: 1 }}
                                 exit={{ opacity: 0 }}
                                 transition={{ duration: 0.12 }}
-                                className="z-[60] w-72 max-w-[calc(100vw-24px)] overflow-hidden rounded-md border border-slate-200 bg-white p-2 shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)]"
+                                className="z-[150] w-72 max-w-[calc(100vw-24px)] overflow-hidden rounded-md border border-slate-200 bg-white p-2 shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)]"
                             >
                                 <div className="px-1 pb-1.5">
                                     <p className="text-[12px] font-medium text-slate-800">Insert a form</p>

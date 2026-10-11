@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"net"
 	"net/url"
 	"os"
@@ -34,6 +35,56 @@ func AppBaseURL() string {
 	return "https://app.warmbly.com"
 }
 
+// DashboardOrigin allows exact configured origins only, never a CORS wildcard.
+func DashboardOrigin(value string) string {
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		return ""
+	}
+	allowed := splitCSV(os.Getenv("CORS_ALLOW_ORIGINS"))
+	allowed = append(allowed, os.Getenv("APP_ORIGIN"), AppBaseURL())
+	for _, candidate := range allowed {
+		v, err := url.Parse(strings.TrimSpace(candidate))
+		if err == nil && v.User == nil && v.Scheme+"://"+v.Host == value {
+			return value
+		}
+	}
+	return ""
+}
+
+type dashboardOriginKey struct{}
+
+func PrimaryDashboardOrigin() string {
+	if origin := DashboardOrigin(strings.TrimSpace(os.Getenv("APP_ORIGIN"))); origin != "" {
+		return origin
+	}
+	u, err := url.Parse(AppBaseURL())
+	if err != nil || u.User != nil {
+		return ""
+	}
+	return DashboardOrigin(u.Scheme + "://" + u.Host)
+}
+
+func WithDashboardOrigin(ctx context.Context, origin string) context.Context {
+	return context.WithValue(ctx, dashboardOriginKey{}, DashboardOrigin(origin))
+}
+
+func DashboardOriginFromContext(ctx context.Context) string {
+	origin, _ := ctx.Value(dashboardOriginKey{}).(string)
+	return DashboardOrigin(origin)
+}
+
+func dashboardBaseURL(origin string) string {
+	if trusted := DashboardOrigin(origin); trusted != "" {
+		return trusted
+	}
+	return AppBaseURL()
+}
+
+func DashboardBaseURL(ctx context.Context) string {
+	return dashboardBaseURL(DashboardOriginFromContext(ctx))
+}
+
 // inferredAppBaseURL reconstructs the dashboard origin from the rest of the
 // deployment's own configuration. CORS_ALLOW_ORIGINS is exact when it is set
 // (the dashboard is the first origin the browser calls the API from);
@@ -60,34 +111,48 @@ func inferredAppBaseURL() string {
 // it: a CLI or a developer client cannot otherwise find the socket on a
 // self-hosted instance, where the host layout is whatever the operator chose.
 func WebsocketURL() string {
-	v := strings.TrimRight(strings.TrimSpace(os.Getenv("WEBSOCKET_URL")), "/")
+	return NormalizeWebsocketURL(os.Getenv("WEBSOCKET_URL"))
+}
+
+func NormalizeWebsocketURL(value string) string {
+	v := strings.TrimSpace(value)
 	if v == "" {
 		return ""
 	}
-	// The variable is written three ways in the wild: a bare host, the Phoenix
-	// socket mount (".../socket"), and the full transport endpoint. Clients
-	// dial what this returns, so all three normalise to the last one. Matching
-	// on a "/socket" substring instead of the suffix left ".../socket"
-	// untouched, which is not a websocket endpoint.
-	switch {
-	case strings.HasSuffix(v, "/socket/websocket"):
-	case strings.HasSuffix(v, "/socket"):
-		v += "/websocket"
-	default:
-		v += "/socket/websocket"
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" || u.User != nil {
+		return ""
 	}
-	return v
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	case "http":
+		u.Scheme = "ws"
+	case "ws", "wss":
+	default:
+		return ""
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	// Normalize the path, not the query string on a legacy reverse-proxy URL.
+	switch {
+	case strings.HasSuffix(u.Path, "/socket/websocket"):
+	case strings.HasSuffix(u.Path, "/socket"):
+		u.Path += "/websocket"
+	default:
+		u.Path += "/socket/websocket"
+	}
+	u.RawPath = ""
+	u.Fragment = ""
+	return u.String()
 }
 
-func GetPasswordResetURL(sessionToken string) string {
-	return AppBaseURL() + "/auth/reset-password/confirm?session=" + url.QueryEscape(sessionToken)
+func GetPasswordResetURL(sessionToken, origin string) string {
+	return dashboardBaseURL(origin) + "/auth/reset-password/confirm?session=" + url.QueryEscape(sessionToken)
 }
 
-// GetInviteURL is the team-invitation accept link. Same reasoning as the reset
-// URL: the dashboard's own copy-link button already used the browser origin, so
-// only the emailed variant was broken on self-host.
-func GetInviteURL(token string) string {
-	return AppBaseURL() + "/invite?token=" + url.QueryEscape(token)
+// GetInviteURL uses a trusted initiating dashboard, or the primary dashboard.
+func GetInviteURL(token, origin string) string {
+	return dashboardBaseURL(origin) + "/invite?token=" + url.QueryEscape(token)
 }
 
 // FormsBaseURL is the origin hosted form pages are served from: FORMS_DOMAIN,

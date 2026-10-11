@@ -75,7 +75,7 @@ func (h *Handler) CreateSegment(c *gin.Context) {
 	}
 	var in models.SegmentWrite
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	var createdBy *uuid.UUID
@@ -98,7 +98,7 @@ func (h *Handler) UpdateSegment(c *gin.Context) {
 	}
 	var in models.SegmentWrite
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	out, xerr := h.SegmentService.Update(c.Request.Context(), orgID, id, &in)
@@ -131,7 +131,7 @@ func (h *Handler) PreviewSegment(c *gin.Context) {
 	}
 	var in models.SegmentPreview
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	n, xerr := h.SegmentService.Preview(c.Request.Context(), orgID, &in)
@@ -150,7 +150,7 @@ func (h *Handler) SetSegmentMembers(c *gin.Context) {
 	}
 	var in models.SegmentMembersWrite
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	// "Select all matching" names a filter instead of listing ids; resolve it
@@ -180,7 +180,7 @@ func (h *Handler) GetSegmentMemberModes(c *gin.Context) {
 		Contacts []string `json:"contacts"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	modes, xerr := h.SegmentService.MemberModes(c.Request.Context(), orgID, id, in.Contacts)
@@ -203,7 +203,7 @@ func (h *Handler) AddSegmentToCampaign(c *gin.Context) {
 	}
 	var in models.SegmentAddToCampaign
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	res, xerr := h.SegmentService.AddToCampaign(c.Request.Context(), orgID, middleware.GetUserID(c), id, &in)
@@ -245,7 +245,9 @@ func (h *Handler) ListCampaignSegments(c *gin.Context) {
 }
 
 // SetCampaignSegments replaces a campaign's linked segments. Members of the
-// linked segments are enrolled as leads immediately and kept current.
+// linked segments are enrolled as leads immediately and kept current; a
+// detached segment's leads are withdrawn again unless the campaign has already
+// written to them or somebody added them by hand.
 func (h *Handler) SetCampaignSegments(c *gin.Context) {
 	orgID, campaignID, ok := campaignSegmentScope(c)
 	if !ok {
@@ -253,7 +255,7 @@ func (h *Handler) SetCampaignSegments(c *gin.Context) {
 	}
 	var in models.CampaignSegmentsWrite
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	// An omitted field must not read as "detach everything"; only an
@@ -262,13 +264,15 @@ func (h *Handler) SetCampaignSegments(c *gin.Context) {
 		errx.Handle(c, errx.New(errx.BadRequest, "segment_ids is required; send [] to detach all segments"))
 		return
 	}
-	links, added, xerr := h.SegmentService.SetCampaignSegments(c.Request.Context(), orgID, campaignID, &in)
+	links, added, change, xerr := h.SegmentService.SetCampaignSegments(c.Request.Context(), orgID, campaignID, &in)
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
 	}
-	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityCampaign, &campaignID, nil, map[string]string{"segments": itoa(len(links)), "added": itoa(added)})
-	c.JSON(http.StatusOK, gin.H{"data": links, "added": added})
+	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityCampaign, &campaignID, nil, map[string]string{
+		"segments": itoa(len(links)), "added": itoa(added), "withdrawn": itoa(change.Withdrawn),
+	})
+	c.JSON(http.StatusOK, gin.H{"data": links, "added": added, "withdrawn": change.Withdrawn, "contacted": change.Contacted})
 }
 
 // ListSegmentOverrides lists the contacts pinned into or out of a segment.

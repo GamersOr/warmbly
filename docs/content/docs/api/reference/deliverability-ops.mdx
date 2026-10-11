@@ -49,6 +49,7 @@ Returns the `AdvancedOutreachSettings` object directly (not wrapped in an envelo
     "out_of_office_keywords": ["out of office", "ooo", "vacation", "abwesenheitsnotiz"],
     "question_keywords": ["?", "how", "price"],
     "auto_create_crm_task": true,
+    "crm_task_intents": ["positive", "question", "neutral", "negative"],
     "auto_pause_on_negative": false,
     "auto_suppress_on_unsubscribe_keyword": true,
     "hold_on_out_of_office": true,
@@ -87,7 +88,11 @@ Returns the `AdvancedOutreachSettings` object directly (not wrapped in an envelo
 }
 ```
 
-The `unsubscribe` block is the workspace default for the opt-out appended after the signature of every campaign email: `mode` is `text` (a reply-to-opt-out sentence, the default), `link` (a sentence with the recipient's signed unsubscribe link) or `off`; a campaign's own `unsubscribe_mode` (`inherit` by default) overrides it. Copy fields are single lines of at most 300 characters and fall back to the defaults when blank. See the [unsubscribe guide](/guides/unsubscribe/).
+The `unsubscribe` block is the workspace default for the opt-out appended after the signature of every campaign email: `mode` is `text` (a reply-to-opt-out sentence, the default), `link` (a sentence with the recipient's own unsubscribe link) or `off`; a campaign's own `unsubscribe_mode` (`inherit` by default) overrides it. Copy fields are single lines of at most 300 characters and fall back to the defaults when blank. See the [unsubscribe guide](/guides/unsubscribe/).
+
+<Callout type="info" title="Reply follow-up tasks are per intent">
+`reply_intent.auto_create_crm_task` opens a CRM task when a classified reply lands, and `reply_intent.crm_task_intents` names which intents are worth one. Omit the field (or send `null`) and the default applies: `positive`, `question`, `neutral`, `negative`, which is every human intent and no automated one. Send `["positive"]` to narrow it, `["positive", "question", "neutral", "negative", "out_of_office", "automated"]` to include auto-responders and bounces, or `[]` to open nothing (the same as turning the switch off). An intent outside that vocabulary is refused with `400`. See [Tasks](/guides/contacts-crm/#tasks).
+</Callout>
 
 <Callout type="info" title="Content score floor is clamped">
 `preflight.min_content_score` is stored clamped to `1`-`100`. A value outside that range is corrected on write rather than rejected, so a floor above `100` cannot flag every campaign permanently. Set `preflight.check_content_score` to `false` to turn the check off; the score never blocks or delays a send either way. See [Content checks](/guides/campaigns/).
@@ -101,11 +106,15 @@ The `unsubscribe` block is the workspace default for the opt-out appended after 
 `send_time_optimization.enabled` defaults to `false`. Set it to `true` and campaign scheduling holds each send until the recipient's local clock reaches one of `preferred_hours`, resolving the recipient's timezone from the contact's `timezone` custom field, then the country-code suffix of its email domain, then `default_contact_timezone`. It can only delay a send: the campaign window, the mailbox's sending profile, its daily cap, and the campaign end date all still bind. See [Sending behavior](/guides/sending-behavior/).
 </Callout>
 
+<Callout type="info" title="Mail that needs action stays in the inbox by default">
+`inbox_tagging.action_required_in_inbox` defaults to `true`. With automatic inbox tagging on, each automated notification is also asked whether it needs someone to act (a failed payment, a suspended account, a suspicious sign-in, a sending limit, a service about to expire), and the ones that do stay in the inbox labelled Action required instead of moving to the Automated view. A question in `inbox_tagging.questions` with `automated: true` is also asked of notifications. See [Mail that needs your action](/guides/inbox-tagging/#mail-that-needs-your-action).
+</Callout>
+
 ## Update outreach settings
 
 `PATCH /outreach/settings`
 
-Replaces the organization's advanced outreach settings with the supplied object. Send the full settings block (the value is upserted, not deep-merged). Returns no body on success.
+Replaces the organization's advanced outreach settings with the supplied object. Send the full settings block (the value is upserted, not deep-merged). A field the object omits takes its default, not its previous value. Returns no body on success.
 
 Auth: **Scope** `WRITE_CAMPAIGNS` · **Org permission** `manage_settings`
 
@@ -283,12 +292,14 @@ Auth: **Scope** `SEND_CAMPAIGNS` · **Org permission** `send_campaigns`
 
 | Parameter | In | Type | Description |
 |-----------|----|------|-------------|
-| `status` | query | string | Optional status filter (e.g. `pending`, `replayed`). |
+| `status` | query | string | Optional status filter (e.g. `pending`, `replayed`, `resolved`). |
 | `limit` | query | integer | Max rows to return, 1 to 200 (default 100). |
 
 ### Response
 
 Returns a `data` array of dead-letter records. This endpoint is not cursor-paginated; it returns up to `limit` rows in one response.
+
+Send dead letters become `resolved` only after an authoritative worker or operator-confirmed send outcome is reconciled. Recovery does not resend mail: the original payload, error and attempts stay available for inspection. Unknown outcomes remain pending and held. A missing Sent-folder copy, reservation marker or executor marker is not proof that nothing was sent.
 
 ```json
 {
@@ -315,7 +326,9 @@ Returns a `data` array of dead-letter records. This endpoint is not cursor-pagin
 
 `POST /tasks/dlq/:id/replay`
 
-Re-dispatches a dead-lettered task. Because a replay can transmit real mail, this requires the send permission rather than plain write access.
+Replays only a dead-lettered campaign wakeup with explicit durable wakeup intent, rechecked under its campaign lock. Once a task binds a contact or sequence for sending, its send intent stays restrictive even after either record is deleted. Legacy or imported tasks without verified wakeup intent and all send-capable tasks return `409 Conflict` and retain their dead-letter evidence. A retry date, JSON payload, null contact/sequence, or missing send marker cannot grant replay. This route requires the send permission rather than plain write access.
+
+Database downgrades refuse to discard this provenance while send-intent or unresolved unverified dead-letter rows exist. Keep the schema and roll forward instead.
 
 Auth: **Scope** `SEND_CAMPAIGNS` · **Org permission** `send_campaigns`
 
@@ -807,7 +820,7 @@ At least one of the three must carry something, and the three together are cappe
     "score": 84,
     "issues": []
   },
-  "model": "gpt-4o-mini",
+  "model": "gpt-6-luna",
   "tokens_used": 812,
   "credits_remaining": 248,
   "credits_charged": 2

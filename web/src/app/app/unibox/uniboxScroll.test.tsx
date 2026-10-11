@@ -12,6 +12,7 @@ import React from "react";
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { screen, act, fireEvent } from "@testing-library/react";
 import {
+    findThreadRow,
     installLayoutShims,
     mount,
     resetScrollTops,
@@ -86,8 +87,10 @@ describe("unibox scroll position", SUITE, () => {
         const before = scroller();
         await scrollTo(1200);
 
+        const row4 = await findThreadRow("Subject 4");
+
         await act(async () => {
-            fireEvent.click(screen.getByText("Subject 4").closest("button")!);
+            fireEvent.click(row4);
         });
         await settle();
 
@@ -103,18 +106,20 @@ describe("unibox scroll position", SUITE, () => {
 
         const search = screen.getByPlaceholderText(/^Search unread/i) as HTMLInputElement;
         await act(async () => {
-            fireEvent.change(search, { target: { value: "invoice" } });
+            fireEvent.change(search, { target: { value: "Subject 2" } });
         });
         await settle();
 
+        const row2 = await findThreadRow("Subject 2");
+
         await act(async () => {
-            fireEvent.click(screen.getByText("Subject 2").closest("button")!);
+            fireEvent.click(row2);
         });
         await settle();
 
         expect(
             (screen.getByPlaceholderText(/^Search unread/i) as HTMLInputElement).value,
-        ).toBe("invoice");
+        ).toBe("Subject 2");
     });
 
     it("puts a remembered offset back after the pane is hidden and shown again", async () => {
@@ -125,15 +130,18 @@ describe("unibox scroll position", SUITE, () => {
         await settle();
         await scrollTo(700);
 
+        const row3 = await findThreadRow("Subject 3");
+
         await act(async () => {
-            fireEvent.click(screen.getByText("Subject 3").closest("button")!);
+            fireEvent.click(row3);
         });
         await settle();
         scroller().scrollTop = 0;
 
-        // The thread pane's back link, the mobile way back to the list.
+        // The thread pane's back link, the mobile way back to the list. It
+        // names the scope the list shows.
         const back = screen
-            .getAllByRole("button", { name: "Inbox" })
+            .getAllByRole("button", { name: "Today" })
             .find((b) => b.className.includes("md:hidden"))!;
         await act(async () => {
             fireEvent.click(back);
@@ -149,13 +157,13 @@ describe("unibox scroll position", SUITE, () => {
         await scrollTo(900);
 
         await act(async () => {
-            await router.navigate("/app/analytics");
+            await router.navigate({ to: "/app/analytics" });
         });
         await settle();
         expect(screen.queryByText("Somewhere else")).toBeTruthy();
 
         await act(async () => {
-            await router.navigate("/app/unibox/week");
+            await router.navigate({ to: "/app/unibox/{-$scope}/{-$threadId}", params: { scope: "week", threadId: undefined } });
         });
         await settle();
 

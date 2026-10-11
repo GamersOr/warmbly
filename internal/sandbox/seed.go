@@ -265,6 +265,9 @@ func Seed(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	if err := seedMailboxes(ctx, pool); err != nil {
 		return err
 	}
+	if err := seedPlacementPanel(ctx, pool); err != nil {
+		return err
+	}
 	if err := seedSubscription(ctx, pool); err != nil {
 		return err
 	}
@@ -303,6 +306,7 @@ func Seed(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	fmt.Println("sandbox seeded:")
 	fmt.Printf("  dashboard  %s / %s (org: Sunrise Labs)\n", SandboxLoginEmail, SandboxLoginPassword)
 	fmt.Printf("  mailboxes  %d senders on @sunrise.test (SMTP -> mailpit, IMAP -> dovecot), signatures + tags on all\n", len(sandboxMailboxes))
+	fmt.Printf("  placement  %d seed inboxes on the instance panel; the simulator files each test copy into Inbox or Junk\n", len(sandboxSeeds))
 	fmt.Println("  campaigns  active, paused, completed, and draft - every list bucket filled")
 	fmt.Println("  warmup     enabled on all senders, premium pool, 10 days of ramp stats")
 	fmt.Println("  history    funnel progress, unified inbox, CRM pipeline, templates, notifications, chart rollups")
@@ -313,6 +317,7 @@ func Seed(ctx context.Context, pool *pgxpool.Pool, cfg Config) error {
 	if err := runAdvisor(ctx, pool); err != nil {
 		return err
 	}
+	seed.ForgetCachedUsers(ctx, pool)
 	return nil
 }
 
@@ -370,12 +375,16 @@ func seedIdentity(ctx context.Context, pool *pgxpool.Pool) error {
 			return err
 		}
 		if _, err := pool.Exec(ctx, `
-			INSERT INTO users (id, first_name, last_name, email, password_hash)
-			VALUES ($1, 'Sunny', 'Sandbox', $2, $3)
+			INSERT INTO users (id, first_name, last_name, email, password_hash, onboarding_completed_at)
+			VALUES ($1, 'Sunny', 'Sandbox', $2, $3, NOW())
 			ON CONFLICT (id) DO NOTHING`,
 			sandboxUser, SandboxLoginEmail, hash); err != nil {
 			return err
 		}
+	}
+	// The demo account lands straight in the dashboard, even on a database seeded before this rule.
+	if _, err := pool.Exec(ctx, `UPDATE users SET onboarding_completed_at = NOW() WHERE id = $1 AND onboarding_completed_at IS NULL`, sandboxUser); err != nil {
+		return err
 	}
 
 	if _, err := pool.Exec(ctx, `

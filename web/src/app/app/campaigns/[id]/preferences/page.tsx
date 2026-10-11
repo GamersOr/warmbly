@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Loading } from "@/components/loader";
 import { useCampaign } from "@/hooks/context/campaign";
 import type Campaign from "@/lib/api/models/app/campaigns/Campaign";
+import { isValidCampaignDailyLimit } from "@/lib/api/models/app/campaigns/Campaign";
 import {
     DeliverabilitySection,
     GeneralSection,
@@ -16,12 +17,14 @@ import {
     RotationRampSection,
 } from "@/components/app/campaigns/preferences/CampaignEmails";
 import CampaignContactOrder from "@/components/app/campaigns/preferences/CampaignContactOrder";
+import { FirstEmailSection } from "@/components/app/campaigns/preferences/CampaignFirstEmail";
 import { GuardrailsSection } from "@/components/app/campaigns/preferences/CampaignGuardrails";
+import { PlacementMonitorSection } from "@/components/app/campaigns/preferences/CampaignPlacementMonitor";
 import { guardrailValidationError } from "@/lib/helper/guardrail";
 import CampaignFolderField from "@/components/app/campaigns/CampaignFolderField";
 import CampaignDangerZone from "@/components/app/campaigns/preferences/CampaignDangerZone";
 import useUpdateCampaign from "@/lib/api/hooks/app/campaigns/useUpdateCampaign";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 import useCampaignSenders from "@/lib/api/hooks/app/campaigns/useCampaignSenders";
@@ -59,6 +62,16 @@ const SECTIONS = [
         id: "guardrails",
         label: "Auto-pause",
         description: "Stop this campaign automatically when its bounce, complaint, or reply rate leaves the band you set.",
+    },
+    {
+        id: "placement",
+        label: "Placement monitor",
+        description: "Test where this campaign's first email lands on a schedule, and get told when it slips.",
+    },
+    {
+        id: "first-email",
+        label: "First email",
+        description: "When a new contact gets their first email after joining this campaign.",
     },
     {
         id: "leadflow",
@@ -222,6 +235,11 @@ export default function CampaignPreferences() {
             ...(newData.ramp_increment !== campaign.ramp_increment && { ramp_increment: newData.ramp_increment }),
             ...(newData.ramp_ceiling !== campaign.ramp_ceiling && { ramp_ceiling: newData.ramp_ceiling }),
 
+            // First email timing
+            ...(newData.entry_delay_minutes !== campaign.entry_delay_minutes && {
+                entry_delay_minutes: newData.entry_delay_minutes,
+            }),
+
             // ESP matching + new-lead throttle
             ...(newData.esp_match_mode !== campaign.esp_match_mode && { esp_match_mode: newData.esp_match_mode }),
             ...(newData.max_new_leads_per_day !== campaign.max_new_leads_per_day && {
@@ -279,7 +297,7 @@ export default function CampaignPreferences() {
     }, [explicitAccounts, savedAccounts]);
 
     const validationError = (): string | null => {
-        if (newData.daily_limit < DAILY_MIN || newData.daily_limit > DAILY_MAX) {
+        if (!isValidCampaignDailyLimit(newData.daily_limit, campaign.daily_limit)) {
             return `Daily limit must be between ${DAILY_MIN} and ${DAILY_MAX}.`;
         }
         if (newData.ramp_enabled && newData.ramp_start > newData.ramp_ceiling) {
@@ -352,6 +370,7 @@ export default function CampaignPreferences() {
                 return (
                     <SendingAccountsSection
                         newCampaign={newData}
+                        savedDailyLimit={campaign.daily_limit}
                         setNewCampaign={setNewData}
                         explicitAccounts={explicitAccounts}
                         setExplicitAccounts={setExplicitAccounts}
@@ -371,6 +390,10 @@ export default function CampaignPreferences() {
                         explicitAccounts={explicitAccounts}
                     />
                 );
+            case "placement":
+                return <PlacementMonitorSection campaignId={campaign.id} />;
+            case "first-email":
+                return <FirstEmailSection newCampaign={newData} setNewCampaign={setNewData} />;
             case "leadflow":
                 return <LeadFlowSection newCampaign={newData} setNewCampaign={setNewData} />;
             case "ccbcc":

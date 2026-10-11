@@ -2,6 +2,35 @@ package config
 
 import "testing"
 
+func TestNormalizeWebsocketURLWithPathsAndQueries(t *testing.T) {
+	for input, want := range map[string]string{
+		"https://realtime.test/socket?tenant=old":                  "wss://realtime.test/socket/websocket?tenant=old",
+		"http://localhost:4000/proxy/socket/websocket/?tenant=old": "ws://localhost:4000/proxy/socket/websocket?tenant=old",
+		"wss://realtime.test?tenant=old":                           "wss://realtime.test/socket/websocket?tenant=old",
+		"file:///etc/passwd":                                       "", "wss://user:password@realtime.test": "", "://bad": "",
+	} {
+		if got := NormalizeWebsocketURL(input); got != want {
+			t.Errorf("NormalizeWebsocketURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestNormalizeWebsocketURLPreservesLegacyConfiguration(t *testing.T) {
+	for _, input := range []string{"", " wss://realtime.test/ ", "wss://realtime.test/socket", "wss://realtime.test/socket/websocket/"} {
+		want := "wss://realtime.test/socket/websocket"
+		if input == "" {
+			want = ""
+		}
+		t.Setenv("WEBSOCKET_URL", input)
+		if got := NormalizeWebsocketURL(input); got != want {
+			t.Errorf("resolved websocket %q became %q, want %q", input, got, want)
+		}
+		if got := WebsocketURL(); got != want {
+			t.Errorf("environment websocket %q became %q, want %q", input, got, want)
+		}
+	}
+}
+
 // The hosted form URL has to be reachable on every install shape: the shared
 // host keeps its port (a share link that drops it points at nothing), and the
 // scheme follows the host rather than the port, because an install can

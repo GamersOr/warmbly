@@ -94,6 +94,12 @@ func warmblyContactFields() []FieldDef {
 	}
 }
 
+// ProviderSupportsAction reports whether action runs on a connection of provider.
+func ProviderSupportsAction(provider IntegrationProvider, action IntegrationAction) bool {
+	c := CapabilityFor(provider)
+	return c != nil && c.Action(action) != nil
+}
+
 // CapabilityFor returns the descriptor for a provider, or nil if the provider
 // has no configurable capability surface.
 func CapabilityFor(provider IntegrationProvider) *ProviderCapability {
@@ -172,8 +178,8 @@ func Capabilities() map[IntegrationProvider]ProviderCapability {
 			Provider: IntegrationSalesforce, Directions: pushOnly,
 			Objects: []CapabilityObject{salesforceContact},
 			Actions: []CapabilityAction{{
-				ID: IntegrationActionSalesforceUpsert, Label: "Create or update contact",
-				Description: "Upsert a Salesforce Contact (matched by email).",
+				ID: IntegrationActionSalesforceUpsert, Label: "Create or update Salesforce record",
+				Description: "Find the person's Lead or Contact by email, or create one, and apply the connection's field rules.",
 				Object:      "contact",
 			}},
 		},
@@ -213,6 +219,13 @@ func Capabilities() map[IntegrationProvider]ProviderCapability {
 		IntegrationZapier: automationCapability(IntegrationZapier),
 		IntegrationMake:   automationCapability(IntegrationMake),
 		IntegrationN8N:    automationCapability(IntegrationN8N),
+		IntegrationClay: {
+			Provider: IntegrationClay, Directions: []SyncDirection{SyncDirectionPush},
+			Actions: []CapabilityAction{{
+				ID: IntegrationActionClaySendRow, Label: "Send a row to Clay",
+				Description: "Add the event as a row in a Clay table, through the table's webhook URL.",
+			}},
+		},
 		IntegrationCalendly: {
 			Provider: IntegrationCalendly, Directions: pushOnly, SupportsBookingLink: true,
 		},

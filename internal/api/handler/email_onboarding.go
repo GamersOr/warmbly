@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/api/middleware"
+	"github.com/warmbly/warmbly/internal/app/email"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
@@ -15,6 +17,10 @@ import (
 // OnboardingOAuthStartRequest starts an OAuth round trip for a Gmail or Outlook account.
 type OnboardingOAuthStartRequest struct {
 	Provider string `json:"provider"`
+	// LoginHint preselects the mailbox in the provider's picker (an import's sign-in rows).
+	LoginHint string `json:"login_hint"`
+	// Return is "web" when the dashboard starts the flow: a sign-in window without an opener then returns to it.
+	Return string `json:"return"`
 }
 
 // OnboardingOAuthFinishRequest carries the authorization code + state back from the provider.
@@ -41,11 +47,15 @@ func (h *Handler) StartEmailOAuth(c *gin.Context) {
 
 	var req OnboardingOAuthStartRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
-	resp, xerr := h.EmailService.OAuthStart(c.Request.Context(), userID, orgID, models.InboxProvider(req.Provider))
+	returnOrigin := ""
+	if req.Return == "web" {
+		returnOrigin = c.GetHeader("Origin")
+	}
+	resp, xerr := h.EmailService.OAuthStart(c.Request.Context(), userID, orgID, models.InboxProvider(req.Provider), req.LoginHint, req.Return == "web", returnOrigin)
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -59,11 +69,11 @@ func (h *Handler) FinishEmailOAuth(c *gin.Context) {
 
 	var req OnboardingOAuthFinishRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
-	acc, reauthed, xerr := h.EmailService.OAuthFinish(c.Request.Context(), userIDStr, req.Code, req.State)
+	acc, reauthed, xerr := h.EmailService.OAuthFinish(c.Request.Context(), userIDStr, req.Code, req.State, h.mailboxFinishAuthorizer(userIDStr))
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -74,12 +84,41 @@ func (h *Handler) FinishEmailOAuth(c *gin.Context) {
 	if reauthed {
 		action, status = models.AuditActionUpdate, http.StatusOK
 	}
-	h.auditOrg(c, action, models.AuditEntityEmailAccount, &acc.ID, nil, map[string]string{
-		"provider": acc.Provider,
-		"email":    acc.Email,
-	})
+	// The flow's organization is the one the state was minted for, which the
+	// session may have switched away from since.
+	if acc.OrganizationID != nil {
+		h.auditInOrg(c, *acc.OrganizationID, action, models.AuditEntityEmailAccount, &acc.ID, nil, map[string]string{
+			"provider": acc.Provider,
+			"email":    acc.Email,
+		})
+	}
 
 	c.JSON(status, acc)
+}
+
+// mailboxFinishAuthorizer re-checks, at finish time, the bar the start route
+// held: membership to connect, manage-emails to renew an existing mailbox.
+func (h *Handler) mailboxFinishAuthorizer(userIDStr string) email.FinishAuthorizer {
+	return func(ctx context.Context, orgID uuid.UUID, reauth bool) *errx.Error {
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			return errx.ErrUnauthorized
+		}
+		if h.OrganizationService == nil {
+			return errx.ErrForbidden
+		}
+		if reauth {
+			return h.OrganizationService.RequirePermission(ctx, orgID, userID, models.PermManageEmails)
+		}
+		member, xerr := h.OrganizationService.GetMembership(ctx, orgID, userID)
+		if xerr != nil {
+			return xerr
+		}
+		if member == nil {
+			return errx.ErrForbidden
+		}
+		return nil
+	}
 }
 
 // ReauthEmailOAuth starts an OAuth round trip that renews the tokens of an
@@ -99,7 +138,7 @@ func (h *Handler) ReauthEmailOAuth(c *gin.Context) {
 		return
 	}
 
-	resp, xerr := h.EmailService.OAuthReauth(c.Request.Context(), userID, orgID, id)
+	resp, xerr := h.EmailService.OAuthReauth(c.Request.Context(), userID, orgID, id, c.GetHeader("Origin"))
 	if xerr != nil {
 		errx.Handle(c, xerr)
 		return
@@ -132,7 +171,7 @@ func (h *Handler) UpdateEmailSMTPIMAP(c *gin.Context) {
 
 	var req OnboardingSMTPIMAPCredentials
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -163,7 +202,7 @@ func (h *Handler) ConnectEmailSMTPIMAP(c *gin.Context) {
 
 	var req OnboardingSMTPIMAPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -205,7 +244,7 @@ func (h *Handler) ConnectEmailSMTPIMAPBulk(c *gin.Context) {
 
 	var req OnboardingSMTPIMAPBulkRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	if len(req.Accounts) == 0 {
@@ -253,4 +292,37 @@ func (h *Handler) GetMailboxAllowance(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, a)
+}
+
+type appPasswordSwitchRequest struct {
+	AppPassword string `json:"app_password"`
+}
+
+// SwitchEmailToAppPassword moves a mailbox off per-mailbox Google sign-in onto
+// Gmail's IMAP and SMTP with an app password, checked live before it is stored.
+// A repeat is refused once the mailbox has switched, so a retry changes nothing.
+func (h *Handler) SwitchEmailToAppPassword(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		errx.Handle(c, errx.ErrUuid)
+		return
+	}
+	var req appPasswordSwitchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.Handle(c, errx.ErrInvalid)
+		return
+	}
+	acc, xerr := h.EmailService.SwitchToAppPassword(c.Request.Context(), orgID, id, req.AppPassword)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityEmailAccount, &acc.ID, map[string]string{"auth_method": models.MailAuthOAuth},
+		map[string]string{"auth_method": models.MailAuthAppPassword, "email": acc.Email})
+	c.JSON(http.StatusOK, acc)
 }

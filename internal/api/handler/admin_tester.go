@@ -2,16 +2,21 @@ package handler
 
 import (
 	"crypto/rand"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/api/middleware"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/observability/errs"
 	"github.com/warmbly/warmbly/internal/pkg/argon2"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
 // A tester account is one an operator hands to somebody outside the team: a
@@ -25,15 +30,36 @@ type adminCreateTesterRequest struct {
 	Email   string `json:"email"`
 	OrgName string `json:"org_name"`
 	Reason  string `json:"reason"`
+	// OrgID joins the tester to a workspace that already exists instead of
+	// minting an empty one. That is what a vendor's reviewer needs: an OAuth
+	// verification is judged on the app doing real work, and a workspace with
+	// no mailbox in it shows none of that. RoleID is then required, because
+	// this is the one path that grants workspace access without anybody in
+	// that workspace asking for it, and a default would be a permission
+	// nobody chose.
+	OrgID  *uuid.UUID `json:"organization_id"`
+	RoleID *uuid.UUID `json:"role_id"`
+	// PasswordDays is how long the handed-out password works; 0 means the default.
+	PasswordDays int `json:"password_days"`
 }
+
+const (
+	testerPasswordDefaultDays = 30
+	testerPasswordMaxDays     = 90
+)
 
 type adminCreateTesterResponse struct {
 	UserID uuid.UUID `json:"user_id"`
 	Email  string    `json:"email"`
 	OrgID  uuid.UUID `json:"organization_id"`
+	// Joined reports whether the tester landed in an existing workspace rather
+	// than one made for it, so the panel can say which and the operator is not
+	// left guessing what they just handed out.
+	Joined bool `json:"joined_existing"`
 	// Password is returned once and never stored in a readable form. Losing it
 	// means making another tester, which is cheap.
-	Password string `json:"password"`
+	Password          string    `json:"password"`
+	PasswordExpiresAt time.Time `json:"password_expires_at"`
 }
 
 // testerPasswordAlphabet leaves out the characters that are misread when a
@@ -83,6 +109,26 @@ func (h *Handler) AdminCreateTester(c *gin.Context) {
 		return
 	}
 
+	if _, nerr := displayname.Validate("Workspace name", req.OrgName, displayname.Workspace, true); nerr != nil {
+		errx.JSON(c, nerr)
+		return
+	}
+
+	days := req.PasswordDays
+	if days == 0 {
+		days = testerPasswordDefaultDays
+	}
+	if days < 1 || days > testerPasswordMaxDays {
+		errx.JSON(c, errx.New(errx.BadRequest, "the password can be valid for 1 to 90 days"))
+		return
+	}
+	passwordExpiresAt := time.Now().Add(time.Duration(days) * 24 * time.Hour)
+
+	if req.OrgID != nil && req.RoleID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "joining an existing workspace needs a role, so the access granted is one somebody chose"))
+		return
+	}
+
 	if existing, lerr := h.UserRepo.GetUserByEmail(c.Request.Context(), parsed.Address); lerr == nil && existing != nil {
 		errx.JSON(c, errx.New(errx.BadRequest, "an account with that address already exists"))
 		return
@@ -103,45 +149,77 @@ func (h *Handler) AdminCreateTester(c *gin.Context) {
 	// exemption: that account would be invisible to the tester list,
 	// un-retryable because the address was taken, and reachable by whoever
 	// held the password.
-	created, cerr := h.UserRepo.CreateExemptUser(c.Request.Context(), parsed, hash, reason, adminID)
+	created, cerr := h.UserRepo.CreateExemptUser(c.Request.Context(), parsed, hash, reason, adminID, passwordExpiresAt)
 	if cerr != nil {
 		errx.JSON(c, errx.New(errx.Internal, "could not create the account"))
 		return
 	}
 
-	orgName := strings.TrimSpace(req.OrgName)
-	if orgName == "" {
-		orgName = "Tester workspace"
-	}
-	org, oerr := h.OrganizationService.Create(c.Request.Context(), created.ID, orgName)
-	if oerr != nil {
-		// Undo the account rather than leave the address taken by something
-		// unusable: revoking would not free it, and a retry would fail on the
-		// existing-email check, so the operator would have nowhere to go.
-		if derr := h.UserRepo.DeleteOrphanExemptUser(c.Request.Context(), created.ID); derr != nil {
-			errx.JSON(c, errx.New(errx.Internal,
-				"the workspace could not be created and the half-made account could not be removed; it is listed under Testers"))
+	// A tester joined to an existing workspace gets no workspace of its own on
+	// purpose. Owning one would leave the reviewer a member of two, and the
+	// dashboard only skips its workspace picker when there is exactly one, so
+	// the first thing they would meet is a chooser naming an empty workspace.
+	var orgID uuid.UUID
+	joined := req.OrgID != nil
+	if joined {
+		member, merr := h.OrganizationService.AttachTester(c.Request.Context(), *req.OrgID, created.ID, *adminID, *req.RoleID)
+		if merr != nil {
+			h.undoHalfMadeTester(c, created.ID, merr)
 			return
 		}
-		errx.JSON(c, errx.New(errx.Internal, "could not create the workspace, so nothing was created. Try again."))
-		return
-	}
-	if h.TrialService != nil {
-		// Best effort: without it the workspace has no subscription row and
-		// reads as unpaid, which is recoverable from the admin panel.
-		_ = h.TrialService.StartFreeTrialWithOrg(c.Request.Context(), created.ID, org.ID)
+		orgID = member.OrganizationID
+	} else {
+		orgName := strings.TrimSpace(req.OrgName)
+		if orgName == "" {
+			orgName = "Tester workspace"
+		}
+		org, oerr := h.OrganizationService.CreateTesterWorkspace(c.Request.Context(), created.ID, *adminID, orgName, reason, passwordExpiresAt)
+		if oerr != nil {
+			h.undoHalfMadeTester(c, created.ID, oerr)
+			return
+		}
+		orgID = org.ID
 	}
 
-	h.logTesterAction(c, *adminID, created.ID, "create_tester", map[string]any{
-		"email": created.Email, "reason": reason, "organization_id": org.ID.String(),
-	})
+	entry := map[string]any{
+		"email": created.Email, "reason": reason, "organization_id": orgID.String(),
+		"joined_existing": joined, "password_expires_at": passwordExpiresAt.UTC().Format(time.RFC3339),
+	}
+	if joined {
+		// The role is the whole of what this tester can reach, so it belongs in
+		// the audit row rather than only in the members table it can be
+		// changed out of later.
+		entry["role_id"] = req.RoleID.String()
+	}
+	h.logTesterAction(c, *adminID, created.ID, "create_tester", entry)
 
 	c.JSON(http.StatusOK, adminCreateTesterResponse{
-		UserID:   created.ID,
-		Email:    created.Email,
-		OrgID:    org.ID,
-		Password: password,
+		UserID:            created.ID,
+		Email:             created.Email,
+		OrgID:             orgID,
+		Joined:            joined,
+		Password:          password,
+		PasswordExpiresAt: passwordExpiresAt,
 	})
+}
+
+// undoHalfMadeTester removes an account whose workspace step failed. Leaving it
+// would take the address without giving anybody anything: revoking the
+// exemption does not free the address, and a retry fails the existing-email
+// check, so the operator would have nowhere to go. The delete is guarded on the
+// account holding no membership, so it cannot remove a tester that did join.
+//
+// The original error is what the operator sees, because a seat limit and a role
+// that does not exist are both things they can fix and neither is a 500. Only a
+// cleanup that itself fails changes the answer, since that is the one case
+// where something was left behind.
+func (h *Handler) undoHalfMadeTester(c *gin.Context, userID uuid.UUID, cause *errx.Error) {
+	if derr := h.UserRepo.DeleteOrphanExemptUser(c.Request.Context(), userID); derr != nil {
+		errx.JSON(c, errx.New(errx.Internal,
+			cause.Message+"; the half-made account could not be removed either, and it is listed under Testers"))
+		return
+	}
+	errx.JSON(c, cause)
 }
 
 // AdminListTesters returns every account holding a login-code exemption, which
@@ -159,8 +237,32 @@ func (h *Handler) AdminListTesters(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": list})
 }
 
-// AdminRevokeTester drops the exemption. The account stays, so anything it
-// created is still attributable; it simply stops bypassing the login code.
+func (h *Handler) AdminSeedTesterWorkspace(c *gin.Context) {
+	adminID := middleware.GetAdminUserID(c)
+	if adminID == nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+	orgID, err := uuid.Parse(c.Param("id"))
+	if err != nil || orgID == uuid.Nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "that is not a workspace id"))
+		return
+	}
+	if h.OrganizationService == nil {
+		errx.JSON(c, errx.New(errx.ServiceUnavailable, "sample data is not available on this instance"))
+		return
+	}
+	result, xerr := h.OrganizationService.SeedTesterWorkspace(c.Request.Context(), orgID, *adminID, c.ClientIP(), c.Request.UserAgent())
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// AdminRevokeTester drops the exemption, the handed-out password and every
+// session the account holds. The account stays, so anything it created is
+// still attributable.
 func (h *Handler) AdminRevokeTester(c *gin.Context) {
 	adminID := middleware.GetAdminUserID(c)
 	if adminID == nil {
@@ -176,12 +278,32 @@ func (h *Handler) AdminRevokeTester(c *gin.Context) {
 		errx.JSON(c, errx.New(errx.ServiceUnavailable, "accounts are not available on this instance"))
 		return
 	}
-	if err := h.UserRepo.SetLoginCodeExempt(c.Request.Context(), userID, false, "", nil); err != nil {
+	ctx := c.Request.Context()
+	// Sessions end first, so a failure leaves the tester listed for a retry.
+	if h.TokenService != nil {
+		if xerr := h.TokenService.RevokeOtherSessions(ctx, userID, uuid.Nil); xerr != nil {
+			errs.CaptureException(xerr)
+			errx.JSON(c, errx.New(errx.Internal, "could not end the account's sessions"))
+			return
+		}
+	}
+	cleared, err := h.UserRepo.RevokeTester(ctx, userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			errx.JSON(c, errx.New(errx.NotFound, "no such account"))
+			return
+		}
 		errx.JSON(c, errx.New(errx.Internal, "could not revoke the exemption"))
 		return
 	}
-	h.logTesterAction(c, *adminID, userID, "revoke_tester", nil)
-	c.JSON(http.StatusOK, gin.H{"revoked": true})
+	// A sign-in that landed between the two writes is ended too.
+	if h.TokenService != nil {
+		if xerr := h.TokenService.RevokeOtherSessions(ctx, userID, uuid.Nil); xerr != nil {
+			errs.CaptureException(xerr)
+		}
+	}
+	h.logTesterAction(c, *adminID, userID, "revoke_tester", map[string]any{"password_cleared": cleared})
+	c.JSON(http.StatusOK, gin.H{"revoked": true, "password_cleared": cleared})
 }
 
 func (h *Handler) logTesterAction(c *gin.Context, adminID, userID uuid.UUID, action string, details map[string]any) {

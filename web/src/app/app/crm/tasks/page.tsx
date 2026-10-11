@@ -20,11 +20,15 @@
 // priority, status), which preserves the TaskTypePicker + themed selectors.
 
 import React from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { taskBrowseFiltersSchema, taskBrowseViewSchema } from "@/lib/browse-crm";
 import {
     AlertTriangleIcon,
     ArrowUpDownIcon,
     CalendarClockIcon,
+    CheckIcon,
     CheckSquareIcon,
+    FlagIcon,
     LayoutListIcon,
     ListTreeIcon,
     Loader2Icon,
@@ -38,9 +42,9 @@ import {
     UsersRoundIcon,
     XIcon,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link } from "@tanstack/react-router";
 import useTeams from "@/lib/api/hooks/app/teams/useTeams";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { AnimatePresence, motion } from "framer-motion";
 import {
     Page,
@@ -59,6 +63,7 @@ import {
     PopoverMenu,
     PopoverMenuContent,
     PopoverMenuItem,
+    PopoverMenuLabel,
     PopoverMenuTrigger,
 } from "@/components/ui/popover-menu";
 import useSearchTasks from "@/lib/api/hooks/app/crm/tasks/useSearchTasks";
@@ -66,6 +71,8 @@ import useTasksSummary from "@/lib/api/hooks/app/crm/tasks/useTasksSummary";
 import useCreateCRMTask from "@/lib/api/hooks/app/crm/tasks/useCreateCRMTask";
 import useUpdateCRMTask from "@/lib/api/hooks/app/crm/tasks/useUpdateCRMTask";
 import useDeleteCRMTask from "@/lib/api/hooks/app/crm/tasks/useDeleteCRMTask";
+import useBulkDeleteTasks from "@/lib/api/hooks/app/crm/tasks/useBulkDeleteTasks";
+import useBulkUpdateTasks from "@/lib/api/hooks/app/crm/tasks/useBulkUpdateTasks";
 import useTaskTypes from "@/lib/api/hooks/app/crm/taskTypes/useTaskTypes";
 import useMembers from "@/lib/api/hooks/app/organizations/useMembers";
 import { useQueryClient } from "@tanstack/react-query";
@@ -75,16 +82,25 @@ import { useSuppressGlobalCursors } from "@/components/app/presence/GlobalCursor
 import { useLivePatch } from "@/hooks/useLivePatch";
 import ResourceViewers from "@/components/app/presence/ResourceViewers";
 import type CRMTask from "@/lib/api/models/app/crm/CRMTask";
+import type { CRMTaskWrite } from "@/lib/api/models/app/crm/CRMTask";
 import type { CRMTaskPriority, CRMTaskStatus } from "@/lib/api/models/app/crm/CRMTask";
 import type SearchTasks from "@/lib/api/models/app/crm/SearchTasks";
 import type { TaskSortBy } from "@/lib/api/models/app/crm/SearchTasks";
 import { EMPTY_TASK_SEARCH } from "@/lib/api/models/app/crm/SearchTasks";
+import type TaskSelection from "@/lib/api/models/app/crm/TaskSelection";
+import * as rowSelection from "@/lib/helper/rowSelection";
+import type { RowSelection } from "@/lib/helper/rowSelection";
 import type OrganizationMember from "@/lib/api/models/app/organizations/OrganizationMember";
 import type Team from "@/lib/api/models/app/teams/Team";
 import type { AppError } from "@/lib/api/client/normalizeError";
-import buildError from "@/lib/helper/buildError";
 import TaskTypePicker from "@/components/app/crm/TaskTypePicker";
 import { taskTypeColor } from "@/components/app/crm/taskTypes";
+import { Checkbox } from "@/components/ui/checkbox";
+import { cn, labelInk } from "@/lib/utils";
+import useCrmProvider from "@/hooks/useCrmProvider";
+import { CrmMark, CrmSyncedAt, OpenInCrm } from "@/components/app/crm/crmProviders";
+import { CrmHeaderStatus, CrmOwnerMappingLink } from "@/components/app/crm/crmMode";
+import { crmErrorMessage, useCrmOwnerIndex } from "@/components/app/crm/crmModeUtils";
 
 const PRIORITIES: { id: CRMTaskPriority; label: string; dot: string; text: string }[] = [
     { id: "urgent", label: "Urgent", dot: "bg-red-500", text: "text-red-700" },
@@ -92,6 +108,15 @@ const PRIORITIES: { id: CRMTaskPriority; label: string; dot: string; text: strin
     { id: "medium", label: "Medium", dot: "bg-sky-500", text: "text-sky-700" },
     { id: "low", label: "Low", dot: "bg-slate-400", text: "text-slate-600" },
 ];
+
+// Status names as this page says them ("Active", not "in progress"), for the
+// bulk-action toasts.
+const STATUS_LABELS: Record<CRMTaskStatus, string> = {
+    pending: "Pending",
+    in_progress: "Active",
+    completed: "Done",
+    cancelled: "Cancelled",
+};
 
 const STATUS_TABS: { id: "all" | CRMTaskStatus; label: string }[] = [
     { id: "all", label: "All" },
@@ -128,7 +153,7 @@ const TONE = {
     muted: { dot: "bg-slate-300", label: "text-slate-500" },
 } as const;
 
-function bucketize(due: string | undefined): Bucket {
+function bucketize(due: string | Date | undefined): Bucket {
     if (!due) return "no_due";
     const d = new Date(due);
     if (Number.isNaN(d.getTime())) return "no_due";
@@ -158,14 +183,16 @@ function isOverdue(t: CRMTask): boolean {
 }
 
 export default function TasksPage() {
-    const [filters, setFilters] = React.useState<SearchTasks>(EMPTY_TASK_SEARCH);
-    const [view, setView] = React.useState<"flat" | "grouped">("flat");
+    const [filters, setFilters] = useBrowseState<SearchTasks>("crm.tasks.filters", EMPTY_TASK_SEARCH, taskBrowseFiltersSchema);
+    const [view, setView] = useBrowseState("crm.tasks.view", "flat", taskBrowseViewSchema);
     const [newOpen, setNewOpen] = React.useState(false);
     const [editing, setEditing] = React.useState<CRMTask | null>(null);
 
     const search = useSearchTasks({ filters, limit: 50 });
     const summary = useTasksSummary(filters);
-    const tasks = search.tasks ?? [];
+    // Memoised: the loaded-id list and the grouped buckets both derive from it,
+    // and a fresh [] on every render would rebuild them every render.
+    const tasks = React.useMemo(() => search.tasks ?? [], [search.tasks]);
     const total = search.total;
     const sum = summary.data;
 
@@ -191,6 +218,91 @@ export default function TasksPage() {
     }, [teams]);
 
     const { data: types = [] } = useTaskTypes();
+    const { isExternal, crm } = useCrmProvider();
+
+    // ── Multi-select ───────────────────────────────────────────────────────
+    // Either the rows ticked, or every task the current filter matches minus
+    // the ones unticked afterwards. Only the second reaches past the pages
+    // loaded so far, and only the server can resolve it, so it travels as the
+    // filter itself.
+    const [rowSel, setRowSel] = React.useState<RowSelection>(rowSelection.emptySelection);
+    const bulkDelete = useBulkDeleteTasks();
+    const bulkUpdate = useBulkUpdateTasks();
+    const confirm = useConfirm();
+
+    const loadedIDs = React.useMemo(() => tasks.map((t) => t.id), [tasks]);
+    const clearSelection = React.useCallback(() => setRowSel(rowSelection.emptySelection), []);
+    const isRowSelected = React.useCallback((id: string) => rowSelection.isRowSelected(rowSel, id), [rowSel]);
+    const selectionCount = rowSelection.selectionCount(rowSel, total);
+    const loadedAllSelected = rowSelection.allLoadedSelected(rowSel, loadedIDs);
+    const canSelectAllMatching = rowSelection.canSelectAllMatching(rowSel, loadedIDs, total);
+
+    // A teammate deleting a row the user had unticked would otherwise leave its
+    // id in `excluded` for good, counting a task that no longer exists against
+    // the selection and eventually emptying it on screen while rows stay
+    // selected. Only sound once every matching row is loaded.
+    React.useEffect(() => {
+        if (search.hasNextPage) return;
+        setRowSel((sel) => rowSelection.pruneExcluded(sel, loadedIDs));
+    }, [search.hasNextPage, loadedIDs]);
+
+    // A selection means what the filter meant when it was made, so changing
+    // the filter drops it rather than silently applying to a different set.
+    const filterKey = JSON.stringify(filters);
+    React.useEffect(() => {
+        clearSelection();
+    }, [filterKey, clearSelection]);
+
+    const selection = React.useMemo<TaskSelection>(
+        () => (rowSel.all ? { tasks: [], all: true, filters, exclude: rowSel.excluded } : { tasks: rowSel.ids }),
+        [rowSel, filters],
+    );
+
+    const busy = bulkDelete.isPending || bulkUpdate.isPending;
+
+    // The server reports what it wrote, which is not always what was selected:
+    // a teammate can have deleted or already completed a row in between. Say
+    // the real number rather than the one on the button.
+    function report(affected: number, verb: string) {
+        if (affected === 0) {
+            toast("Nothing changed: those tasks are gone, or already in that state.");
+            return;
+        }
+        toast.success(`${affected.toLocaleString()} ${affected === 1 ? "task" : "tasks"} ${verb}`);
+    }
+
+    // The rows stay tickable while the request is in flight, so clear only the
+    // selection that was actually sent. Clearing unconditionally threw away a
+    // selection the user had started building while waiting.
+    function clearIfUnchanged(submitted: RowSelection) {
+        setRowSel((current) => (current === submitted ? rowSelection.emptySelection : current));
+    }
+
+    async function applyBulk(patch: { status?: CRMTaskStatus; priority?: CRMTaskPriority }, verb: string) {
+        if (selectionCount === 0) return;
+        const submitted = rowSel;
+        try {
+            const res = await bulkUpdate.mutateAsync({ ...selection, ...patch });
+            clearIfUnchanged(submitted);
+            report(res.affected, verb);
+        } catch (err) {
+            toast.error(crmErrorMessage(err));
+        }
+    }
+
+    function deleteSelected() {
+        if (selectionCount === 0) return;
+        const submitted = rowSel;
+        confirm?.show(deletePrompt(selectionCount), async () => {
+            try {
+                const res = await bulkDelete.mutateAsync(selection);
+                clearIfUnchanged(submitted);
+                report(res.affected, "deleted");
+            } catch (err) {
+                toast.error(crmErrorMessage(err));
+            }
+        });
+    }
 
     const statusTab: "all" | CRMTaskStatus =
         filters.statuses.length === 1 ? filters.statuses[0] : "all";
@@ -211,7 +323,11 @@ export default function TasksPage() {
 
     return (
         <Page>
-            <PageTopbar eyebrow="Tasks" subtitle="Follow-ups + reminders across the org">
+            <PageTopbar
+                eyebrow="Tasks"
+                subtitle={isExternal ? `${crm.name} ${crm.words.tasks} · follow-ups across the org` : "Follow-ups + reminders across the org"}
+            >
+                {isExternal && <CrmHeaderStatus />}
                 <ViewToggle view={view} onChange={setView} />
                 <TopbarAction icon={<PlusIcon className="w-3 h-3" />} onClick={() => setNewOpen(true)}>
                     New task
@@ -297,22 +413,44 @@ export default function TasksPage() {
                         onCreate={() => setNewOpen(true)}
                         onClear={() => setFilters(EMPTY_TASK_SEARCH)}
                     />
-                ) : view === "grouped" ? (
-                    <GroupedView
-                        tasks={tasks}
-                        memberByUser={memberByUser}
-                        teamById={teamById}
-                        types={types}
-                        onOpen={setEditing}
-                    />
                 ) : (
-                    <FlatView
-                        tasks={tasks}
-                        memberByUser={memberByUser}
-                        teamById={teamById}
-                        types={types}
-                        onOpen={setEditing}
-                    />
+                    <>
+                        <SelectAllBanner
+                            selectAll={rowSel.all}
+                            count={selectionCount}
+                            loadedCount={tasks.length}
+                            total={total}
+                            canSelectAllMatching={canSelectAllMatching}
+                            onSelectAllMatching={() => setRowSel(rowSelection.selectAllMatching())}
+                            onClear={clearSelection}
+                            grouped={view === "grouped"}
+                        />
+                        {view === "grouped" ? (
+                            <GroupedView
+                                tasks={tasks}
+                                memberByUser={memberByUser}
+                                teamById={teamById}
+                                types={types}
+                                onOpen={setEditing}
+                                isRowSelected={isRowSelected}
+                                onToggle={(id, on) => setRowSel((sel) => rowSelection.toggleRow(sel, id, on))}
+                                onToggleMany={(ids) => setRowSel((sel) => rowSelection.toggleGroup(sel, ids))}
+                                allSelected={(ids) => rowSelection.allLoadedSelected(rowSel, ids)}
+                            />
+                        ) : (
+                            <FlatView
+                                tasks={tasks}
+                                memberByUser={memberByUser}
+                                teamById={teamById}
+                                types={types}
+                                onOpen={setEditing}
+                                isRowSelected={isRowSelected}
+                                onToggle={(id, on) => setRowSel((sel) => rowSelection.toggleRow(sel, id, on))}
+                                allLoadedSelected={loadedAllSelected}
+                                onToggleAll={() => setRowSel((sel) => rowSelection.toggleLoaded(sel, loadedIDs))}
+                            />
+                        )}
+                    </>
                 )}
 
                 {!search.isPending && tasks.length > 0 && (
@@ -325,6 +463,15 @@ export default function TasksPage() {
                     />
                 )}
             </PageBody>
+
+            <TaskSelectionBar
+                count={selectionCount}
+                busy={busy}
+                onStatus={(status) => applyBulk({ status }, status === "completed" ? "marked done" : `set to ${STATUS_LABELS[status]}`)}
+                onPriority={(priority) => applyBulk({ priority }, `set to ${priority} priority`)}
+                onDelete={deleteSelected}
+                onClear={clearSelection}
+            />
 
             <TaskDialog
                 open={newOpen}
@@ -343,6 +490,177 @@ export default function TasksPage() {
     );
 }
 
+// ── Selection ───────────────────────────────────────────────
+
+// deletePrompt words the confirm so a 4,000-row select-all does not read the
+// same as three ticked rows.
+function deletePrompt(count: number): string {
+    if (count === 1) return "Delete this task?";
+    return `Delete ${count.toLocaleString()} tasks? This cannot be undone.`;
+}
+
+// The bridge between "every row on screen" and "every row that matches". The
+// list only ever holds the pages it has loaded, so ticking the header can never
+// mean the whole filtered set on its own; this says what is selected and offers
+// the rest in one click.
+function SelectAllBanner({
+    selectAll,
+    count,
+    loadedCount,
+    total,
+    canSelectAllMatching,
+    onSelectAllMatching,
+    onClear,
+    grouped,
+}: {
+    selectAll: boolean;
+    count: number;
+    loadedCount: number;
+    total: number;
+    canSelectAllMatching: boolean;
+    onSelectAllMatching: () => void;
+    onClear: () => void;
+    grouped: boolean;
+}) {
+    if (!selectAll && !canSelectAllMatching) return null;
+    const plural = (n: number) => (n === 1 ? "task" : "tasks");
+    return (
+        <div
+            className={`px-5 py-2 bg-sky-50/70 border border-sky-100 text-[12px] text-sky-900 flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1 text-center ${
+                grouped ? "rounded-md mb-3" : "border-x-0 border-t-0"
+            }`}
+        >
+            {selectAll ? (
+                <>
+                    <span>
+                        All <span className="font-medium">{count.toLocaleString()}</span> {plural(count)} matching this
+                        view are selected.
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onClear}
+                        className="font-medium underline underline-offset-2 hover:text-sky-700"
+                    >
+                        Clear selection
+                    </button>
+                </>
+            ) : (
+                <>
+                    <span>
+                        The <span className="font-medium">{loadedCount.toLocaleString()}</span> {plural(loadedCount)}{" "}
+                        loaded here are selected.
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onSelectAllMatching}
+                        className="font-medium underline underline-offset-2 hover:text-sky-700"
+                    >
+                        Select all {total.toLocaleString()} matching
+                    </button>
+                </>
+            )}
+        </div>
+    );
+}
+
+// Floating bulk-action bar, same shape as the contacts one: it appears with the
+// first ticked row and names the count before any action reads it.
+function TaskSelectionBar({
+    count,
+    busy,
+    onStatus,
+    onPriority,
+    onDelete,
+    onClear,
+}: {
+    count: number;
+    busy: boolean;
+    onStatus: (status: CRMTaskStatus) => void;
+    onPriority: (priority: CRMTaskPriority) => void;
+    onDelete: () => void;
+    onClear: () => void;
+}) {
+    if (count === 0) return null;
+    return (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 flex items-center max-w-[calc(100vw-16px)] flex-wrap justify-center md:max-w-none md:flex-nowrap gap-1.5 rounded-md border border-slate-200 bg-white shadow-[0_6px_20px_-4px_rgba(15,23,42,0.12),0_2px_4px_rgba(15,23,42,0.04)] px-2 py-1.5">
+            <div className="inline-flex items-center gap-1.5 px-2 h-7 rounded bg-sky-50 text-sky-700 text-[12px] font-medium">
+                <CheckIcon className="w-3 h-3" />
+                <span>{count.toLocaleString()} selected</span>
+            </div>
+            <button
+                type="button"
+                onClick={() => onStatus("completed")}
+                disabled={busy}
+                className="h-7 px-2.5 rounded text-[12px] text-slate-700 hover:text-emerald-700 hover:bg-emerald-50 font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+            >
+                {busy ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <CheckSquareIcon className="w-3 h-3" />}
+                <span>Mark done</span>
+            </button>
+            <PopoverMenu side="top" align="center">
+                <PopoverMenuTrigger asChild>
+                    <button
+                        type="button"
+                        disabled={busy}
+                        className="h-7 px-2.5 rounded text-[12px] text-slate-700 hover:text-slate-900 hover:bg-slate-100 font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                    >
+                        <SquareIcon className="w-3 h-3" />
+                        <span className="hidden sm:inline">Status</span>
+                    </button>
+                </PopoverMenuTrigger>
+                <PopoverMenuContent minWidth={170}>
+                    <PopoverMenuLabel>Set {count.toLocaleString()} to</PopoverMenuLabel>
+                    {STATUS_TABS.filter((t) => t.id !== "all").map((t) => (
+                        <PopoverMenuItem key={t.id} onSelect={() => onStatus(t.id as CRMTaskStatus)}>
+                            {t.label}
+                        </PopoverMenuItem>
+                    ))}
+                </PopoverMenuContent>
+            </PopoverMenu>
+            <PopoverMenu side="top" align="center">
+                <PopoverMenuTrigger asChild>
+                    <button
+                        type="button"
+                        disabled={busy}
+                        className="h-7 px-2.5 rounded text-[12px] text-slate-700 hover:text-slate-900 hover:bg-slate-100 font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+                    >
+                        <FlagIcon className="w-3 h-3" />
+                        <span className="hidden sm:inline">Priority</span>
+                    </button>
+                </PopoverMenuTrigger>
+                <PopoverMenuContent minWidth={170}>
+                    <PopoverMenuLabel>Set {count.toLocaleString()} to</PopoverMenuLabel>
+                    {PRIORITIES.map((p) => (
+                        <PopoverMenuItem
+                            key={p.id}
+                            onSelect={() => onPriority(p.id)}
+                            icon={<span className={`size-1.5 rounded-full ${p.dot}`} />}
+                        >
+                            {p.label}
+                        </PopoverMenuItem>
+                    ))}
+                </PopoverMenuContent>
+            </PopoverMenu>
+            <button
+                type="button"
+                onClick={onDelete}
+                disabled={busy}
+                className="h-7 px-2.5 rounded text-[12px] text-red-600 hover:text-white hover:bg-red-600 font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+            >
+                <TrashIcon className="w-3 h-3" />
+                <span className="hidden sm:inline">Delete</span>
+            </button>
+            <div className="h-4 w-px bg-slate-200" />
+            <button
+                type="button"
+                onClick={onClear}
+                className="h-7 px-2.5 rounded text-[12px] text-slate-500 hover:text-slate-900 transition-colors"
+            >
+                Clear
+            </button>
+        </div>
+    );
+}
+
 // ── Views ────────────────────────────────────────────────────────────────
 
 function FlatView({
@@ -351,17 +669,32 @@ function FlatView({
     teamById,
     types,
     onOpen,
+    isRowSelected,
+    onToggle,
+    allLoadedSelected,
+    onToggleAll,
 }: {
     tasks: CRMTask[];
     memberByUser: Map<string, OrganizationMember>;
     teamById: Map<string, Team>;
     types: { name: string; color: string }[];
     onOpen: (t: CRMTask) => void;
+    isRowSelected: (id: string) => boolean;
+    onToggle: (id: string, on: boolean) => void;
+    allLoadedSelected: boolean;
+    onToggleAll: () => void;
 }) {
     return (
         <table className="w-full border-collapse">
             <thead className="sticky top-0 bg-white z-[1]">
                 <tr className="border-b border-slate-200">
+                    <th className="pl-3 pr-2 py-2 w-9">
+                        <Checkbox
+                            aria-label="Select every task loaded"
+                            checked={allLoadedSelected}
+                            onChange={onToggleAll}
+                        />
+                    </th>
                     <Th className="text-left">Task</Th>
                     <Th className="text-left hidden md:table-cell">Type</Th>
                     <Th className="text-left hidden md:table-cell">Assignee</Th>
@@ -380,6 +713,8 @@ function FlatView({
                         team={t.assigned_team_id ? teamById.get(t.assigned_team_id) : undefined}
                         types={types}
                         onOpen={() => onOpen(t)}
+                        selected={isRowSelected(t.id)}
+                        onToggle={(on) => onToggle(t.id, on)}
                     />
                 ))}
             </tbody>
@@ -393,12 +728,16 @@ function FlatRow({
     team,
     types,
     onOpen,
+    selected,
+    onToggle,
 }: {
     task: CRMTask;
     member?: OrganizationMember;
     team?: Team;
     types: { name: string; color: string }[];
     onOpen: () => void;
+    selected: boolean;
+    onToggle: (on: boolean) => void;
 }) {
     const update = useUpdateCRMTask();
     const del = useDeleteCRMTask();
@@ -412,10 +751,10 @@ function FlatRow({
         try {
             await update.mutateAsync({
                 id: task.id,
-                data: { status: done ? "completed" : "pending" } as Partial<CRMTask>,
+                data: { status: done ? "completed" : "pending" } as CRMTaskWrite,
             });
         } catch (err) {
-            toast.error(buildError(err as AppError));
+            toast.error(crmErrorMessage(err));
         }
     }
 
@@ -424,7 +763,7 @@ function FlatRow({
             try {
                 await del.mutateAsync(task.id);
             } catch (err) {
-                toast.error(buildError(err as AppError));
+                toast.error(crmErrorMessage(err));
             }
         });
     }
@@ -432,8 +771,17 @@ function FlatRow({
     return (
         <tr
             onClick={onOpen}
-            className="group h-11 border-b border-slate-200/60 hover:bg-slate-50/80 cursor-pointer transition-colors"
+            className={`group h-11 border-b border-slate-200/60 cursor-pointer transition-colors ${
+                selected ? "bg-sky-50/60" : "hover:bg-slate-50/80"
+            }`}
         >
+            <td className="pl-3 pr-2" onClick={(e) => e.stopPropagation()}>
+                <Checkbox
+                    aria-label={`Select ${task.title}`}
+                    checked={selected}
+                    onChange={() => onToggle(!selected)}
+                />
+            </td>
             <td className="px-3 max-w-0">
                 <div className="flex items-center gap-2.5 min-w-0">
                     <button
@@ -469,6 +817,7 @@ function FlatRow({
                     assignedTo={task.assigned_to}
                     team={team}
                     assignedTeamId={task.assigned_team_id}
+                    externalOwner={task.external?.owner_name}
                 />
             </td>
             <td className="px-3 whitespace-nowrap">
@@ -486,6 +835,14 @@ function FlatRow({
                 <DueCell due={task.due_date} overdue={overdue} />
             </td>
             <td className="px-2 w-9 text-right" onClick={(e) => e.stopPropagation()}>
+                <div className="inline-flex items-center justify-end gap-0.5">
+                {task.external?.url && (
+                    <OpenInCrm
+                        external={task.external}
+                        compact
+                        className="size-7 opacity-100 md:opacity-0 md:group-hover:opacity-100 focus-visible:opacity-100"
+                    />
+                )}
                 <PopoverMenu open={menuOpen} onOpenChange={setMenuOpen} align="end">
                     <PopoverMenuTrigger asChild>
                         <button
@@ -511,6 +868,7 @@ function FlatRow({
                         </PopoverMenuItem>
                     </PopoverMenuContent>
                 </PopoverMenu>
+                </div>
             </td>
         </tr>
     );
@@ -522,12 +880,20 @@ function GroupedView({
     teamById,
     types,
     onOpen,
+    isRowSelected,
+    onToggle,
+    onToggleMany,
+    allSelected,
 }: {
     tasks: CRMTask[];
     memberByUser: Map<string, OrganizationMember>;
     teamById: Map<string, Team>;
     types: { name: string; color: string }[];
     onOpen: (t: CRMTask) => void;
+    isRowSelected: (id: string) => boolean;
+    onToggle: (id: string, on: boolean) => void;
+    onToggleMany: (ids: string[]) => void;
+    allSelected: (ids: string[]) => boolean;
 }) {
     // Bucket only the rows already paged in. "Load more" pulls the next server
     // page, so this is never an in-memory slice of a larger set: it is exactly
@@ -571,6 +937,10 @@ function GroupedView({
                         teamById={teamById}
                         types={types}
                         onOpen={onOpen}
+                        isRowSelected={isRowSelected}
+                        onToggle={onToggle}
+                        onToggleMany={onToggleMany}
+                        allSelected={allSelected}
                     />
                 );
             })}
@@ -585,6 +955,10 @@ function BucketGroup({
     teamById,
     types,
     onOpen,
+    isRowSelected,
+    onToggle,
+    onToggleMany,
+    allSelected,
 }: {
     bucket: { id: Bucket; label: string; tone: keyof typeof TONE };
     tasks: CRMTask[];
@@ -592,10 +966,20 @@ function BucketGroup({
     teamById: Map<string, Team>;
     types: { name: string; color: string }[];
     onOpen: (t: CRMTask) => void;
+    isRowSelected: (id: string) => boolean;
+    onToggle: (id: string, on: boolean) => void;
+    onToggleMany: (ids: string[]) => void;
+    allSelected: (ids: string[]) => boolean;
 }) {
+    const ids = tasks.map((t) => t.id);
     return (
         <div className="rounded-md border border-slate-200 bg-white overflow-hidden">
-            <div className="h-8 px-3 border-b border-slate-200 flex items-center gap-1.5">
+            <div className="h-8 px-3 border-b border-slate-200 flex items-center gap-2">
+                <Checkbox
+                    aria-label={`Select the ${bucket.label} tasks`}
+                    checked={allSelected(ids)}
+                    onChange={() => onToggleMany(ids)}
+                />
                 <span className={`size-1.5 rounded-full ${TONE[bucket.tone].dot}`} />
                 <span
                     className={`text-[11px] uppercase tracking-[0.1em] font-semibold ${TONE[bucket.tone].label}`}
@@ -615,6 +999,8 @@ function BucketGroup({
                         team={t.assigned_team_id ? teamById.get(t.assigned_team_id) : undefined}
                         types={types}
                         onOpen={onOpen}
+                        selected={isRowSelected(t.id)}
+                        onToggle={(on) => onToggle(t.id, on)}
                     />
                 ))}
             </div>
@@ -628,12 +1014,16 @@ function GroupedRow({
     team,
     types,
     onOpen,
+    selected,
+    onToggle,
 }: {
     task: CRMTask;
     member?: OrganizationMember;
     team?: Team;
     types: { name: string; color: string }[];
     onOpen: (t: CRMTask) => void;
+    selected: boolean;
+    onToggle: (on: boolean) => void;
 }) {
     const update = useUpdateCRMTask();
     const isDone = task.status === "completed";
@@ -644,17 +1034,26 @@ function GroupedRow({
         e.stopPropagation();
         const next: CRMTaskStatus = isDone ? "pending" : "completed";
         try {
-            await update.mutateAsync({ id: task.id, data: { status: next } as Partial<CRMTask> });
+            await update.mutateAsync({ id: task.id, data: { status: next } as CRMTaskWrite });
         } catch (err) {
-            toast.error(buildError(err as AppError));
+            toast.error(crmErrorMessage(err));
         }
     }
 
     return (
         <div
             onClick={() => onOpen(task)}
-            className="h-10 px-3 flex items-center gap-2.5 hover:bg-slate-50 cursor-pointer transition-colors"
+            className={`group h-10 px-3 flex items-center gap-2.5 cursor-pointer transition-colors ${
+                selected ? "bg-sky-50/60" : "hover:bg-slate-50"
+            }`}
         >
+            <Checkbox
+                aria-label={`Select ${task.title}`}
+                className="shrink-0"
+                checked={selected}
+                onClick={(e) => e.stopPropagation()}
+                onChange={() => onToggle(!selected)}
+            />
             <button
                 type="button"
                 onClick={toggle}
@@ -680,6 +1079,7 @@ function GroupedRow({
                 assignedTo={task.assigned_to}
                 team={team}
                 assignedTeamId={task.assigned_team_id}
+                externalOwner={task.external?.owner_name}
                 compact
             />
             <span
@@ -691,6 +1091,13 @@ function GroupedRow({
             <span className="inline-flex items-center gap-1 font-mono text-[10.5px] tabular-nums shrink-0 w-20 justify-end">
                 <DueCell due={task.due_date} overdue={overdue} />
             </span>
+            {task.external?.url && (
+                <OpenInCrm
+                    external={task.external}
+                    compact
+                    className="opacity-100 md:opacity-0 md:group-hover:opacity-100 focus-visible:opacity-100"
+                />
+            )}
         </div>
     );
 }
@@ -727,17 +1134,22 @@ function AssigneeCell({
     assignedTo,
     team,
     assignedTeamId,
+    externalOwner,
     compact = false,
 }: {
     member?: OrganizationMember;
     assignedTo?: string;
     team?: Team;
     assignedTeamId?: string;
+    // The CRM owner's name when that owner is not a workspace member.
+    externalOwner?: string;
     compact?: boolean;
 }) {
+    const { crm } = useCrmProvider();
     // A task may carry a person, a team, both, or neither. Render whichever are
     // present; only fall back to "Unassigned" when nothing is set.
-    if (!assignedTo && !assignedTeamId) {
+    const crmOwner = !assignedTo ? externalOwner?.trim() : undefined;
+    if (!assignedTo && !assignedTeamId && !crmOwner) {
         return <span className="text-slate-300 text-[11.5px]">{compact ? "" : "Unassigned"}</span>;
     }
     const label = memberLabel(member, assignedTo);
@@ -753,6 +1165,24 @@ function AssigneeCell({
                         {initials}
                     </span>
                     {!compact && <span className="text-[11.5px] text-slate-600 truncate">{label}</span>}
+                </span>
+            )}
+            {crmOwner && (
+                <span
+                    className="inline-flex items-center gap-1.5 min-w-0"
+                    title={`${crmOwner} (${crm.name} ${crm.words.owner}, not a workspace member)`}
+                >
+                    <span
+                        className={cn(
+                            "size-5 shrink-0 rounded-full border text-[9px] font-semibold inline-flex items-center justify-center uppercase tracking-tight",
+                            crm.tint,
+                            crm.border,
+                            crm.tintText,
+                        )}
+                    >
+                        {memberInitials({ name: crmOwner } as OrganizationMember)}
+                    </span>
+                    {!compact && <span className="text-[11.5px] text-slate-600 truncate">{crmOwner}</span>}
                 </span>
             )}
             {assignedTeamId && <TeamChip team={team} teamId={assignedTeamId} compact={compact} />}
@@ -833,7 +1263,7 @@ function TaskTypeTag({
     );
 }
 
-function DueCell({ due, overdue }: { due: string | undefined; overdue: boolean }) {
+function DueCell({ due, overdue }: { due: string | Date | undefined; overdue: boolean }) {
     if (!due) return <span className="text-slate-300 text-[11px]">—</span>;
     if (overdue) {
         return (
@@ -926,6 +1356,11 @@ function AssigneeFacet({
                 </button>
             </PopoverMenuTrigger>
             <PopoverMenuContent minWidth={220} className="max-h-64 overflow-y-auto">
+                {selected.filter((id) => !members.some((m) => m.user_id === id)).map((id) => (
+                    <PopoverMenuItem key={id} onSelect={() => toggle(id)} selected closeOnSelect={false}>
+                        {memberLabel(undefined, id)}
+                    </PopoverMenuItem>
+                ))}
                 {members.length === 0 ? (
                     <div className="px-2 py-1.5 text-[11.5px] text-slate-400">No members</div>
                 ) : (
@@ -988,6 +1423,11 @@ function TeamFacet({
                 </button>
             </PopoverMenuTrigger>
             <PopoverMenuContent minWidth={220} className="max-h-64 overflow-y-auto">
+                {selected.filter((id) => !teams.some((t) => t.id === id)).map((id) => (
+                    <PopoverMenuItem key={id} onSelect={() => toggle(id)} selected closeOnSelect={false}>
+                        {teamLabel(undefined, id)}
+                    </PopoverMenuItem>
+                ))}
                 {teams.length === 0 ? (
                     <Link
                         to="/app/settings/teams"
@@ -1053,6 +1493,11 @@ function TypeFacet({
                 </button>
             </PopoverMenuTrigger>
             <PopoverMenuContent minWidth={200} className="max-h-64 overflow-y-auto">
+                {selected.filter((name) => !types.some((t) => t.name === name)).map((name) => (
+                    <PopoverMenuItem key={name} onSelect={() => toggle(name)} selected closeOnSelect={false}>
+                        {name}
+                    </PopoverMenuItem>
+                ))}
                 {types.length === 0 ? (
                     <div className="px-2 py-1.5 text-[11.5px] text-slate-400">No types yet</div>
                 ) : (
@@ -1069,7 +1514,7 @@ function TypeFacet({
                                 />
                             }
                         >
-                            <span style={{ color: t.color || "#94a3b8" }}>
+                            <span style={{ color: labelInk(t.color || "#94a3b8") }}>
                                 {t.name}
                             </span>
                         </PopoverMenuItem>
@@ -1417,9 +1862,12 @@ function TaskDialog({
     const [status, setStatus] = React.useState<CRMTaskStatus>("pending");
     const [assignedTo, setAssignedTo] = React.useState<string>("");
     const [assignedTeamId, setAssignedTeamId] = React.useState<string>("");
+    const { isExternal, crm } = useCrmProvider();
+    const [saveError, setSaveError] = React.useState<{ message: string; code?: string } | null>(null);
 
     React.useEffect(() => {
         if (!open) return;
+        setSaveError(null);
         if (editing) {
             setTitle(editing.title);
             setDescription(editing.description ?? "");
@@ -1446,7 +1894,7 @@ function TaskDialog({
             toast.error("Title required");
             return;
         }
-        const data: Partial<CRMTask> = {
+        const data: CRMTaskWrite = {
             title: title.trim(),
             priority,
             type,
@@ -1457,18 +1905,32 @@ function TaskDialog({
         if (assignedTeamId) data.assigned_team_id = assignedTeamId;
         if (editing) data.status = status;
 
+        // The CRM answers in sentences worth reading, so they stay in the dialog.
+        if (isExternal) {
+            setSaveError(null);
+            try {
+                if (editing) await update.mutateAsync({ id: editing.id, data });
+                else await create.mutateAsync(data);
+                toast.success(editing ? `Task saved to ${crm.name}` : `Task created in ${crm.name}`);
+                onClose();
+            } catch (e) {
+                setSaveError({ message: crmErrorMessage(e), code: (e as AppError)?.code });
+            }
+            return;
+        }
+
         try {
             if (editing) {
                 await toast.promise(update.mutateAsync({ id: editing.id, data }), {
                     loading: "Saving…",
                     success: "Task updated",
-                    error: (e: AppError) => buildError(e),
+                    error: (e: AppError) => crmErrorMessage(e),
                 });
             } else {
                 await toast.promise(create.mutateAsync(data), {
                     loading: "Creating task…",
                     success: "Task created",
-                    error: (e: AppError) => buildError(e),
+                    error: (e: AppError) => crmErrorMessage(e),
                 });
             }
             onClose();
@@ -1484,7 +1946,7 @@ function TaskDialog({
                 await toast.promise(del.mutateAsync(editing.id), {
                     loading: "Deleting…",
                     success: "Task deleted",
-                    error: (e: AppError) => buildError(e),
+                    error: (e: AppError) => crmErrorMessage(e),
                 });
                 onClose();
             } catch {
@@ -1537,17 +1999,35 @@ function TaskDialog({
                                     <TrashIcon className="w-3 h-3" />
                                 </button>
                             )}
+                            {editing?.external?.url && (
+                                <OpenInCrm external={editing.external} compact className="ml-auto" />
+                            )}
                             <button
                                 type="button"
                                 onClick={onClose}
                                 aria-label="Close"
-                                className="ml-auto size-7 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 inline-flex items-center justify-center transition-colors"
+                                className={`${editing?.external?.url ? "" : "ml-auto "}size-7 rounded-md text-slate-500 hover:text-slate-900 hover:bg-slate-100 inline-flex items-center justify-center transition-colors`}
                             >
                                 <XIcon className="w-3.5 h-3.5" />
                             </button>
                         </div>
 
                         <div className="px-4 py-4 space-y-3 overflow-y-auto min-h-0 flex-1">
+                            {isExternal && (
+                                <div className="flex items-center gap-1.5 text-[11.5px] text-slate-500">
+                                    <CrmMark provider={crm.id} className="w-3 h-3" />
+                                    <span>
+                                        {editing
+                                            ? `Changes save to this ${crm.words.task} in ${crm.name}.`
+                                            : crm.words.task === "task"
+                                              ? `This task is created in ${crm.name}.`
+                                              : `This task is created in ${crm.name} as an ${crm.words.task}.`}
+                                    </span>
+                                    {editing?.external?.synced_at && (
+                                        <CrmSyncedAt at={editing.external.synced_at} provider={crm.id} className="ml-auto hidden sm:inline-flex" />
+                                    )}
+                                </div>
+                            )}
                             <div>
                                 <Label>Title</Label>
                                 <TextInput
@@ -1574,14 +2054,18 @@ function TaskDialog({
                                     <TaskTypePicker value={type} onChange={setType} />
                                 </div>
                                 <div>
-                                    <Label>Assignee</Label>
+                                    <Label>{isExternal ? "Assigned to" : "Assignee"}</Label>
                                     <AssigneePicker
                                         value={assignedTo}
                                         members={members}
-                                        onChange={setAssignedTo}
+                                        onChange={(id) => {
+                                            setAssignedTo(id);
+                                            setSaveError(null);
+                                        }}
                                         teams={teams}
                                         teamValue={assignedTeamId}
                                         onTeamChange={setAssignedTeamId}
+                                        externalOwner={!assignedTo ? editing?.external?.owner_name : undefined}
                                     />
                                 </div>
                             </div>
@@ -1623,6 +2107,19 @@ function TaskDialog({
                                     </div>
                                 </div>
                             )}
+                            {saveError && (
+                                <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[11.5px] leading-relaxed text-red-700">
+                                    {saveError.message}
+                                    {(saveError.code === "crm_reauth_required" || saveError.code === "crm_owner_unmapped") && (
+                                        <>
+                                            {" "}
+                                            <Link to={crm.settingsPath} className="font-medium underline underline-offset-2 hover:text-red-900">
+                                                Open {crm.name} settings
+                                            </Link>
+                                        </>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         <div className="px-3 h-12 shrink-0 border-t border-slate-200 flex items-center gap-1.5">
@@ -1659,6 +2156,7 @@ function AssigneePicker({
     teams,
     teamValue,
     onTeamChange,
+    externalOwner,
 }: {
     value: string;
     members: OrganizationMember[];
@@ -1666,10 +2164,16 @@ function AssigneePicker({
     teams: Team[];
     teamValue: string;
     onTeamChange: (id: string) => void;
+    // CRM owner not in this workspace, shown while no member is picked.
+    externalOwner?: string;
 }) {
     const [open, setOpen] = React.useState(false);
     const cur = members.find((m) => m.user_id === value);
     const curTeam = teams.find((t) => t.id === teamValue);
+    // Provider mode: only members the CRM knows as owners can be assigned.
+    const { isExternal, isMapped } = useCrmOwnerIndex();
+    const { crm } = useCrmProvider();
+    const anyUnmapped = isExternal && members.some((m) => !isMapped(m.user_id));
 
     // Person and team are independent: a task can set one, both, or neither.
     // The trigger summarizes whichever are selected.
@@ -1679,7 +2183,9 @@ function AssigneePicker({
             : memberLabel(cur)
         : curTeam
           ? curTeam.name
-          : "Unassigned";
+          : externalOwner
+            ? `${externalOwner} (${crm.name} ${crm.words.owner})`
+            : "Unassigned";
 
     return (
         <PopoverMenu open={open} onOpenChange={setOpen} align="start">
@@ -1722,6 +2228,12 @@ function AssigneePicker({
                         onSelect={() => onChange(m.user_id)}
                         selected={m.user_id === value}
                         closeOnSelect={false}
+                        disabled={!isMapped(m.user_id)}
+                        trailing={
+                            isMapped(m.user_id) ? undefined : (
+                                <span className="text-[10px] text-slate-400">Not in {crm.name}</span>
+                            )
+                        }
                         icon={
                             <span className="size-5 rounded-full bg-sky-50 border border-sky-200 text-sky-700 text-[9px] font-semibold inline-flex items-center justify-center uppercase">
                                 {memberInitials(m)}
@@ -1731,6 +2243,7 @@ function AssigneePicker({
                         <span className="truncate">{memberLabel(m)}</span>
                     </PopoverMenuItem>
                 ))}
+                {anyUnmapped && <CrmOwnerMappingLink onNavigate={() => setOpen(false)} />}
                 <div className="my-1 h-px bg-slate-200" />
                 <div className="px-3 pt-0.5 pb-1 text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">
                     Team
@@ -1833,7 +2346,7 @@ function hasAnyFilter(f: SearchTasks): boolean {
     );
 }
 
-function fmtDue(d: string) {
+function fmtDue(d: string | Date) {
     try {
         const dt = new Date(d);
         const now = new Date();

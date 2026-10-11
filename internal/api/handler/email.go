@@ -23,7 +23,7 @@ func (h *Handler) EmailsSearch(c *gin.Context) {
 	tag := c.Query("tag")
 	limit := c.Query("limit")
 
-	resp, err := h.EmailService.Search(c.Request.Context(), orgID.String(), query, cursor, tag, limit, middleware.GetAPIKeyAllowedEmailAccounts(c))
+	resp, err := h.EmailService.Search(c.Request.Context(), orgID.String(), query, cursor, tag, limit, middleware.AllowedEmailAccounts(c))
 	if err != nil {
 		errx.Handle(c, err)
 		return
@@ -66,7 +66,7 @@ func (h *Handler) UpdateEmail(c *gin.Context) {
 	var data models.UpdateEmail
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -74,6 +74,11 @@ func (h *Handler) UpdateEmail(c *gin.Context) {
 	if err != nil {
 		errx.Handle(c, err)
 		return
+	}
+
+	// A mailbox switched back on resumes its warmup now, not on the next reconciler pass.
+	if data.Status != nil && *data.Status == "active" && resp != nil {
+		_ = h.TasksService.EnsureWarmupScheduled(c.Request.Context(), resp.ID)
 	}
 
 	// Audit log
@@ -97,7 +102,7 @@ func (h *Handler) BulkTagEmails(c *gin.Context) {
 
 	var data models.BulkEmailTags
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -125,9 +130,9 @@ func (h *Handler) BulkTagEmails(c *gin.Context) {
 	}
 	// The mailbox scope here is the workspace, so a restricted API key needs
 	// the same allowlist check the per-id routes get from
-	// RequireAPIKeyEmailAccountParam; there is no path param to gate on.
+	// RequireEmailAccountParam; there is no path param to gate on.
 	for _, id := range emailIDs {
-		if !middleware.APIKeyAllowsEmailAccount(c, id) {
+		if !middleware.EmailAccountAllowed(c, id) {
 			errx.Handle(c, errx.New(errx.Forbidden, "email account is not allowed for this API key"))
 			return
 		}
@@ -177,10 +182,14 @@ func (h *Handler) ResumeWarmup(c *gin.Context) { h.warmupLifecycle(c, "resume") 
 func (h *Handler) StopWarmup(c *gin.Context) { h.warmupLifecycle(c, "stop") }
 
 func (h *Handler) warmupLifecycle(c *gin.Context, action string) {
-	userIDStr := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 	emailAccountID := c.Param("id")
 
-	resp, err := h.EmailService.SetWarmupLifecycle(c.Request.Context(), userIDStr, emailAccountID, action)
+	resp, err := h.EmailService.SetWarmupLifecycle(c.Request.Context(), orgID.String(), emailAccountID, action)
 	if err != nil {
 		errx.Handle(c, err)
 		return
@@ -303,11 +312,15 @@ func (h *Handler) UpdateEmailTrackingDomain(c *gin.Context) {
 }
 
 func (h *Handler) DeleteEmail(c *gin.Context) {
-	userIDStr := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	emailAccountID := c.Param("id")
 
-	if err := h.EmailService.Delete(c.Request.Context(), userIDStr, emailAccountID); err != nil {
+	if err := h.EmailService.Delete(c.Request.Context(), orgID.String(), emailAccountID); err != nil {
 		errx.Handle(c, err)
 		return
 	}
@@ -318,4 +331,37 @@ func (h *Handler) DeleteEmail(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// UpdateEmailDirectTracking switches open/click tracking on this mailbox's
+// hand-written unibox sends. Off by default, and deliberately per mailbox: a
+// pixel belongs in a cold sequence more comfortably than in a one-to-one reply.
+// PATCH /emails/:id/direct-tracking
+func (h *Handler) UpdateEmailDirectTracking(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	var req struct {
+		Enabled *bool `json:"enabled" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	emailAccountID := c.Param("id")
+	if err := h.EmailService.UpdateTrackDirectMail(c.Request.Context(), orgID.String(), emailAccountID, *req.Enabled); err != nil {
+		errx.Handle(c, err)
+		return
+	}
+
+	if accountID, err := uuid.Parse(emailAccountID); err == nil {
+		h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityEmailAccount, &accountID,
+			map[string]string{"track_direct_mail": strconv.FormatBool(*req.Enabled)}, nil)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"track_direct_mail": *req.Enabled})
 }

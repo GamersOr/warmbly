@@ -32,11 +32,16 @@ import (
 const DefaultInterval = 90 * time.Second
 
 type Config struct {
-	NodeID  uuid.UUID
-	Role    models.NodeRole
-	Name    string
-	Region  string
-	Address string
+	LogToken           string
+	WarmupSendProtocol int
+	NodeID             uuid.UUID
+	Role               models.NodeRole
+	Name               string
+	Region             string
+	Address            string
+	// CapacityTarget is meaningful for workers only. Zero leaves the control
+	// plane's stored/default target unchanged.
+	CapacityTarget float64
 	// Version is what this build reports. Empty means "unknown", which the
 	// control plane must not read as "needs updating".
 	Version string
@@ -49,30 +54,46 @@ type Config struct {
 	// in dev where nothing supervises the process.
 	TargetVersionPath string
 
+	// Condition is a standing problem reported on every beat while it lasts,
+	// unlike ReportError, which is reported once. Nil or empty reports none.
+	Condition func() string
+
 	HTTPClient *http.Client
 }
 
 type Agent struct {
-	cfg     Config
-	http    *http.Client
-	started time.Time
+	logs           *logCapture
+	cfg            Config
+	http           *http.Client
+	started        time.Time
+	usage          usageSampler
+	address        string
+	addressChecked time.Time
 
 	// lastErr is reported on the next beat and then cleared, so the dashboard
 	// shows what went wrong without it sticking forever.
-	lastErr atomic.Pointer[string]
+	lastErr        atomic.Pointer[string]
+	reloadRequests atomic.Uint64
 }
 
 func New(cfg Config) *Agent {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Agent{cfg: cfg, http: cfg.HTTPClient, started: time.Now()}
+	a := &Agent{cfg: cfg, http: cfg.HTTPClient, started: time.Now()}
+	a.prepareLogs()
+	return a
 }
 
 // ReportError attaches a message to the next heartbeat. Safe from any
 // goroutine; the newest message wins.
 func (a *Agent) ReportError(msg string) {
 	a.lastErr.Store(&msg)
+}
+
+// RequestReload coalesces missing-mailbox recovery into the next acknowledged heartbeat.
+func (a *Agent) RequestReload() {
+	a.reloadRequests.Add(1)
 }
 
 // Run beats until ctx is cancelled, then sends one farewell beat so the node
@@ -86,9 +107,13 @@ func (a *Agent) Run(ctx context.Context) {
 		log.Println("nodeagent: no backend URL or token; heartbeats disabled")
 		return
 	}
+	go a.runLogs(ctx)
 
 	interval := DefaultInterval
-	if reply := a.beat(ctx, true, false); reply != nil {
+	bootPending := true
+	acknowledgedReload := a.reloadRequests.Load()
+	if reply := a.beat(ctx, bootPending, false); reply != nil {
+		bootPending = false
 		interval = paceFrom(reply.LivenessSeconds)
 	}
 
@@ -105,7 +130,10 @@ func (a *Agent) Run(ctx context.Context) {
 			cancel()
 			return
 		case <-ticker.C:
-			if reply := a.beat(ctx, false, false); reply != nil {
+			reload := a.reloadRequests.Load()
+			if reply := a.beat(ctx, bootPending || reload != acknowledgedReload, false); reply != nil {
+				bootPending = false
+				acknowledgedReload = reload
 				if next := paceFrom(reply.LivenessSeconds); next != interval {
 					interval = next
 					ticker.Reset(interval)
@@ -130,18 +158,25 @@ func paceFrom(livenessSeconds int) time.Duration {
 
 func (a *Agent) beat(ctx context.Context, booted, stopping bool) *models.NodeHeartbeatReply {
 	beat := models.NodeHeartbeat{
-		NodeID:   a.cfg.NodeID,
-		Role:     a.cfg.Role,
-		Name:     a.cfg.Name,
-		Region:   a.cfg.Region,
-		Address:  a.cfg.Address,
-		Version:  a.cfg.Version,
-		Usage:    sampleUsage(a.started),
-		Booted:   booted,
-		Stopping: stopping,
+		WarmupSendProtocol: a.cfg.WarmupSendProtocol,
+		NodeID:             a.cfg.NodeID,
+		Role:               a.cfg.Role,
+		Name:               a.cfg.Name,
+		Region:             a.cfg.Region,
+		Address:            a.address,
+		CapacityTarget:     a.cfg.CapacityTarget,
+		Version:            a.cfg.Version,
+		Usage:              a.sampleUsage(),
+		Booted:             booted,
+		Stopping:           stopping,
+	}
+	if !stopping {
+		beat.Address = a.publicAddress(ctx)
 	}
 	if p := a.lastErr.Swap(nil); p != nil {
 		beat.LastError = *p
+	} else if a.cfg.Condition != nil {
+		beat.LastError = a.cfg.Condition()
 	}
 
 	body, err := json.Marshal(beat)
@@ -168,12 +203,12 @@ func (a *Agent) beat(ctx context.Context, booted, stopping bool) *models.NodeHea
 		return nil
 	}
 
-	var reply models.NodeHeartbeatReply
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+	var reply *models.NodeHeartbeatReply
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil || reply == nil {
 		return nil
 	}
 	a.applyTarget(reply.DesiredVersion)
-	return &reply
+	return reply
 }
 
 // applyTarget records the version the control plane wants. Writing a file the
@@ -206,15 +241,17 @@ func (a *Agent) applyTarget(version string) {
 		version, a.cfg.Version)
 }
 
-func sampleUsage(started time.Time) models.NodeUsage {
+func (a *Agent) sampleUsage() models.NodeUsage {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	mem := int(m.Sys / 1024 / 1024)
 	goroutines := runtime.NumGoroutine()
-	uptime := int64(time.Since(started).Seconds())
-	return models.NodeUsage{
+	uptime := int64(time.Since(a.started).Seconds())
+	usage := models.NodeUsage{
 		MemoryMB:      &mem,
 		Goroutines:    &goroutines,
 		UptimeSeconds: &uptime,
 	}
+	a.usage.sample(&usage)
+	return usage
 }

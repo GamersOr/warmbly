@@ -78,10 +78,7 @@ func NewKafkaFromProducer(p *kafka.Producer, cfg KafkaConfig) *KafkaBus {
 
 func (b *KafkaBus) Name() string { return "kafka" }
 
-// Publish writes to the underlying producer. The context is checked for
-// cancellation before the call but not used to bound the produce itself: the
-// confluent-kafka-go producer is asynchronous and Produce returns immediately
-// after enqueuing.
+// Publish succeeds only after a native broker delivery report.
 func (b *KafkaBus) Publish(ctx context.Context, topic, key string, payload []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -90,21 +87,30 @@ func (b *KafkaBus) Publish(ctx context.Context, topic, key string, payload []byt
 	closed := b.closed
 	b.mu.Unlock()
 	if closed {
-		return errors.New("eventbus kafka: bus closed")
+		return ErrBusClosed
 	}
 	// A worker's command topic is named after its node id, so the first
 	// publish to it is the first time anything knows the name.
 	if err := b.ensureTopics(ctx, topic); err != nil {
 		return err
 	}
-	return b.producer.Produce(topic, []byte(key), payload)
+	pctx, cancel := context.WithTimeout(ctx, handlerTimeout())
+	defer cancel()
+	err := b.producer.ProduceConfirmed(pctx, topic, []byte(key), payload)
+	if errors.Is(err, kafka.ErrClientClosed) {
+		return ErrBusClosed
+	}
+	return err
 }
 
 // Subscribe creates a fresh consumer in the given group, subscribes to all
 // topics, and blocks reading messages until ctx is cancelled or a fatal error
-// occurs. Handler errors are logged but do not abort the loop; the message is
-// still committed to match the existing kafka.Consumer.Consume behaviour.
+// occurs. Failed handlers never store offsets; exhausted retries reopen for replay.
 func (b *KafkaBus) Subscribe(ctx context.Context, topics []string, group string, handler Handler) error {
+	return b.SubscribeKeyed(ctx, topics, group, 1, nil, handler)
+}
+
+func (b *KafkaBus) SubscribeKeyed(ctx context.Context, topics []string, group string, lanes int, key KeyResolver, handler Handler) error {
 	if len(topics) == 0 {
 		return errors.New("eventbus kafka: at least one topic required")
 	}
@@ -114,6 +120,15 @@ func (b *KafkaBus) Subscribe(ctx context.Context, topics []string, group string,
 	if handler == nil {
 		return errors.New("eventbus kafka: handler required")
 	}
+	if lanes < 1 || lanes > 64 || (lanes > 1 && key == nil) {
+		return errors.New("eventbus kafka: keyed subscription requires 1-64 lanes and a key resolver")
+	}
+	return retrySubscription(ctx, func(ctx context.Context) error {
+		return b.subscribeOnce(ctx, topics, group, lanes, key, handler)
+	})
+}
+
+func (b *KafkaBus) subscribeOnce(ctx context.Context, topics []string, group string, lanes int, key KeyResolver, handler Handler) error {
 
 	// Subscribing to a topic that does not exist yet returns no messages and
 	// no error, so a worker would sit silent rather than fail.
@@ -127,6 +142,10 @@ func (b *KafkaBus) Subscribe(ctx context.Context, topics []string, group string,
 	}
 	cc.Set("group.id", group)
 	cc.Set("auto.offset.reset", "earliest")
+	// Offsets are stored once a message is handled and committed in the
+	// background: a synchronous commit per message cost a broker round trip each.
+	cc.Set("enable.auto.commit", true)
+	cc.Set("enable.auto.offset.store", false)
 
 	cons, err := cc.Connect()
 	if err != nil {
@@ -141,29 +160,66 @@ func (b *KafkaBus) Subscribe(ctx context.Context, topics []string, group string,
 	if b.closed {
 		b.mu.Unlock()
 		cons.Close()
-		return errors.New("eventbus kafka: bus closed")
+		return ErrBusClosed
 	}
 	b.consumers = append(b.consumers, cons)
 	b.mu.Unlock()
-
-	return cons.Consume(ctx, func(msg *ckf.Message) error {
-		topic := ""
-		if msg.TopicPartition.Topic != nil {
-			topic = *msg.TopicPartition.Topic
+	defer func() {
+		b.mu.Lock()
+		for i, c := range b.consumers {
+			if c == cons {
+				b.consumers = append(b.consumers[:i], b.consumers[i+1:]...)
+				break
+			}
 		}
-		hctx, cancel := context.WithTimeout(ctx, handlerTimeout())
+		b.mu.Unlock()
+		cons.Close()
+	}()
+
+	resolve := func(msg *ckf.Message) (string, error) {
+		return resolveKey(ctx, key, kafkaEnvelope(msg))
+	}
+	deliver := kafkaHandler(ctx, handler)
+	err = cons.ConsumeConcurrent(ctx, lanes, resolve, deliver)
+	if errors.Is(err, kafka.ErrClientClosed) {
+		return ErrBusClosed
+	}
+	if errors.Is(err, kafka.ErrAssignmentLost) {
+		return errors.Join(ErrSubscriptionRebalanced, err)
+	}
+	return err
+}
+
+func kafkaHandler(ctx context.Context, handler Handler) func(*ckf.Message) error {
+	var mu sync.Mutex
+	attempts := map[*ckf.Message]int{}
+	return func(msg *ckf.Message) error {
+		mu.Lock()
+		attempts[msg]++
+		attempt := attempts[msg]
+		mu.Unlock()
+		envelope := kafkaEnvelope(msg)
+		envelope.Attempt = attempt
+		// A message already being handled finishes after a shutdown signal; only reading the next one stops.
+		hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), handlerTimeout())
 		defer cancel()
-		if err := invokeHandler(hctx, handler, Message{
-			Topic:   topic,
-			Key:     string(msg.Key),
-			Payload: msg.Value,
-			Attempt: 1,
-		}); err != nil {
-			log.Error().Err(err).Str("topic", topic).Msg("eventbus kafka handler error")
+		if err := invokeHandler(hctx, handler, envelope); err != nil {
+			log.Error().Err(err).Str("topic", envelope.Topic).Msg("eventbus kafka handler error")
 			return err
 		}
+		mu.Lock()
+		delete(attempts, msg)
+		mu.Unlock()
 		return nil
-	})
+	}
+}
+
+func kafkaEnvelope(msg *ckf.Message) Message {
+	topic := ""
+	if msg.TopicPartition.Topic != nil {
+		topic = *msg.TopicPartition.Topic
+	}
+	return Message{Topic: topic, Key: string(msg.Key), Payload: msg.Value, Attempt: 1, Redelivers: true}
 }
 
 // Close flushes the producer and closes every consumer that was opened via
@@ -198,9 +254,7 @@ func (b *KafkaBus) Close() error {
 	return nil
 }
 
-// Producer exposes the underlying *kafka.Producer for legacy callers that
-// need the Avrov2 serializer attached or other Kafka-specific knobs. New code
-// should not depend on this; it exists to keep the migration incremental.
+// Producer exposes Kafka-specific knobs for legacy callers.
 func (b *KafkaBus) Producer() *kafka.Producer { return b.producer }
 
 // Compile-time interface check.

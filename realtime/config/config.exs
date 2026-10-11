@@ -45,6 +45,7 @@ config :realtime, RealtimeWeb.Endpoint,
   url: [host: "localhost"],
   http: [
     port: String.to_integer(System.get_env("PORT") || "4000"),
+    protocol_options: [invalid_response_headers: :error_terminate],
     transport_options: [socket_opts: [:inet6]]
   ],
   secret_key_base:
@@ -60,8 +61,11 @@ config :logger, :console,
 # Use Jason for JSON parsing
 config :phoenix, :json_library, Jason
 
+# Socket connect params are logged; any key containing these is shown as [FILTERED].
+config :phoenix, :filter_parameters, ["password", "token", "secret", "key"]
+
 # Sentry configuration. Uses a Finch HTTP client instead of the default
-# hackney one (hackney was dropped to clear CVE-2026-47071).
+# hackney one, so the app carries no hackney dependency.
 config :sentry,
   client: Realtime.SentryFinchClient,
   environment_name: Mix.env(),

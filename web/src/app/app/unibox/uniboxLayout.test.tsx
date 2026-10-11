@@ -15,15 +15,18 @@
 // which state survives a remount.
 
 import React from "react";
-import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { screen, act, fireEvent } from "@testing-library/react";
 import { useAppStore } from "@/stores";
+import { replyDraftKey } from "@/lib/unibox/replyDraft";
+import { useOutboxStore } from "@/hooks/useOutboxStore";
 import {
     UNIBOX_LIST_DEFAULT_WIDTH,
     UNIBOX_LIST_MAX_WIDTH,
     UNIBOX_LIST_MIN_WIDTH,
 } from "@/stores/slices/uiSlice";
 import {
+    findThreadRow,
     installLayoutShims,
     mount,
     resetScrollTops,
@@ -32,6 +35,8 @@ import {
     settle,
     SUITE,
 } from "./uniboxHarness";
+
+const threadFixture = vi.hoisted(() => ({ includeNewer: false }));
 
 beforeAll(() => {
     installLayoutShims();
@@ -42,8 +47,12 @@ beforeAll(() => {
 
 vi.mock("@/lib/api/client/Request", () => ({
     default: async (cfg: { url?: string }) => {
-        const { route } = await import("./uniboxHarness");
-        return route(String(cfg?.url ?? ""));
+        const { route, ROWS } = await import("./uniboxHarness");
+        const url = String(cfg?.url ?? "");
+        if (threadFixture.includeNewer && url.startsWith("/unibox/thread?") && url.includes("thread-4")) {
+            return { data: [ROWS[4], { ...ROWS[4], id: "newer-message" }], pagination: { has_more: false } };
+        }
+        return route(url);
     },
 }));
 vi.mock("@/lib/helper/getToken", () => ({
@@ -95,20 +104,71 @@ async function drag(fromX: number, toX: number) {
 }
 
 async function openThread(subject: string) {
+    const row = await findThreadRow(subject);
     await act(async () => {
-        fireEvent.click(screen.getByText(subject).closest("button")!);
+        fireEvent.click(row);
     });
     await settle();
 }
 
 describe("unibox desktop layout (#473)", SUITE, () => {
     beforeEach(() => {
+        threadFixture.includeNewer = false;
         resetScrollTops();
         useAppStore.setState({
             navCollapsed: false,
             uniboxListWidth: UNIBOX_LIST_DEFAULT_WIDTH,
             uniboxContactRailOpen: true,
         });
+    });
+
+    afterEach(() => {
+        vi.mocked(localStorage.getItem).mockReset();
+    });
+
+    it("keeps one bounded keyboard-accessible reading area and pane-responsive actions", async () => {
+        await mount("/app/unibox/all");
+        await settle();
+        await openThread("Subject 4");
+        const messages = screen.getByRole("region", { name: "Conversation messages" });
+        expect(messages).toHaveAttribute("tabindex", "0");
+        expect(messages.className).toContain("min-h-0");
+        expect(messages.className).toContain("overflow-y-auto");
+        expect(messages.className).toContain("overflow-x-hidden");
+        expect(messages.parentElement?.className).toContain("@container/thread");
+        const more = screen.getByRole("button", { name: "More thread actions" });
+        expect(more.className).toContain("@min-[28rem]/thread:hidden");
+        expect(screen.getByRole("button", { name: "Reply" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Forward" })).toBeInTheDocument();
+    });
+
+    it("reopens a personal draft on an older message when newer mail exists", async () => {
+        threadFixture.includeNewer = true;
+        useAppStore.setState({ currentOrganization: { id: "org-1", name: "Org", role: "owner" } });
+        const key = replyDraftKey("u1", "org-1", "thread-4", "msg-4", "reply");
+        vi.mocked(localStorage.getItem).mockImplementation((item: string) => item === key
+            ? JSON.stringify({ to: ["s4@example.com"], cc: [], bcc: [], subject: "Re: Subject 4", body: "My older reply" })
+            : null);
+        await mount("/app/unibox/all");
+        await settle();
+        await openThread("Subject 4");
+        expect(await screen.findByPlaceholderText(/Write your reply/, undefined, { timeout: 10_000 })).toHaveValue("My older reply");
+        await act(async () => fireEvent.click(screen.getByLabelText("Close composer, keeping the draft")));
+        await settle();
+        expect(screen.queryByPlaceholderText(/Write your reply/)).toBeNull();
+    });
+
+    it("does not forward a different message when the forwarded one is gone", async () => {
+        await mount("/app/unibox/all");
+        await settle();
+        act(() => useOutboxStore.getState().setReplyRestore({
+            threadId: "thread-4", messageId: "no-longer-here", mode: "forward",
+            to: ["x@example.com"], cc: [], bcc: [], subject: "Fwd: Subject 4", body: "FYI", emailAccountId: "mbox-1",
+        }));
+        await openThread("Subject 4");
+        expect(screen.queryByPlaceholderText(/Add a note/)).toBeNull();
+        // The thread stays answerable: the Reply/Forward bar is back.
+        expect(screen.getByRole("button", { name: "Forward" })).toBeInTheDocument();
     });
 
     describe("collapsible left navigation", () => {
@@ -133,14 +193,14 @@ describe("unibox desktop layout (#473)", SUITE, () => {
 
             expect(useAppStore.getState().navCollapsed).toBe(true);
             expect(aside.className).toContain("md:w-14");
-            // Same destination, no VISIBLE label: the name moves into a
-            // visually hidden span, because lucide marks its svg aria-hidden
-            // and the link would otherwise announce as nothing at all. It must
-            // not become an aria-label: that would override the whole subtree
-            // and silence the unread count nested in the same link.
+            // Same destination, no VISIBLE label: the label column is faded and
+            // clipped but stays in the link, because lucide marks its svg
+            // aria-hidden and the link would otherwise announce as nothing at
+            // all. It must not become an aria-label: that would override the
+            // whole subtree and silence the unread count nested in the same link.
             expect(settingsLink().getAttribute("aria-label")).toBeNull();
             expect(settingsLink().textContent).toBe("Settings");
-            expect(settingsLink().querySelector("span")?.className).toContain("sr-only");
+            expect(settingsLink().querySelector("span")?.className).toContain("opacity-0");
 
             // `b` is the documented shortcut for the same thing. It was wired to
             // the store while nothing rendered from it; this is what makes it
@@ -157,12 +217,64 @@ describe("unibox desktop layout (#473)", SUITE, () => {
             await mount("/app/unibox/all");
             await settle();
 
-            const search = screen.getByPlaceholderText(/^Search/i);
+            const search = await screen.findByPlaceholderText(/^Search/i, undefined, { timeout: 10_000 });
             await act(async () => {
                 fireEvent.keyDown(search, { key: "b" });
             });
 
             expect(useAppStore.getState().navCollapsed).toBe(false);
+        });
+
+        // Issue #742: the tip is held shut while expanded, and Radix only
+        // reports changes against that, so a hover there used to report the
+        // open and never the close. Collapsing then showed every such tip.
+        it("opens no tips on collapse for rows hovered while expanded", async () => {
+            await mount("/app/unibox/all");
+            await settle();
+
+            const rows = Array.from(document.querySelectorAll<HTMLAnchorElement>('aside a[data-slot="tooltip-trigger"]')).slice(0, 3);
+            expect(rows).toHaveLength(3);
+            const tips = () => document.querySelectorAll('[data-slot="tooltip-content"]');
+            const hover = async (row: HTMLElement) => {
+                await act(async () => {
+                    fireEvent.pointerMove(row);
+                });
+                await settle();
+                await act(async () => {
+                    fireEvent.pointerLeave(row);
+                });
+            };
+
+            for (const row of rows) await hover(row);
+            await settle();
+            expect(tips()).toHaveLength(0);
+
+            await act(async () => {
+                fireEvent.keyDown(document.body, { key: "b" });
+            });
+            await settle();
+            expect(useAppStore.getState().navCollapsed).toBe(true);
+            expect(tips()).toHaveLength(0);
+
+            // The rail itself still names a row on hover.
+            await act(async () => {
+                fireEvent.pointerMove(rows[0]);
+            });
+            await settle();
+            expect(tips()).toHaveLength(1);
+
+            // And a tip left open in the rail does not come back after a round
+            // trip through the expanded sidebar.
+            await act(async () => {
+                fireEvent.keyDown(document.body, { key: "b" });
+            });
+            await settle();
+            await act(async () => {
+                fireEvent.keyDown(document.body, { key: "b" });
+            });
+            await settle();
+            expect(useAppStore.getState().navCollapsed).toBe(true);
+            expect(tips()).toHaveLength(0);
         });
     });
 
@@ -241,12 +353,18 @@ describe("unibox desktop layout (#473)", SUITE, () => {
     });
 
     describe("contact rail", () => {
-        it("opens by default and stays closed once closed, thread after thread", async () => {
+        it("starts closed by default, and each state sticks thread after thread", async () => {
+            const initial = useAppStore.getInitialState().uniboxContactRailOpen;
+            expect(initial).toBe(false);
+            useAppStore.setState({ uniboxContactRailOpen: initial });
             await mount("/app/unibox/all");
             await settle();
-
             await openThread("Subject 4");
-            // Default is still open, which is what 568bdb48 settled on.
+            expect(screen.getByLabelText("Show contact panel")).toBeTruthy();
+
+            await act(async () => {
+                fireEvent.click(screen.getByLabelText("Show contact panel"));
+            });
             const toggle = screen.getByLabelText("Hide contact panel");
 
             await act(async () => {

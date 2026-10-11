@@ -1,5 +1,5 @@
 // Modal that surfaces the per-org inbound webhook URL exactly once after
-// a Calendly/Cal.com/DMARC connection is created. The secret is embedded
+// a Calendly, Cal.com or Clay connection is created, or its URL is rotated. The secret is embedded
 // in the URL path — if the user closes without copying, they must
 // rotate the secret to get it again.
 
@@ -7,18 +7,21 @@
 
 import React from "react";
 import { CheckIcon, CopyIcon, XIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import type { IntegrationProvider } from "@/lib/api/models/app/integrations/Integration";
+import { API_URL } from "@/lib/information";
 
 const PROVIDER_NAMES: Partial<Record<IntegrationProvider, string>> = {
     calendly: "Calendly",
     cal_com: "Cal.com",
+    clay: "Clay",
 };
 
 const HINTS: Partial<Record<IntegrationProvider, string>> = {
     calendly: "Paste this in Calendly under Account, Integrations, Webhooks, Create Webhook. Subscribe to invitee.created.",
     cal_com: "Paste this in Cal.com under Settings, Developer, Webhooks. Subscribe to BOOKING_CREATED.",
+    clay: "Paste this as the endpoint of an HTTP API column in your Clay table, method POST, with the row's columns in a JSON body.",
 };
 
 export default function InboundUrlDialog({
@@ -32,9 +35,10 @@ export default function InboundUrlDialog({
 }) {
     const [copied, setCopied] = React.useState(false);
 
+    // The inbound route is served by the API, which is often not the dashboard's host.
     const fullUrl = url.startsWith("http")
         ? url
-        : `${window.location.origin}${url}`;
+        : `${(API_URL || window.location.origin).replace(/\/+$/, "")}${url}`;
 
     function copy() {
         navigator.clipboard.writeText(fullUrl).then(
@@ -47,8 +51,24 @@ export default function InboundUrlDialog({
         );
     }
 
+    React.useEffect(() => {
+        const onKey = (ev: KeyboardEvent) => {
+            if (ev.key !== "Escape" || document.querySelector("[data-floating], [role='alertdialog']")) return;
+            ev.preventDefault();
+            ev.stopImmediatePropagation();
+            onClose();
+        };
+        // Capture, so the popup underneath does not close on the same Escape.
+        document.addEventListener("keydown", onKey, true);
+        return () => document.removeEventListener("keydown", onKey, true);
+    }, [onClose]);
+
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div
+            data-nested-dialog
+            onMouseDown={(ev) => ev.stopPropagation()}
+            className="fixed inset-0 z-[150] flex items-center justify-center px-2"
+        >
             <button
                 type="button"
                 aria-label="Close"
@@ -57,10 +77,8 @@ export default function InboundUrlDialog({
             />
             <div className="relative z-10 w-[520px] max-w-[92vw] max-h-[90dvh] flex flex-col bg-white rounded-lg shadow-xl border border-slate-200 overflow-hidden">
                 <div className="h-12 px-5 border-b border-slate-200 flex items-center gap-3 shrink-0">
-                    <div className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">Webhook URL</div>
-                    <div className="h-4 w-px bg-slate-200" />
-                    <div className="text-[12.5px] text-slate-900 font-medium truncate flex-1">
-                        {PROVIDER_NAMES[provider] ?? provider}
+                    <div className="text-[13px] text-slate-900 font-semibold truncate flex-1">
+                        {PROVIDER_NAMES[provider] ?? provider} webhook URL
                     </div>
                     <button
                         type="button"
@@ -78,7 +96,9 @@ export default function InboundUrlDialog({
                     </p>
 
                     <div className="rounded border border-slate-200 bg-slate-50 p-2.5 flex items-center gap-2">
-                        <code className="flex-1 font-mono text-[11.5px] text-slate-800 break-all">{fullUrl}</code>
+                        <code className="flex-1 font-mono text-[11.5px] text-slate-800 break-all" data-ph-mask="">
+                            {fullUrl}
+                        </code>
                         <button
                             type="button"
                             onClick={copy}
@@ -91,8 +111,8 @@ export default function InboundUrlDialog({
 
                     <div className="rounded border border-amber-200 bg-amber-50 px-3 py-2.5">
                         <p className="text-[11.5px] text-amber-900 leading-relaxed">
-                            This URL contains a secret that is only shown once. If you lose it, rotate the
-                            connection to mint a new one — the old URL will stop working immediately.
+                            This URL contains a secret that is only shown once. If you lose it, use Rotate URL
+                            on the connection to mint a new one. The old URL stops working immediately.
                         </p>
                     </div>
                 </div>

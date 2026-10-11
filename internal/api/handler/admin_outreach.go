@@ -23,7 +23,7 @@ func (h *Handler) AdminSendOutreach(c *gin.Context) {
 
 	var req models.SendAdminOutreachRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -64,6 +64,11 @@ func (h *Handler) AdminListOutreach(c *gin.Context) {
 		errx.JSON(c, errx.New(errx.BadRequest, "invalid query parameters"))
 		return
 	}
+	offset, ok := offsetCursor(c)
+	if !ok {
+		return
+	}
+	search.Offset = offset
 	result, xerr := h.AdminOutreachService.Search(c.Request.Context(), &search)
 	if xerr != nil {
 		errx.JSON(c, xerr)

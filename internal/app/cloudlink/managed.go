@@ -4,14 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
-	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
 // Cloud-managed mailboxes: the grant lives on Warmbly Cloud; this instance sends with brokered access tokens.
@@ -27,104 +25,39 @@ const OAuthReturnPath = "/cloud-oauth/done"
 // tokenCacheMax bounds how long a brokered token is reused before the cloud is asked again.
 const tokenCacheMax = 10 * time.Minute
 
-type oauthSession struct {
-	OrgID     uuid.UUID
-	UserID    uuid.UUID
-	Provider  models.InboxProvider
-	ExpiresAt time.Time
-}
-
 type cachedToken struct {
 	token   *models.PoolLinkAccessToken
 	expires time.Time
 }
 
 func (s *service) StartOAuth(ctx context.Context, orgID, userID uuid.UUID, provider models.InboxProvider) (*models.CloudLinkOAuthStart, *errx.Error) {
-	l, xerr := s.link(ctx)
-	if xerr != nil {
-		return nil, xerr
+	if !reconciliationLocked(ctx) {
+		var result *models.CloudLinkOAuthStart
+		xerr := s.reconcileLocked(ctx, func(ctx context.Context) *errx.Error {
+			var xerr *errx.Error
+			result, xerr = s.StartOAuth(ctx, orgID, userID, provider)
+			return xerr
+		})
+		return result, xerr
 	}
-	if provider != models.InboxProviderGoogle && provider != models.InboxProviderOutlook {
-		return nil, errx.ErrEmailOnboardProvider
-	}
-	var res models.PoolLinkOAuthStartResponse
-	req := models.PoolLinkOAuthStartRequest{Provider: provider, ReturnURL: strings.TrimRight(config.AppBaseURL(), "/") + OAuthReturnPath}
-	if xerr := s.clientFor(l).do(ctx, http.MethodPost, "/instance/oauth/start", req, &res); xerr != nil {
-		return nil, xerr
-	}
-	s.mu.Lock()
-	s.sessions[res.Session] = oauthSession{OrgID: orgID, UserID: userID, Provider: provider, ExpiresAt: time.Now().Add(15 * time.Minute)}
-	for k, v := range s.sessions {
-		if time.Now().After(v.ExpiresAt) {
-			delete(s.sessions, k)
-		}
-	}
-	s.mu.Unlock()
-	return &models.CloudLinkOAuthStart{URL: res.URL, Session: res.Session}, nil
+	return s.startManagedOAuth(ctx, orgID, userID, provider)
 }
 
 func (s *service) FinishOAuth(ctx context.Context, orgID, userID uuid.UUID, session string) (*models.Email, *errx.Error) {
-	s.mu.Lock()
-	sess, ok := s.sessions[session]
-	s.mu.Unlock()
-	if !ok || sess.OrgID != orgID || time.Now().After(sess.ExpiresAt) {
-		return nil, ErrOAuthSession
+	if !reconciliationLocked(ctx) {
+		var result *models.Email
+		xerr := s.reconcileLocked(ctx, func(ctx context.Context) *errx.Error {
+			var xerr *errx.Error
+			result, xerr = s.FinishOAuth(ctx, orgID, userID, session)
+			return xerr
+		})
+		return result, xerr
 	}
-	l, xerr := s.link(ctx)
-	if xerr != nil {
-		return nil, xerr
-	}
-	var state models.PoolLinkMailboxState
-	if xerr := s.clientFor(l).do(ctx, http.MethodPost, "/instance/oauth/finish", models.PoolLinkOAuthFinishRequest{Session: session}, &state); xerr != nil {
-		return nil, xerr
-	}
-	s.mu.Lock()
-	delete(s.sessions, session)
-	s.mu.Unlock()
-	return s.mirror(ctx, l, orgID, userID, &state)
+	return s.finishManagedOAuth(ctx, orgID, userID, session)
 }
 
-// mirror creates the local, credential-free copy of a cloud-managed mailbox.
-func (s *service) mirror(ctx context.Context, l *models.CloudLink, orgID, userID uuid.UUID, state *models.PoolLinkMailboxState) (*models.Email, *errx.Error) {
-	name := strings.TrimSpace(state.Name)
-	if name == "" {
-		name = state.Email
-	}
-	acc, xerr := s.emails.NewManagedAccount(ctx, userID.String(), models.NewOauthAccount{
-		OrganizationID: &orgID,
-		Provider:       models.InboxProvider(state.Provider),
-		Name:           name,
-		Email:          state.Email,
-	})
-	if xerr != nil {
-		// Release the cloud side so the next attempt is clean.
-		if rerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+state.RemoteID.String(), nil, nil); rerr != nil {
-			log.Error().Str("remote_id", state.RemoteID.String()).Str("code", rerr.Identifier).Msg("cloud link: local mirror failed and the cloud link could not be released")
-		}
-		return nil, xerr
-	}
-	if _, err := s.repo.Enroll(ctx, acc.ID, state.RemoteID, true); err != nil {
-		if s.emailSvc != nil {
-			_ = s.emailSvc.Delete(ctx, userID.String(), acc.ID.String())
-		}
-		// Release the cloud side too: a mailbox left linked to this instance
-		// with no mirror here is hidden from the adoptable list and refused on
-		// a second attempt, so it could never be recovered from either side.
-		if rerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+state.RemoteID.String(), nil, nil); rerr != nil {
-			log.Error().Str("remote_id", state.RemoteID.String()).Str("code", rerr.Identifier).Msg("cloud link: local mirror row failed and the cloud link could not be released")
-		}
-		return nil, errx.InternalError()
-	}
-	if s.emailSvc != nil {
-		if err := s.emailSvc.LoadAccountOntoWorker(ctx, acc.ID); err != nil {
-			log.Warn().Err(err).Str("account_id", acc.ID.String()).Msg("cloud link: worker load of managed mailbox failed; reconciler will retry")
-		}
-	}
-	return acc, nil
-}
-
-func (s *service) ListWorkspaceMailboxes(ctx context.Context) ([]models.PoolLinkWorkspaceMailbox, *errx.Error) {
-	l, xerr := s.link(ctx)
+func (s *service) ListWorkspaceMailboxes(ctx context.Context, orgID uuid.UUID) ([]models.PoolLinkWorkspaceMailbox, *errx.Error) {
+	l, xerr := s.link(ctx, orgID)
 	if xerr != nil {
 		return nil, xerr
 	}
@@ -139,20 +72,29 @@ func (s *service) ListWorkspaceMailboxes(ctx context.Context) ([]models.PoolLink
 }
 
 func (s *service) Adopt(ctx context.Context, orgID, userID, cloudAccountID uuid.UUID) (*models.Email, *errx.Error) {
-	l, xerr := s.link(ctx)
-	if xerr != nil {
-		return nil, xerr
+	if !reconciliationLocked(ctx) {
+		var result *models.Email
+		xerr := s.reconcileLocked(ctx, func(ctx context.Context) *errx.Error {
+			var xerr *errx.Error
+			result, xerr = s.Adopt(ctx, orgID, userID, cloudAccountID)
+			return xerr
+		})
+		return result, xerr
 	}
-	var state models.PoolLinkMailboxState
-	req := models.PoolLinkAdoptRequest{RemoteID: uuid.New(), EmailAccountID: cloudAccountID}
-	if xerr := s.clientFor(l).do(ctx, http.MethodPost, "/instance/mailboxes/adopt", req, &state); xerr != nil {
-		return nil, xerr
-	}
-	return s.mirror(ctx, l, orgID, userID, &state)
+	return s.adoptManagedMailbox(ctx, orgID, userID, cloudAccountID)
 }
 
 // AccessToken is the worker's credential for a managed mailbox, cached briefly.
 func (s *service) AccessToken(ctx context.Context, accountID uuid.UUID) (*models.PoolLinkAccessToken, *errx.Error) {
+	if r, ok := s.repo.(repository.CloudManagedConsentRepository); ok {
+		allowed, err := r.CanBrokerManagedToken(ctx, accountID)
+		if err != nil {
+			return nil, errx.InternalError()
+		}
+		if !allowed {
+			return nil, ErrMailboxInactive
+		}
+	}
 	s.mu.Lock()
 	if c, ok := s.tokens[accountID]; ok && time.Now().Before(c.expires) {
 		s.mu.Unlock()
@@ -167,7 +109,7 @@ func (s *service) AccessToken(ctx context.Context, accountID uuid.UUID) (*models
 	if m == nil || !m.Managed {
 		return nil, ErrNotManaged
 	}
-	l, xerr := s.link(ctx)
+	l, xerr := s.mailboxLink(ctx, m)
 	if xerr != nil {
 		return nil, xerr
 	}
@@ -193,17 +135,35 @@ func (s *service) forgetToken(accountID uuid.UUID) {
 }
 
 // removeManaged deletes the local mirror; the cloud keeps the mailbox in the workspace.
-func (s *service) removeManaged(ctx context.Context, userID string, m *models.CloudLinkMailbox) *errx.Error {
-	if l, err := s.repo.Get(ctx); err == nil && l != nil {
-		if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+m.RemoteID.String(), nil, nil); xerr != nil && xerr.Identifier != "pool_link_mailbox_not_found" {
-			return xerr
+func (s *service) removeManaged(ctx context.Context, orgID string, m *models.CloudLinkMailbox) *errx.Error {
+	if err := s.repo.BeginRemoval(ctx, m.EmailAccountID); err != nil {
+		return errx.InternalError()
+	}
+	l, err := s.repo.GetByInstance(ctx, m.InstanceID)
+	if err != nil {
+		return errx.InternalError()
+	}
+	if l == nil {
+		return ErrNotConnected
+	}
+	if r, ok := s.repo.(repository.CloudManagedConsentRepository); ok {
+		if err := r.RevokeManagedConsents(ctx, l.InstanceID, &m.EmailAccountID); err != nil {
+			return errx.InternalError()
 		}
+	}
+	if xerr := s.clientFor(l).do(ctx, http.MethodDelete, "/instance/mailboxes/"+m.RemoteID.String(), nil, nil); xerr != nil && xerr.Identifier != "pool_link_mailbox_not_found" && !linkAlreadyGone(xerr) {
+		return xerr
 	}
 	s.forgetToken(m.EmailAccountID)
 	if s.emailSvc != nil {
-		if xerr := s.emailSvc.Delete(ctx, userID, m.EmailAccountID.String()); xerr != nil && xerr != errx.ErrNotFound {
+		if xerr := s.emailSvc.Delete(ctx, orgID, m.EmailAccountID.String()); xerr != nil && xerr != errx.ErrNotFound {
 			return xerr
 		}
+	} else {
+		return errx.InternalError()
+	}
+	if err := s.repo.Unenroll(ctx, m.EmailAccountID); err != nil {
+		return errx.InternalError()
 	}
 	return nil
 }
@@ -214,7 +174,7 @@ func (s *service) VerifyWarmupToken(ctx context.Context, accountID uuid.UUID, to
 	if err != nil || m == nil {
 		return false, err
 	}
-	l, xerr := s.link(ctx)
+	l, xerr := s.mailboxLink(ctx, m)
 	if xerr != nil {
 		return false, xerr
 	}
@@ -239,7 +199,7 @@ func (s *service) IsCloudWarmupDelivery(ctx context.Context, accountID uuid.UUID
 	if err != nil || m == nil {
 		return false, err
 	}
-	l, xerr := s.link(ctx)
+	l, xerr := s.mailboxLink(ctx, m)
 	if xerr != nil {
 		return false, xerr
 	}
@@ -247,6 +207,31 @@ func (s *service) IsCloudWarmupDelivery(ctx context.Context, accountID uuid.UUID
 		Valid bool `json:"valid"`
 	}
 	q := models.PoolLinkWarmupDeliveryQuery{Sender: sender, MessageID: messageID, Subject: subject}
+	if xerr := s.clientFor(l).do(ctx, http.MethodPost, "/instance/mailboxes/"+m.RemoteID.String()+"/warmup-deliveries", q, &out); xerr != nil {
+		return false, xerr
+	}
+	return out.Valid, nil
+}
+
+// IsCloudWarmupThreadReply asks the cloud whether a tokenless message answers
+// a turn of one of its warmup conversations. The cloud records a yes itself,
+// so the turn answering this one is recognised on the next ask.
+func (s *service) IsCloudWarmupThreadReply(ctx context.Context, accountID uuid.UUID, messageID string, inReplyTo []string) (bool, error) {
+	if len(inReplyTo) == 0 {
+		return false, nil
+	}
+	m, err := s.repo.GetByAccount(ctx, accountID)
+	if err != nil || m == nil {
+		return false, err
+	}
+	l, xerr := s.mailboxLink(ctx, m)
+	if xerr != nil {
+		return false, xerr
+	}
+	var out struct {
+		Valid bool `json:"valid"`
+	}
+	q := models.PoolLinkWarmupDeliveryQuery{MessageID: messageID, InReplyTo: inReplyTo}
 	if xerr := s.clientFor(l).do(ctx, http.MethodPost, "/instance/mailboxes/"+m.RemoteID.String()+"/warmup-deliveries", q, &out); xerr != nil {
 		return false, xerr
 	}

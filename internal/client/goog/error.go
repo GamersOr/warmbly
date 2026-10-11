@@ -3,6 +3,7 @@ package goog
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/errx"
@@ -39,6 +40,37 @@ func IsThreadRefusal(err error) bool {
 	return gerr.Code == 400 && strings.Contains(strings.ToLower(gerr.Message), "thread")
 }
 
+// googleThrottleReasons are the reasons Google returns for "you are going too
+// fast", all of which arrive as a 403 alongside the ones that mean the grant is
+// genuinely refused. Treating the whole status as refusal told the owner of a
+// mailbox that had merely hit a per-minute quota to re-authorize, and reported
+// every retry as an incident.
+var googleThrottleReasons = map[string]struct{}{
+	"rateLimitExceeded":     {},
+	"userRateLimitExceeded": {},
+	"quotaExceeded":         {},
+	"dailyLimitExceeded":    {},
+}
+
+func isGoogleThrottle(gerr *googleapi.Error) bool {
+	if gerr.Code == 429 {
+		return true
+	}
+	if gerr.Code != 403 {
+		return false
+	}
+	for _, item := range gerr.Errors {
+		if _, ok := googleThrottleReasons[item.Reason]; ok {
+			return true
+		}
+	}
+	// Some Gmail 403s carry no structured reason, only the sentence. "Quota
+	// exceeded for quota metric ... limit ... per minute per user" is the one
+	// that flooded error tracking.
+	msg := strings.ToLower(gerr.Message)
+	return strings.Contains(msg, "quota exceeded") || strings.Contains(msg, "rate limit exceeded")
+}
+
 func HandleError(err error) *errx.MailError {
 	if err == nil {
 		return nil
@@ -48,18 +80,36 @@ func HandleError(err error) *errx.MailError {
 	// branch below.
 	var gerr *googleapi.Error
 	if errors.As(err, &gerr) {
+		now := time.Now().UTC()
+		failure := errx.SendFailure{Provider: "google", Protocol: "http", Status: gerr.Code,
+			Scope: "mailbox", ObservedAt: now, Disposition: errx.SendPermanent,
+			RetryAt: errx.RetryAfterAt(gerr.Header.Get("Retry-After"), now)}
+		for _, item := range gerr.Errors {
+			if code := errx.SafeProviderCode(item.Reason); code != "" {
+				failure.Cause = code
+				break
+			}
+		}
+		// Throttles come back as 403 and 429, so the status alone does not say
+		// whether the caller should back off or the owner should re-authorize.
+		if isGoogleThrottle(gerr) {
+			failure.Disposition = errx.SendThrottle
+			return errx.WithSendFailure(errx.ErrMailSendingTooFast, failure)
+		}
+		base := errx.ErrMailSendRejected("The provider rejected the request")
 		switch gerr.Code {
 		case 401:
-			return errx.ErrMailGoogleAuth
+			base, failure.Disposition = errx.ErrMailGoogleAuth, errx.SendAuth
 		case 402:
-			return errx.ErrMailGooglePayment
+			base = errx.ErrMailGooglePayment
 		case 403:
-			return errx.ErrMailGoogleForbidden(gerr.Message)
+			base, failure.Disposition = errx.ErrMailGoogleForbidden("The provider refused access"), errx.SendAuth
 		default:
-			respErr := errx.ErrMailGoogleUnknown(gerr.Code, gerr.Message)
-			log.Debug().Err(err).Msg("Google Api Error")
-			return respErr
+			if gerr.Code >= 500 {
+				base, failure.Disposition = errx.ErrMailServerUnreachable, errx.SendRetry
+			}
 		}
+		return errx.WithSendFailure(base, failure)
 	}
 
 	// The token source runs inside the API call, so a grant the user revoked

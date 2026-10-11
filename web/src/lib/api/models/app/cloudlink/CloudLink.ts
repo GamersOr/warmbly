@@ -4,6 +4,8 @@
 // Cloud side:        GET/POST /pool-link/*    (the /connect approval page and
 //                    the workspace's linked instances)
 
+import type { WarmupPartnerLimit, WarmupSendFailure } from "@/lib/api/models/app/analytics/AccountStatus";
+
 export type PoolLinkCodeStatus = "pending" | "approved" | "claimed" | "denied";
 
 export interface PoolLinkOrgInfo {
@@ -28,8 +30,13 @@ export interface PoolLinkPlan {
     /** null when unlimited */
     mailbox_limit: number | null;
     enrolled: number;
+    /** Mailboxes with warmup on and not paused; older servers do not send it. */
+    warming?: number;
     price_usd: number;
+    /** The cloud's billing page with the warmup plan checkout open; only on the free tier. */
     upgrade_url?: string;
+    /** The cloud's billing page; absent when the cloud runs without billing. */
+    manage_url?: string;
     warmup_entitled: boolean;
 }
 
@@ -44,10 +51,20 @@ export interface PoolLinkOffer {
     currency: string;
 }
 
+/** Root redirects Warmbly Cloud serves for this linked instance. */
+export interface PoolLinkRedirectOffer {
+    available: boolean;
+    host?: string;
+    limit: number;
+    used: number;
+}
+
 export interface PoolLinkInstanceInfo {
     instance: PoolLinkInstance;
     organization: PoolLinkOrgInfo;
     plan: PoolLinkPlan;
+    /** Absent from a Cloud that does not serve redirects. */
+    redirects?: PoolLinkRedirectOffer | null;
 }
 
 export interface PoolLinkCode {
@@ -83,6 +100,9 @@ export interface PoolLinkWarmupStatus {
     max_volume: number;
     reply_rate: number;
     days_active: number;
+    /** Older clouds do not send these. */
+    partner_limit?: WarmupPartnerLimit;
+    send_failure?: WarmupSendFailure;
 }
 
 export interface PoolLinkWarmupHealth {
@@ -93,6 +113,11 @@ export interface PoolLinkWarmupHealth {
     spam_score: number;
     blocked_until?: Date | null;
     evaluated_at?: Date | null;
+    partner_mailboxes_7d?: number;
+    partner_domains_7d?: number;
+    partner_organizations_7d?: number;
+    received_7d?: number;
+    senders_7d?: number;
 }
 
 export interface PoolLinkMailboxError {
@@ -106,6 +131,7 @@ export interface PoolLinkMailboxError {
 }
 
 export interface PoolLinkMailboxState {
+    participation?: DiagnosticParticipation;
     remote_id: string;
     email_account_id: string;
     email: string;
@@ -126,7 +152,17 @@ export interface PoolLinkMailboxState {
     settings: PoolLinkWarmupSettings;
 }
 
+export interface DiagnosticParticipation {
+    mode: "legacy" | "diagnostic" | "off";
+    send: boolean;
+    receive: boolean;
+    shared_daily_limit?: number | null;
+    rolling_recipient_limit?: number | null;
+}
+
 export interface CloudLink {
+    /** Absent on a legacy instance-wide connection. */
+    organization_id?: string | null;
     cloud_url: string;
     instance_id: string;
     organization_name: string;
@@ -136,6 +172,7 @@ export interface CloudLink {
 }
 
 export interface CloudLinkStatus {
+    legacy_connected?: boolean;
     connected: boolean;
     link?: CloudLink | null;
     info?: PoolLinkInstanceInfo | null;
@@ -159,6 +196,7 @@ export interface CloudLinkPollResult {
 }
 
 export interface CloudLinkMailboxRow {
+    legacy?: boolean;
     id: string;
     email: string;
     name: string;

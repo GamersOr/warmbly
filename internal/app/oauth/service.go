@@ -9,8 +9,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/warmbly/warmbly/internal/app/webhook"
+	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/cache"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/whdomain"
@@ -32,10 +35,58 @@ type AppWebhookSyncer interface {
 	DeleteAppEndpointsExcept(ctx context.Context, appID uuid.UUID, keepOrgIDs []uuid.UUID) error
 }
 
+// ListingGuard ends a directory listing's feature. Satisfied by
+// repository.AppDirectoryRepository.
+type ListingGuard interface {
+	Unfeature(ctx context.Context, orgID, appID uuid.UUID) error
+}
+
+// DeveloperBlockedError is returned when an operator has stopped this workspace
+// or person from registering or publishing apps.
+type DeveloperBlockedError struct{ Reason string }
+
+func (e *DeveloperBlockedError) Error() string {
+	if e.Reason == "" {
+		return "registering and publishing apps is blocked for this workspace"
+	}
+	return "registering and publishing apps is blocked for this workspace: " + e.Reason
+}
+
+// ErrAppSuspended is returned when the owner edits an app an operator suspended.
+var ErrAppSuspended = errors.New("this app is suspended by the instance's administrators")
+
+// ErrAppNotFound is returned when the workspace owns no app with that id.
+var ErrAppNotFound = errors.New("application not found")
+
+// ValidationError is a refusal written for the developer; any other error from a write is a server fault.
+type ValidationError struct{ msg string }
+
+func (e *ValidationError) Error() string { return e.msg }
+
+func invalidf(format string, args ...any) error {
+	return &ValidationError{msg: fmt.Sprintf(format, args...)}
+}
+
+// appWebsite accepts an empty value or an http(s) address on a host, without
+// credentials; it is shown to other workspaces as a link.
+func appWebsite(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || len(raw) > 2048 {
+		return "", errx.NewWithIdentifier(errx.BadRequest, "invalid_website", "the website must be an http or https address")
+	}
+	return u.String(), nil
+}
+
 // Service is the OAuth authorization server.
 type Service struct {
 	repo        repository.OAuthRepository
+	admin       repository.OAuthAdminRepository
 	webhookSync AppWebhookSyncer
+	listings    ListingGuard
 	// cache backs the per-IP rate limit on the open Dynamic Client Registration
 	// endpoint. Optional: nil disables the limit (fails open).
 	cache *cache.Cache
@@ -49,6 +100,12 @@ func NewService(repo repository.OAuthRepository, c *cache.Cache) *Service {
 // an app, or changing its webhook config, reconciles the per-org endpoints.
 func (s *Service) WireWebhookSync(w AppWebhookSyncer) {
 	s.webhookSync = w
+}
+
+// WireListingGuard makes a change to an app's public face (name, logo,
+// website, scopes) end its directory listing's feature.
+func (s *Service) WireListingGuard(g ListingGuard) {
+	s.listings = g
 }
 
 // --- credential helpers (mirror the api_key hash-at-rest scheme) ---
@@ -72,7 +129,7 @@ func verifyPKCE(verifier, challenge string) bool {
 		return false
 	}
 	sum := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(sum[:]) == challenge
+	return subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(sum[:])), []byte(challenge)) == 1
 }
 
 // --- application management ---
@@ -80,9 +137,16 @@ func verifyPKCE(verifier, challenge string) bool {
 // RegisterApplication creates a new OAuth client. Every app is issued a client
 // secret, returned exactly once here.
 func (s *Service) RegisterApplication(ctx context.Context, orgID, userID uuid.UUID, w models.OAuthApplicationWrite) (*models.OAuthApplicationWithSecret, error) {
-	name := strings.TrimSpace(w.Name)
-	if name == "" {
-		return nil, fmt.Errorf("a name is required")
+	if err := s.CheckDeveloperAccess(ctx, orgID, userID); err != nil {
+		return nil, err
+	}
+	name, err := appName(w.Name, "")
+	if err != nil {
+		return nil, err
+	}
+	website, err := appWebsite(w.WebsiteURL)
+	if err != nil {
+		return nil, err
 	}
 	uris, err := validateRedirectURIs(w.RedirectURIs)
 	if err != nil {
@@ -92,9 +156,9 @@ func (s *Service) RegisterApplication(ctx context.Context, orgID, userID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	scopes := w.Scopes & models.AllAPIPermissionsMask
+	scopes := w.Scopes & models.AppGrantableScopes
 	if scopes == 0 {
-		return nil, fmt.Errorf("select at least one scope")
+		return nil, invalidf("select at least one scope")
 	}
 	clientID, err := randomToken(models.OAuthClientIDPrefix)
 	if err != nil {
@@ -106,7 +170,7 @@ func (s *Service) RegisterApplication(ctx context.Context, orgID, userID uuid.UU
 		Name:                  name,
 		Description:           strings.TrimSpace(w.Description),
 		LogoURL:               strings.TrimSpace(w.LogoURL),
-		WebsiteURL:            strings.TrimSpace(w.WebsiteURL),
+		WebsiteURL:            website,
 		ClientID:              clientID,
 		RedirectURIs:          uris,
 		AllowedWebhookDomains: domains,
@@ -140,17 +204,24 @@ func (s *Service) GetApplication(ctx context.Context, orgID, id uuid.UUID) (*mod
 // UpdateApplication edits an app's display fields, redirect URIs, scopes, and
 // status. client_id and the secret are immutable here (rotate the secret
 // separately).
-func (s *Service) UpdateApplication(ctx context.Context, orgID, id uuid.UUID, w models.OAuthApplicationWrite) (*models.OAuthApplication, error) {
+func (s *Service) UpdateApplication(ctx context.Context, orgID, userID, id uuid.UUID, w models.OAuthApplicationWrite) (*models.OAuthApplication, error) {
 	app, err := s.repo.GetApplication(ctx, orgID, id)
 	if err != nil {
 		return nil, err
 	}
 	if app == nil {
-		return nil, fmt.Errorf("application not found")
+		return nil, ErrAppNotFound
 	}
-	name := strings.TrimSpace(w.Name)
-	if name == "" {
-		return nil, fmt.Errorf("a name is required")
+	if app.SuspendedAt != nil {
+		return nil, ErrAppSuspended
+	}
+	name, err := appName(w.Name, app.Name)
+	if err != nil {
+		return nil, err
+	}
+	website, err := appWebsite(w.WebsiteURL)
+	if err != nil {
+		return nil, err
 	}
 	uris, err := validateRedirectURIs(w.RedirectURIs)
 	if err != nil {
@@ -160,14 +231,26 @@ func (s *Service) UpdateApplication(ctx context.Context, orgID, id uuid.UUID, w 
 	if err != nil {
 		return nil, err
 	}
-	scopes := w.Scopes & models.AllAPIPermissionsMask
+	scopes := w.Scopes & models.AppGrantableScopes
 	if scopes == 0 {
-		return nil, fmt.Errorf("select at least one scope")
+		return nil, invalidf("select at least one scope")
+	}
+	// The logo has its own endpoints; an update without one keeps the current logo.
+	logo := app.LogoURL
+	if v := strings.TrimSpace(w.LogoURL); v != "" {
+		logo = v
+	}
+	faceChanged := app.Name != name || app.LogoURL != logo || app.WebsiteURL != website || app.Scopes&models.AppGrantableScopes != scopes
+	// A blocked developer keeps a working app but cannot change what other workspaces see of it.
+	if faceChanged {
+		if err := s.CheckDeveloperAccess(ctx, orgID, userID); err != nil {
+			return nil, err
+		}
 	}
 	app.Name = name
 	app.Description = strings.TrimSpace(w.Description)
-	app.LogoURL = strings.TrimSpace(w.LogoURL)
-	app.WebsiteURL = strings.TrimSpace(w.WebsiteURL)
+	app.LogoURL = logo
+	app.WebsiteURL = website
 	app.RedirectURIs = uris
 	app.AllowedWebhookDomains = domains
 	app.Scopes = scopes
@@ -176,6 +259,11 @@ func (s *Service) UpdateApplication(ctx context.Context, orgID, id uuid.UUID, w 
 	}
 	if err := s.repo.UpdateApplication(ctx, app); err != nil {
 		return nil, err
+	}
+	if faceChanged && s.listings != nil {
+		if err := s.listings.Unfeature(ctx, orgID, id); err != nil {
+			return nil, errx.NewPublic(errx.Internal, "the app was saved but its directory listing could not be updated")
+		}
 	}
 	// Re-materialize the app's per-org endpoints from the new config (URL/events).
 	s.ReconcileAppEndpoints(ctx, id)
@@ -194,10 +282,10 @@ func applyWebhookConfig(app *models.OAuthApplication, w models.OAuthApplicationW
 		return nil
 	}
 	if err := webhook.ValidateOutboundURL(url); err != nil {
-		return fmt.Errorf("webhook url: %w", err)
+		return invalidf("webhook url: %v", err)
 	}
 	if !whdomain.HostAllowed(hostOf(url), app.AllowedWebhookDomains) {
-		return fmt.Errorf("webhook url host must be within the app's allowed webhook domains")
+		return invalidf("webhook url host must be within the app's allowed webhook domains")
 	}
 	for _, e := range w.WebhookEvents {
 		e = strings.TrimSpace(e)
@@ -205,7 +293,7 @@ func applyWebhookConfig(app *models.OAuthApplication, w models.OAuthApplicationW
 			continue
 		}
 		if !models.IsValidWebhookEventType(e) {
-			return fmt.Errorf("unknown webhook event type: %s", e)
+			return invalidf("unknown webhook event type: %s", e)
 		}
 		app.WebhookEvents = append(app.WebhookEvents, e)
 	}
@@ -241,7 +329,7 @@ func (s *Service) ReconcileAppEndpoints(ctx context.Context, appID uuid.UUID) {
 	if err != nil || app == nil {
 		return
 	}
-	if strings.TrimSpace(app.WebhookURL) == "" || app.WebhookSecret == "" {
+	if !app.Usable() || strings.TrimSpace(app.WebhookURL) == "" || app.WebhookSecret == "" {
 		_ = s.webhookSync.DeleteAppEndpointsExcept(ctx, appID, nil)
 		return
 	}
@@ -274,7 +362,7 @@ func (s *Service) WebhookSecret(ctx context.Context, orgID, id uuid.UUID) (strin
 		return "", err
 	}
 	if app == nil {
-		return "", fmt.Errorf("application not found")
+		return "", ErrAppNotFound
 	}
 	return app.WebhookSecret, nil
 }
@@ -287,7 +375,7 @@ func (s *Service) RotateWebhookSecret(ctx context.Context, orgID, id uuid.UUID) 
 		return "", err
 	}
 	if app == nil {
-		return "", fmt.Errorf("application not found")
+		return "", ErrAppNotFound
 	}
 	app.WebhookSecret = genWebhookSecret()
 	if err := s.repo.UpdateApplication(ctx, app); err != nil {
@@ -305,7 +393,7 @@ func (s *Service) RotateSecret(ctx context.Context, orgID, id uuid.UUID) (string
 		return "", err
 	}
 	if app == nil {
-		return "", fmt.Errorf("application not found")
+		return "", ErrAppNotFound
 	}
 	secret, err := randomToken(models.OAuthClientSecretPrefix)
 	if err != nil {
@@ -332,12 +420,29 @@ func (s *Service) ListAuthorizedApps(ctx context.Context, orgID, userID uuid.UUI
 	return s.repo.ListAuthorizedApps(ctx, orgID, userID)
 }
 
+// ListWorkspaceAuthorizations is every member's live app authorizations in the workspace.
+func (s *Service) ListWorkspaceAuthorizations(ctx context.Context, orgID uuid.UUID) ([]models.OAuthMemberAuthorization, error) {
+	return s.repo.ListWorkspaceAuthorizations(ctx, orgID)
+}
+
 func (s *Service) RevokeAuthorization(ctx context.Context, orgID, userID, appID uuid.UUID) error {
 	if err := s.repo.RevokeAuthorization(ctx, orgID, userID, appID); err != nil {
 		return err
 	}
 	// The org may have lost its last grant for this app — reconcile its endpoint.
 	s.ReconcileAppEndpoints(ctx, appID)
+	return nil
+}
+
+// RevokeMemberGrants ends every app authorization a member holds in a workspace they left.
+func (s *Service) RevokeMemberGrants(ctx context.Context, orgID, userID uuid.UUID) error {
+	apps, err := s.repo.RevokeMemberGrants(ctx, orgID, userID)
+	if err != nil {
+		return err
+	}
+	for _, appID := range apps {
+		s.ReconcileAppEndpoints(ctx, appID)
+	}
 	return nil
 }
 
@@ -353,19 +458,19 @@ func validateRedirectURIs(uris []string) ([]string, error) {
 		}
 		parsed, err := url.Parse(u)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return nil, fmt.Errorf("invalid redirect URI: %s", u)
+			return nil, invalidf("invalid redirect URI: %s", u)
 		}
 		if parsed.Fragment != "" {
-			return nil, fmt.Errorf("a redirect URI must not contain a fragment: %s", u)
+			return nil, invalidf("a redirect URI must not contain a fragment: %s", u)
 		}
 		if parsed.Scheme != "https" && !isLoopbackRedirect(parsed) {
-			return nil, fmt.Errorf("a redirect URI must use https: %s", u)
+			return nil, invalidf("a redirect URI must use https: %s", u)
 		}
 		seen[u] = true
 		out = append(out, u)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("at least one redirect URI is required")
+		return nil, invalidf("at least one redirect URI is required")
 	}
 	return out, nil
 }
@@ -382,7 +487,41 @@ func isLoopbackRedirect(u *url.URL) bool {
 func validateWebhookDomains(domains []string) ([]string, error) {
 	out, err := whdomain.NormalizeList(domains)
 	if err != nil {
-		return nil, err
+		return nil, invalidf("%v", err)
 	}
 	return out, nil
+}
+
+// CheckDeveloperAccess returns a *DeveloperBlockedError when an operator has
+// blocked this workspace or person from registering or publishing apps.
+func (s *Service) CheckDeveloperAccess(ctx context.Context, orgID, userID uuid.UUID) error {
+	b, err := s.repo.DeveloperBlock(ctx, orgID, userID)
+	if err != nil {
+		return fmt.Errorf("developer access lookup failed: %w", err)
+	}
+	if b != nil {
+		return &DeveloperBlockedError{Reason: b.Reason}
+	}
+	return nil
+}
+
+// DeveloperAccess reports what the workspace's developers may do, for the UI.
+func (s *Service) DeveloperAccess(ctx context.Context, orgID, userID uuid.UUID) models.OAuthDeveloperAccess {
+	b, err := s.repo.DeveloperBlock(ctx, orgID, userID)
+	if err != nil || b == nil {
+		return models.OAuthDeveloperAccess{}
+	}
+	return models.OAuthDeveloperAccess{Blocked: true, Reason: b.Reason}
+}
+
+// SetLogo records the logo the server stored for the app ("" clears it). A new
+// logo is a change to the app's public face, so it ends a directory feature.
+func (s *Service) SetLogo(ctx context.Context, orgID, id uuid.UUID, logoURL string) (*models.OAuthApplication, error) {
+	if err := s.repo.UpdateApplicationLogo(ctx, orgID, id, logoURL); err != nil {
+		return nil, err
+	}
+	if s.listings != nil {
+		_ = s.listings.Unfeature(ctx, orgID, id)
+	}
+	return s.repo.GetApplication(ctx, orgID, id)
 }

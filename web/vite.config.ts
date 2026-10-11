@@ -1,8 +1,12 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
 import tailwindcss from "@tailwindcss/vite";
 import { sentryVitePlugin } from "@sentry/vite-plugin";
+import { dashboardCspPlugin, noncePlaceholder } from "./csp";
+
+// A Cloudflare Pages build sets no release, so its events are tagged with the commit it built.
+if (!process.env.VITE_SENTRY_RELEASE && process.env.CF_PAGES_COMMIT_SHA) process.env.VITE_SENTRY_RELEASE = process.env.CF_PAGES_COMMIT_SHA;
 
 // Source maps, and nothing else, is what this section decides.
 //
@@ -36,11 +40,36 @@ const sentryPlugins = uploadToSentry
       ]
     : [];
 
-export default defineConfig({
+// Requests the interface font from the head, in parallel with the scripts, not after the stylesheet parses.
+function preloadInterfaceFont(): Plugin {
+    return {
+        name: "warmbly:preload-interface-font",
+        apply: "build",
+        transformIndexHtml: {
+            order: "post",
+            handler(_html, ctx) {
+                const file = Object.keys(ctx.bundle ?? {}).find((name) => /inter-latin-opsz-normal-[^/]*\.woff2$/.test(name));
+                if (!file) return [];
+                return [
+                    {
+                        tag: "link",
+                        attrs: { rel: "preload", as: "font", type: "font/woff2", href: `/${file}`, crossorigin: "" },
+                        injectTo: "head-prepend",
+                    },
+                ];
+            },
+        },
+    };
+}
+
+export default defineConfig(({ command, mode, isPreview }) => ({
+    html: { cspNonce: command === "serve" && !isPreview ? noncePlaceholder : undefined },
     plugins: [
         react(),
         tailwindcss(),
+        preloadInterfaceFont(),
         ...sentryPlugins,
+        dashboardCspPlugin({ ...loadEnv(mode, process.cwd(), ""), ...process.env } as Record<string, string>),
     ],
     build: {
         // Only when they are going to be uploaded: shipping them otherwise
@@ -59,12 +88,12 @@ export default defineConfig({
         include: [
             "react",
             "react-dom",
-            "react-router-dom",
+            "@tanstack/react-router",
             "axios",
             "framer-motion",
             "@tanstack/react-query",
             "@tanstack/react-query-devtools",
-            "react-hot-toast",
+            "react-hot-toast/headless",
             "lucide-react",
             "@remixicon/react",
         ],
@@ -76,16 +105,15 @@ export default defineConfig({
         // inert for normal local dev. Lets `make web PUBLIC_HOST=<name>` work
         // when reached at https://<host>.<tailnet>.ts.net.
         allowedHosts: [".ts.net", ...(process.env.VITE_ALLOWED_HOSTS?.split(",").filter(Boolean) ?? [])],
-        // Warm up the most-mounted entry points before the user
-        // clicks them so navigation doesn't trigger a cold compile.
+        // Compile every dashboard page at startup, so no first click waits
+        // on the dev server.
         warmup: {
             clientFiles: [
                 "./src/main.tsx",
-                "./src/app/app/layout.tsx",
-                "./src/app/app/emails/page.tsx",
-                "./src/app/app/campaigns/page.tsx",
-                "./src/app/app/contacts/page.tsx",
+                "./src/router.tsx",
+                "./src/app/app/**/page.tsx",
+                "./src/app/app/**/layout.tsx",
             ],
         },
     },
-});
+}));

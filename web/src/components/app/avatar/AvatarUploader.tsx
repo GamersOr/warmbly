@@ -13,14 +13,16 @@
 // endpoints — the page wires `onUpload` to the right mutation.
 
 import React from "react";
+import { DashboardImage } from "@/components/ui/dashboard-image";
 import { CameraIcon, ImageIcon, Loader2Icon, TrashIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import {
     AVATAR_ACCEPT,
     AVATAR_OUTPUT_DIMENSION,
     resizeAvatar,
     type ResizedAvatar,
 } from "@/lib/avatar";
+import { errorMessage } from "@/lib/errors/message";
 
 interface Props {
     /** Existing avatar URL or undefined when none. */
@@ -70,7 +72,7 @@ export function AvatarUploader({
         try {
             resized = await resizeAvatar(f);
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Couldn't process that image.");
+            toast.error(errorMessage(err, "Couldn't process that image."));
             return;
         }
 
@@ -80,7 +82,7 @@ export function AvatarUploader({
         try {
             await onUpload(resized.blob);
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Upload failed.");
+            toast.error(errorMessage(err, "Upload failed."));
             // Drop the optimistic preview on failure.
             URL.revokeObjectURL(resized.previewUrl);
             setPreview(null);
@@ -97,7 +99,7 @@ export function AvatarUploader({
             if (preview) URL.revokeObjectURL(preview.previewUrl);
             setPreview(null);
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Couldn't remove the avatar.");
+            toast.error(errorMessage(err, "Couldn't remove the avatar."));
         } finally {
             setRemoving(false);
         }
@@ -117,7 +119,7 @@ export function AvatarUploader({
                 className={`group relative ${dim} ${radius} bg-slate-900 text-white flex items-center justify-center shrink-0 overflow-hidden disabled:opacity-60 transition-shadow hover:ring-2 hover:ring-slate-300 ring-offset-1`}
             >
                 {displayUrl ? (
-                    <img
+                    <DashboardImage
                         src={displayUrl}
                         alt=""
                         className={`absolute inset-0 w-full h-full object-cover ${radius}`}

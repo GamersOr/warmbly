@@ -16,9 +16,9 @@
 // landing, no orgs" and "ongoing management" cases.
 
 import React from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "@tanstack/react-router";
 import { LogOutIcon, Loader2Icon, MailIcon, PlusIcon, UsersIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import getToken from "@/lib/helper/getToken";
 import useOrganizations from "@/lib/api/hooks/app/organizations/useOrganizations";
 import useMyInvitations from "@/lib/api/hooks/app/organizations/useMyInvitations";
@@ -90,7 +90,7 @@ function SelectOrgPageInner() {
 
     async function onLogout() {
         await logout.mutateAsync();
-        navigate("/auth/login", { replace: true });
+        navigate({ to: "/auth/login", replace: true });
     }
 
     const orgList = orgs.data ?? [];
@@ -113,7 +113,7 @@ function SelectOrgPageInner() {
                 await switchOrg.mutateAsync(list[0].id).catch(() => undefined);
                 setOrganizations(list);
                 setCurrentOrganization(list[0]);
-                navigate("/app/emails", { replace: true });
+                navigate({ to: "/app/emails", replace: true });
             }
         } catch {
             /* surfaced */
@@ -125,7 +125,7 @@ function SelectOrgPageInner() {
             await switchOrg.mutateAsync(orgId);
             const org = orgList.find((o) => o.id === orgId);
             if (org) setCurrentOrganization(org);
-            navigate("/app/emails", { replace: true });
+            navigate({ to: "/app/emails", replace: true });
         } catch (e) {
             toast.error(buildError(e as AppError));
         }
@@ -135,7 +135,7 @@ function SelectOrgPageInner() {
     const noWorkspaces = !loading && orgList.length === 0 && inviteList.length === 0;
 
     return (
-        <div className="min-h-dvh bg-[#f5f6f8] flex items-center justify-center px-4 py-12">
+        <div className="min-h-dvh bg-[#f5f6f8] dark:bg-[var(--wb-chrome)] flex items-center justify-center px-4 py-12">
             <div className="w-full max-w-[480px] rounded-lg bg-white border border-slate-200 shadow-[0_24px_48px_-12px_rgba(15,23,42,0.08)] overflow-hidden">
                 <div className="h-12 px-4 border-b border-slate-200 flex items-center gap-2.5">
                     <Logo className="w-4 text-slate-900 shrink-0" />

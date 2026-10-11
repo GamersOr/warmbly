@@ -2,9 +2,9 @@
 // shared ContactsTable scoped by segment_ids, with include/exclude actions).
 
 import React from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { ArrowLeftIcon, CheckIcon, ChevronDownIcon, CopyIcon, MegaphoneIcon, PencilIcon, Trash2Icon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import ContactsTable from "@/components/app/contacts/ContactsTable";
 import SegmentEditor from "@/components/app/segments/SegmentEditor";
@@ -34,7 +34,7 @@ export default function SegmentPage() {
 }
 
 function SegmentDetail() {
-    const { id } = useParams<{ id: string }>();
+    const { id } = useParams({ from: "/app/contacts/segments/$id" });
     const navigate = useNavigate();
     const confirm = useConfirm();
     const write = useWriteGuard("MANAGE_CONTACTS");
@@ -71,7 +71,7 @@ function SegmentDetail() {
             try {
                 await remove.mutateAsync(s.id);
                 toast.success("Segment deleted");
-                navigate("/app/contacts/segments");
+                navigate({ to: "/app/contacts/segments" });
             } catch (err) {
                 toast.error(buildError(err as AppError));
             }
@@ -259,6 +259,7 @@ function describe(c: SegmentCondition, specs: SegmentFieldSpec[]): string {
     if (VALUELESS_OPERATORS.has(c.operator)) return `${label} ${op ?? c.operator}`;
     if (c.values && c.values.length > 0) return `${label} ${op} ${c.values.length} value${c.values.length === 1 ? "" : "s"}`;
     if (c.operator === "within_days" || c.operator === "not_within_days") return `${label} ${op} ${c.value} days`;
+    if (spec?.kind === "date" && c.value) return `${label} ${op} ${c.value.slice(0, 10)}`;
     return `${label} ${op} ${c.value ?? ""}`.trim();
 }
 

@@ -1,6 +1,6 @@
 import React from "react";
 import { useUserProfile } from "@/hooks/context/user";
-import { NumberInput, TextInput } from "@/components/ui/field";
+import { FieldError, NumberInput, TextInput } from "@/components/ui/field";
 import useUpdateProfile from "@/lib/api/hooks/auth/useUpdateProfile";
 import useUpdateSendPreferences from "@/lib/api/hooks/auth/useUpdateSendPreferences";
 import { AvatarUploader } from "@/components/app/avatar/AvatarUploader";
@@ -12,6 +12,9 @@ import { Row, Section, SectionShell, initials } from "../_components/SectionShel
 import SaveStatus from "../_components/SaveStatus";
 import { useAutosave, type AutosaveStatus } from "@/hooks/useAutosave";
 import { useRegisterUnsaved } from "@/hooks/context/unsaved";
+import { PERSON_NAME_MAX, nameError, normalizeName } from "@/lib/displayName";
+import TimezonesSection from "./TimezonesSection";
+import { ThemeCards } from "@/components/app/theme/ThemePicker";
 
 // Header indicator priority when two autosaves share one SaveStatus.
 function combineStatus(a: AutosaveStatus, b: AutosaveStatus): AutosaveStatus {
@@ -30,18 +33,21 @@ export default function ProfileSettingsPage() {
     const removeAvatar = useDeleteUserAvatar();
     const updateProfile = useUpdateProfile();
 
-    // Auto-save names ~700ms after the user stops typing. Empty names are not
-    // persisted (the server requires both), so the field just stays unsaved.
+    // Auto-save names ~700ms after the user stops typing. A name the server
+    // would refuse is not sent; the field shows why and stays unsaved.
     // Memoized so the debounce timer only resets on an actual name change.
     const value = React.useMemo(
-        () => ({ firstName: firstName.trim(), lastName: lastName.trim() }),
+        () => ({ firstName: normalizeName(firstName), lastName: normalizeName(lastName) }),
         [firstName, lastName],
     );
+    const firstError = nameError("First name", firstName, "person");
+    const lastError = nameError("Last name", lastName, "person");
     const autosave = useAutosave({
         value,
         debounceMs: 700,
         save: async (v) => {
-            if (!v.firstName || !v.lastName) throw new Error("name required");
+            const invalid = nameError("First name", v.firstName, "person") ?? nameError("Last name", v.lastName, "person");
+            if (invalid) throw new Error(invalid);
             await updateProfile.mutateAsync({ first_name: v.firstName, last_name: v.lastName });
         },
     });
@@ -80,18 +86,36 @@ export default function ProfileSettingsPage() {
     return (
         <SectionShell
             title="Profile"
-            description="Used in emails sent on your behalf, the sidebar avatar, and any invitation you send out."
+            description="Used in emails sent on your behalf, the sidebar avatar, and any invitation you send out, plus how the dashboard looks to you."
             actions={<SaveStatus status={status} onRetry={retry} />}
         >
             <Section eyebrow="Identity" description="Names appear on outgoing emails.">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                         <FieldLabel>First name</FieldLabel>
-                        <TextInput value={firstName} onChange={setFirstName} className="w-full" />
+                        <TextInput
+                            value={firstName}
+                            onChange={setFirstName}
+                            invalid={!!firstError}
+                            title={firstError ?? undefined}
+                            maxLength={PERSON_NAME_MAX}
+                            autoComplete="given-name"
+                            className="w-full"
+                        />
+                        <FieldError message={firstError} />
                     </div>
                     <div>
                         <FieldLabel>Last name</FieldLabel>
-                        <TextInput value={lastName} onChange={setLastName} className="w-full" />
+                        <TextInput
+                            value={lastName}
+                            onChange={setLastName}
+                            invalid={!!lastError}
+                            title={lastError ?? undefined}
+                            maxLength={PERSON_NAME_MAX}
+                            autoComplete="family-name"
+                            className="w-full"
+                        />
+                        <FieldError message={lastError} />
                     </div>
                 </div>
                 <Row
@@ -106,19 +130,16 @@ export default function ProfileSettingsPage() {
                         className="w-full max-w-[280px] h-7 px-2.5 rounded-md border border-slate-200 bg-slate-50 text-[12.5px] text-slate-500 font-mono"
                     />
                 </Row>
-                <Row
-                    label="Timezone"
-                    description="Detected from your browser. Used to render campaign schedules in local time."
-                    align="start"
-                >
-                    <input
-                        type="text"
-                        value={Intl.DateTimeFormat().resolvedOptions().timeZone}
-                        readOnly
-                        className="w-full max-w-[280px] h-7 px-2.5 rounded-md border border-slate-200 bg-slate-50 text-[12.5px] text-slate-500 font-mono"
-                    />
-                </Row>
             </Section>
+
+            <Section
+                eyebrow="Appearance"
+                description="System follows your device and switches with it. Saved in this browser."
+            >
+                <ThemeCards />
+            </Section>
+
+            <TimezonesSection />
 
             <Section
                 eyebrow="Undo send"

@@ -105,7 +105,7 @@ func (h *Handler) CreateCreditCheckoutSession(c *gin.Context) {
 		CancelURL  string `json:"cancel_url" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 
@@ -127,7 +127,9 @@ func (h *Handler) CreateCreditCheckoutSession(c *gin.Context) {
 	}
 
 	session, xerr := h.StripeService.CreateCreditCheckoutSession(
-		c.Request.Context(), uid, *orgID, pack.Key, pack.Credits, req.SuccessURL, req.CancelURL,
+		c.Request.Context(), uid, *orgID, pack.Key, pack.Credits,
+		billingReturnURL(c.Request.Context(), req.SuccessURL, "/app/settings/billing?credits=done"),
+		billingReturnURL(c.Request.Context(), req.CancelURL, "/app/settings/billing"),
 	)
 	if xerr != nil {
 		errx.JSON(c, xerr)
@@ -264,7 +266,7 @@ func (h *Handler) UpdateCreditSettings(c *gin.Context) {
 		AutoTopupMaxPerMonth int    `json:"auto_topup_max_per_month"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 	if body.AutoTopupPack == "" {

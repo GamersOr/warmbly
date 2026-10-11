@@ -6,15 +6,23 @@ import (
 	"github.com/google/uuid"
 )
 
+type OrganizationCategory string
+
+const (
+	OrganizationCategoryStandard OrganizationCategory = "standard"
+	OrganizationCategoryTest     OrganizationCategory = "test"
+)
+
 // Organization represents a multi-user organization/workspace
 type Organization struct {
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	Slug        *string   `json:"slug,omitempty"`
-	AvatarURL   *string   `json:"avatar_url,omitempty"`
-	OwnerUserID uuid.UUID `json:"owner_user_id"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Category    OrganizationCategory `json:"category"`
+	ID          uuid.UUID            `json:"id"`
+	Name        string               `json:"name"`
+	Slug        *string              `json:"slug,omitempty"`
+	AvatarURL   *string              `json:"avatar_url,omitempty"`
+	OwnerUserID uuid.UUID            `json:"owner_user_id"`
+	CreatedAt   time.Time            `json:"created_at"`
+	UpdatedAt   time.Time            `json:"updated_at"`
 
 	// Soft-delete window. When DeletionScheduledFor is non-nil the
 	// organization is "pending deletion" and will be hard-deleted at
@@ -48,6 +56,11 @@ type Organization struct {
 	// history); admin-controlled (manage_settings).
 	AssistantSharedHistory bool `json:"assistant_shared_history"`
 
+	// Timezone is the workspace's IANA zone: the default a new campaign's
+	// schedule is created in, and the clock a mailbox with no timezone of its
+	// own keeps its warmup hours and working hours in. Empty means not set.
+	Timezone string `json:"timezone"`
+
 	// Joined data
 	Owner *User `json:"owner,omitempty"`
 }
@@ -73,6 +86,9 @@ type OrganizationMember struct {
 	InvitedBy   *uuid.UUID             `json:"invited_by,omitempty"`
 	InvitedAt   time.Time              `json:"invited_at"`
 	AcceptedAt  *time.Time             `json:"accepted_at,omitempty"`
+	// AccessScope is which resources the role applies to; Access is filled where the grants are listed.
+	AccessScope AccessScope   `json:"access_scope"`
+	Access      *MemberAccess `json:"access,omitempty"`
 
 	// Joined data
 	User         *User         `json:"user,omitempty"`
@@ -102,6 +118,11 @@ func (m *OrganizationMember) IsOwner() bool {
 	return m.Role == string(RoleOwner)
 }
 
+// IsRestricted reports whether the member reaches only the resources granted to them.
+func (m *OrganizationMember) IsRestricted() bool {
+	return m != nil && !m.IsOwner() && m.AccessScope == AccessScopeRestricted
+}
+
 // OrganizationInvitation represents a pending invitation to join an organization
 type OrganizationInvitation struct {
 	ID             uuid.UUID              `json:"id"`
@@ -115,6 +136,7 @@ type OrganizationInvitation struct {
 	Token          string                 `json:"-"` // Never expose token in JSON
 	ExpiresAt      time.Time              `json:"expires_at"`
 	CreatedAt      time.Time              `json:"created_at"`
+	Access         *MemberAccess          `json:"access,omitempty"`
 
 	// Joined data
 	Organization  *Organization `json:"organization,omitempty"`
@@ -153,7 +175,9 @@ const (
 
 // CreateOrganizationRequest represents the request to create a new organization
 type CreateOrganizationRequest struct {
-	Name string `json:"name" binding:"required,min=1,max=255"`
+	Name string `json:"name" binding:"required"`
+	// Timezone is the workspace timezone, an IANA name. Optional.
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // UpdateOrganizationRequest represents the request to update an organization
@@ -173,6 +197,9 @@ type UpdateOrganizationRequest struct {
 	// AssistantSharedHistory toggles workspace-shared assistant conversations
 	// (manage_settings).
 	AssistantSharedHistory *bool `json:"assistant_shared_history,omitempty"`
+	// Timezone is the workspace timezone (manage_settings). An IANA name;
+	// empty string clears it.
+	Timezone *string `json:"timezone,omitempty"`
 }
 
 // InviteMemberRequest represents the request to invite a new member
@@ -182,6 +209,8 @@ type InviteMemberRequest struct {
 	// RoleID stays accepted as a single-role shorthand.
 	RoleIDs []uuid.UUID `json:"role_ids,omitempty"`
 	RoleID  *uuid.UUID  `json:"role_id,omitempty"`
+	// Access restricts the invitee from the moment they join; absent is the entire workspace.
+	Access *MemberAccess `json:"access,omitempty"`
 }
 
 // Resolved returns the requested role ids, merging the single-role shorthand.

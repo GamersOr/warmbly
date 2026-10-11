@@ -11,10 +11,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/db"
 	"github.com/warmbly/warmbly/internal/infrastructure/kms"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
 )
 
 type UserRepository interface {
@@ -41,7 +43,12 @@ type UserRepository interface {
 	// CreateExemptUser creates an account and its login-code exemption in one
 	// transaction, so a failure cannot leave an account that holds no
 	// exemption and therefore appears in no list.
-	CreateExemptUser(ctx context.Context, email *mail.Address, passwordHash, reason string, by *uuid.UUID) (*models.User, error)
+	// The password stops working at passwordExpiresAt.
+	CreateExemptUser(ctx context.Context, email *mail.Address, passwordHash, reason string, by *uuid.UUID, passwordExpiresAt time.Time) (*models.User, error)
+
+	// RevokeTester clears the exemption and, on an account whose password was
+	// handed out with an expiry, the password too. It reports whether it did.
+	RevokeTester(ctx context.Context, id uuid.UUID) (passwordCleared bool, err error)
 
 	// DeleteOrphanExemptUser undoes a tester creation whose workspace step
 	// failed. The predicate is the safety: it only matches an account that is
@@ -50,6 +57,8 @@ type UserRepository interface {
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	SetFreeTrialUsed(ctx context.Context, userID uuid.UUID) error
 	UpdateOnboarding(ctx context.Context, userID uuid.UUID, firstName, lastName, referralSource, role, teamSize string) error
+	MarkOnboarded(ctx context.Context, userID uuid.UUID) (time.Time, error)
+	MarkProductTourCompleted(ctx context.Context, userID uuid.UUID) (time.Time, error)
 	UpdateProfile(ctx context.Context, userID uuid.UUID, firstName, lastName string) error
 	UpdateAvatar(ctx context.Context, userID uuid.UUID, avatarURL *string) error
 
@@ -85,17 +94,30 @@ func NewUserRepostory(db *db.DB, kms kms.Provider) UserRepository {
 	}
 }
 
+// ErrUserEmailTaken is CreateUser's answer when the address already belongs to an account.
+var ErrUserEmailTaken = errors.New("an account with this email address already exists")
+
+// ErrUserNotFound is returned when the account a write names does not exist.
+var ErrUserNotFound = errors.New("no such account")
+
 func (r *userRepository) CreateUser(ctx context.Context, email *mail.Address, passwordHash string) (*models.User, error) {
+	return createUser(ctx, r.DB, email, passwordHash)
+}
+
+type userCreator interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func createUser(ctx context.Context, store userCreator, email *mail.Address, passwordHash string) (*models.User, error) {
 	id := uuid.New()
 
-	var firstName string
+	// The stored form is decided here, not by the caller, because the account
+	// lookups all fold and `users_email_key` does not: a row written with the
+	// case someone typed is a row no sign-in and no reset can find.
+	address := normalizeUserEmail(email.Address)
 
-	nameSplit := strings.SplitN(email.Address, "@", 2)
-	if len(nameSplit) < 2 {
-		firstName = "Unknown"
-	} else {
-		firstName = nameSplit[0]
-	}
+	// Only a local part that passes the display-name rules becomes a name.
+	firstName := displayname.FromEmail(address)
 
 	var lastName string
 	now := time.Now()
@@ -114,16 +136,20 @@ func (r *userRepository) CreateUser(ctx context.Context, email *mail.Address, pa
 	`
 
 	var params = []any{
-		id, email.Address, passwordHash,
+		id, address, passwordHash,
 		firstName, lastName,
 		now,
 	}
 
-	_, err := r.DB.Exec(
+	_, err := store.Exec(
 		ctx,
 		q,
 		params...)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "users_email_key" {
+			return nil, ErrUserEmailTaken
+		}
 		db.CaptureError(err, q, nil, "exec")
 		return nil, err
 	}
@@ -133,7 +159,7 @@ func (r *userRepository) CreateUser(ctx context.Context, email *mail.Address, pa
 
 		FirstName: firstName,
 		LastName:  lastName,
-		Email:     email.Address,
+		Email:     address,
 		Roles:     make([]uuid.UUID, 0),
 
 		CreatedAt: now,
@@ -145,7 +171,7 @@ func (r *userRepository) getUser(ctx context.Context, key string, value any) (*m
 	var u models.User
 
 	q := fmt.Sprintf(
-		`SELECT u.id, u.email, u.first_name, u.last_name, u.avatar_url, u.referral_source, u.onboarding_completed_at,
+		`SELECT u.id, u.email, u.first_name, u.last_name, u.avatar_url, u.referral_source, u.onboarding_completed_at, u.product_tour_completed_at,
 		   u.max_organizations, u.free_trial_used, u.admin_permissions,
 		   u.deletion_scheduled_at, u.deletion_scheduled_for, u.undo_send_seconds,
 		   u.updated_at, u.created_at,
@@ -166,7 +192,7 @@ func (r *userRepository) getUser(ctx context.Context, key string, value any) (*m
 		ctx,
 		q,
 		params...,
-	).Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.AvatarURL, &u.ReferralSource, &u.OnboardingCompletedAt,
+	).Scan(&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.AvatarURL, &u.ReferralSource, &u.OnboardingCompletedAt, &u.ProductTourCompletedAt,
 		&u.MaxOrganizations, &u.FreeTrialUsed, &adminPerm,
 		&u.DeletionScheduledAt, &u.DeletionScheduledFor, &u.UndoSendSeconds,
 		&u.UpdatedAt, &u.CreatedAt, &u.Roles)
@@ -185,12 +211,19 @@ func (r *userRepository) getUser(ctx context.Context, key string, value any) (*m
 	return &u, nil
 }
 
+// normalizeUserEmail is the form `users.email` is written and matched in.
+// `users_email_key` is a plain unique index on the raw column, so the case a
+// row was written with is the only case that will ever find it again.
+func normalizeUserEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 func (r *userRepository) GetUser(ctx context.Context, userID uuid.UUID) (*models.User, error) {
 	return r.getUser(ctx, "id", userID)
 }
 
 func (r *userRepository) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
-	return r.getUser(ctx, "email", email)
+	return r.getUser(ctx, "email", normalizeUserEmail(email))
 }
 
 func (r *userRepository) SetFreeTrialUsed(ctx context.Context, userID uuid.UUID) error {
@@ -203,6 +236,23 @@ func (r *userRepository) UpdateOnboarding(ctx context.Context, userID uuid.UUID,
 	const q = `UPDATE users SET first_name=$2, last_name=$3, referral_source=$4, job_role=NULLIF($5,''), team_size=NULLIF($6,''), onboarding_completed_at=NOW(), updated_at=NOW() WHERE id=$1`
 	_, err := r.DB.Exec(ctx, q, userID, firstName, lastName, referralSource, role, teamSize)
 	return err
+}
+
+// MarkOnboarded skips the first-run wizard for an operator-provisioned account,
+// keeping an earlier completion time when there is one.
+func (r *userRepository) MarkOnboarded(ctx context.Context, userID uuid.UUID) (time.Time, error) {
+	const q = `UPDATE users SET onboarding_completed_at=COALESCE(onboarding_completed_at, NOW()), updated_at=NOW() WHERE id=$1 RETURNING onboarding_completed_at`
+	var at time.Time
+	err := r.DB.QueryRow(ctx, q, userID).Scan(&at)
+	return at, err
+}
+
+// MarkProductTourCompleted records that the tour was finished or skipped, keeping the first time.
+func (r *userRepository) MarkProductTourCompleted(ctx context.Context, userID uuid.UUID) (time.Time, error) {
+	const q = `UPDATE users SET product_tour_completed_at=COALESCE(product_tour_completed_at, NOW()), updated_at=NOW() WHERE id=$1 RETURNING product_tour_completed_at`
+	var at time.Time
+	err := r.DB.QueryRow(ctx, q, userID).Scan(&at)
+	return at, err
 }
 
 func (r *userRepository) UpdateProfile(ctx context.Context, userID uuid.UUID, firstName, lastName string) error {
@@ -322,10 +372,22 @@ func (r *userRepository) SetLoginCodeExempt(ctx context.Context, id uuid.UUID, e
 // likely to have been forgotten is the one that has been there longest.
 func (r *userRepository) ListLoginCodeExempt(ctx context.Context) ([]models.LoginCodeExemption, error) {
 	rows, err := r.DB.Query(ctx, `
-		SELECT id, email, login_code_exempt_reason, login_code_exempt_at
-		FROM users
-		WHERE login_code_exempt
-		ORDER BY login_code_exempt_at NULLS FIRST`)
+		SELECT u.id, u.email, u.login_code_exempt_reason, u.login_code_exempt_at, u.password_expires_at,
+		       workspace.id, seeded.created_at
+		FROM users u
+		LEFT JOIN LATERAL (
+			SELECT o.id FROM organizations o
+			WHERE o.owner_user_id = u.id AND o.category = 'test'
+			ORDER BY o.created_at, o.id LIMIT 1
+		) workspace ON true
+		LEFT JOIN LATERAL (
+			SELECT a.created_at FROM admin_audit_logs a
+			WHERE a.target_type = 'organization' AND a.target_id = workspace.id
+			  AND a.action = 'seed_tester_workspace'
+			ORDER BY a.created_at LIMIT 1
+		) seeded ON true
+		WHERE u.login_code_exempt
+		ORDER BY u.login_code_exempt_at NULLS FIRST`)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +396,7 @@ func (r *userRepository) ListLoginCodeExempt(ctx context.Context) ([]models.Logi
 	out := []models.LoginCodeExemption{}
 	for rows.Next() {
 		var e models.LoginCodeExemption
-		if err := rows.Scan(&e.UserID, &e.Email, &e.Reason, &e.GrantedAt); err != nil {
+		if err := rows.Scan(&e.UserID, &e.Email, &e.Reason, &e.GrantedAt, &e.PasswordExpiresAt, &e.TestWorkspaceID, &e.SampleDataSeededAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -347,7 +409,7 @@ func (r *userRepository) ListLoginCodeExempt(ctx context.Context) ([]models.Logi
 // Creating them separately meant a failure between the two left an account
 // with no exemption: invisible to the tester list, un-retryable because the
 // address was taken, and reachable by whoever held the password.
-func (r *userRepository) CreateExemptUser(ctx context.Context, email *mail.Address, passwordHash, reason string, by *uuid.UUID) (*models.User, error) {
+func (r *userRepository) CreateExemptUser(ctx context.Context, email *mail.Address, passwordHash, reason string, by *uuid.UUID, passwordExpiresAt time.Time) (*models.User, error) {
 	tx, err := r.DB.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -356,38 +418,67 @@ func (r *userRepository) CreateExemptUser(ctx context.Context, email *mail.Addre
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	id := uuid.New()
-	firstName := "Unknown"
-	if parts := strings.SplitN(email.Address, "@", 2); len(parts) == 2 {
-		firstName = parts[0]
-	}
+	address := normalizeUserEmail(email.Address)
+	firstName := displayname.FromEmail(address)
 	now := time.Now()
 	if _, ierr := tx.Exec(ctx, `
-		INSERT INTO users (id, email, password_hash, first_name, last_name, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, '', $5, $5)`,
-		id, email.Address, passwordHash, firstName, now); ierr != nil {
+		INSERT INTO users (id, email, password_hash, first_name, last_name, created_at, updated_at, onboarding_completed_at)
+		VALUES ($1, $2, $3, $4, '', $5, $5, $5)`,
+		id, address, passwordHash, firstName, now); ierr != nil {
 		return nil, ierr
 	}
 	created := &models.User{
-		ID:        id,
-		FirstName: firstName,
-		Email:     email.Address,
-		Roles:     make([]uuid.UUID, 0),
-		CreatedAt: now,
-		UpdatedAt: now,
+		OnboardingCompletedAt: &now,
+		ID:                    id,
+		FirstName:             firstName,
+		Email:                 address,
+		Roles:                 make([]uuid.UUID, 0),
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	if _, eerr := tx.Exec(ctx, `
 		UPDATE users
 		SET login_code_exempt = true,
 		    login_code_exempt_reason = $2,
 		    login_code_exempt_by = $3,
-		    login_code_exempt_at = NOW()
-		WHERE id = $1`, created.ID, reason, by); eerr != nil {
+		    login_code_exempt_at = NOW(),
+		    password_expires_at = $4
+		WHERE id = $1`, created.ID, reason, by, passwordExpiresAt); eerr != nil {
 		return nil, eerr
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return created, nil
+}
+
+// RevokeTester ends a tester's exemption and its handed-out password in one
+// write. An account exempted without an expiring password keeps its password.
+func (r *userRepository) RevokeTester(ctx context.Context, id uuid.UUID) (bool, error) {
+	var cleared bool
+	err := r.DB.QueryRow(ctx, `
+		WITH ended_grants AS (
+			UPDATE subscriptions s SET managed_until = now(), updated_at = now()
+			FROM organizations o
+			WHERE s.organization_id = o.id AND o.owner_user_id = $1
+			  AND o.category = 'test' AND s.managed_plan_id = $2
+		)
+		UPDATE users u
+		SET login_code_exempt = false,
+		    login_code_exempt_reason = NULL,
+		    login_code_exempt_by = NULL,
+		    login_code_exempt_at = NULL,
+		    password_hash = CASE WHEN old.tester THEN NULL ELSE u.password_hash END,
+		    password_changed_at = CASE WHEN old.tester THEN now() ELSE u.password_changed_at END,
+		    password_expires_at = NULL,
+		    updated_at = now()
+		FROM (SELECT id, password_expires_at IS NOT NULL AS tester FROM users WHERE id = $1 FOR UPDATE) old
+		WHERE u.id = old.id
+		RETURNING old.tester`, id, models.TestPlanID).Scan(&cleared)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrUserNotFound
+	}
+	return cleared, err
 }
 
 // DeleteOrphanExemptUser removes a half-created tester.

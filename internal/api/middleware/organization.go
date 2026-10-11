@@ -174,7 +174,8 @@ func (h *Handler) RequireOrganization() gin.HandlerFunc {
 func (h *Handler) RequirePermission(perm models.OrganizationPermission) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if h.OrganizationService == nil {
-			c.Next()
+			errx.JSON(c, errx.InternalError())
+			c.Abort()
 			return
 		}
 
@@ -192,7 +193,7 @@ func (h *Handler) RequirePermission(perm models.OrganizationPermission) gin.Hand
 			return
 		}
 
-		has, xerr := h.OrganizationService.HasPermission(c.Request.Context(), *orgID, userID, perm)
+		has, xerr := h.memberHasPermission(c, *orgID, userID, perm)
 		if xerr != nil {
 			errx.JSON(c, xerr)
 			c.Abort()

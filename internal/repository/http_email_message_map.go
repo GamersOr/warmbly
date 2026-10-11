@@ -25,7 +25,7 @@ import (
 //	   200 emailMessageMapPayload | 404 (no mapping -> nil)
 //	DELETE {BaseURL}/api/v1/internal/email-message-map?user_id=&email_id=&message_id=&id= -> 204
 //
-// Auth: Authorization: Bearer <ENCRYPTED_KEYS_WORKER_TOKEN> (== INTERNAL_API_TOKEN).
+// Auth: Authorization: Bearer <config.NodeAPIToken()>.
 type httpEmailMessageMapRepository struct {
 	baseURL string
 	token   string
@@ -89,8 +89,43 @@ func (r *httpEmailMessageMapRepository) Add(ctx context.Context, data EmailMessa
 	case http.StatusNoContent, http.StatusOK, http.StatusCreated:
 		return nil
 	default:
-		return fmt.Errorf("email_message_map.http: add: unexpected status %d", resp.StatusCode)
+		return &ControlPlaneHTTPError{Status: resp.StatusCode}
 	}
+}
+
+func (r *httpEmailMessageMapRepository) AdmitArrival(ctx context.Context, data EmailMessageData, pending *PendingArrival) error {
+	body, err := json.Marshal(struct {
+		Map     emailMessageMapPayload `json:"map"`
+		Pending *PendingArrival        `json:"pending"`
+	}{emailMessageMapPayload(data), pending})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint()+"/arrival", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	r.authed(req)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("arrival admission: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return ErrArrivalOutboxUnsupported
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get("X-Warmbly-Arrival-Durable") == "" &&
+		resp.Request != nil && resp.Request.URL.String() == req.URL.String() && resp.Request.Method == req.Method {
+		markers := resp.Header.Values("X-Warmbly-Arrival-Ownership-Lost")
+		if mailbox, parseErr := uuid.Parse(data.EmailID); parseErr == nil && mailbox != uuid.Nil && len(markers) == 1 && markers[0] == mailbox.String() {
+			return ErrArrivalMailboxOwnershipLost
+		}
+	}
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("X-Warmbly-Arrival-Durable") != "1" {
+		return &ControlPlaneHTTPError{Status: resp.StatusCode}
+	}
+	return nil
 }
 
 func (r *httpEmailMessageMapRepository) Get(ctx context.Context, userID, emailID uuid.UUID, messageID string) (*EmailMessageData, error) {
@@ -126,7 +161,7 @@ func (r *httpEmailMessageMapRepository) Get(ctx context.Context, userID, emailID
 		d := EmailMessageData(p)
 		return &d, nil
 	default:
-		return nil, fmt.Errorf("email_message_map.http: get: unexpected status %d", resp.StatusCode)
+		return nil, &ControlPlaneHTTPError{Status: resp.StatusCode}
 	}
 }
 
@@ -152,7 +187,7 @@ func (r *httpEmailMessageMapRepository) Del(ctx context.Context, userID, emailID
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
-		return fmt.Errorf("email_message_map.http: del: unexpected status %d", resp.StatusCode)
+		return &ControlPlaneHTTPError{Status: resp.StatusCode}
 	}
 	return nil
 }

@@ -12,6 +12,10 @@
 // the whole set via /meetings/summary, not a reduce over the loaded page.
 
 import React from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { UserContext } from "@/hooks/context/user";
+import { useAppStore } from "@/stores/useAppStore";
+import { crmBrowseSearchSchema, meetingBrowseTimeframeSchema } from "@/lib/browse-crm";
 import {
     CalendarClockIcon,
     CalendarPlusIcon,
@@ -23,7 +27,7 @@ import {
     XCircleIcon,
     RotateCcwIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import {
     Page,
     PageBody,
@@ -54,6 +58,9 @@ import {
     type MeetingsSearch,
 } from "@/lib/api/models/app/integrations/Integration";
 import { cn } from "@/lib/utils";
+import { Link } from "@tanstack/react-router";
+import useCrmProvider from "@/hooks/useCrmProvider";
+import { CrmMark } from "@/components/app/crm/crmProviders";
 
 type Timeframe = "upcoming" | "past" | "all";
 
@@ -71,7 +78,7 @@ const STATUS_STYLE: Record<MeetingStatus, { label: string; cls: string }> = {
     no_show: { label: "No-show", cls: "bg-red-50 text-red-700 border-red-200" },
 };
 
-function formatWhen(iso?: string): { date: string; time: string; rel: string } {
+function formatWhen(iso?: string | Date): { date: string; time: string; rel: string } {
     if (!iso) return { date: "No time set", time: "", rel: "" };
     const d = new Date(iso);
     if (isNaN(d.getTime())) return { date: "No time set", time: "", rel: "" };
@@ -87,7 +94,7 @@ function formatWhen(iso?: string): { date: string; time: string; rel: string } {
 
 // --- Add to calendar (no API: a Google template link + a downloadable .ics) ---
 
-function gcalStamp(iso: string): string {
+function gcalStamp(iso: string | Date): string {
     return new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 }
 
@@ -134,9 +141,15 @@ function downloadICS(m: MeetingBooking) {
 }
 
 export default function MeetingsPage() {
-    const [timeframe, setTimeframe] = React.useState<Timeframe>("upcoming");
-    const [searchRaw, setSearchRaw] = React.useState("");
-    const [search, setSearch] = React.useState("");
+    const userId = React.useContext(UserContext)?.user.id;
+    const workspaceId = useAppStore((state) => state.currentOrganization?.id ?? "personal");
+    return <MeetingsBrowser key={`${userId}:${workspaceId}`} />;
+}
+
+function MeetingsBrowser() {
+    const [timeframe, setTimeframe] = useBrowseState("crm.meetings.timeframe", "upcoming", meetingBrowseTimeframeSchema);
+    const [searchRaw, setSearchRaw] = useBrowseState("crm.meetings.search", "", crmBrowseSearchSchema);
+    const [search, setSearch] = React.useState(() => searchRaw.trim());
     const [creating, setCreating] = React.useState(false);
 
     React.useEffect(() => {
@@ -154,6 +167,9 @@ export default function MeetingsPage() {
     const { data: summary } = useMeetingsSummary();
 
     const rows = meetings ?? [];
+    // Provider mode with meeting logging on: booked calls also land in the CRM.
+    const { isExternal, crm, settings } = useCrmProvider();
+    const logsToCrm = isExternal && !!settings?.config?.activity?.meetings;
 
     return (
         <Page>
@@ -174,6 +190,20 @@ export default function MeetingsPage() {
             </StatStrip>
 
             <PageBody>
+                {logsToCrm && (
+                    <div className={cn("px-5 py-2 border-b border-slate-200 flex items-center gap-2 text-[11.5px] text-slate-600", crm.tint)}>
+                        <CrmMark provider={crm.id} className="w-3.5 h-3.5" />
+                        <span className="min-w-0 flex-1">
+                            Calls booked through Calendly or Cal.com are logged to {crm.name} as meetings on the {crm.words.contact}.
+                        </span>
+                        <Link
+                            to={crm.settingsPath}
+                            className={cn("shrink-0 text-[11.5px] font-medium text-slate-600 transition-colors", crm.hoverText)}
+                        >
+                            Settings
+                        </Link>
+                    </div>
+                )}
                 <SectionBar label="Meetings" count={total ? `${rows.length} of ${total}` : undefined}>
                     <div className="flex items-center gap-0.5 rounded-md border border-slate-200 p-0.5">
                         {TABS.map((tab) => (

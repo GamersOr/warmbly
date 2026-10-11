@@ -16,14 +16,20 @@ https://docs.warmbly.com/asyncapi.json
 The socket speaks the Phoenix channel protocol (serializer version `1.0.0`) at:
 
 ```
-wss://realtime.warmbly.com/socket/websocket?vsn=1.0.0&token=<TOKEN>
+wss://realtime.warmbly.com/socket/websocket?vsn=1.0.0
 ```
 
-Three token types are accepted, and all of them go in the same `token` query parameter:
+Three token types are accepted:
 
-- **API key** (`wmbly_…`): pass a key with the `REALTIME_SUBSCRIBE` permission (bit 11) directly as `token`. See [Permissions](/api/permissions/) for how to grant it.
-- **OAuth access token** (`wmat_…`): pass an access token whose grant includes the realtime scope (the lowercased permission, `realtime_subscribe`). It connects on the granting user's behalf with exactly the scopes they approved. See [OAuth](/api/oauth/).
-- **Short-lived JWT**: browser sessions call the authenticated socket endpoint to mint a 10-minute connection token. This is what the dashboard itself uses.
+- **API key** (`wmbly_…`): send a key with the `REALTIME_SUBSCRIBE` permission (bit 11) in the `X-Warmbly-Token` request header of the WebSocket handshake. See [Permissions](/api/permissions/) for how to grant it.
+- **OAuth access token** (`wmat_…`): send an access token whose grant includes the realtime scope (the lowercased permission, `realtime_subscribe`) in the same `X-Warmbly-Token` header. It connects on the granting user's behalf with exactly the scopes they approved. See [OAuth](/api/oauth/).
+- **Short-lived JWT**: browser sessions call the authenticated socket endpoint to mint a 10-minute connection token and pass it as the `token` query parameter. This is what the dashboard itself uses.
+
+Send API keys and OAuth access tokens in the `x-warmbly-token` header. Putting one in the URL as `token` still works but is deprecated: URLs end up in proxy and access logs, and these credentials outlive any session, so it will stop working in a later API version. The 10-minute connection token belongs in the query string. Browsers cannot set headers on a WebSocket, so connect with an API key or OAuth token from a server-side client.
+
+`POST /v1/getaway` continues returning the direct gateway `url` and `expires_in`. It also returns `proxy_path` when a gateway is configured. The dashboard resolves that path against its versioned API base and uses the API origin for its WebSocket, so a self-host does not depend on realtime CSP discovery succeeding during dashboard startup. Failed connection attempts alternate with the direct gateway for older proxy configurations. The proxy accepts only short-lived WebSocket tickets, not access tokens, API keys or OAuth credentials; developer clients continue connecting directly. It preserves the dashboard Origin and realtime authorization and connection limits. The backend signs a ticket-bound client-address proof so per-IP limits do not treat every proxied user as the same client.
+
+A credential stops working on the socket as soon as it does on the REST API: a revoked key or token, a holder banned from signing in, or a suspended OAuth app is refused at the handshake. Signing out, signing out everywhere, changing or resetting a password, and an account ban also close every socket that user has open; the dashboard reconnects on its own with a fresh connection token if its session is still valid.
 
 In short, both developer auth methods work here: an API key with `REALTIME_SUBSCRIBE`, or an OAuth access token with the realtime scope. They authenticate through the same gate, so everything below applies to either.
 
@@ -41,11 +47,27 @@ After connecting, join one or more topics with a `phx_join` message:
 | `account:<account_id>` | One mailbox's sync and warmup events | Requires `manage_emails` |
 | `bulk:<operation_id>` | Progress of one bulk operation | Import/export progress; only the user who started the operation receives its events |
 
-Events arrive as channel messages whose event name is the event type, for example `EMAIL_SENT`, `EMAIL_OPENED`, `EMAIL_REPLIED`, `EMAIL_RECEIVED`, `AI_DRAFT_READY`, `CAMPAIGN_COMPLETED`, `CAMPAIGN_IDLE` (a continuous campaign ran out of leads and is waiting), `TASK_PROGRESS`, `ACCOUNT_HEALTH_CHANGED`, `ACCOUNT_SYNC_STATE`, `AUDIT_CREATED`, `AUTOMATION_RUN`, `MEETING_BOOKED`, `NOTIFICATION_CREATED`, `PAGE_HIT`. Payloads always include `event_type` and a timestamp, plus the relevant ids (`campaign_id`, `contact_id`, `thread_id`, and so on). `EMAIL_OPENED` and `EMAIL_CLICKED` also carry `occurred_at` (when the tracking service saw it; `timestamp` is the publish time), `machine` (true for a mail client prefetch or a security scanner's fetch), and `client`, `device_type`, `country_code` and `city` when the consumer could tell.
+Events arrive as channel messages whose event name is the event type, for example `EMAIL_SENT`, `EMAIL_OPENED`, `EMAIL_REPLIED`, `EMAIL_RECEIVED`, `AI_DRAFT_READY`, `CAMPAIGN_COMPLETED`, `CAMPAIGN_IDLE` (a continuous campaign ran out of leads and is waiting), `TASK_PROGRESS`, `ACCOUNT_HEALTH_CHANGED`, `ACCOUNT_SYNC_STATE`, `WARMUP_PLACEMENT` (a partner found one of the workspace's warmup emails; `status` is `inbox`, `tabs` or `spam`), `PLACEMENT_TEST_UPDATED`, `AUDIT_CREATED`, `AUTOMATION_RUN`, `MEETING_BOOKED`, `NOTIFICATION_CREATED`, `PAGE_HIT`. Payloads always include `event_type` and a timestamp, plus the relevant ids (`campaign_id`, `contact_id`, `thread_id`, and so on). `EMAIL_OPENED` and `EMAIL_CLICKED` also carry `occurred_at` (when the tracking service saw it; `timestamp` is the publish time), `machine` (true for a mail client prefetch or a security scanner's fetch), and `client`, `client_type` (`app` or `webmail`), `device_hidden` (a mailbox provider's image proxy fetched it, so the device is unknowable), `device_type`, `os`, `browser`, `country_code` and `city` when the consumer could tell.
 
 `AI_DRAFT_READY` fires when the [inbox agent](/guides/inbox-agent/) drafts a suggested reply awaiting review; it carries `thread_id` and `draft_id` and requires `access_unibox`.
 
-Permission filtering happens per event on the org channel: for example inbox events require `access_unibox`, campaign pulses require `view_campaigns`, member changes require `manage_team`, and billing events require `manage_billing`. A member without the permission simply never receives the event.
+`MAILBOX_IMPORT_PROGRESS` fires on the org channel as a [mailbox import](/guides/mailbox-import/) moves: at most once a second per import while rows finish, and always when it completes, is cancelled, or a waiting sign-in row connects. It carries `org_id`, `import_id` and `status` (`running`, `completed` or `cancelled`), not the rows, so refetch `GET /emails/imports/:id` on receipt. It requires `manage_emails`.
+
+`CONTACT_IMPORT_PROGRESS` fires on the org channel as a [background contact import](/api/reference/contacts/#background-imports) moves: when it is queued and starts, at most once a second while its rows settle, and when it completes, fails, or is cancelled. It carries `org_id`, `import_id` and `status` (`queued`, `running`, `completed`, `failed` or `cancelled`), not the rows, so refetch `GET /contacts/imports/:id` on receipt. It requires `view_contacts`.
+
+`PLACEMENT_TEST_UPDATED` fires on the org channel when an [inbox placement test](/guides/placement-tests/) starts, each time one of its copies gets a verdict, and when it finishes or is cancelled. It carries `org_id`, `test_id`, `status` (`running`, `completed`, `cancelled` or `failed`) and, for a test of a campaign step, `campaign_id`, not the results, so refetch `GET /placement/tests/:id` on receipt. A [placement batch](/guides/placement-tests/#testing-a-fleet-with-batches) sends the same event with `batch_id` in place of `test_id` and the batch's status when it starts, skips or defers a mailbox, and finishes; its tests send their own events as they run, each with its `test_id`. It requires `view_analytics`, like the endpoints that read results.
+
+Permission filtering happens per event on the org channel: for example inbox events require `access_unibox`, campaign pulses require `view_campaigns`, placement tests require `view_analytics`, mailbox and mailbox import events require `manage_emails`, member changes require `manage_team`, and billing events require `manage_billing`. A member without the permission simply never receives the event.
+
+For a member restricted to [selected resources](/guides/team-roles/#access-scope), and any key or app acting for one, the org channel also filters by their grants: inbox events need a granted `email_account_id`, other events need a granted `campaign_id` or `email_account_id`, and `AUDIT_CREATED` arrives only for a granted campaign, folder or mailbox, or for a change to the member themselves. Everything else is dropped, including events that name no resource. Such a socket is never tracked in presence and receives no teammate `presence_state`, `presence_diff` or `live:*` frames. Presence diffs pass through the channel's authorization filter rather than Phoenix's direct broadcast fastlane. When an unrestricted member becomes restricted, their presence is removed and an empty `presence_state` clears their previously visible roster.
+
+`campaign:<id>` and `account:<id>` check access at join, then refresh authorization every 30 seconds and before delivery whenever the previous check is at least 30 seconds old. Refusal or an authorization lookup error stops the channel without delivering the event. The org channel has the same bounded refresh, including for unrestricted members who become restricted, and also re-reads grants on relevant member, campaign and folder changes. Revoking a grant or moving a campaign out of a granted folder therefore does not rely on an audit event being delivered. An existing authorization may remain usable within its 30-second cache window; revocation is not guaranteed to be instantaneous.
+
+Owner-addressed workspace events do not bypass these gates. The Go publisher checks current membership before using the direct user route, and `user:<id>` verifies each workspace or resource event against current access with a bounded 30-second authorization cache. Scope-less workspace events are withheld from restricted members. Personal account events, session revocation and sign-in security notices remain available. Workspace notifications require a current unrestricted membership, including stored feed rows and deferred email/push delivery.
+
+Private task, mailbox error and warmup-statistics events stay on their authorized user route; they are not promoted to workspace broadcasts. Contact reload signals retain their workspace authorization context without broadcasting to other members. If a queued push digest cannot verify membership or message eligibility because of a temporary lookup failure, it retries rather than delivering or discarding the affected items. Revoked access is checked again on retry.
+
+A change to your own membership, to a role, or to the workspace's owner triggers a re-read on the org channel when its change event arrives, with the bounded refresh above as a fallback. Removal from a workspace also applies to open connections: every socket the removed member has open is disconnected. On reconnect each channel's join checks membership again, so channels for workspaces they still belong to come back and the removed workspace's are refused with `not_a_member` (code `4010`).
 
 ## Selecting events with intents
 
@@ -115,13 +137,15 @@ Resume is **at-least-once**: a replay may re-deliver an event you already handle
 
 ## Reference client
 
-The serializer (`vsn=1.0.0`) frames every message as a five-element array `[join_ref, ref, topic, event, payload]`. The client below speaks that wire format directly over a plain `WebSocket`, so it has no dependencies (if you already use the `phoenix` npm package, its `Socket`/`Channel` classes do the same framing for you). It walks the whole lifecycle: connect with a token, join `org:<org_id>` with intents, read the HELLO join reply, run the heartbeat loop at the advertised cadence, resume from the last `seq` on reconnect, handle events (including `CUSTOM_EVENT`), and back off on close or rejection.
+The serializer (`vsn=1.0.0`) frames every message as a five-element array `[join_ref, ref, topic, event, payload]`. The client below speaks that wire format directly over the Node.js [`ws`](https://www.npmjs.com/package/ws) package, which can set the `X-Warmbly-Token` handshake header (if you already use the `phoenix` npm package, its `Socket`/`Channel` classes do the same framing for you). It walks the whole lifecycle: connect with a token, join `org:<org_id>` with intents, read the HELLO join reply, run the heartbeat loop at the advertised cadence, resume from the last `seq` on reconnect, handle events (including `CUSTOM_EVENT`), and back off on close or rejection.
 
 ```js
-// No dependencies. token can be an API key (wmbly_… with REALTIME_SUBSCRIBE)
-// or an OAuth access token (wmat_… with the realtime scope).
+// Node.js with `npm install ws`. token can be an API key (wmbly_… with
+// REALTIME_SUBSCRIBE) or an OAuth access token (wmat_… with the realtime scope).
+import WebSocket from "ws";
+
 function connectRealtime({ token, orgId, intents = ["CUSTOM"], onEvent }) {
-  const url = `wss://realtime.warmbly.com/socket/websocket?vsn=1.0.0&token=${encodeURIComponent(token)}`;
+  const url = "wss://realtime.warmbly.com/socket/websocket?vsn=1.0.0";
   const topic = `org:${orgId}`;
 
   let ws, ref = 0, joinRef = null, heartbeatTimer = null, watchdog = null;
@@ -163,7 +187,7 @@ function connectRealtime({ token, orgId, intents = ["CUSTOM"], onEvent }) {
 
   const open = () => {
     closedByUs = false;
-    ws = new WebSocket(url);
+    ws = new WebSocket(url, { headers: { "X-Warmbly-Token": token } });
 
     ws.onopen = () => { backoff = 1000; join(); };
 
@@ -280,7 +304,7 @@ These frames are deliberately lightweight:
 - only human (JWT) members exchange them. API-key connections neither send nor receive live frames.
 - they are exempt from the per-minute client-event budget below (which they would exhaust instantly). Each socket is bounded by a small in-process burst limit instead, and clients should throttle pointer and drag frames to roughly 20 to 30 per second.
 
-Card positions are also persisted separately over REST, so an arrangement sticks across visits even with nobody else watching. The live stream is only the moment-to-moment motion.
+Warmbly's own builder canvases lay themselves out from the flow's structure, so they send no `live:node` frames and store no positions. The frame and the layout endpoints remain for clients that arrange cards themselves.
 
 ## Rate limits and connection caps
 

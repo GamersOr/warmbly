@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/apikey"
+	"github.com/warmbly/warmbly/internal/app/oauth"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 )
@@ -139,6 +140,23 @@ func (h *Handler) validateAPIKey(c *gin.Context, rawKey string) {
 	c.Set(UserIDKey, key.UserID.String())
 	c.Set(OrganizationIDKey, key.OrganizationID)
 
+	// A key acts for the member who created it: it ends with their membership and never exceeds their current role.
+	if h.OrganizationService != nil {
+		member, xerr := h.OrganizationService.GetMembership(c.Request.Context(), key.OrganizationID, key.UserID)
+		if xerr != nil {
+			errx.JSON(c, xerr)
+			c.Abort()
+			return
+		}
+		if member == nil || member.AcceptedAt == nil {
+			errx.JSON(c, errx.NewWithIdentifier(errx.Unauthorized, "api_key_holder_left",
+				"The member who created this API key is no longer in this workspace. Create a new key."))
+			c.Abort()
+			return
+		}
+		c.Set(SessionMemberKey, member)
+	}
+
 	// UpdateLastUsed is itself fire-and-forget; also remembers the caller
 	// IP so the dashboard can show "last called from".
 	h.APIKeyService.UpdateLastUsed(c.Request.Context(), key.ID, c.ClientIP())
@@ -162,12 +180,86 @@ func (h *Handler) validateOAuthToken(c *gin.Context, token string) {
 		c.Abort()
 		return
 	}
+	setOAuthCaller(c, claims)
+	c.Next()
+}
+
+// setOAuthCaller puts an OAuth token's identity on the request. The granting member's
+// membership rides along, so every gate holds the token to that member's role as well as its scopes.
+func setOAuthCaller(c *gin.Context, claims *oauth.AccessClaims) {
 	c.Set(AuthTypeKey, AuthTypeOAuth)
 	c.Set(APIKeyPermissionsKey, claims.Scopes)
 	c.Set(UserIDKey, claims.UserID.String())
 	c.Set(OrganizationIDKey, claims.OrganizationID)
 	c.Set(OAuthApplicationIDKey, claims.ApplicationID)
-	c.Next()
+	if claims.Member != nil {
+		c.Set(SessionMemberKey, claims.Member)
+	}
+}
+
+// RefuseOAuth keeps OAuth app tokens off routes that mint or manage credentials.
+func RefuseOAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetString(AuthTypeKey) == AuthTypeOAuth {
+			errx.JSON(c, errx.NewWithIdentifier(errx.Forbidden, "oauth_token_not_allowed",
+				"OAuth app tokens cannot manage API keys or OAuth apps. Use the dashboard or an API key."))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// GetMemberPermissions returns the caller's membership permissions resolved at authentication
+// (a session or an OAuth token), with the owner holding all of them.
+func GetMemberPermissions(c *gin.Context) (models.OrganizationPermission, bool) {
+	v, ok := c.Get(SessionMemberKey)
+	if !ok {
+		return 0, false
+	}
+	m, ok := v.(*models.OrganizationMember)
+	if !ok || m == nil {
+		return 0, false
+	}
+	if m.IsOwner() {
+		return models.AllPermissions, true
+	}
+	return m.Permissions, true
+}
+
+// GetAuthMember returns the caller's membership resolved at authentication (session or OAuth token), or nil.
+func GetAuthMember(c *gin.Context) *models.OrganizationMember {
+	if v, ok := c.Get(SessionMemberKey); ok {
+		if m, ok := v.(*models.OrganizationMember); ok {
+			return m
+		}
+	}
+	return nil
+}
+
+// oauthMemberAllows reports whether the member behind an API key or OAuth token holds any of perms; sessions pass.
+func (h *Handler) oauthMemberAllows(c *gin.Context, perms ...models.OrganizationPermission) (bool, *errx.Error) {
+	if !bitmaskAuth(c.GetString(AuthTypeKey)) || h.OrganizationService == nil {
+		return true, nil
+	}
+	userID, err := GetUserUUID(c)
+	if err != nil {
+		return false, errx.ErrUnauthorized
+	}
+	orgID := GetOrganizationID(c)
+	if orgID == nil {
+		return false, errx.New(errx.BadRequest, "no organization selected")
+	}
+	for _, p := range perms {
+		has, xerr := h.memberHasPermission(c, *orgID, userID, p)
+		if xerr != nil {
+			return false, xerr
+		}
+		if has {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (h *Handler) validateJWT(c *gin.Context, token string) {
@@ -182,8 +274,10 @@ func (h *Handler) validateJWT(c *gin.Context, token string) {
 	c.Set(UserIDKey, session.UserID.String())
 	c.Set(SessionKey, session)
 	c.Set(AccessTokenKey, token)
-	if session.CurrentOrganizationID != nil {
-		c.Set(OrganizationIDKey, *session.CurrentOrganizationID)
+	if xerr := h.setSessionOrganization(c, session); xerr != nil {
+		errx.JSON(c, xerr)
+		c.Abort()
+		return
 	}
 	c.Next()
 }
@@ -234,11 +328,17 @@ func (h *Handler) RequireAccess(orgPerm models.OrganizationPermission, apiPerm u
 				c.Abort()
 				return
 			}
+			if allowed, xerr := h.oauthMemberAllows(c, orgPerm); xerr != nil || !allowed {
+				errx.JSON(c, orNotPermitted(xerr))
+				c.Abort()
+				return
+			}
 			c.Next()
 		default:
-			// JWT path: defer to the org-permission gate.
+			// JWT path: defer to the org-permission gate, which refuses when it cannot check.
 			if h.OrganizationService == nil {
-				c.Next()
+				errx.JSON(c, errx.InternalError())
+				c.Abort()
 				return
 			}
 			userID, err := GetUserUUID(c)
@@ -253,7 +353,7 @@ func (h *Handler) RequireAccess(orgPerm models.OrganizationPermission, apiPerm u
 				c.Abort()
 				return
 			}
-			has, xerr := h.OrganizationService.HasPermission(c.Request.Context(), *orgID, userID, orgPerm)
+			has, xerr := h.memberHasPermission(c, *orgID, userID, orgPerm)
 			if xerr != nil {
 				errx.JSON(c, xerr)
 				c.Abort()
@@ -266,6 +366,56 @@ func (h *Handler) RequireAccess(orgPerm models.OrganizationPermission, apiPerm u
 			}
 			c.Next()
 		}
+	}
+}
+
+// RequireKeyHolder passes an API key only while the member who created it holds perm; other callers pass.
+func (h *Handler) RequireKeyHolder(perm models.OrganizationPermission) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetString(AuthTypeKey) != AuthTypeAPIKey {
+			c.Next()
+			return
+		}
+		userID, err := GetUserUUID(c)
+		orgID := GetOrganizationID(c)
+		if err != nil || orgID == nil || h.OrganizationService == nil {
+			errx.JSON(c, errx.ErrForbidden)
+			c.Abort()
+			return
+		}
+		has, xerr := h.memberHasPermission(c, *orgID, userID, perm)
+		if xerr != nil {
+			errx.JSON(c, xerr)
+			c.Abort()
+			return
+		}
+		if !has {
+			errx.JSON(c, errx.New(errx.Forbidden, "the member who created this API key does not have this permission"))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// orNotPermitted is the lookup failure when there is one, and the member's missing permission otherwise.
+func orNotPermitted(xerr *errx.Error) *errx.Error {
+	if xerr != nil {
+		return xerr
+	}
+	return errx.New(errx.Forbidden, "the member who authorized this app does not have this permission")
+}
+
+// RequireAccessWithQuery applies RequireAccess only when the request carries
+// the named query parameter.
+func (h *Handler) RequireAccessWithQuery(param string, orgPerm models.OrganizationPermission, apiPerm uint64) gin.HandlerFunc {
+	gate := h.RequireAccess(orgPerm, apiPerm)
+	return func(c *gin.Context) {
+		if strings.TrimSpace(c.Query(param)) == "" {
+			c.Next()
+			return
+		}
+		gate(c)
 	}
 }
 
@@ -290,10 +440,16 @@ func (h *Handler) RequireAnyAccess(apiPerm uint64, orgPerms ...models.Organizati
 				c.Abort()
 				return
 			}
+			if allowed, xerr := h.oauthMemberAllows(c, orgPerms...); xerr != nil || !allowed {
+				errx.JSON(c, orNotPermitted(xerr))
+				c.Abort()
+				return
+			}
 			c.Next()
 		default:
 			if h.OrganizationService == nil {
-				c.Next()
+				errx.JSON(c, errx.InternalError())
+				c.Abort()
 				return
 			}
 			userID, err := GetUserUUID(c)
@@ -309,7 +465,7 @@ func (h *Handler) RequireAnyAccess(apiPerm uint64, orgPerms ...models.Organizati
 				return
 			}
 			for _, p := range orgPerms {
-				has, xerr := h.OrganizationService.HasPermission(c.Request.Context(), *orgID, userID, p)
+				has, xerr := h.memberHasPermission(c, *orgID, userID, p)
 				if xerr != nil {
 					errx.JSON(c, xerr)
 					c.Abort()
@@ -324,56 +480,6 @@ func (h *Handler) RequireAnyAccess(apiPerm uint64, orgPerms ...models.Organizati
 			c.Abort()
 		}
 	}
-}
-
-// RequireAPIKeyEmailAccountParam enforces an API key's optional
-// allowed_email_accounts allowlist against a route parameter. JWT callers and
-// unrestricted API keys pass through.
-func RequireAPIKeyEmailAccountParam(param string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.GetString(AuthTypeKey) != AuthTypeAPIKey {
-			c.Next()
-			return
-		}
-
-		if len(GetAPIKeyAllowedEmailAccounts(c)) == 0 {
-			c.Next()
-			return
-		}
-
-		accountID, err := uuid.Parse(c.Param(param))
-		if err != nil {
-			errx.Handle(c, errx.ErrUuid)
-			c.Abort()
-			return
-		}
-
-		if APIKeyAllowsEmailAccount(c, accountID) {
-			c.Next()
-			return
-		}
-
-		errx.Handle(c, errx.New(errx.Forbidden, "email account is not allowed for this API key"))
-		c.Abort()
-	}
-}
-
-// APIKeyAllowsEmailAccount reports whether the authenticating API key may act
-// on accountID. JWT callers and unrestricted keys always may.
-func APIKeyAllowsEmailAccount(c *gin.Context, accountID uuid.UUID) bool {
-	if c.GetString(AuthTypeKey) != AuthTypeAPIKey {
-		return true
-	}
-	allowed := GetAPIKeyAllowedEmailAccounts(c)
-	if len(allowed) == 0 {
-		return true
-	}
-	for _, id := range allowed {
-		if id == accountID {
-			return true
-		}
-	}
-	return false
 }
 
 // GetAuthType returns "jwt" or "api_key" (empty if unauthenticated).

@@ -6,7 +6,7 @@
 // exemptions are the same query.
 
 import { Request } from "@/lib/api/client";
-import type { LoginCodeExemption, CreatedTester } from "@/lib/api/models/admin";
+import type { LoginCodeExemption, CreatedTester, AdminOrgRole } from "@/lib/api/models/admin";
 
 export function listTesters(): Promise<{ data: LoginCodeExemption[] }> {
     return Request({ method: "GET", url: "/admin/testers", authorization: true });
@@ -14,12 +14,27 @@ export function listTesters(): Promise<{ data: LoginCodeExemption[] }> {
 
 export function createTester(body: {
     email: string;
-    org_name?: string;
     reason: string;
+    /** Names a new workspace. Ignored when organization_id is set. */
+    org_name?: string;
+    /** Joins an existing workspace instead of minting one. Requires role_id. */
+    organization_id?: string;
+    role_id?: string;
+    /** Days the password works, 1 to 90. Defaults to 30. */
+    password_days?: number;
 }): Promise<CreatedTester> {
     return Request({ method: "POST", url: "/admin/testers", authorization: true, data: body });
 }
 
-export function revokeTester(id: string): Promise<{ revoked: boolean }> {
+/** The roles of one workspace, for the join-existing path. */
+export function listOrganizationRoles(orgID: string): Promise<{ data: AdminOrgRole[] }> {
+    return Request({ method: "GET", url: `/admin/organizations/${orgID}/roles`, authorization: true });
+}
+
+export function revokeTester(id: string): Promise<{ revoked: boolean; password_cleared: boolean }> {
     return Request({ method: "DELETE", url: `/admin/testers/${id}`, authorization: true });
+}
+
+export function seedTesterWorkspace(orgID: string): Promise<{ organization_id: string; created: boolean; seeded_at: string }> {
+    return Request({ method: "POST", url: `/admin/organizations/${orgID}/sample-data`, authorization: true });
 }

@@ -3,10 +3,12 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/repository"
 )
 
 type EventHandler[T any] func(ctx context.Context, event T) error
@@ -21,6 +23,19 @@ func (s *JobsService) HandleEvent(ctx context.Context, event *models.JobEvent) e
 			Msg("no handler registered for job event type, dropping")
 		return nil
 	}
+	err := resp(ctx, event.Body)
+	var pending *syncArrivalPendingError
+	if !errors.As(err, &pending) {
+		return err
+	}
+	outbox, ok := s.ArrivalOutbox.(repository.PriorityArrivalOutbox)
+	if !ok {
+		return err
+	}
+	// Resolve the blocking dependency without overtaking it or waiting for the whole backlog.
+	if _, deliveryErr := outbox.DeliverPendingArrival(ctx, pending.user, pending.email, pending.id, s.deliverArrivalEvent); deliveryErr != nil {
+		return deliveryErr
+	}
 	return resp(ctx, event.Body)
 }
 
@@ -33,6 +48,7 @@ func (w *JobsService) InitEvents() {
 	Register(w, models.JobEventTypeRemoveEmail, w.HandleRemoveEmail)
 	Register(w, models.JobEventTypeFlagsAdd, w.HandleFlagsAdd)
 	Register(w, models.JobEventTypeFlagsRemove, w.HandleFlagsRemove)
+	Register(w, models.JobEventTypeFolderUpdate, w.HandleFolderUpdate)
 	Register(w, models.JobEventTypeMailboxUpdate, w.HandleMailboxUpdate)
 	Register(w, models.JobEventTypeMailboxDelete, w.HandleMailboxDelete)
 	Register(w, models.JobEventTypeMailboxRename, w.HandleMailboxRename)
@@ -40,6 +56,8 @@ func (w *JobsService) InitEvents() {
 	Register(w, models.JobEventTypeGraphDeltaUpdate, w.HandleGraphDeltaUpdate)
 	Register(w, models.JobEventTypeSyncState, w.HandleSyncState)
 	Register(w, models.JobEventTypeTokenUpdate, w.HandleTokenUpdate)
+	Register(w, models.JobEventTypeWarmupRemovalChecked, w.HandleWarmupRemovalChecked)
+	Register(w, models.JobEventTypeWarmupFiled, w.HandleWarmupFiled)
 
 	// Send outcomes. A worker reports every send it was handed; a failure
 	// walks back what the control plane stamped at hand-off.

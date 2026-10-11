@@ -1,4 +1,4 @@
-// Organizations browser — left filter rail + server-driven sortable,
+// Organizations browser: left filter rail + server-driven sortable,
 // cursor-paged table. Searchable by identity, plan, plan visibility,
 // subscription state, relationships, count ranges, and timeline date ranges.
 // The Mailboxes cell links into the Mailboxes browser pre-filtered to the org.
@@ -7,7 +7,8 @@ import { useEffect, useState } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/kit";
+import { TONE_TEXT } from "@/lib/tones";
 import {
     Explorer,
     FilterGroup,
@@ -67,15 +68,16 @@ const columns: Column<AdminOrgListItem>[] = [
         sortable: true,
         sortKey: "name",
         cell: (o) => (
-            <div>
+            <div className="min-w-0 py-1.5 leading-tight">
                 <Link
                     to={`/organizations/${o.id}`}
                     onClick={(e) => e.stopPropagation()}
-                    className="font-medium text-[var(--admin-accent-strong)] hover:underline"
+                    className="font-medium text-foreground hover:text-[var(--admin-accent-strong)] hover:underline"
                 >
                     {o.name}
                 </Link>
-                {o.slug && <div className="font-mono text-[10px] text-muted-foreground">{o.slug}</div>}
+                {o.category === "test" && <StatusBadge tone="info" className="ml-2">Test</StatusBadge>}
+                {o.slug && <div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">{o.slug}</div>}
             </div>
         ),
         csv: (o) => o.name,
@@ -86,16 +88,14 @@ const columns: Column<AdminOrgListItem>[] = [
         sortable: true,
         sortKey: "owner_email",
         cell: (o) => (
-            <div>
+            <div className="min-w-0 py-1.5 leading-tight">
                 <div className="flex items-center gap-1.5">
-                    <span className="text-xs">{ownerName(o)}</span>
+                    <span className="text-foreground">{ownerName(o)}</span>
                     {o.owner_banned_at && (
-                        <Badge variant="outline" className="text-[10px] border-red-300 bg-red-50 text-red-700">
-                            banned
-                        </Badge>
+                        <StatusBadge tone="danger">banned</StatusBadge>
                     )}
                 </div>
-                <div className="text-[10px] text-muted-foreground">{o.owner_email}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">{o.owner_email}</div>
             </div>
         ),
         csv: (o) => o.owner_email,
@@ -106,40 +106,24 @@ const columns: Column<AdminOrgListItem>[] = [
         cell: (o) =>
             o.plan_name ? (
                 <div className="flex items-center gap-1.5">
-                    <span className="text-xs">{o.plan_name}</span>
-                    {o.plan_public === false && (
-                        <Badge variant="outline" className="text-[10px] border-violet-300 bg-violet-50 text-violet-700">
-                            private
-                        </Badge>
-                    )}
-                    {o.is_enterprise && (
-                        <Badge variant="outline" className="text-[10px] border-indigo-300 bg-indigo-50 text-indigo-700">
-                            enterprise
-                        </Badge>
-                    )}
+                    <span className="whitespace-nowrap text-foreground">{o.plan_name}</span>
+                    {o.plan_public === false && <StatusBadge tone="strong">private</StatusBadge>}
+                    {o.is_enterprise && <StatusBadge tone="accent">enterprise</StatusBadge>}
                     {/* Paid because we said so. Worth seeing in the table: it is
                         the difference between revenue and a grant. */}
                     {o.managed_plan && (
-                        <Badge
-                            variant="outline"
-                            className="text-[10px] border-sky-300 bg-sky-50 text-sky-700"
-                            title={o.managed_plan_reason ?? "Granted by an operator"}
-                        >
+                        <StatusBadge tone="info" title={o.managed_plan_reason ?? "Granted by an operator"}>
                             managed
-                        </Badge>
+                        </StatusBadge>
                     )}
                     {o.managed_plan_expired && (
-                        <Badge
-                            variant="outline"
-                            className="text-[10px] border-amber-300 bg-amber-50 text-amber-700"
-                            title={o.managed_plan_reason ?? "The grant has lapsed"}
-                        >
+                        <StatusBadge tone="warning" title={o.managed_plan_reason ?? "The grant has lapsed"}>
                             grant lapsed
-                        </Badge>
+                        </StatusBadge>
                     )}
                 </div>
             ) : (
-                <span className="text-xs text-muted-foreground">—</span>
+                <span className="text-subtle-foreground">—</span>
             ),
         csv: (o) =>
             [o.plan_name || "", o.managed_plan ? "managed" : "", o.managed_plan_expired ? "grant lapsed" : ""]
@@ -149,22 +133,18 @@ const columns: Column<AdminOrgListItem>[] = [
     {
         id: "channel",
         header: "Channel",
-        // Where the workspace came from, recorded once at signup. Hidden by
-        // default: most signups are direct and the column would read empty.
-        defaultHidden: true,
-        // "direct" means no acquisition data at all, which is the same thing
-        // the "No acquisition data" filter selects. A row with only a landing
-        // path is not direct, so it shows the path rather than falling through.
         cell: (o) =>
-            o.utm_source || o.utm_medium || o.utm_campaign || o.landing_path ? (
-                <div className="flex flex-col leading-tight" title={[o.utm_campaign, o.landing_path].filter(Boolean).join(" · ")}>
-                    <span className="text-xs">{o.utm_source || o.landing_path || "—"}</span>
-                    {o.utm_medium && <span className="text-[10px] text-muted-foreground">{o.utm_medium}</span>}
+            o.utm_source || o.utm_medium || o.utm_campaign || o.landing_path || o.referrer_host ? (
+                <div className="flex flex-col leading-tight" title={[o.referrer_host, o.utm_campaign, o.landing_path].filter(Boolean).join(" · ")}>
+                    <span className="text-foreground">{o.utm_source || o.referrer_host || "Unknown"}</span>
+                    {o.utm_medium && <span className="mt-0.5 text-xs text-muted-foreground">{o.utm_medium}</span>}
+                    {o.utm_source && o.referrer_host && <span className="mt-0.5 text-xs text-muted-foreground">{o.referrer_host}</span>}
+                    {o.landing_path && <span className="mt-0.5 text-xs text-muted-foreground">{o.landing_path}</span>}
                 </div>
             ) : (
-                <span className="text-xs text-muted-foreground">direct</span>
+                <span className="text-muted-foreground">Unknown</span>
             ),
-        csv: (o) => [o.utm_source, o.utm_medium, o.utm_campaign, o.landing_path].filter(Boolean).join(" | "),
+        csv: (o) => [o.utm_source, o.utm_medium, o.utm_campaign, o.referrer_host, o.landing_path].filter(Boolean).join(" | "),
     },
     {
         id: "posture",
@@ -173,7 +153,7 @@ const columns: Column<AdminOrgListItem>[] = [
             o.risk_state && o.risk_state !== "trusted" ? (
                 <RiskBadge state={o.risk_state} />
             ) : (
-                <span className="text-xs text-muted-foreground">—</span>
+                <span className="text-subtle-foreground">—</span>
             ),
         csv: (o) => o.risk_state || "",
     },
@@ -188,7 +168,7 @@ const columns: Column<AdminOrgListItem>[] = [
             <Link
                 to={`/mailboxes?org=${o.id}`}
                 onClick={(e) => e.stopPropagation()}
-                className="tabular-nums text-[var(--admin-accent-strong)] hover:underline"
+                className="tabular-nums text-[var(--admin-accent-strong)] underline-offset-2 hover:underline"
                 title="Browse this org's mailboxes"
             >
                 {o.email_account_count}
@@ -203,9 +183,11 @@ const columns: Column<AdminOrgListItem>[] = [
         sortable: true,
         sortKey: "campaign_count",
         cell: (o) => (
-            <span className="tabular-nums">
+            <span className="whitespace-nowrap tabular-nums">
                 {o.campaign_count}
-                {o.active_campaigns > 0 && <span className="ml-1 text-emerald-600">({o.active_campaigns} active)</span>}
+                {o.active_campaigns > 0 && (
+                    <span className={`ml-1 text-xs ${TONE_TEXT.success}`}>({o.active_campaigns} active)</span>
+                )}
             </span>
         ),
         csv: (o) => o.campaign_count,
@@ -215,11 +197,13 @@ const columns: Column<AdminOrgListItem>[] = [
         header: "Status",
         cell: (o) =>
             o.deletion_scheduled_for ? (
-                <Badge variant="outline" className="text-[10px] border-amber-300 bg-amber-50 text-amber-700">
+                <StatusBadge tone="warning" dot>
                     pending deletion
-                </Badge>
+                </StatusBadge>
             ) : (
-                <span className="text-xs text-emerald-600">active</span>
+                <StatusBadge tone="success" dot>
+                    active
+                </StatusBadge>
             ),
         csv: (o) => (o.deletion_scheduled_for ? "pending_deletion" : "active"),
     },
@@ -228,7 +212,7 @@ const columns: Column<AdminOrgListItem>[] = [
         header: "Created",
         sortable: true,
         sortKey: "created_at",
-        cell: (o) => <span className="text-xs text-muted-foreground">{new Date(o.created_at).toLocaleDateString()}</span>,
+        cell: (o) => <span className="whitespace-nowrap tabular-nums text-muted-foreground">{new Date(o.created_at).toLocaleDateString()}</span>,
         csv: (o) => o.created_at,
         defaultHidden: true,
     },
@@ -250,10 +234,10 @@ export default function OrganizationsPage() {
     const [ownerBanned, setOwnerBanned] = useState(false);
     const [hasActiveCampaigns, setHasActiveCampaigns] = useState(false);
     const [hasEmailAccounts, setHasEmailAccounts] = useState(false);
-    // Acquisition channel. utmSource/utmMedium match exactly; the two toggles
-    // split "arrived through a tagged link" from "came in directly".
+    // Acquisition filters match the values recorded at signup exactly.
     const [utmSource, setUtmSource] = useState("");
     const [utmMedium, setUtmMedium] = useState("");
+    const [referrerHost, setReferrerHost] = useState("");
     const [hasAcquisition, setHasAcquisition] = useState(false);
     const [noAcquisition, setNoAcquisition] = useState(false);
     // Count ranges
@@ -276,7 +260,7 @@ export default function OrganizationsPage() {
     const filterKey = JSON.stringify({
         query, status, visibility, subStatus, enterprise, managedPlan, hasOverrides, risk, cancelAtPeriodEnd,
         hasActiveSubscription, noSubscription, ownerBanned, hasActiveCampaigns, hasEmailAccounts,
-        utmSource, utmMedium, hasAcquisition, noAcquisition,
+        utmSource, utmMedium, referrerHost, hasAcquisition, noAcquisition,
         memMin, memMax, mbMin, mbMax, campMin, campMax, created, trialEnd, periodEnd, updated, sort,
     });
 
@@ -305,6 +289,7 @@ export default function OrganizationsPage() {
                 has_email_accounts: hasEmailAccounts || undefined,
                 utm_source: utmSource.trim() || undefined,
                 utm_medium: utmMedium.trim() || undefined,
+                referrer_host: referrerHost.trim().toLowerCase() || undefined,
                 has_acquisition: hasAcquisition || undefined,
                 no_acquisition: noAcquisition || undefined,
                 member_count_min: memMin,
@@ -343,6 +328,7 @@ export default function OrganizationsPage() {
         (risk ? 1 : 0) +
         (utmSource ? 1 : 0) +
         (utmMedium ? 1 : 0) +
+        (referrerHost ? 1 : 0) +
         bools.filter(Boolean).length +
         ranges.filter(([a, b]) => a !== undefined || b !== undefined).length +
         [created, trialEnd, periodEnd, updated].filter(rangeActive).length +
@@ -364,6 +350,7 @@ export default function OrganizationsPage() {
         setHasEmailAccounts(false);
         setUtmSource("");
         setUtmMedium("");
+        setReferrerHost("");
         setHasAcquisition(false);
         setNoAcquisition(false);
         setMemMin(undefined);
@@ -381,7 +368,17 @@ export default function OrganizationsPage() {
 
     return (
         <div>
-            <PageHeader title="Organizations" description="Every workspace on the platform. Filter by plan, subscription, relationships, usage, and timeline; sort and drill into owner, members, and mailboxes." />
+            <PageHeader
+                title="Organizations"
+                meta={
+                    data?.pagination.total != null ? (
+                        <span className="text-[13px] tabular-nums text-subtle-foreground">
+                            {data.pagination.total.toLocaleString()}
+                        </span>
+                    ) : undefined
+                }
+                description="Every workspace on the platform. Filter by plan, subscription, relationships, usage, and timeline; sort and drill into owner, members, and mailboxes."
+            />
             <Explorer
                 activeCount={activeCount}
                 onReset={resetAll}
@@ -439,6 +436,9 @@ export default function OrganizationsPage() {
                             <div className="mt-2">
                                 <SearchFilter value={utmMedium} onChange={setUtmMedium} placeholder="utm_medium…" />
                             </div>
+                            <div className="mt-2">
+                                <SearchFilter value={referrerHost} onChange={setReferrerHost} placeholder="Referrer host, e.g. www.google.com…" />
+                            </div>
                             <div className="mt-2 flex flex-col gap-2">
                                 {/* Mutually exclusive: the backend resolves both-at-once
                                     by ignoring one, which would leave a filter switched
@@ -451,7 +451,7 @@ export default function OrganizationsPage() {
                                 <ToggleFilter
                                     checked={noAcquisition}
                                     onChange={(v) => { setNoAcquisition(v); if (v) setHasAcquisition(false); }}
-                                    label="No acquisition data (direct)"
+                                    label="No acquisition data (unknown source)"
                                 />
                             </div>
                         </FilterGroup>

@@ -47,13 +47,14 @@ export default function WarmupCoverageNotice({
         : `Only ${warmupCount} are warming, so the same accounts pair over and over, which reads as fake and ramps slowly.`;
 
     return (
-        <div className="px-5 pt-4">
+        <div>
             <div className="flex items-start gap-2.5 rounded-md border border-amber-200/70 bg-amber-50/70 px-3 py-2.5 text-amber-800">
                 <RiFireLine className="w-4 h-4 mt-px shrink-0 text-amber-500" />
                 <div className="min-w-0 text-[12.5px] leading-snug">
                     <span className="font-medium">{title}.</span>{" "}
                     <span className="text-amber-800/90">
-                        {body} A believable pool is around 20 to 50 mailboxes, ramped over a few weeks toward a safe 40 to 50 a day.
+                        {body}
+                        <span className="hidden sm:inline"> A believable pool is around 20 to 50 mailboxes, ramped over a few weeks toward a safe 40 to 50 a day.</span>
                     </span>{" "}
                     <button
                         type="button"

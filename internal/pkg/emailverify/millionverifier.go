@@ -3,6 +3,7 @@ package emailverify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,8 +54,11 @@ type mvSingleResponse struct {
 }
 
 type mvCreditsResponse struct {
-	Credits int    `json:"credits"`
-	Error   string `json:"error"`
+	Credits int `json:"credits"`
+	// RenewingCredits is a subscription's allowance, which real-time checks
+	// also draw on; an account living on one reports zero Credits.
+	RenewingCredits int    `json:"renewing_credits"`
+	Error           string `json:"error"`
 }
 
 // Verify implements Verifier. An API failure is never an "invalid" verdict:
@@ -76,11 +80,13 @@ func (m *MillionVerifier) Check(ctx context.Context, email string) (Result, erro
 	q.Set("timeout", fmt.Sprintf("%d", millionVerifierProbeTimeout))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/api/v3/?"+q.Encode(), nil)
 	if err != nil {
+		err = withoutURL(err)
 		res.Reason = "millionverifier request failed: " + err.Error()
 		return res, err
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
+		err = withoutURL(err)
 		res.Reason = "millionverifier unreachable: " + err.Error()
 		return res, err
 	}
@@ -133,17 +139,18 @@ func (m *MillionVerifier) Account(ctx context.Context) (*int, error) {
 	return &n, err
 }
 
-// Credits returns the account's remaining credits, and validates the key.
+// Credits returns the credits a real-time check can spend (pay-as-you-go plus
+// a subscription's renewing allowance), and validates the key.
 func (m *MillionVerifier) Credits(ctx context.Context) (int, error) {
 	q := url.Values{}
 	q.Set("api", m.apiKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/api/v3/credits?"+q.Encode(), nil)
 	if err != nil {
-		return 0, err
+		return 0, withoutURL(err)
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, withoutURL(err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -160,7 +167,7 @@ func (m *MillionVerifier) Credits(ctx context.Context) (int, error) {
 	if out.Error != "" {
 		return 0, m.accountError(nil, out.Error)
 	}
-	return out.Credits, nil
+	return out.Credits + out.RenewingCredits, nil
 }
 
 func (m *MillionVerifier) accountError(res *Result, msg string) error {
@@ -176,6 +183,16 @@ func (m *MillionVerifier) accountError(res *Result, msg string) error {
 	}
 	if res != nil {
 		res.Reason = "millionverifier: " + msg
+	}
+	return err
+}
+
+// withoutURL drops the request URL from a transport error, because the API key
+// travels in its query string.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("millionverifier: %s: %w", ue.Op, ue.Err)
 	}
 	return err
 }

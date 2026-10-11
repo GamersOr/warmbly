@@ -2,12 +2,24 @@ package msgraph
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
-	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/errx"
 )
+
+func deltaExpired(err error) bool {
+	var mailErr *errx.MailError
+	if !errors.As(err, &mailErr) || mailErr.Failure == nil {
+		return false
+	}
+	failure := mailErr.Failure
+	return failure.Status == http.StatusGone ||
+		(failure.Status == http.StatusBadRequest && strings.EqualFold(failure.Cause, "syncStateNotFound"))
+}
 
 // graphErrorEnvelope is Graph's standard error shape.
 type graphErrorEnvelope struct {
@@ -32,26 +44,31 @@ func HandleError(resp *http.Response) *errx.MailError {
 	var env graphErrorEnvelope
 	_ = json.Unmarshal(body, &env)
 
-	logError := func() {
-		log.Debug().
-			Int("status", resp.StatusCode).
-			Str("code", env.Error.Code).
-			Str("message", env.Error.Message).
-			Msg("Graph API error")
-	}
-
+	now := time.Now().UTC()
+	failure := errx.SendFailure{Provider: "microsoft", Protocol: "http", Status: resp.StatusCode,
+		Cause: errx.SafeProviderCode(env.Error.Code), Scope: "mailbox", ObservedAt: now,
+		Disposition: errx.SendRetry, RetryAt: errx.RetryAfterAt(resp.Header.Get("Retry-After"), now)}
+	base := errx.ErrMailServerUnreachable
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
-		return errx.ErrMailAuthenticationFailed
+		base, failure.Disposition = errx.ErrMailAuthenticationFailed, errx.SendAuth
 	case http.StatusForbidden:
-		return errx.ErrMailAuthorizationFailed
+		base, failure.Disposition = errx.ErrMailAuthorizationFailed, errx.SendAuth
 	case http.StatusNotFound:
-		logError()
-		return errx.ErrMailResourceNotFound
+		base, failure.Disposition = errx.ErrMailResourceNotFound, errx.SendPermanent
 	case http.StatusTooManyRequests:
-		return errx.ErrMailSendingTooFast
+		base, failure.Disposition = errx.ErrMailSendingTooFast, errx.SendThrottle
 	default:
-		logError()
-		return errx.ErrMailServerUnreachable
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			failure.Disposition = errx.SendPermanent
+		}
 	}
+	return errx.WithSendFailure(base, failure)
+}
+
+func retryAfter(value string, now time.Time) time.Duration {
+	if at := errx.RetryAfterAt(value, now); at != nil {
+		return at.Sub(now)
+	}
+	return 0
 }

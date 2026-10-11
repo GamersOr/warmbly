@@ -17,7 +17,7 @@ import { visitorKey } from "./events";
 import type { AnswerValue } from "./fields";
 import { FieldControl } from "./fields";
 import { Turnstile } from "./Turnstile";
-import { resetTurnstile } from "./turnstile";
+import { resetTurnstile } from "./turnstileScript";
 
 type Answers = Record<string, AnswerValue>;
 
@@ -169,10 +169,7 @@ export function FormRenderer({
                 });
                 postSubmitted(def.public_id);
                 track("form_submitted", def.public_id);
-                if (res.redirect_url) {
-                    redirect(res.redirect_url);
-                    return;
-                }
+                if (res.redirect_url && redirect(res.redirect_url)) return;
                 setDone(res.message || "Thanks!");
             } catch (e) {
                 if (e instanceof StalePageError) {

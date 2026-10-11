@@ -3,6 +3,7 @@ package imap
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-imap/v2/imapserver/imapmemserver"
+	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 )
 
@@ -118,6 +120,21 @@ func (w *wireLog) commands(name string) []string {
 // half of the conversation.
 func recordingServer(t *testing.T, caps imap.CapSet, folders ...string) (*Client, *wireLog) {
 	t.Helper()
+	return interceptingServer(t, caps, nil, folders...)
+}
+
+// interceptingServer is recordingServer with a stand-in for a stricter server:
+// when refuse returns a non-empty reply for a command line, the proxy answers
+// with it instead of forwarding the command.
+func interceptingServer(t *testing.T, caps imap.CapSet, refuse func(line string) string, folders ...string) (*Client, *wireLog) {
+	t.Helper()
+	return rewritingServer(t, caps, refuse, nil, folders...)
+}
+
+// rewritingServer is interceptingServer that can also rewrite what the server
+// says, line by line, to stand in for a server whose dialect it does not speak.
+func rewritingServer(t *testing.T, caps imap.CapSet, refuse, rewrite func(line string) string, folders ...string) (*Client, *wireLog) {
+	t.Helper()
 	upstream := startMemServer(t, caps, folders...)
 	log := &wireLog{}
 
@@ -138,14 +155,42 @@ func recordingServer(t *testing.T, caps imap.CapSet, folders ...string) (*Client
 				_ = down.Close()
 				return
 			}
-			go func() { _, _ = io.Copy(down, up); _ = down.Close() }()
+			toClient := &lockedWriter{w: down}
+			go func() {
+				defer func() { _ = down.Close() }()
+				if rewrite == nil {
+					_, _ = io.Copy(toClient, up)
+					return
+				}
+				r := bufio.NewReader(up)
+				for {
+					line, err := r.ReadString('\n')
+					if line != "" {
+						if _, werr := toClient.Write([]byte(rewrite(line))); werr != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
 			go func() {
 				defer func() { _ = up.Close() }()
 				r := bufio.NewReader(down)
 				for {
 					line, err := r.ReadString('\n')
 					if line != "" {
-						log.add(strings.TrimRight(line, "\r\n"))
+						trimmed := strings.TrimRight(line, "\r\n")
+						log.add(trimmed)
+						if refuse != nil {
+							if reply := refuse(trimmed); reply != "" {
+								if _, werr := toClient.Write([]byte(reply + "\r\n")); werr != nil {
+									return
+								}
+								continue
+							}
+						}
 						if _, werr := up.Write([]byte(line)); werr != nil {
 							return
 						}
@@ -159,6 +204,19 @@ func recordingServer(t *testing.T, caps imap.CapSet, folders ...string) (*Client
 	}()
 
 	return clientTo(t, ln.Addr().String()), log
+}
+
+// lockedWriter keeps the proxy's own replies from interleaving with the
+// server's bytes.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 func atoi(s string) int {
@@ -203,6 +261,87 @@ func TestFoldersWithoutListStatus(t *testing.T) {
 		if b.UIDNext == 0 {
 			t.Errorf("%q came back with no UIDNEXT, which is the incremental cursor here", b.Name)
 		}
+	}
+}
+
+func TestFoldersStatusFailureDoesNotBecomeFolderAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply string
+		code        errx.MailErrorCode
+	}{
+		{"unavailable", "NO [UNAVAILABLE] Try later", errx.MailErrorCodeServerUnreachable},
+		{"server bug", "NO [SERVERBUG] Try later", errx.MailErrorCodeServerUnreachable},
+		{"connection limit", "NO [LIMIT] Try later", errx.MailErrorCodeSendingTooFast},
+		{"authentication", "NO [AUTHENTICATIONFAILED] Sign in again", errx.MailErrorCodeInvalidCredentials},
+		{"authorization", "NO [AUTHORIZATIONFAILED] Not permitted", errx.MailErrorCodeAuthorizationFailed},
+		{"unknown refusal", "NO Could not obtain status", errx.MailErrorCodeImapUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := interceptingServer(t, nil, func(line string) string {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 && strings.EqualFold(fields[1], "STATUS") && strings.Contains(line, "Sent") {
+					return fields[0] + " " + tc.reply
+				}
+				return ""
+			}, "Sent")
+			if err := c.Connect(); err != nil {
+				t.Fatal(err)
+			}
+			boxes, err := c.Folders()
+			if err == nil || err.Code != tc.code || len(boxes) != 0 {
+				t.Fatalf("partial listing could retire Sent: boxes=%v err=%v, want %s", boxes, err, tc.code)
+			}
+		})
+	}
+}
+
+func TestFoldersExplicitlyMissingStatusFolderCanBeSkipped(t *testing.T) {
+	c, _ := interceptingServer(t, nil, func(line string) string {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && strings.EqualFold(fields[1], "STATUS") && strings.Contains(line, "Sent") {
+			return fields[0] + " NO [NONEXISTENT] Folder removed"
+		}
+		return ""
+	}, "Sent")
+	boxes, err := c.Folders()
+	if err != nil || len(boxes) != 1 || boxes[0].Name != "INBOX" {
+		t.Fatalf("authoritative missing folder did not preserve remaining listing: %v %v", boxes, err)
+	}
+}
+
+func TestFoldersMissingListStatusFallsBackToStatus(t *testing.T) {
+	suppressed := 0
+	c, wire := rewritingServer(t, imap.CapSet{imap.CapIMAP4rev1: {}, imap.CapListExtended: {}, imap.CapListStatus: {}}, nil, func(line string) string {
+		if strings.HasPrefix(strings.ToUpper(line), "* STATUS ") && suppressed < 2 {
+			suppressed++
+			return ""
+		}
+		return line
+	}, "Sent")
+	boxes, err := c.Folders()
+	if err != nil || len(boxes) != 2 || len(wire.commands("STATUS")) != 2 {
+		t.Fatalf("missing LIST-STATUS metadata became folder absence: boxes=%v err=%v fallback=%v", boxes, err, wire.commands("STATUS"))
+	}
+}
+
+func TestFoldersIncompleteStatusRemainsRetryable(t *testing.T) {
+	for _, reply := range []string{"OK Status unavailable", "OK Status completed"} {
+		t.Run(reply, func(t *testing.T) {
+			c, _ := interceptingServer(t, nil, func(line string) string {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 && strings.EqualFold(fields[1], "STATUS") && strings.Contains(line, "Sent") {
+					if reply == "OK Status completed" {
+						return "* STATUS Sent (MESSAGES 0)\r\n" + fields[0] + " " + reply
+					}
+					return fields[0] + " " + reply
+				}
+				return ""
+			}, "Sent")
+			boxes, err := c.Folders()
+			if err == nil || err.Code != errx.MailErrorCodeServerUnreachable || len(boxes) != 0 {
+				t.Fatalf("incomplete status was treated as authoritative: boxes=%v err=%v", boxes, err)
+			}
+		})
 	}
 }
 
@@ -258,6 +397,72 @@ func TestFoldersCapKeepsInboxAndSpecialFolders(t *testing.T) {
 	}
 	if c.FolderOverflow() != len(many)+1-5 {
 		t.Errorf("FolderOverflow = %d, want %d", c.FolderOverflow(), len(many)+1-5)
+	}
+}
+
+func TestFolderListingPreservesCompleteNamesWithBoundedStatus(t *testing.T) {
+	for _, listStatus := range []bool{false, true} {
+		t.Run(fmt.Sprintf("LIST-STATUS=%t", listStatus), func(t *testing.T) {
+			var caps imap.CapSet
+			if listStatus {
+				caps = imap.CapSet{imap.CapIMAP4rev1: {}, imap.CapListExtended: {}, imap.CapListStatus: {}}
+			}
+			suppressed := 0
+			c, wire := rewritingServer(t, caps, nil, func(line string) string {
+				if listStatus && strings.HasPrefix(strings.ToUpper(line), "* STATUS ") && suppressed < 5 {
+					suppressed++
+					return ""
+				}
+				return line
+			}, "Sent", "Archive", "Outside", "Other")
+			listing, err := c.listFoldersCapped(2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(listing.Folders) != 2 || c.FolderOverflow() != 3 || len(wire.commands("STATUS")) != 2 {
+				t.Fatalf("cap did not bound status work: listing=%+v commands=%v", listing, wire.commands("STATUS"))
+			}
+			for _, name := range []string{"INBOX", "Sent", "Archive", "Outside", "Other"} {
+				if _, present := listing.Present[name]; !present {
+					t.Fatalf("complete LIST presence lost %q outside cap", name)
+				}
+			}
+			for _, box := range listing.Folders {
+				if box.UIDValidity == 0 || box.UIDNext == 0 {
+					t.Fatalf("kept folder has incomplete status: %+v", box)
+				}
+			}
+		})
+	}
+}
+
+func TestFolderListingRequiresCompleteDiscoveryOrExplicitAbsence(t *testing.T) {
+	for _, reply := range []string{"NO [UNAVAILABLE] Try later", "NO [NONEXISTENT] Folder removed"} {
+		t.Run(reply, func(t *testing.T) {
+			c, _ := interceptingServer(t, nil, func(line string) string {
+				fields := strings.Fields(line)
+				if len(fields) >= 3 && strings.EqualFold(fields[1], "STATUS") && strings.Contains(line, "Sent") {
+					return fields[0] + " " + reply
+				}
+				return ""
+			}, "Sent")
+			listing, err := c.ListFolders()
+			if strings.Contains(reply, "UNAVAILABLE") {
+				if err == nil || listing.Present != nil || len(listing.Folders) != 0 {
+					t.Fatalf("failed pass leaked retirement authority: %+v err=%v", listing, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, present := listing.Present["Sent"]; present {
+				t.Fatal("explicit resource absence was not retained")
+			}
+			if _, present := listing.Present["INBOX"]; !present {
+				t.Fatal("remaining positive presence was lost")
+			}
+		})
 	}
 }
 

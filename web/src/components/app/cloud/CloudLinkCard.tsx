@@ -4,8 +4,8 @@
 
 import React from "react";
 import { motion } from "framer-motion";
-import toast from "react-hot-toast";
-import { CheckIcon, CloudIcon, CopyIcon, ExternalLinkIcon, FlameIcon, InboxIcon, Loader2Icon, LockIcon, ShieldCheckIcon } from "lucide-react";
+import toast from "react-hot-toast/headless";
+import { CheckIcon, CloudIcon, CopyIcon, ExternalLinkIcon, FlameIcon, GlobeIcon, InboxIcon, Loader2Icon, LockIcon, ShieldCheckIcon } from "lucide-react";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 import type { CloudLinkPendingConnect } from "@/lib/api/models/app/cloudlink/CloudLink";
@@ -129,7 +129,10 @@ export default function CloudLinkCard({
                 </span>
                 <div className="text-[13px] text-slate-600 leading-relaxed">
                     <p className="text-slate-900 font-medium">Warmbly warms your mailboxes for you.</p>
-                    <p className="mt-1">Free for 10 mailboxes. Google and Microsoft sign-in without OAuth setup. Your data stays on this server; only warmup runs in the cloud.</p>
+                    <p className="mt-1">
+                        Free for 10 mailboxes. Google and Microsoft sign-in without OAuth setup, and domain redirects without proxy setup. Your data stays on
+                        this server; only warmup runs in the cloud.
+                    </p>
                     {start.isPending && (
                         <p className="mt-2 inline-flex items-center gap-1.5 text-slate-400">
                             <Loader2Icon className="w-3 h-3 animate-spin" /> Getting a code
@@ -152,9 +155,13 @@ export default function CloudLinkCard({
                         </p>
                     </div>
                     <ul className="space-y-2 text-[12.5px] text-slate-600">
-                        <Bullet icon={FlameIcon}>Free for up to 10 mailboxes. Unlimited mailboxes for $15 a month.</Bullet>
+                        <Bullet icon={FlameIcon}>Free for up to 10 mailboxes. Premium, $15 a month, brings better deliverability to every mailbox.</Bullet>
                         <Bullet icon={CloudIcon}>Sign in Google and Microsoft mailboxes through Warmbly's own apps: no OAuth client setup on this server.</Bullet>
-                        <Bullet icon={LockIcon}>Only mailbox sign-ins live on the cloud, encrypted, for warmup and sending. Campaigns, contacts and inbox never leave here.</Bullet>
+                        <Bullet icon={GlobeIcon}>Have the cloud serve your sending domains&apos; website redirects, with no proxy or certificate setup on this server.</Bullet>
+                        <Bullet icon={LockIcon}>
+                            Only mailbox sign-ins live on the cloud, encrypted, for warmup and sending, plus the domain and website of any redirect you hand it.
+                            Campaigns, contacts and inbox never leave here.
+                        </Bullet>
                         <Bullet icon={ShieldCheckIcon}>You can remove a mailbox or disconnect at any time; the cloud forgets it immediately.</Bullet>
                     </ul>
                     <button
@@ -183,6 +190,7 @@ export default function CloudLinkCard({
                 animate={{ scale: 1, opacity: 1 }}
                 className="group relative rounded-lg border border-slate-200 bg-slate-50 px-6 py-4 font-mono text-[28px] tracking-[0.28em] text-slate-900 hover:border-sky-300 transition-colors"
                 title="Copy code"
+                data-ph-mask=""
             >
                 {pending.user_code}
                 <span className="absolute -top-2 -right-2 size-6 rounded-full bg-white border border-slate-200 text-slate-500 inline-flex items-center justify-center group-hover:text-sky-600">

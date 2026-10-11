@@ -14,7 +14,7 @@ import SelectOption from "./popup/select/SelectOption";
 import { convertToValidJSONKey, isValidEmail } from "@/lib/helper";
 import AddBoxTopBack from "./emails/add/AddBoxTopBack";
 import useAddContacts from "@/lib/api/hooks/app/contacts/useAddContacts";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
 
@@ -767,7 +767,7 @@ function CSVSelector({
     const [drop, setDrop] = React.useState<boolean>(false);
     const dropRef = React.useRef<HTMLDivElement>(null);
 
-    useClickOutside(dropRef, () => setDrop(false))
+    useClickOutside(drop, () => setDrop(false), dropRef);
 
     return (<>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-5 sm:justify-between">

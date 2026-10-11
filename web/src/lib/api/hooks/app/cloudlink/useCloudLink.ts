@@ -21,17 +21,23 @@ import {
     revokePoolLinkInstance,
 } from "@/lib/api/client/app/cloudlink/poolLink";
 
+import useCurrentOrganization from "@/lib/api/hooks/app/organizations/useCurrentOrganization";
+import { SENDING_DOMAINS_KEY } from "@/lib/api/hooks/app/emails/useSendingDomains";
+
 export const CLOUD_LINK_KEY = ["cloud-link"];
 export const POOL_LINK_KEY = ["pool-link"];
 
 // Self-hosted side.
 
-export function useCloudLinkStatus(enabled = true) {
-    return useQuery({ queryKey: [...CLOUD_LINK_KEY, "status"], queryFn: getCloudLinkStatus, enabled, staleTime: 10_000 });
+// Each read asks Warmbly Cloud, so a surface that only needs the redirect offer can take a longer staleTime.
+export function useCloudLinkStatus(enabled = true, staleTime = 10_000) {
+    const organization = useCurrentOrganization();
+    return useQuery({ queryKey: [...CLOUD_LINK_KEY, organization.data?.id, "status"], queryFn: getCloudLinkStatus, enabled: enabled && !!organization.data?.id, staleTime });
 }
 
 export function useCloudLinkMailboxes(enabled = true) {
-    return useQuery({ queryKey: [...CLOUD_LINK_KEY, "mailboxes"], queryFn: listCloudLinkMailboxes, enabled, staleTime: 10_000 });
+    const organization = useCurrentOrganization();
+    return useQuery({ queryKey: [...CLOUD_LINK_KEY, organization.data?.id, "mailboxes"], queryFn: listCloudLinkMailboxes, enabled: enabled && !!organization.data?.id, staleTime: 10_000 });
 }
 
 export function useStartCloudLinkConnect() {
@@ -51,10 +57,12 @@ export function usePollCloudLinkConnect() {
 export function useDisconnectCloudLink() {
     const qc = useQueryClient();
     return useMutation({
-        mutationFn: () => disconnectCloudLink(),
+        mutationFn: (legacy: boolean) => disconnectCloudLink(legacy),
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: CLOUD_LINK_KEY });
             void qc.invalidateQueries({ queryKey: ["emails"] });
+            // Redirects Warmbly Cloud served stop with the link.
+            void qc.invalidateQueries({ queryKey: SENDING_DOMAINS_KEY });
         },
     });
 }
@@ -90,7 +98,8 @@ export function useCloudLinkMailboxLifecycle() {
 }
 
 export function useCloudWorkspaceMailboxes(enabled = true) {
-    return useQuery({ queryKey: [...CLOUD_LINK_KEY, "workspace-mailboxes"], queryFn: listCloudWorkspaceMailboxes, enabled, staleTime: 10_000 });
+    const organization = useCurrentOrganization();
+    return useQuery({ queryKey: [...CLOUD_LINK_KEY, organization.data?.id, "workspace-mailboxes"], queryFn: listCloudWorkspaceMailboxes, enabled: enabled && !!organization.data?.id, staleTime: 10_000 });
 }
 
 export function useAdoptCloudMailbox() {
@@ -128,7 +137,8 @@ export function useDenyPoolLinkCode() {
 }
 
 export function usePoolLinkInstances(enabled = true) {
-    return useQuery({ queryKey: [...POOL_LINK_KEY, "instances"], queryFn: listPoolLinkInstances, enabled, staleTime: 10_000 });
+    const organization = useCurrentOrganization();
+    return useQuery({ queryKey: [...POOL_LINK_KEY, organization.data?.id, "instances"], queryFn: listPoolLinkInstances, enabled: enabled && !!organization.data?.id, staleTime: 10_000 });
 }
 
 export function useRevokePoolLinkInstance() {

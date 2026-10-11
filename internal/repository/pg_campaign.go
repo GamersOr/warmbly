@@ -17,12 +17,16 @@ import (
 	"github.com/warmbly/warmbly/internal/infrastructure/db"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
+	"github.com/warmbly/warmbly/internal/utils"
 	"github.com/warmbly/warmbly/internal/utils/paging"
 	"github.com/warmbly/warmbly/internal/utils/validate"
 )
 
 type CampaignRepository interface {
 	Create(ctx context.Context, userID string, orgID *uuid.UUID, data *models.CreateCampaign) (*models.Campaign, *errx.Error)
+	// WorkspaceTimezone is the zone a campaign with no timezone of its own is
+	// read in: the workspace's, else UTC.
+	WorkspaceTimezone(ctx context.Context, orgID uuid.UUID) string
 	Get(ctx context.Context, userID, id string) (*models.Campaign, error)
 	GetByID(ctx context.Context, campaignID uuid.UUID) (*models.Campaign, error)
 	GetSequenceByID(ctx context.Context, sequenceID uuid.UUID) (*models.Sequence, error)
@@ -37,11 +41,11 @@ type CampaignRepository interface {
 	// Search filters by name substring, folder id, and status bucket
 	// ("draft" | "active" | "paused" | "completed"; paused matches every
 	// paused_* variant; empty means all).
-	Search(ctx context.Context, userID, query string, cursor, folder *string, status, kind string, limit int32) (*models.CampaignsResult, error)
+	Search(ctx context.Context, userID, query string, cursor, folder *string, status string, limit int32, allowed []uuid.UUID) (*models.CampaignsResult, error)
 	// Overview returns status-bucket counts plus per-folder totals for the
 	// campaigns browser sidebar.
-	Overview(ctx context.Context, orgID string) (*models.CampaignsOverview, error)
-	Update(ctx context.Context, userID, query string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error)
+	Overview(ctx context.Context, orgID string, allowed []uuid.UUID) (*models.CampaignsOverview, error)
+	Update(ctx context.Context, orgID, query string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error)
 	UpdateStatus(ctx context.Context, campaignID uuid.UUID, status string) error
 	UpdateStatusWithLock(ctx context.Context, campaignID uuid.UUID, status string) error
 	// Delete removes the campaign, its cascading data and every pending task
@@ -57,6 +61,9 @@ type CampaignRepository interface {
 	StopCampaign(ctx context.Context, campaignID uuid.UUID) error
 	ValidateCampaignReady(ctx context.Context, campaignID uuid.UUID) error
 	GetPendingCampaignTasks(ctx context.Context, campaignID uuid.UUID) ([]Task, error)
+	// IsPacedSuccessor reports whether a pending wakeup was parked by a tick
+	// that sent, so it is send spacing rather than a deferral recheck.
+	IsPacedSuccessor(ctx context.Context, campaignID uuid.UUID, pending Task) (bool, error)
 	// ListCampaignScheduleCandidates returns active campaigns that have NO pending
 	// task — their self-perpetuating chain died and needs re-seeding. Used by the
 	// campaign reconciler.
@@ -71,6 +78,10 @@ type CampaignRepository interface {
 	CountActiveForOrganization(ctx context.Context, orgID uuid.UUID) (int, error)
 	// ListIDsByStatus lists the org's campaigns parked at one status.
 	ListIDsByStatus(ctx context.Context, orgID uuid.UUID, status string) ([]uuid.UUID, error)
+	// ListActiveCampaignIDs pages the ids of every active campaign on the
+	// instance, keyset-ordered by id from afterID (uuid.Nil for the first page),
+	// for the background send-plan snapshotter.
+	ListActiveCampaignIDs(ctx context.Context, afterID uuid.UUID, limit int) ([]uuid.UUID, error)
 	AccountHasActiveCampaign(ctx context.Context, accountID uuid.UUID) (bool, error)
 	// CountActiveCampaignsForAccount returns how many active campaigns send
 	// from the given mailbox (matched through the campaign's email tags OR an
@@ -78,6 +89,10 @@ type CampaignRepository interface {
 	// low-volume health-check warmup running whenever a mailbox is in use by a
 	// live campaign.
 	CountActiveCampaignsForAccount(ctx context.Context, accountID uuid.UUID) (int, error)
+	// CountActiveCampaignsForAccounts is the batched form, keyed by account id,
+	// so a status list resolves campaign membership for the whole page in one
+	// query. An account backing no active campaign maps to 0.
+	CountActiveCampaignsForAccounts(ctx context.Context, accountIDs []uuid.UUID) (map[uuid.UUID]int, error)
 
 	// ── Explicit sender pool (feature 1) ────────────────────────────────
 	// GetCampaignSenders returns the campaign's explicit sender rows.
@@ -143,7 +158,7 @@ func NewCampaignRepostory(db *db.DB) CampaignRepository {
 const CAMPAIGN_SELECT = `id, name, description, status,
 		  stop_on_reply, open_tracking, link_tracking,
 		  text_only, daily_limit, unsubscribe_header, risky_emails,
-		  cc_addr, bcc_addr, start_date, end_date, timezone, days,
+		  cc_addr, bcc_addr, start_date, end_date, timezone, COALESCE(NULLIF(timezone, ''), (SELECT NULLIF(o.timezone, '') FROM organizations o WHERE o.id = organization_id), 'UTC') AS effective_timezone, days,
 		  start_time, end_time,
 		  contact_order_by, contact_order_dir, contact_order_field,
 		  updated_at, created_at,
@@ -155,7 +170,6 @@ const CAMPAIGN_SELECT = `id, name, description, status,
 		  guardrail_enabled, guardrail_bounce_rate_max, guardrail_complaint_rate_max,
 		  guardrail_reply_rate_min, guardrail_min_sample, guardrail_window_days,
 		  guardrail_tripped_at, guardrail_reason,
-		  kind,
 		  utm_tracking, utm_source, utm_medium, utm_campaign,
 		  unsubscribe_mode,
 		  continuous, idle_since`
@@ -165,7 +179,7 @@ func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) err
 		&campaign.ID, &campaign.Name, &campaign.Description, &campaign.Status,
 		&campaign.StopOnReply, &campaign.OpenTracking, &campaign.LinkTracking,
 		&campaign.TextOnly, &campaign.DailyLimit, &campaign.UnsubscribeHeader, &campaign.RiskyEmails,
-		&campaign.CC, &campaign.BCC, &campaign.StartDate, &campaign.EndDate, &campaign.Timezone, &campaign.Days,
+		&campaign.CC, &campaign.BCC, &campaign.StartDate, &campaign.EndDate, &campaign.Timezone, &campaign.EffectiveTimezone, &campaign.Days,
 		&campaign.StartTime, &campaign.EndTime,
 		&campaign.ContactOrderBy, &campaign.ContactOrderDir, &campaign.ContactOrderField,
 		&campaign.UpdatedAt, &campaign.CreatedAt,
@@ -177,7 +191,6 @@ func getCampaign(rows db.Scannable, campaign *models.Campaign, extra ...any) err
 		&campaign.GuardrailEnabled, &campaign.GuardrailBounceRateMax, &campaign.GuardrailComplaintRateMax,
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
-		&campaign.Kind,
 		&campaign.UTMTracking, &campaign.UTMSource, &campaign.UTMMedium, &campaign.UTMCampaign,
 		&campaign.UnsubscribeMode,
 		&campaign.Continuous, &campaign.IdleSince,
@@ -192,7 +205,7 @@ const CAMPAIGN_SELECT_FULL = `
 	c.id, c.name, c.description, c.status,
 	c.stop_on_reply, c.open_tracking, c.link_tracking,
 	c.text_only, c.daily_limit, c.unsubscribe_header, c.risky_emails,
-	c.cc_addr, c.bcc_addr, c.start_date, c.end_date, c.timezone, c.days,
+	c.cc_addr, c.bcc_addr, c.start_date, c.end_date, c.timezone, COALESCE(NULLIF(c.timezone, ''), (SELECT NULLIF(o.timezone, '') FROM organizations o WHERE o.id = c.organization_id), 'UTC') AS effective_timezone, c.days,
 	c.start_time, c.end_time,
 	c.contact_order_by, c.contact_order_dir, c.contact_order_field,
 	c.updated_at, c.created_at,
@@ -204,7 +217,6 @@ const CAMPAIGN_SELECT_FULL = `
 	c.guardrail_enabled, c.guardrail_bounce_rate_max, c.guardrail_complaint_rate_max,
 	c.guardrail_reply_rate_min, c.guardrail_min_sample, c.guardrail_window_days,
 	c.guardrail_tripped_at, c.guardrail_reason,
-	c.kind,
 	c.utm_tracking, c.utm_source, c.utm_medium, c.utm_campaign,
 	c.unsubscribe_mode,
 	c.continuous, c.idle_since,
@@ -214,6 +226,16 @@ const CAMPAIGN_SELECT_FULL = `
 
 func getCampaignFull(rows db.Scannable, campaign *models.Campaign) error {
 	return getCampaign(rows, campaign, &campaign.EmailTags, &campaign.Folders)
+}
+
+// WorkspaceTimezone is the zone a campaign with none of its own is read in:
+// the workspace timezone, else UTC.
+func (r *campaignRepository) WorkspaceTimezone(ctx context.Context, orgID uuid.UUID) string {
+	var zone string
+	if err := resultDB(ctx, r.DB).QueryRow(ctx, `SELECT timezone FROM organizations WHERE id = $1`, orgID).Scan(&zone); err == nil && zone != "" {
+		return zone
+	}
+	return "UTC"
 }
 
 // Create inserts a new campaign and, in the same transaction, applies every
@@ -231,8 +253,9 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		}
 		days = *data.Days
 	}
-	timezone := "Europe/London"
-	if data.Timezone != nil {
+	// Empty follows the workspace timezone, resolved on every read.
+	timezone := ""
+	if data.Timezone != nil && *data.Timezone != "" {
 		if !tz.Valid(*data.Timezone) {
 			return nil, errx.ErrTimezone
 		}
@@ -306,18 +329,6 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		if len(v.BodyPlain) > config.SequenceBodyLimit || len(v.BodyHTML) > config.SequenceBodyLimit {
 			return nil, errx.ErrSequenceBody
 		}
-	}
-
-	kind := models.CampaignKindSequence
-	if data.Kind != nil && *data.Kind != "" {
-		if !models.ValidCampaignKind(*data.Kind) {
-			return nil, errx.New(errx.BadRequest, "kind must be sequence or one_time")
-		}
-		kind = *data.Kind
-	}
-	// A one-time email is one message; follow-ups belong in a sequence.
-	if kind == models.CampaignKindOneTime && len(data.Sequences) > 1 {
-		return nil, errx.New(errx.BadRequest, "a one-time email has a single step; create a sequence campaign for follow-ups")
 	}
 
 	cc := data.CC
@@ -465,7 +476,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		return nil, errx.New(errx.BadRequest, "explicit sender strategy requires at least one sender")
 	}
 
-	tx, err := r.DB.Begin(ctx)
+	tx, err := beginResultTx(ctx, r.DB)
 	if err != nil {
 		db.CaptureError(err, "", nil, "begin")
 		return nil, errx.InternalError()
@@ -489,7 +500,7 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			sender_strategy, rotation_mode,
 			ramp_enabled, ramp_start, ramp_increment, ramp_ceiling,
 			esp_match_mode, max_new_leads_per_day, prioritize_new_leads,
-			tracking_domain, kind,
+			tracking_domain,
 			utm_tracking, utm_source, utm_medium, utm_campaign,
 			unsubscribe_mode, continuous, entry_delay_minutes,
 			created_at, updated_at
@@ -502,9 +513,9 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 			$21, $22,
 			$23, $24, $25, $26,
 			$27, $28, $29,
-			$30, $31,
-			$32, $33, $34, $35,
-			$36, $37, $38,
+			$30,
+			$31, $32, $33, $34,
+			$35, $36, $37,
 			NOW(), NOW()
 		)
 		RETURNING %s
@@ -541,14 +552,13 @@ func (r *campaignRepository) Create(ctx context.Context, userID string, orgID *u
 		maxNewLeads,        // $28
 		prioritizeNewLeads, // $29
 		trackingDomain,     // $30
-		kind,               // $31
-		utmTracking,        // $32
-		utmSource,          // $33
-		utmMedium,          // $34
-		utmCampaign,        // $35
-		unsubMode,          // $36
-		continuous,         // $37
-		entryDelay,         // $38
+		utmTracking,        // $31
+		utmSource,          // $32
+		utmMedium,          // $33
+		utmCampaign,        // $34
+		unsubMode,          // $35
+		continuous,         // $36
+		entryDelay,         // $37
 	}
 
 	row := tx.QueryRow(ctx, insertSQL, params...)
@@ -760,8 +770,8 @@ func (r *campaignRepository) Get(ctx context.Context, orgID, id string) (*models
 	return &campaign, nil
 }
 
-func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cursor, folder *string, status, kind string, limit int32) (*models.CampaignsResult, error) {
-	tx, err := r.DB.Begin(ctx)
+func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cursor, folder *string, status string, limit int32, allowed []uuid.UUID) (*models.CampaignsResult, error) {
+	tx, err := beginResultTx(ctx, r.DB)
 	if err != nil {
 		db.CaptureError(err, "", nil, "begin")
 		return nil, err
@@ -785,11 +795,11 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 		  SELECT 1 FROM campaign_folders cf WHERE cf.campaign_id = c.id AND cf.folder_id = $4
 		 ))
 		 AND ($5 = '' OR CASE WHEN $5 = 'paused' THEN c.status::text LIKE 'paused%%' ELSE c.status::text = $5 END)
-		 AND ($6 = '' OR c.kind = $6)
+		 AND ($6::uuid[] IS NULL OR c.id = ANY($6))
 		GROUP BY c.id
-		ORDER BY created_at DESC
+		ORDER BY c.created_at DESC, c.id DESC
 		LIMIT %d`,
-		CAMPAIGN_SELECT_FULL, limit,
+		CAMPAIGN_SELECT_FULL, limit+1,
 	)
 
 	var countSQL string
@@ -804,7 +814,7 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 				SELECT 1 FROM campaign_folders cf WHERE cf.campaign_id = c.id AND cf.folder_id = $3
 			  ))
 			  AND ($4 = '' OR CASE WHEN $4 = 'paused' THEN c.status::text LIKE 'paused%' ELSE c.status::text = $4 END)
-			  AND ($5 = '' OR c.kind = $5)
+			  AND ($5::uuid[] IS NULL OR c.id = ANY($5))
 		`
 	}
 
@@ -814,7 +824,7 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 		query,
 		folder,
 		status,
-		kind,
+		allowed,
 	}
 
 	rows, err := tx.Query(
@@ -841,13 +851,18 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 		}
 		campaigns = append(campaigns, campaign)
 	}
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, sql, params, "rows")
+		return nil, err
+	}
 
 	var total *int64
 	var nextCursor *string
 	var hasMore bool
 	if len(campaigns) > int(limit) {
 		hasMore = true
-		nextCursor = paging.EncodeUUID(campaigns[limit].ID)
+		// The last row returned: the next page starts strictly below it.
+		nextCursor = paging.EncodeUUID(campaigns[limit-1].ID)
 		campaigns = campaigns[:limit]
 	}
 
@@ -857,7 +872,7 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 			query,
 			folder,
 			status,
-			kind,
+			allowed,
 		}
 		var tmp int64
 		err = tx.QueryRow(ctx, countSQL, params...).Scan(&tmp)
@@ -878,7 +893,7 @@ func (r *campaignRepository) Search(ctx context.Context, orgID, query string, cu
 	}, nil
 }
 
-func (r *campaignRepository) Overview(ctx context.Context, orgID string) (*models.CampaignsOverview, error) {
+func (r *campaignRepository) Overview(ctx context.Context, orgID string, allowed []uuid.UUID) (*models.CampaignsOverview, error) {
 	overview := models.CampaignsOverview{Folders: []models.CampaignFolderCount{}}
 
 	countsSQL := `
@@ -887,17 +902,15 @@ func (r *campaignRepository) Overview(ctx context.Context, orgID string) (*model
 			COUNT(*) FILTER (WHERE status = 'active'),
 			COUNT(*) FILTER (WHERE status::text LIKE 'paused%'),
 			COUNT(*) FILTER (WHERE status = 'draft'),
-			COUNT(*) FILTER (WHERE status = 'completed'),
-			COUNT(*) FILTER (WHERE kind = 'one_time')
+			COUNT(*) FILTER (WHERE status = 'completed')
 		FROM campaigns
-		WHERE organization_id = $1`
-	err := r.DB.QueryRow(ctx, countsSQL, orgID).Scan(
+		WHERE organization_id = $1 AND ($2::uuid[] IS NULL OR id = ANY($2))`
+	err := resultDB(ctx, r.DB).QueryRow(ctx, countsSQL, orgID, allowed).Scan(
 		&overview.Total,
 		&overview.Active,
 		&overview.Paused,
 		&overview.Draft,
 		&overview.Completed,
-		&overview.OneTime,
 	)
 	if err != nil {
 		db.CaptureError(err, countsSQL, []any{orgID}, "queryrow")
@@ -908,9 +921,9 @@ func (r *campaignRepository) Overview(ctx context.Context, orgID string) (*model
 		SELECT cf.folder_id, COUNT(*)
 		FROM campaign_folders cf
 		JOIN campaigns c ON c.id = cf.campaign_id
-		WHERE c.organization_id = $1
+		WHERE c.organization_id = $1 AND ($2::uuid[] IS NULL OR c.id = ANY($2))
 		GROUP BY cf.folder_id`
-	rows, err := r.DB.Query(ctx, foldersSQL, orgID)
+	rows, err := resultDB(ctx, r.DB).Query(ctx, foldersSQL, orgID, allowed)
 	if err != nil {
 		db.CaptureError(err, foldersSQL, []any{orgID}, "query")
 		return nil, err
@@ -928,9 +941,9 @@ func (r *campaignRepository) Overview(ctx context.Context, orgID string) (*model
 	return &overview, nil
 }
 
-func (r *campaignRepository) Update(ctx context.Context, userID, campaignID string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error) {
+func (r *campaignRepository) Update(ctx context.Context, orgID, campaignID string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error) {
 	setClauses := []string{}
-	args := []any{userID, campaignID}
+	args := []any{orgID, campaignID}
 	argPos := 3
 
 	if data.Name != nil {
@@ -1049,7 +1062,7 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		argPos++
 	}
 	if data.Timezone != nil {
-		if !tz.Valid(*data.Timezone) {
+		if *data.Timezone != "" && !tz.Valid(*data.Timezone) {
 			return nil, errx.ErrTimezone
 		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "timezone", argPos))
@@ -1109,8 +1122,16 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 		argPos++
 	}
 	if data.ContactOrderField != nil {
+		// This is the order field that reaches an ORDER BY expression, so it is
+		// validated on the way in like the two allowlisted ones above. It is a
+		// custom-field key, so it answers to the same rule as every other
+		// custom-field key in the product.
+		field := utils.NormalizeJSONKey(*data.ContactOrderField)
+		if field != "" && !utils.IsValidJSONKey(field) {
+			return nil, errx.ErrInvalid
+		}
 		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "contact_order_field", argPos))
-		args = append(args, *data.ContactOrderField)
+		args = append(args, field)
 		argPos++
 	}
 
@@ -1165,9 +1186,9 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 	if data.RampStart != nil || data.RampCeiling != nil {
 		start, ceiling := 0, 0
 		if data.RampStart == nil || data.RampCeiling == nil {
-			err := r.DB.QueryRow(ctx,
-				"SELECT ramp_start, ramp_ceiling FROM campaigns WHERE user_id = $1 AND id = $2",
-				userID, campaignID).Scan(&start, &ceiling)
+			err := resultDB(ctx, r.DB).QueryRow(ctx,
+				"SELECT ramp_start, ramp_ceiling FROM campaigns WHERE organization_id = $1 AND id = $2",
+				orgID, campaignID).Scan(&start, &ceiling)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return nil, errx.ErrNotFound
@@ -1311,7 +1332,7 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 
 	setClauses = append(setClauses, "updated_at = now()")
 
-	tx, err := r.DB.Begin(ctx)
+	tx, err := beginResultTx(ctx, r.DB)
 	if err != nil {
 		db.CaptureError(err, "", nil, "begin")
 		return nil, errx.InternalError()
@@ -1325,18 +1346,18 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 	}()
 
 	var query string
-	if argPos > 3 {
+	if argPos >= 3 {
 		query = fmt.Sprintf(`
 			UPDATE campaigns
 			SET %s
-			WHERE user_id = $1 AND id = $2
+			WHERE organization_id = $1 AND id = $2
 			RETURNING %s
 		`, strings.Join(setClauses, ", "), CAMPAIGN_SELECT)
 	} else {
 		query = fmt.Sprintf(`
 			SELECT %s 
 			FROM campaigns
-			WHERE user_id = $1 AND id = $2
+			WHERE organization_id = $1 AND id = $2
 		`, CAMPAIGN_SELECT)
 	}
 
@@ -1395,7 +1416,7 @@ func (r *campaignRepository) Update(ctx context.Context, userID, campaignID stri
 	return &campaign, nil
 }
 
-// GetByID retrieves a campaign by ID without requiring userID (for internal service use)
+// GetByID retrieves a campaign by ID without requiring orgID (for internal service use)
 func (r *campaignRepository) GetByID(ctx context.Context, campaignID uuid.UUID) (*models.Campaign, error) {
 	var campaign models.Campaign
 
@@ -1412,13 +1433,13 @@ func (r *campaignRepository) GetByID(ctx context.Context, campaignID uuid.UUID) 
 		CAMPAIGN_SELECT_FULL,
 	)
 
-	row := r.DB.QueryRow(ctx, query, campaignID)
+	row := resultDB(ctx, r.DB).QueryRow(ctx, query, campaignID)
 	err := row.Scan(
 		&campaign.UserID, &campaign.OrganizationID,
 		&campaign.ID, &campaign.Name, &campaign.Description, &campaign.Status,
 		&campaign.StopOnReply, &campaign.OpenTracking, &campaign.LinkTracking,
 		&campaign.TextOnly, &campaign.DailyLimit, &campaign.UnsubscribeHeader, &campaign.RiskyEmails,
-		&campaign.CC, &campaign.BCC, &campaign.StartDate, &campaign.EndDate, &campaign.Timezone, &campaign.Days,
+		&campaign.CC, &campaign.BCC, &campaign.StartDate, &campaign.EndDate, &campaign.Timezone, &campaign.EffectiveTimezone, &campaign.Days,
 		&campaign.StartTime, &campaign.EndTime,
 		&campaign.ContactOrderBy, &campaign.ContactOrderDir, &campaign.ContactOrderField,
 		&campaign.UpdatedAt, &campaign.CreatedAt,
@@ -1430,7 +1451,6 @@ func (r *campaignRepository) GetByID(ctx context.Context, campaignID uuid.UUID) 
 		&campaign.GuardrailEnabled, &campaign.GuardrailBounceRateMax, &campaign.GuardrailComplaintRateMax,
 		&campaign.GuardrailReplyRateMin, &campaign.GuardrailMinSample, &campaign.GuardrailWindowDays,
 		&campaign.GuardrailTrippedAt, &campaign.GuardrailReason,
-		&campaign.Kind,
 		&campaign.UTMTracking, &campaign.UTMSource, &campaign.UTMMedium, &campaign.UTMCampaign,
 		&campaign.UnsubscribeMode,
 		&campaign.Continuous, &campaign.IdleSince,
@@ -1456,7 +1476,7 @@ func (r *campaignRepository) GetSequenceByID(ctx context.Context, sequenceID uui
 	`
 
 	var seq models.Sequence
-	err := r.DB.QueryRow(ctx, query, sequenceID).Scan(
+	err := resultDB(ctx, r.DB).QueryRow(ctx, query, sequenceID).Scan(
 		&seq.ID, &seq.Name, &seq.Subject, &seq.BodyPlain, &seq.BodyHTML,
 		&seq.BodySync, &seq.BodyCode, &seq.WaitAfter, &seq.ThreadReply, &seq.Kind, &seq.Action, &seq.UpdatedAt, &seq.CreatedAt,
 	)
@@ -1480,7 +1500,7 @@ func (r *campaignRepository) GetSequencesByCampaignID(ctx context.Context, campa
 		ORDER BY position ASC, created_at ASC
 	`
 
-	rows, err := r.DB.Query(ctx, query, campaignID)
+	rows, err := resultDB(ctx, r.DB).Query(ctx, query, campaignID)
 	if err != nil {
 		db.CaptureError(err, query, []any{campaignID}, "query")
 		return nil, err
@@ -1517,7 +1537,7 @@ func (r *campaignRepository) GetSequencesRoutingByCampaignID(ctx context.Context
 		ORDER BY position ASC, created_at ASC
 	`
 
-	rows, err := r.DB.Query(ctx, query, campaignID)
+	rows, err := resultDB(ctx, r.DB).Query(ctx, query, campaignID)
 	if err != nil {
 		db.CaptureError(err, query, []any{campaignID}, "query")
 		return nil, err
@@ -1560,7 +1580,7 @@ func (r *campaignRepository) UpdateStatus(ctx context.Context, campaignID uuid.U
 
 	// Validate that the transition is allowed
 	var currentStatus string
-	if err := r.DB.QueryRow(ctx, `SELECT status FROM campaigns WHERE id = $1`, campaignID).Scan(&currentStatus); err != nil {
+	if err := resultDB(ctx, r.DB).QueryRow(ctx, `SELECT status FROM campaigns WHERE id = $1`, campaignID).Scan(&currentStatus); err != nil {
 		return err
 	}
 	allowed, ok := validCampaignTransitions[currentStatus]
@@ -1568,7 +1588,7 @@ func (r *campaignRepository) UpdateStatus(ctx context.Context, campaignID uuid.U
 		return fmt.Errorf("invalid campaign transition from %q to %q", currentStatus, status)
 	}
 
-	_, err := r.DB.Exec(ctx, query, status, campaignID)
+	_, err := resultDB(ctx, r.DB).Exec(ctx, query, status, campaignID)
 	return err
 }
 
@@ -1592,14 +1612,14 @@ func (r *campaignRepository) StartCampaign(ctx context.Context, campaignID uuid.
 		    guardrail_tripped_at = NULL,
 		    guardrail_reason = ''
 		WHERE id = $1`
-	_, err := r.DB.Exec(ctx, query, campaignID)
+	_, err := resultDB(ctx, r.DB).Exec(ctx, query, campaignID)
 	return err
 }
 
 // StopCampaign sets campaign status to paused and updates last_status_change_at
 func (r *campaignRepository) StopCampaign(ctx context.Context, campaignID uuid.UUID) error {
 	query := `UPDATE campaigns SET status = 'paused', idle_since = NULL, last_status_change_at = NOW(), updated_at = NOW() WHERE id = $1`
-	_, err := r.DB.Exec(ctx, query, campaignID)
+	_, err := resultDB(ctx, r.DB).Exec(ctx, query, campaignID)
 	return err
 }
 
@@ -1607,7 +1627,7 @@ func (r *campaignRepository) StopCampaign(ctx context.Context, campaignID uuid.U
 func (r *campaignRepository) ValidateCampaignReady(ctx context.Context, campaignID uuid.UUID) error {
 	// Check sequences
 	var seqCount int
-	err := r.DB.QueryRow(ctx, `SELECT COUNT(*) FROM sequences WHERE campaign_id = $1`, campaignID).Scan(&seqCount)
+	err := resultDB(ctx, r.DB).QueryRow(ctx, `SELECT COUNT(*) FROM sequences WHERE campaign_id = $1`, campaignID).Scan(&seqCount)
 	if err != nil {
 		return err
 	}
@@ -1619,7 +1639,7 @@ func (r *campaignRepository) ValidateCampaignReady(ctx context.Context, campaign
 	// leads instead of needing them up front.
 	var contactCount int
 	var continuous bool
-	err = r.DB.QueryRow(ctx, `
+	err = resultDB(ctx, r.DB).QueryRow(ctx, `
 		SELECT (SELECT COUNT(*) FROM campaign_leads WHERE campaign_id = $1),
 		       (SELECT continuous FROM campaigns WHERE id = $1)`, campaignID).Scan(&contactCount, &continuous)
 	if err != nil {
@@ -1632,13 +1652,13 @@ func (r *campaignRepository) ValidateCampaignReady(ctx context.Context, campaign
 
 	// Sender pool (unified): valid if it has any enabled explicit sender OR any
 	// email tag OR — when neither is selected ("all") — at least one active
-	// mailbox for the owner to fall back to.
+	// mailbox in the campaign's organization to fall back to.
 	var senderCount int
-	if err := r.DB.QueryRow(ctx, `SELECT COUNT(*) FROM campaign_senders WHERE campaign_id = $1 AND enabled`, campaignID).Scan(&senderCount); err != nil {
+	if err := resultDB(ctx, r.DB).QueryRow(ctx, `SELECT COUNT(*) FROM campaign_senders WHERE campaign_id = $1 AND enabled`, campaignID).Scan(&senderCount); err != nil {
 		return err
 	}
 	var tagCount int
-	if err := r.DB.QueryRow(ctx, `SELECT COUNT(*) FROM campaign_email_tags WHERE campaign_id = $1`, campaignID).Scan(&tagCount); err != nil {
+	if err := resultDB(ctx, r.DB).QueryRow(ctx, `SELECT COUNT(*) FROM campaign_email_tags WHERE campaign_id = $1`, campaignID).Scan(&tagCount); err != nil {
 		return err
 	}
 	if senderCount > 0 || tagCount > 0 {
@@ -1650,7 +1670,7 @@ func (r *campaignRepository) ValidateCampaignReady(ctx context.Context, campaign
 	// campaign starts and then parks itself on its first tick (issue #340 is
 	// the same mistake in the other direction).
 	var strategy string
-	if err := r.DB.QueryRow(ctx, `SELECT sender_strategy FROM campaigns WHERE id = $1`, campaignID).Scan(&strategy); err != nil {
+	if err := resultDB(ctx, r.DB).QueryRow(ctx, `SELECT sender_strategy FROM campaigns WHERE id = $1`, campaignID).Scan(&strategy); err != nil {
 		return err
 	}
 	if strategy == CampaignSenderStrategyExplicit {
@@ -1658,9 +1678,9 @@ func (r *campaignRepository) ValidateCampaignReady(ctx context.Context, campaign
 			"this campaign sends from mailboxes picked by hand and none are left; pick its sending accounts again, or switch it back to selecting by tag")
 	}
 	var activeMailboxes int
-	if err := r.DB.QueryRow(ctx, `
+	if err := resultDB(ctx, r.DB).QueryRow(ctx, `
 		SELECT COUNT(*) FROM email_accounts
-		WHERE user_id = (SELECT user_id FROM campaigns WHERE id = $1) AND status = 'active'
+		WHERE organization_id = (SELECT organization_id FROM campaigns WHERE id = $1) AND status = 'active'
 	`, campaignID).Scan(&activeMailboxes); err != nil {
 		return err
 	}
@@ -1668,6 +1688,26 @@ func (r *campaignRepository) ValidateCampaignReady(ctx context.Context, campaign
 		return errx.New(errx.BadRequest, "campaign must have at least one active sending mailbox")
 	}
 	return nil
+}
+
+// IsPacedSuccessor implements the interface comment on CampaignRepository. A
+// sending tick completes and parks its successor in the same call, so a wakeup
+// created later than that (a reconciler re-seed) is not its successor.
+func (r *campaignRepository) IsPacedSuccessor(ctx context.Context, campaignID uuid.UUID, pending Task) (bool, error) {
+	var paced bool
+	err := resultDB(ctx, r.DB).QueryRow(ctx, `
+		SELECT `+taskDispatchedEmail+` AND t.completed_at >= $2::timestamptz - interval '1 minute'
+		FROM tasks t
+		JOIN campaign_tasks ct ON ct.task_id = t.id
+		WHERE ct.campaign_id = $1 AND t.task_type = 'campaign'
+		  AND t.status NOT IN ('pending', 'cancelled') AND t.created_at < $2
+		ORDER BY t.created_at DESC
+		LIMIT 1
+	`, campaignID, pending.CreatedAt).Scan(&paced)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return paced, err
 }
 
 // GetPendingCampaignTasks returns all pending tasks for a campaign
@@ -1680,7 +1720,7 @@ func (r *campaignRepository) GetPendingCampaignTasks(ctx context.Context, campai
 		WHERE ct.campaign_id = $1 AND t.status = 'pending'
 	`
 
-	rows, err := r.DB.Query(ctx, query, campaignID)
+	rows, err := resultDB(ctx, r.DB).Query(ctx, query, campaignID)
 	if err != nil {
 		return nil, err
 	}
@@ -1720,12 +1760,39 @@ func (r *campaignRepository) ListCampaignScheduleCandidates(ctx context.Context,
 		ORDER BY c.idle_since ASC NULLS FIRST
 		LIMIT $1`
 
-	rows, err := r.DB.Query(ctx, query, limit)
+	rows, err := resultDB(ctx, r.DB).Query(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListActiveCampaignIDs pages active campaign ids keyset-ordered by id, so the
+// snapshotter walks the whole fleet one bounded batch at a time regardless of
+// how many campaigns are active.
+func (r *campaignRepository) ListActiveCampaignIDs(ctx context.Context, afterID uuid.UUID, limit int) ([]uuid.UUID, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := resultDB(ctx, r.DB).Query(ctx, `
+		SELECT id FROM campaigns
+		WHERE status = 'active' AND id > $1
+		ORDER BY id
+		LIMIT $2`, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	var ids []uuid.UUID
 	for rows.Next() {
 		var id uuid.UUID
@@ -1771,7 +1838,7 @@ func (r *campaignRepository) ListStaleParkedCampaigns(ctx context.Context, stale
 		WHERE p.scheduled_at > NOW() + $1::interval
 		LIMIT $2`
 
-	rows, err := r.DB.Query(ctx, query, staleAfter.String(), limit)
+	rows, err := resultDB(ctx, r.DB).Query(ctx, query, staleAfter.String(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1791,13 +1858,13 @@ func (r *campaignRepository) ListStaleParkedCampaigns(ctx context.Context, stale
 func (r *campaignRepository) CountActiveForOrganization(ctx context.Context, orgID uuid.UUID) (int, error) {
 	query := `SELECT COUNT(*) FROM campaigns WHERE organization_id = $1 AND status = 'active'`
 	var count int
-	err := r.DB.QueryRow(ctx, query, orgID).Scan(&count)
+	err := resultDB(ctx, r.DB).QueryRow(ctx, query, orgID).Scan(&count)
 	return count, err
 }
 
 // ListIDsByStatus lists the org's campaigns parked at one status.
 func (r *campaignRepository) ListIDsByStatus(ctx context.Context, orgID uuid.UUID, status string) ([]uuid.UUID, error) {
-	rows, err := r.DB.Query(ctx, `SELECT id FROM campaigns WHERE organization_id = $1 AND status = $2`, orgID, status)
+	rows, err := resultDB(ctx, r.DB).Query(ctx, `SELECT id FROM campaigns WHERE organization_id = $1 AND status = $2`, orgID, status)
 	if err != nil {
 		return nil, err
 	}
@@ -1856,7 +1923,7 @@ func (r *campaignRepository) AccountHasActiveCampaign(ctx context.Context, accou
 		)
 	`
 	var exists bool
-	err := r.DB.QueryRow(ctx, query, accountID).Scan(&exists)
+	err := resultDB(ctx, r.DB).QueryRow(ctx, query, accountID).Scan(&exists)
 	return exists, err
 }
 
@@ -1894,8 +1961,63 @@ func (r *campaignRepository) CountActiveCampaignsForAccount(ctx context.Context,
 			  AND NOT EXISTS (SELECT 1 FROM campaign_senders cs2 WHERE cs2.campaign_id = c.id AND cs2.enabled)
 		) AS active_campaigns`
 	var count int
-	err := r.DB.QueryRow(ctx, query, accountID).Scan(&count)
+	err := resultDB(ctx, r.DB).QueryRow(ctx, query, accountID).Scan(&count)
 	return count, err
+}
+
+// CountActiveCampaignsForAccounts counts, for each mailbox in the set, the
+// distinct active campaigns it backs. Same scope rule as the single-account
+// form: tag-resolved, explicit enabled sender, or an "all" campaign (no tags,
+// no enabled senders) in the mailbox's tenant when the mailbox is active.
+func (r *campaignRepository) CountActiveCampaignsForAccounts(ctx context.Context, accountIDs []uuid.UUID) (map[uuid.UUID]int, error) {
+	out := make(map[uuid.UUID]int, len(accountIDs))
+	if len(accountIDs) == 0 {
+		return out, nil
+	}
+	for _, id := range accountIDs {
+		out[id] = 0
+	}
+
+	query := `
+		SELECT a.id, COUNT(DISTINCT c.id)
+		FROM unnest($1::uuid[]) AS a(id)
+		JOIN email_accounts ea ON ea.id = a.id
+		LEFT JOIN campaigns c
+		  ON c.status = 'active'
+		 AND c.organization_id = ea.organization_id
+		 AND (
+			EXISTS (
+				SELECT 1 FROM campaign_email_tags cet
+				JOIN email_tags et ON et.tag_id = cet.tag_id
+				WHERE cet.campaign_id = c.id AND et.email_id = a.id
+			)
+			OR EXISTS (
+				SELECT 1 FROM campaign_senders cs
+				WHERE cs.campaign_id = c.id AND cs.email_account_id = a.id AND cs.enabled
+			)
+			OR (
+				ea.status = 'active'
+				AND NOT EXISTS (SELECT 1 FROM campaign_email_tags cet2 WHERE cet2.campaign_id = c.id)
+				AND NOT EXISTS (SELECT 1 FROM campaign_senders cs2 WHERE cs2.campaign_id = c.id AND cs2.enabled)
+			)
+		 )
+		GROUP BY a.id`
+
+	rows, err := resultDB(ctx, r.DB).Query(ctx, query, accountIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id uuid.UUID
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			return nil, err
+		}
+		out[id] = count
+	}
+	return out, rows.Err()
 }
 
 // syncCampaignSendersTx replaces the explicit sender pool inside an existing tx.
@@ -2040,7 +2162,7 @@ func (r *campaignRepository) ReplaceCampaignSenders(ctx context.Context, campaig
 	// ownership against the org (the senders route is org-scoped).
 	var userID string
 	var orgID *uuid.UUID
-	if err := r.DB.QueryRow(ctx, `SELECT user_id, organization_id FROM campaigns WHERE id = $1`, campaignID).Scan(&userID, &orgID); err != nil {
+	if err := resultDB(ctx, r.DB).QueryRow(ctx, `SELECT user_id, organization_id FROM campaigns WHERE id = $1`, campaignID).Scan(&userID, &orgID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errx.ErrNotFound
 		}
@@ -2052,7 +2174,7 @@ func (r *campaignRepository) ReplaceCampaignSenders(ctx context.Context, campaig
 		orgStr = orgID.String()
 	}
 
-	tx, err := r.DB.Begin(ctx)
+	tx, err := beginResultTx(ctx, r.DB)
 	if err != nil {
 		db.CaptureError(err, "", nil, "begin")
 		return nil, errx.InternalError()
@@ -2069,6 +2191,12 @@ func (r *campaignRepository) ReplaceCampaignSenders(ctx context.Context, campaig
 		return nil, xerr
 	}
 
+	// The send-plan snapshot is keyed on updated_at, so a sender edit must move it.
+	if _, err := tx.Exec(ctx, `UPDATE campaigns SET updated_at = now() WHERE id = $1`, campaignID); err != nil {
+		db.CaptureError(err, "campaign updated_at", []any{campaignID}, "exec")
+		return nil, errx.InternalError()
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		db.CaptureError(err, "", nil, "commit")
 		return nil, errx.InternalError()
@@ -2081,7 +2209,7 @@ func (r *campaignRepository) ReplaceCampaignSenders(ctx context.Context, campaig
 // a single atomic UPDATE (no read-modify-write), keeping cursors coherent when
 // multiple campaign tasks for the same campaign run concurrently.
 func (r *campaignRepository) AdvanceCampaignSender(ctx context.Context, campaignID, accountID uuid.UUID) error {
-	_, err := r.DB.Exec(ctx, `
+	_, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaign_senders
 		SET rotation_position = rotation_position + 1, last_sent_at = NOW()
 		WHERE campaign_id = $1 AND email_account_id = $2
@@ -2093,7 +2221,7 @@ func (r *campaignRepository) AdvanceCampaignSender(ctx context.Context, campaign
 // no-op when ramp is off or already advanced today. Applied via min() in the
 // scheduler so it can only LOWER the effective per-mailbox cap.
 func (r *campaignRepository) AdvanceRampLevel(ctx context.Context, campaignID uuid.UUID) error {
-	_, err := r.DB.Exec(ctx, `
+	_, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaigns
 		SET ramp_level = LEAST(ramp_ceiling, GREATEST(ramp_level, ramp_start) + ramp_increment),
 		    ramp_level_date = CURRENT_DATE
@@ -2111,7 +2239,7 @@ func (r *campaignRepository) DecrementCampaignDailySend(ctx context.Context, cam
 	if newLead {
 		newLeadDec = 1
 	}
-	_, err := r.DB.Exec(ctx, `
+	_, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaign_daily_sends
 		SET emails_sent = GREATEST(emails_sent - 1, 0),
 		    new_leads_started = GREATEST(new_leads_started - $3, 0)
@@ -2124,7 +2252,7 @@ func (r *campaignRepository) DecrementCampaignDailySend(ctx context.Context, cam
 // completed state is touched: a paused campaign stays paused and picks the
 // retry up when it is resumed.
 func (r *campaignRepository) ReopenAfterSendFailure(ctx context.Context, campaignID uuid.UUID) (bool, error) {
-	tag, err := r.DB.Exec(ctx, `
+	tag, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaigns
 		SET status = 'active', last_status_change_at = NOW(), updated_at = NOW()
 		WHERE id = $1 AND status = 'completed'
@@ -2139,7 +2267,7 @@ func (r *campaignRepository) ReopenAfterSendFailure(ctx context.Context, campaig
 // waiting for more. Returns true only on the transition, so the caller logs
 // and broadcasts it once rather than on every pass that finds nothing.
 func (r *campaignRepository) MarkIdle(ctx context.Context, campaignID uuid.UUID) (bool, error) {
-	tag, err := r.DB.Exec(ctx, `
+	tag, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaigns
 		SET idle_since = NOW(), updated_at = NOW()
 		WHERE id = $1 AND status = 'active' AND continuous AND idle_since IS NULL
@@ -2154,7 +2282,7 @@ func (r *campaignRepository) MarkIdle(ctx context.Context, campaignID uuid.UUID)
 // to the organization so a foreign campaign id cannot be reached.
 func (r *campaignRepository) KeepRunning(ctx context.Context, orgID, campaignID uuid.UUID) (bool, error) {
 	var continuous bool
-	err := r.DB.QueryRow(ctx, `
+	err := resultDB(ctx, r.DB).QueryRow(ctx, `
 		SELECT continuous FROM campaigns WHERE id = $1 AND organization_id = $2
 	`, campaignID, orgID).Scan(&continuous)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -2166,7 +2294,7 @@ func (r *campaignRepository) KeepRunning(ctx context.Context, orgID, campaignID 
 	if continuous {
 		return false, nil
 	}
-	tag, err := r.DB.Exec(ctx, `
+	tag, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaigns SET continuous = true, updated_at = NOW()
 		WHERE id = $1 AND organization_id = $2 AND NOT continuous
 	`, campaignID, orgID)
@@ -2178,7 +2306,7 @@ func (r *campaignRepository) KeepRunning(ctx context.Context, orgID, campaignID 
 
 // ClearIdle ends the wait once the campaign has something to send again.
 func (r *campaignRepository) ClearIdle(ctx context.Context, campaignID uuid.UUID) error {
-	_, err := r.DB.Exec(ctx, `
+	_, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaigns SET idle_since = NULL, updated_at = NOW()
 		WHERE id = $1 AND idle_since IS NOT NULL
 	`, campaignID)
@@ -2188,7 +2316,7 @@ func (r *campaignRepository) ClearIdle(ctx context.Context, campaignID uuid.UUID
 // CountNewLeadsStartedToday returns new_leads_started for the current UTC day.
 func (r *campaignRepository) CountNewLeadsStartedToday(ctx context.Context, campaignID uuid.UUID) (int, error) {
 	var n int
-	err := r.DB.QueryRow(ctx, `
+	err := resultDB(ctx, r.DB).QueryRow(ctx, `
 		SELECT COALESCE(new_leads_started, 0)
 		FROM campaign_daily_sends
 		WHERE campaign_id = $1 AND send_date = CURRENT_DATE
@@ -2202,18 +2330,21 @@ func (r *campaignRepository) CountNewLeadsStartedToday(ctx context.Context, camp
 // SetCampaignTrackingDomainVerified flips the verified flag/timestamp on the
 // campaign-scoped tracking-domain override.
 func (r *campaignRepository) SetCampaignTrackingDomainVerified(ctx context.Context, campaignID uuid.UUID, verified bool, at *time.Time) error {
-	_, err := r.DB.Exec(ctx, `
+	_, err := resultDB(ctx, r.DB).Exec(ctx, `
 		UPDATE campaigns
 		SET tracking_domain_verified = $2, tracking_domain_verified_at = $3, updated_at = NOW()
 		WHERE id = $1
 	`, campaignID, verified, at)
+	if isTrackingDomainTaken(err) {
+		return ErrTrackingDomainTaken
+	}
 	return err
 }
 
 // UpdateStatusWithLock updates campaign status using a PostgreSQL advisory lock to prevent concurrent updates.
 // The WHERE clause guards against races: only updates if the campaign is currently 'active'.
 func (r *campaignRepository) UpdateStatusWithLock(ctx context.Context, campaignID uuid.UUID, status string) error {
-	tx, err := r.DB.Begin(ctx)
+	tx, err := beginResultTx(ctx, r.DB)
 	if err != nil {
 		db.CaptureError(err, "", nil, "begin")
 		return err

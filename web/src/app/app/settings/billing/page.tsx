@@ -9,6 +9,8 @@
 // from the marketing site's pricing.astro.
 
 import React from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { billingIntervalSchema } from "@/lib/browse-other-lists";
 import {
     ArrowUpRightIcon,
     CheckIcon,
@@ -23,10 +25,11 @@ import {
     TicketIcon,
     XIcon,
 } from "lucide-react";
-import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useParams } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { TopbarAction } from "@/components/layout/Page";
+import { useSearchParams } from "@/hooks/useSearchParams";
 import useFeatureAccess from "@/hooks/useFeatureAccess";
 import useUpgradeFlow from "@/hooks/useUpgradeFlow";
 import { useUpgradeDialog } from "@/hooks/context/upgrade";
@@ -42,7 +45,7 @@ import { TextInput } from "@/components/ui/field";
 import BillingIntervalToggle from "@/components/app/billing/BillingIntervalToggle";
 import PlanCard from "@/components/app/billing/PlanCard";
 import EnterpriseInquiryDialog from "@/components/app/billing/EnterpriseInquiryDialog";
-import PoolUpgradeDialog from "@/components/app/billing/PoolUpgradeDialog";
+import WarmupPlanDialog from "@/components/app/billing/WarmupPlanDialog";
 import { Row, Section, SectionShell, TableSurface } from "../_components/SectionShell";
 import { PAID_PLANS, getPlan, planOrder, type PlanID } from "@/lib/plans";
 import { describeDiscount, fmtMoney, fromMinorUnits, type BillingInterval } from "@/lib/pricing";
@@ -82,17 +85,18 @@ export default function BillingSettingsPage() {
     const upgradeDialog = useUpgradeDialog();
     const openPortal = flow.openPortal;
     const redemptions = useAppliedDiscounts();
-    const { tab: tabSlug } = useParams();
+    const { tab: tabSlug } = useParams({ from: "/app/settings/billing/{-$tab}" });
     const navigate = useNavigate();
     const [codeInput, setCodeInput] = React.useState("");
     const [applied, setApplied] = React.useState<DiscountPreview | null>(null);
     const [billingInterval, setBillingInterval] =
-        React.useState<BillingInterval>("annual");
+        useBrowseState<BillingInterval>("settings.billing.interval", "annual", billingIntervalSchema);
     const [salesOpen, setSalesOpen] = React.useState(false);
 
-    // ?pool=1 is where a self-hosted instance's "Unlimited" button lands, and
-    // ?pool=done is where Stripe returns. Both are consumed once and stripped,
-    // so a refresh or a back navigation does not replay them.
+    // ?pool=1 is where a linked instance's "Premium" button lands (and what
+    // the overview's warmup-only row opens), and ?pool=done is where Stripe
+    // returns. Both are consumed once and stripped, so a refresh or a back
+    // navigation does not replay them.
     const [searchParams, setSearchParams] = useSearchParams();
     const poolParam = searchParams.get("pool");
     const [poolOpen, setPoolOpen] = React.useState(false);
@@ -100,7 +104,7 @@ export default function BillingSettingsPage() {
         if (!poolParam) return;
         if (poolParam === "1") setPoolOpen(true);
         if (poolParam === "done") {
-            toast.success("Payment received. Unlimited pool mailboxes apply as soon as Stripe confirms.");
+            toast.success("Payment received. The Warmup plan applies as soon as Stripe confirms.");
         }
         const next = new URLSearchParams(searchParams);
         next.delete("pool");
@@ -109,11 +113,11 @@ export default function BillingSettingsPage() {
 
     const resolvedTab = tabForSlug(tabSlug);
     const tab: BillingTab = resolvedTab ?? "overview";
-    const setTab = (t: BillingTab) => navigate(pathForTab(t));
+    const setTab = (t: BillingTab) => navigate({ to: pathForTab(t) });
 
     // Unknown slug (stale link, typo) — normalize the URL to the overview.
     if (resolvedTab === null) {
-        return <Navigate to="/app/settings/billing" replace />;
+        return <Navigate to="/app/settings/billing/{-$tab}" params={{ tab: undefined }} replace />;
     }
 
     // No billing provider on this deployment: there is nothing to manage here.
@@ -205,14 +209,14 @@ export default function BillingSettingsPage() {
         <SectionShell
             title="Billing"
             description={`Plan, payment and invoices for ${currentOrg?.name ?? "this workspace"}.`}
-            actions={
+            actions={flow.hasBillingCustomer ? (
                 <TopbarAction
                     icon={<ExternalLinkIcon className="w-3 h-3" />}
                     onClick={openPortal}
                 >
                     {flow.portalPending ? "Opening…" : "Manage billing"}
                 </TopbarAction>
-            }
+            ) : undefined}
         >
             <div>
                 <div className="sticky top-0 z-20 bg-white/95 backdrop-blur px-2 md:px-6 flex items-center gap-1 border-b border-slate-200/70 overflow-x-auto">
@@ -251,7 +255,7 @@ export default function BillingSettingsPage() {
                         className="divide-y divide-slate-200/70"
                     >
                         {tab === "overview" && (
-                            <OverviewTab onChangePlan={openPlanChooser} />
+                            <OverviewTab onChangePlan={openPlanChooser} onWarmupPlan={() => setPoolOpen(true)} />
                         )}
 
                         {tab === "plans" && (
@@ -281,8 +285,9 @@ export default function BillingSettingsPage() {
                                                 ctaVerb={currentPlan.id === "free" ? "Get" : "Switch to"}
                                                 footer={
                                                     <ProrationNote
+                                                        interval={billingInterval}
                                                         planId={flow.resolveServerPlan(id)?.id}
-                                                        enabled={currentPlan.id !== "free" && currentPlan.id !== id}
+                                                        enabled={flow.hasStripeSubscription && currentPlan.id !== id}
                                                     />
                                                 }
                                                 onChoose={() => upgrade(id)}
@@ -290,7 +295,8 @@ export default function BillingSettingsPage() {
                                         ))}
                                     </div>
                                     <Link
-                                        to="/#pricing"
+                                        to="/"
+                                        hash="pricing"
                                         className="inline-flex items-center gap-1 text-[11.5px] text-slate-500 hover:text-slate-900 transition-colors"
                                     >
                                         <ArrowUpRightIcon className="w-3 h-3" />
@@ -361,7 +367,7 @@ export default function BillingSettingsPage() {
                                 >
                                     {redemptions.isPending ? (
                                         <div className="h-16 rounded bg-slate-100 animate-pulse" />
-                                    ) : (redemptions.data?.data.length ?? 0) === 0 ? (
+                                    ) : (redemptions.data?.data?.length ?? 0) === 0 ? (
                                         <p className="text-[12px] text-slate-500 leading-relaxed">
                                             No codes redeemed yet. Apply a code above to see it here.
                                         </p>
@@ -395,7 +401,13 @@ export default function BillingSettingsPage() {
                             </>
                         )}
 
-                        {tab === "payment" && (
+                        {tab === "payment" && !flow.hasBillingCustomer && (
+                            <Section eyebrow="Payment" description="Complete checkout to set up billing. Operator-granted plans do not create a Stripe billing account.">
+                                <button type="button" onClick={() => navigate({ to: pathForTab("plans") })} className="h-7 px-3 rounded-md bg-slate-900 text-white text-[12px]">Choose a plan</button>
+                            </Section>
+                        )}
+
+                        {tab === "payment" && flow.hasBillingCustomer && (
                             <>
                                 <Section
                                     eyebrow="Payment"
@@ -458,7 +470,7 @@ export default function BillingSettingsPage() {
                 </AnimatePresence>
             </div>
             <EnterpriseInquiryDialog open={salesOpen} onClose={() => setSalesOpen(false)} />
-            <PoolUpgradeDialog open={poolOpen} onClose={() => setPoolOpen(false)} />
+            <WarmupPlanDialog open={poolOpen} onClose={() => setPoolOpen(false)} />
         </SectionShell>
     );
 }
@@ -509,7 +521,7 @@ function describeRedemption(d: DiscountRedemption): string {
     return d.type || "Discount";
 }
 
-function fmtDate(value?: string | null): string {
+function fmtDate(value?: string | Date | null): string {
     if (!value) return "—";
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return "—";
@@ -523,12 +535,14 @@ function fmtDate(value?: string | null): string {
 // What a switch costs today, shown on each plan card for a paying workspace.
 // An empty id disables the query, so free workspaces and the current plan never
 // hit /subscription/preview-change.
-function ProrationNote({ planId, enabled }: { planId?: string; enabled: boolean }) {
-    const preview = usePreviewPlanChange(enabled && planId ? planId : "");
+function ProrationNote({ planId, enabled, interval }: { planId?: string; enabled: boolean; interval: BillingInterval }) {
+    const preview = usePreviewPlanChange(enabled && interval === "monthly" && planId ? planId : "");
     if (!enabled) return null;
     return (
         <div className="rounded-md border border-slate-200/80 bg-slate-50 px-2.5 py-1.5 text-[11px] leading-snug">
-            {preview.isPending ? (
+            {interval === "annual" ? (
+                <span className="text-slate-500">Stripe calculates annual proration when you switch.</span>
+            ) : preview.isPending ? (
                 <span className="text-slate-400">Pricing this switch…</span>
             ) : preview.data ? (
                 <>
@@ -539,9 +553,9 @@ function ProrationNote({ planId, enabled }: { planId?: string; enabled: boolean 
                                 preview.data.proration_amount,
                                 preview.data.currency,
                             );
-                            if (due > 0) return `Due today $${fmtMoney(due)}`;
-                            if (due < 0) return `Credit $${fmtMoney(Math.abs(due))}`;
-                            return "No charge today";
+                            if (due > 0) return `Estimated proration $${fmtMoney(due)}`;
+                            if (due < 0) return `Estimated credit $${fmtMoney(Math.abs(due))}`;
+                            return "No estimated proration";
                         })()}
                     </div>
                     <div className="text-slate-400">

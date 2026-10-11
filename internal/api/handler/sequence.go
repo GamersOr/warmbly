@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,14 +13,35 @@ import (
 )
 
 func (h *Handler) CreateSequence(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	id := c.Param("id")
 
-	resp, err := h.SequenceService.Create(c.Request.Context(), userID, id)
+	// The body is optional: the same fields as PATCH, applied to the new step.
+	var data models.UpdateSequence
+	if err := c.ShouldBindJSON(&data); err != nil && !errors.Is(err, io.EOF) {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	resp, err := h.SequenceService.Create(c.Request.Context(), orgID.String(), id)
 	if err != nil {
 		errx.Handle(c, err)
 		return
+	}
+	if data != (models.UpdateSequence{}) {
+		updated, uerr := h.SequenceService.Update(c.Request.Context(), orgID.String(), id, resp.ID.String(), &data)
+		if uerr != nil {
+			// A refused body leaves no blank step behind.
+			_ = h.SequenceService.Delete(c.Request.Context(), orgID.String(), id, resp.ID.String())
+			errx.Handle(c, uerr)
+			return
+		}
+		resp = updated
 	}
 
 	h.auditOrg(c, models.AuditActionCreate, models.AuditEntitySequence, &resp.ID, nil, map[string]string{"campaign_id": id})
@@ -27,11 +50,15 @@ func (h *Handler) CreateSequence(c *gin.Context) {
 }
 
 func (h *Handler) GetSequences(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	id := c.Param("id")
 
-	resp, err := h.SequenceService.Get(c.Request.Context(), userID, id)
+	resp, err := h.SequenceService.Get(c.Request.Context(), orgID.String(), id)
 	if err != nil {
 		errx.Handle(c, err)
 		return
@@ -41,7 +68,11 @@ func (h *Handler) GetSequences(c *gin.Context) {
 }
 
 func (h *Handler) UpdateSequence(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	id := c.Param("id")
 	sequenceID := c.Param("sid")
@@ -49,11 +80,11 @@ func (h *Handler) UpdateSequence(c *gin.Context) {
 	var data models.UpdateSequence
 
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, err)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 
-	resp, err := h.SequenceService.Update(c.Request.Context(), userID, id, sequenceID, &data)
+	resp, err := h.SequenceService.Update(c.Request.Context(), orgID.String(), id, sequenceID, &data)
 	if err != nil {
 		errx.Handle(c, err)
 		return
@@ -72,19 +103,23 @@ func (h *Handler) UpdateSequence(c *gin.Context) {
 // audit log or read as a content change. Retries are naturally safe (positions
 // are last-write-wins), so no Idempotency-Key is required.
 func (h *Handler) PatchSequenceLayout(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 	id := c.Param("id")
 
 	var data models.SequenceLayout
 	if err := c.ShouldBindJSON(&data); err != nil {
-		errx.Handle(c, err)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	if len(data.Positions) > 1000 {
 		errx.JSON(c, errx.New(errx.BadRequest, "too many positions"))
 		return
 	}
-	if err := h.SequenceService.UpdateLayout(c.Request.Context(), userID, id, data.Positions); err != nil {
+	if err := h.SequenceService.UpdateLayout(c.Request.Context(), orgID.String(), id, data.Positions); err != nil {
 		errx.Handle(c, err)
 		return
 	}
@@ -92,12 +127,16 @@ func (h *Handler) PatchSequenceLayout(c *gin.Context) {
 }
 
 func (h *Handler) DeleteSequence(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
 
 	id := c.Param("id")
 	sequenceID := c.Param("sid")
 
-	if err := h.SequenceService.Delete(c.Request.Context(), userID, id, sequenceID); err != nil {
+	if err := h.SequenceService.Delete(c.Request.Context(), orgID.String(), id, sequenceID); err != nil {
 		errx.Handle(c, err)
 		return
 	}

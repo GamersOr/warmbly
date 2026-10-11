@@ -40,7 +40,7 @@ func newLedgerFixture(t *testing.T) *ledgerFixture {
 	f.address = "Ledger-" + f.org.String()[:8] + "@Test.Local"
 	f.exec(t, `INSERT INTO users (id, email, first_name, last_name) VALUES ($1, $2, 'Ledger', 'Test')`,
 		f.user, "ledger-"+f.user.String()[:8]+"@test.local")
-	f.exec(t, `INSERT INTO organizations (id, name, slug, owner_user_id) VALUES ($1, 'Ledger Test', $2, $3)`,
+	f.exec(t, `INSERT INTO organizations (id, name, slug, owner_user_id,risk_state) VALUES ($1, 'Ledger Test', $2, $3,'trusted')`,
 		f.org, "ledger-"+f.org.String()[:8], f.user)
 
 	t.Cleanup(func() {
@@ -74,8 +74,8 @@ func (f *ledgerFixture) addMailbox(t *testing.T, user uuid.UUID) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	f.exec(t, `INSERT INTO email_accounts (id, user_id, organization_id, email, name, signature_plain,
-	              signature_html, provider, status, campaign_limit, min_wait_time, timezone)
-	          VALUES ($1, $2, $3, $4, 'Ledger', '', '', 'smtp_imap', 'active', 50, 600, 'UTC')`,
+	              signature_html, provider, status, campaign_limit, min_wait_time, timezone,test_mode)
+	          VALUES ($1, $2, $3, $4, 'Ledger', '', '', 'smtp_imap', 'active', 50, 600, 'UTC',NULL)`,
 		id, user, f.org, f.address)
 	return id
 }
@@ -98,7 +98,7 @@ func (f *ledgerFixture) penalise(t *testing.T, id uuid.UUID, score float64, stat
 
 func (f *ledgerFixture) remove(t *testing.T, user, id uuid.UUID) {
 	t.Helper()
-	if xerr := f.emails.Delete(context.Background(), user.String(), id.String(), 0); xerr != nil {
+	if xerr := f.emails.Delete(context.Background(), f.org.String(), id.String(), 0); xerr != nil {
 		t.Fatalf("Delete: %v", xerr)
 	}
 }
@@ -525,5 +525,62 @@ func TestLiveHealthFloorKeepsTheReadingThatProducedTheSentence(t *testing.T) {
 	}
 	if got := f.standing(t, id); got.score != 88 || got.reason != worse {
 		t.Fatalf("a reading that applied did not replace the explanation: %+v", got)
+	}
+}
+
+// A throttle slows a mailbox down and keeps it in the pool; only a quarantine
+// or block stamps blocked_at, which every partner query reads as "out".
+func TestLiveHealthThrottleStaysInThePool(t *testing.T) {
+	f := newLedgerFixture(t)
+	ctx := context.Background()
+	id := f.addMailbox(t, f.user)
+	f.join(t, id)
+
+	eligible := func() bool {
+		t.Helper()
+		ids, err := f.warmups.GetPoolParticipants(ctx, "premium", true)
+		if err != nil {
+			t.Fatalf("GetPoolParticipants: %v", err)
+		}
+		for _, got := range ids {
+			if got == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	throttleEnd := time.Now().Add(3 * 24 * time.Hour)
+	if _, err := f.warmups.UpdateParticipantHealth(ctx, id, models.WarmupHealthThrottled, &throttleEnd, "placement throttle", 20); err != nil {
+		t.Fatalf("UpdateParticipantHealth: %v", err)
+	}
+	if got := f.standing(t, id); got.state != "throttled" || got.blockedAt != nil {
+		t.Fatalf("a throttle was recorded as a block: %+v", got)
+	}
+	if !eligible() {
+		t.Fatal("a throttled mailbox was taken out of the pool; it should run at reduced volume")
+	}
+
+	quarantineEnd := time.Now().Add(7 * 24 * time.Hour)
+	if _, err := f.warmups.UpdateParticipantHealth(ctx, id, models.WarmupHealthQuarantined, &quarantineEnd, "complaints", 50); err != nil {
+		t.Fatalf("UpdateParticipantHealth: %v", err)
+	}
+	if got := f.standing(t, id); got.blockedAt == nil {
+		t.Fatalf("a quarantine did not stamp blocked_at: %+v", got)
+	}
+	if eligible() {
+		t.Fatal("a quarantined mailbox stayed in the pool")
+	}
+
+	// A served quarantine re-judged as a throttle comes back into the pool.
+	f.exec(t, `UPDATE warmup_pool_participants SET blocked_until = now() - interval '1 hour' WHERE email_account_id = $1`, id)
+	if _, err := f.warmups.UpdateParticipantHealth(ctx, id, models.WarmupHealthThrottled, &throttleEnd, "placement throttle", 20); err != nil {
+		t.Fatalf("UpdateParticipantHealth: %v", err)
+	}
+	if got := f.standing(t, id); got.state != "throttled" || got.blockedAt != nil {
+		t.Fatalf("a quarantine that ended in a throttle kept blocked_at: %+v", got)
+	}
+	if !eligible() {
+		t.Fatal("a mailbox released from quarantine into a throttle stayed out of the pool")
 	}
 }

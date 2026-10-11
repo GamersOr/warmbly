@@ -9,8 +9,9 @@
  *   web-app-manifest-192x192.png
  *   web-app-manifest-512x512.png
  *
- * The 1200x600 OG / Twitter card (public/og-image.jpg) is exported from the
- * Figma Branding file (the "Social" frame), not generated here.
+ * The 1920x1008 OG / Twitter card (public/og-image.jpg) is not generated here:
+ * it is the Figma "Social" frame's sky with the home page hero screen
+ * (DashboardMock) rendered over it at 1200x630 x1.6.
  *
  * Run with: node scripts/gen-icons.mjs
  */

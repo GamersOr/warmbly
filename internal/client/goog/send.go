@@ -27,7 +27,7 @@ type Attachment struct {
 
 func (c *Client) SendMessage(
 	ctx context.Context,
-	fromName string,
+	fromName, fromEmail string,
 	to, cc, bcc []string,
 	messageID,
 	subject, bodyPlain, bodyHTML string,
@@ -40,13 +40,13 @@ func (c *Client) SendMessage(
 	// returns when you READ a parsed message; submitting one to Send is
 	// rejected outright with "'raw' RFC822 payload message string or uploading
 	// message via /upload/* URL required". Every send goes through raw.
-	return c.sendRaw(fromName, to, cc, bcc, messageID, subject, bodyPlain, bodyHTML, parent, attachments, customHeaders...)
+	return c.sendRaw(fromName, fromEmail, to, cc, bcc, messageID, subject, bodyPlain, bodyHTML, parent, attachments, customHeaders...)
 }
 
 // sendRaw builds an RFC 5322 message and submits it as base64url-encoded Raw,
 // which is the only body Gmail's Send endpoint accepts.
 func (c *Client) sendRaw(
-	fromName string,
+	fromName, fromEmail string,
 	to, cc, bcc []string,
 	messageID,
 	subject, bodyPlain, bodyHTML string,
@@ -56,7 +56,7 @@ func (c *Client) sendRaw(
 ) (*gmail.Message, error) {
 	var hdrs []header
 	hdrs = append(hdrs,
-		header{"From", c.FromAddress(fromName)},
+		header{"From", c.FromIdentity(fromName, fromEmail)},
 		header{"To", mailhdr.AddressList(to)},
 		// We now own header encoding, so a non-ASCII subject (or recipient
 		// display name) has to be RFC 2047-encoded here. Encoding is a no-op
@@ -77,6 +77,14 @@ func (c *Client) sendRaw(
 	}
 	if len(customHeaders) > 0 {
 		for k, v := range customHeaders[0] {
+			if strings.EqualFold(k, "References") {
+				for i := range hdrs {
+					if strings.EqualFold(hdrs[i].name, "References") {
+						hdrs = append(hdrs[:i], hdrs[i+1:]...)
+						break
+					}
+				}
+			}
 			hdrs = append(hdrs, header{k, v})
 		}
 	}
@@ -100,6 +108,29 @@ func (c *Client) sendRaw(
 	return sent, nil
 }
 
+// SentMessageID reads the Message-ID a sent message carries. Gmail may replace
+// the one we minted with its own, and only the stamped value matches what the
+// recipient received and what the sent copy syncs back with.
+func (c *Client) SentMessageID(ctx context.Context, id string) (string, error) {
+	if id == "" || c.srv == nil {
+		return "", nil
+	}
+	msg, err := c.srv.Users.Messages.Get("me", id).
+		Format("metadata").MetadataHeaders("Message-ID").
+		Context(ctx).Do()
+	if err != nil {
+		return "", HandleError(err)
+	}
+	return stampedMessageID(msg), nil
+}
+
+func stampedMessageID(msg *gmail.Message) string {
+	if msg == nil || msg.Payload == nil {
+		return ""
+	}
+	return strings.TrimSpace(getSingleHeader(msg.Payload.Headers, "Message-ID"))
+}
+
 type header struct{ name, value string }
 
 // buildMIME assembles the message body using the narrowest structure the
@@ -109,6 +140,11 @@ type header struct{ name, value string }
 // multipart/mixed would be valid but is not what a mail client produces, and
 // cold outreach has no room for gratuitous structural differences.
 func buildMIME(hdrs []header, bodyPlain, bodyHTML string, attachments []Attachment) ([]byte, error) {
+	for _, h := range hdrs {
+		if err := mailhdr.CheckHeader(h.name, h.value); err != nil {
+			return nil, fmt.Errorf("%s: %w", h.name, err)
+		}
+	}
 	switch {
 	case len(attachments) > 0:
 		return buildMixedMIME(hdrs, bodyPlain, bodyHTML, attachments)

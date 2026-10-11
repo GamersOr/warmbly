@@ -1,12 +1,15 @@
+import { DashboardImage } from "@/components/ui/dashboard-image";
+
 // app.warmbly.com/connect?code=XXXX-XXXX — a signed-in member approves a
 // self-hosted instance's request to warm its mailboxes in this workspace.
 // Standalone on the auth screen's sky: enter code, review, done.
 
 import React from "react";
-import { Link, Navigate, useSearchParams } from "react-router-dom";
+import { Link, Navigate } from "@tanstack/react-router";
+import { useSearchParams } from "@/hooks/useSearchParams";
 import { AnimatePresence, motion } from "framer-motion";
 import { REGEXP_ONLY_DIGITS_AND_CHARS } from "input-otp";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import {
     ArrowLeftIcon,
     ArrowRightIcon,
@@ -22,6 +25,7 @@ import {
 } from "lucide-react";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import BrandMark from "@/components/shared/BrandMark";
+import ReauthModal from "@/components/app/modals/ReauthModal";
 import getToken from "@/lib/helper/getToken";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
@@ -48,10 +52,16 @@ const slideTransition = { duration: 0.28, ease: [0.16, 1, 0.3, 1] as const };
 
 export default function ConnectPage() {
     if (!getToken()) {
-        const next = encodeURIComponent(window.location.pathname + window.location.search);
-        return <Navigate to={`/auth/login?next=${next}`} replace />;
+        const next = window.location.pathname + window.location.search;
+        return <Navigate to="/auth/login" search={{ next }} replace />;
     }
-    return <ConnectInner />;
+    // Outside the /app layout, so approving (which needs a fresh confirmation) brings its own prompt.
+    return (
+        <>
+            <ConnectInner />
+            <ReauthModal />
+        </>
+    );
 }
 
 function ConnectInner() {
@@ -104,9 +114,9 @@ function ConnectInner() {
                 <div className="sky-base" />
                 <div className="sky-breathe" />
                 <div className="sun-glow" />
-                <img src="/backdrops/cloud-3.webp" alt="" decoding="async" className="cloud-drift cloud-1 absolute select-none" style={{ top: "6%", left: "-10%", width: 360, opacity: 0.55, height: "auto" }} />
-                <img src="/backdrops/cloud-4.webp" alt="" decoding="async" className="cloud-drift cloud-2 absolute select-none" style={{ bottom: "8%", right: "-8%", width: 320, opacity: 0.5, height: "auto" }} />
-                <img src="/backdrops/cloud-1.webp" alt="" decoding="async" className="cloud-drift cloud-1 absolute select-none" style={{ top: "44%", right: "14%", width: 220, opacity: 0.35, height: "auto" }} />
+                <DashboardImage src="/backdrops/cloud-3.webp" alt="" decoding="async" className="cloud-drift cloud-1 absolute select-none" style={{ top: "6%", left: "-10%", width: 360, opacity: 0.55, height: "auto" }} />
+                <DashboardImage src="/backdrops/cloud-4.webp" alt="" decoding="async" className="cloud-drift cloud-2 absolute select-none" style={{ bottom: "8%", right: "-8%", width: 320, opacity: 0.5, height: "auto" }} />
+                <DashboardImage src="/backdrops/cloud-1.webp" alt="" decoding="async" className="cloud-drift cloud-1 absolute select-none" style={{ top: "44%", right: "14%", width: 220, opacity: 0.35, height: "auto" }} />
             </div>
 
             <div className="relative z-10 w-full max-w-[560px]">
@@ -152,7 +162,7 @@ function ConnectInner() {
                     </div>
                 </motion.div>
 
-                <div className="mt-5 flex items-center justify-center gap-3 text-[12px] text-white/70">
+                <div className="theme-solid mt-5 flex items-center justify-center gap-3 text-[12px] text-white/70">
                     <Link to="/app/emails" className="hover:text-white transition-colors">Back to dashboard</Link>
                     <span className="text-white/40">·</span>
                     <a href="https://docs.warmbly.com/guides/warmbly-cloud/" target="_blank" rel="noreferrer" className="hover:text-white transition-colors">How linking works</a>
@@ -179,8 +189,8 @@ function Steps({ current }: { current: "code" | "review" | "done" }) {
                         <div className="flex items-center gap-2">
                             <motion.span
                                 animate={{
-                                    backgroundColor: state === "todo" ? "#f1f5f9" : "#0284c7",
-                                    color: state === "todo" ? "#94a3b8" : "#ffffff",
+                                    backgroundColor: state === "todo" ? "var(--color-slate-100)" : "#0284c7",
+                                    color: state === "todo" ? "var(--color-slate-400)" : "#ffffff",
                                 }}
                                 className="size-6 rounded-full inline-flex items-center justify-center text-[11px] font-semibold"
                             >
@@ -359,7 +369,7 @@ function ReviewStep({
                                         }`}
                                     >
                                         <span className={`size-8 rounded-md inline-flex items-center justify-center shrink-0 overflow-hidden ${on ? "bg-sky-600 text-white" : "bg-slate-100 text-slate-600"}`}>
-                                            {o.avatar ? <img src={o.avatar} alt="" className="size-full object-cover" /> : <BuildingIcon className="w-4 h-4" />}
+                                            {o.avatar ? <DashboardImage src={o.avatar} alt="" className="size-full object-cover" /> : <BuildingIcon className="w-4 h-4" />}
                                         </span>
                                         <span className="min-w-0 flex-1">
                                             <span className="block text-[13.5px] font-medium text-slate-900 truncate">{o.name}</span>

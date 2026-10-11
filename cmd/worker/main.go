@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"log"
+	"math"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/cipher"
 	"github.com/warmbly/warmbly/internal/app/worker"
+	wsmtp "github.com/warmbly/warmbly/internal/client/smtpimap/smtp"
 	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/infrastructure/cache"
 	"github.com/warmbly/warmbly/internal/infrastructure/codec"
@@ -97,7 +100,7 @@ func main() {
 	// backend API (same base URL + token as the DEK store) rather than touching
 	// Postgres directly, per the worker no-direct-SQL rule in CLAUDE.md.
 	internalBaseURL := strings.TrimRight(os.Getenv("ENCRYPTED_KEYS_BACKEND_URL"), "/")
-	internalToken := os.Getenv("ENCRYPTED_KEYS_WORKER_TOKEN")
+	internalToken := config.NodeAPIToken()
 	emailMessageMapRepo, err := repository.NewHTTPEmailMessageMapRepository(internalBaseURL, internalToken)
 	if err != nil {
 		log.Fatal(err)
@@ -109,14 +112,8 @@ func main() {
 		log.Fatal(err)
 	}
 	// Mailboxes managed by Warmbly Cloud send with access tokens the backend
-	// brokers; the refresh grant never reaches the worker. Minting one is a
-	// broker operation, so it carries NODE_BROKER_TOKEN where the instance
-	// issues a separate one and the shared internal token otherwise.
-	brokerToken := os.Getenv("NODE_BROKER_TOKEN")
-	if brokerToken == "" {
-		brokerToken = internalToken
-	}
-	tokenBroker, err := repository.NewHTTPBrokeredTokenClient(internalBaseURL, brokerToken)
+	// brokers; the refresh grant never reaches the worker.
+	tokenBroker, err := repository.NewHTTPBrokeredTokenClient(internalBaseURL, internalToken)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -172,8 +169,10 @@ func main() {
 		log.Println("WARNING: BOX_GOOGLE_CLIENT_ID/SECRET not set; Gmail mailbox token refresh will fail on expiry")
 	}
 
+	agent := newNodeAgent(workerID, bindIP)
 	// WorkerService
 	workerService := &worker.WorkerService{
+		OnMailboxMissing:          agent.RequestReload,
 		ID:                        workerID.String(),
 		CipherService:             cipherService,
 		Bus:                       bus,
@@ -196,6 +195,7 @@ func main() {
 	// the rolling 1m counters into a WorkerHealth event, publishes via the
 	// event bus so the consumer can write a row into worker_health_samples.
 	go workerService.Heartbeat(ctx)
+	go workerService.ListenValidations(ctx)
 	go workerService.RunHealth(ctx, 30*time.Second)
 
 	// heartbeatDone closes once the farewell beat has been sent. Main waits on
@@ -204,7 +204,7 @@ func main() {
 	heartbeatDone := make(chan struct{})
 	go func() {
 		defer close(heartbeatDone)
-		newNodeAgent(workerID, bindIP).Run(ctx)
+		agent.Run(ctx)
 	}()
 
 	// Graceful shutdown
@@ -218,7 +218,12 @@ func main() {
 	}()
 
 	log.Printf("Worker %s started, listening on topic %s", workerID, workerTopic)
-	if err := bus.Subscribe(ctx, []string{workerTopic}, "worker-"+workerID.String(), workerService.Receive); err != nil {
+	lanes := worker.CommandConcurrency()
+	if _, ok := bus.(eventbus.KeyedSubscriber); !ok {
+		lanes = 1
+	}
+	log.Printf("Worker command concurrency: %d ordered mailbox lanes", lanes)
+	if err := eventbus.SubscribeKeyed(ctx, bus, []string{workerTopic}, "worker-"+workerID.String(), lanes, workerService.ResolveCommandKey, workerService.Receive); err != nil {
 		log.Println("event bus subscribe ended:", err)
 	}
 
@@ -242,17 +247,35 @@ func newNodeAgent(workerID uuid.UUID, bindIP string) *nodeagent.Agent {
 		reportedIP = bindIP
 	}
 	return nodeagent.New(nodeagent.Config{
-		NodeID:  workerID,
-		Role:    models.NodeRoleWorker,
-		Name:    os.Getenv("WARMBLY_NODE_NAME"),
-		Region:  nodeRegion(),
-		Address: reportedIP,
-		Version: buildVersion(),
-		BaseURL: os.Getenv("ENCRYPTED_KEYS_BACKEND_URL"),
-		Token:   os.Getenv("ENCRYPTED_KEYS_WORKER_TOKEN"),
+		WarmupSendProtocol: 2,
+		NodeID:             workerID,
+		Role:               models.NodeRoleWorker,
+		Name:               os.Getenv("WARMBLY_NODE_NAME"),
+		Region:             nodeRegion(),
+		Address:            reportedIP,
+		CapacityTarget:     workerCapacityTarget(),
+		Version:            buildVersion(),
+		BaseURL:            os.Getenv("ENCRYPTED_KEYS_BACKEND_URL"),
+		Token:              config.NodeAPIToken(),
 		// Written for the host-side updater installed by `warmbly join`.
 		TargetVersionPath: os.Getenv("WARMBLY_TARGET_VERSION_PATH"),
+		Condition:         wsmtp.EgressCondition,
 	})
+}
+
+const defaultWorkerCapacityTarget = 100.0
+
+// workerCapacityTarget reads this machine's assigned-mailbox target.
+func workerCapacityTarget() float64 {
+	raw := strings.TrimSpace(os.Getenv("WARMBLY_WORKER_CAPACITY"))
+	if raw == "" {
+		return defaultWorkerCapacityTarget
+	}
+	n, err := strconv.ParseFloat(raw, 64)
+	if err != nil || n <= 0 || math.IsNaN(n) || math.IsInf(n, 0) || n > 99_999_999.99 {
+		return defaultWorkerCapacityTarget
+	}
+	return n
 }
 
 // nodeRegion reads the sign-in geography hint. WARMBLY_NODE_REGION is what the

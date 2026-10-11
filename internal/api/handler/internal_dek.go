@@ -9,12 +9,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/encryptedkeys"
 )
 
 // Internal endpoints used by workers to fetch/store encrypted DEKs without
-// connecting to Postgres directly. Auth via middleware.InternalAuthMiddleware
-// (static bearer token in INTERNAL_API_TOKEN env var, both sides).
+// connecting to Postgres directly. Auth via middleware.NodeBrokerAuthMiddleware
+// (NODE_BROKER_TOKEN, falling back to INTERNAL_API_TOKEN).
 //
 // Wire format mirrors what encryptedkeys.HTTPStore expects:
 //
@@ -49,7 +50,7 @@ func (h *Handler) InternalGetDEK(c *gin.Context) {
 	}
 	v, err := h.EncryptedKeys.Get(c.Request.Context(), id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 		return
 	}
 	if v == "" {
@@ -85,20 +86,8 @@ func (h *Handler) InternalPutDEK(c *gin.Context) {
 	case errors.Is(err, encryptedkeys.ErrAlreadyExists):
 		c.Status(http.StatusConflict)
 	default:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errx.JSON(c, errx.New(errx.Internal, err.Error()))
 	}
-}
-
-func (h *Handler) InternalDeleteDEK(c *gin.Context) {
-	id, ok := parseOrgID(c)
-	if !ok {
-		return
-	}
-	if err := h.EncryptedKeys.Delete(c.Request.Context(), id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.Status(http.StatusNoContent)
 }
 
 // InternalDecryptDEK opens a sealed data key for a node, so the node needs no
@@ -130,9 +119,13 @@ func (h *Handler) InternalDecryptDEK(c *gin.Context) {
 	if err != nil {
 		// The reason is not echoed: this answers an unauthenticated-by-org
 		// caller, and KMS errors distinguish "not a key of ours" from "malformed",
-		// which is exactly what a prober wants to learn.
+		// which is exactly what a prober wants to learn. It is recorded, though:
+		// a run of failures here is the signal that someone holding the token is
+		// trying keys.
+		logBrokerAccess(c, "dek.decrypt", "", false, "kms refused the ciphertext")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "could not decrypt data key"})
 		return
 	}
+	logBrokerAccess(c, "dek.decrypt", "", true, "")
 	c.JSON(http.StatusOK, dekDecryptResponse{DataKey: base64.StdEncoding.EncodeToString(key)})
 }

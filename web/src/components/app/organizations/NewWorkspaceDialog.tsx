@@ -8,13 +8,15 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { BriefcaseIcon, Loader2Icon, XIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import useCreateOrganization from "@/lib/api/hooks/app/organizations/useCreateOrganization";
 import useSwitchOrganization from "@/lib/api/hooks/app/organizations/useSwitchOrganization";
-import { Label, TextInput } from "@/components/ui/field";
+import { FieldError, Label, TextInput } from "@/components/ui/field";
+import { WORKSPACE_NAME_MAX, nameError, normalizeName } from "@/lib/displayName";
 import { useAppStore } from "@/stores";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
+import { browserTimezone } from "@/lib/timezone";
 
 interface Props {
     open: boolean;
@@ -31,14 +33,16 @@ export function NewWorkspaceDialog({ open, onClose }: Props) {
         if (!open) setName("");
     }, [open]);
 
+    const error = nameError("Workspace name", name, "workspace");
+
     async function submit() {
-        const t = name.trim();
-        if (t.length < 2) {
-            toast.error("Name is required");
+        const t = normalizeName(name);
+        if (error) {
+            toast.error(error);
             return;
         }
         try {
-            const org = await toast.promise(create.mutateAsync({ name: t }), {
+            const org = await toast.promise(create.mutateAsync({ name: t, timezone: browserTimezone() || undefined }), {
                 loading: "Creating workspace…",
                 success: "Workspace created",
                 error: (e: AppError) => buildError(e),
@@ -108,8 +112,11 @@ export function NewWorkspaceDialog({ open, onClose }: Props) {
                                     onChange={setName}
                                     placeholder="Acme outbound"
                                     autoFocus
+                                    invalid={!!name.trim() && !!error}
+                                    maxLength={WORKSPACE_NAME_MAX}
                                     className="w-full"
                                 />
+                                <FieldError message={name.trim() ? error : null} />
                             </div>
                             <p className="text-[11px] text-slate-400 leading-relaxed pt-1">
                                 You'll be the owner. Rename and invite teammates later.
@@ -127,7 +134,7 @@ export function NewWorkspaceDialog({ open, onClose }: Props) {
                             <button
                                 type="button"
                                 onClick={submit}
-                                disabled={create.isPending || name.trim().length < 2}
+                                disabled={create.isPending || !!error}
                                 className="h-7 px-2.5 rounded-md bg-slate-900 hover:bg-slate-800 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
                             >
                                 {create.isPending && <Loader2Icon className="w-3 h-3 animate-spin" />}

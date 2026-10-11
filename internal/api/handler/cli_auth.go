@@ -29,7 +29,7 @@ func (h *Handler) CLIAuthStart(c *gin.Context) {
 	}
 	var req models.CLIAuthStartRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 	res, xerr := h.CLIAuthService.StartCode(c.Request.Context(), req)
@@ -71,6 +71,21 @@ func (h *Handler) CLIAuthDescribeCode(c *gin.Context) {
 		errx.JSON(c, xerr)
 		return
 	}
+	// With a workspace picked, show exactly what approving there would grant.
+	if raw := c.Query("organization_id"); raw != "" {
+		orgID, perr := uuid.Parse(raw)
+		userID, uerr := middleware.GetUserUUID(c)
+		if perr != nil || uerr != nil {
+			errx.JSON(c, errx.New(errx.BadRequest, "organization_id must be a workspace id"))
+			return
+		}
+		granted, xerr := h.CLIAuthService.GrantableScopes(c.Request.Context(), orgID, userID, code.Scopes)
+		if xerr != nil {
+			errx.JSON(c, xerr)
+			return
+		}
+		code.GrantedScopes, code.GrantedScopeNames = &granted, models.APIScopeNames(granted)
+	}
 	c.JSON(http.StatusOK, code)
 }
 
@@ -87,7 +102,7 @@ func (h *Handler) CLIAuthApproveCode(c *gin.Context) {
 	}
 	var req models.CLIAuthApproveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errx.JSON(c, errx.New(errx.BadRequest, "invalid request body"))
+		errx.JSON(c, errx.InvalidBody(err))
 		return
 	}
 	orgID, perr := uuid.Parse(req.OrganizationID)

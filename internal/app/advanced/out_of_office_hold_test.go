@@ -2,10 +2,12 @@ package advanced
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/app/inboxtag"
 	"github.com/warmbly/warmbly/internal/app/replyclassify"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -14,6 +16,10 @@ import (
 // holdRecorder captures the one call holdForOutOfOffice makes. Embedding the
 // interface beats stubbing forty methods; anything else the code reached for
 // would panic rather than pass quietly.
+//
+// It records HoldLeadEverywhere, not HoldLead: an away message holds the
+// person across every campaign they are a lead of, so reaching for the
+// single-campaign write here would be the bug back (issue #518).
 type holdRecorder struct {
 	repository.CampaignProgressRepository
 	until  *time.Time
@@ -23,13 +29,13 @@ type holdRecorder struct {
 	refuse bool
 }
 
-func (h *holdRecorder) HoldLead(_ context.Context, _, _ uuid.UUID, until *time.Time, reason, source string) (*models.LeadHold, error) {
+func (h *holdRecorder) HoldLeadEverywhere(_ context.Context, _ uuid.UUID, until *time.Time, reason, source string) ([]uuid.UUID, error) {
 	h.calls++
 	h.until, h.reason, h.source = until, reason, source
 	if h.refuse {
 		return nil, nil
 	}
-	return &models.LeadHold{Since: time.Now(), Until: until, Reason: reason, Source: source}, nil
+	return []uuid.UUID{uuid.New()}, nil
 }
 
 // An out-of-office reply parks the contact until they are back: the date the
@@ -78,7 +84,7 @@ func TestHoldForOutOfOffice(t *testing.T) {
 				cfg, &models.EmailMessageStoreData{Subject: tc.subject, BodyText: tc.body})
 
 			if rec.calls != 1 {
-				t.Fatalf("HoldLead called %d times, want once", rec.calls)
+				t.Fatalf("HoldLeadEverywhere called %d times, want once", rec.calls)
 			}
 			if rec.source != models.LeadHoldSourceOutOfOffice {
 				t.Fatalf("hold source = %q, want %q", rec.source, models.LeadHoldSourceOutOfOffice)
@@ -126,5 +132,60 @@ func TestHoldForOutOfOfficeFloorsAZeroFallback(t *testing.T) {
 		&models.EmailMessageStoreData{Subject: "Out of office", BodyText: "away"})
 	if rec.until == nil || !rec.until.After(time.Now().Add(23*time.Hour)) {
 		t.Fatalf("hold lifts at %v, want at least a day out", rec.until)
+	}
+}
+
+// verdictStore answers the one lookup the hold makes, with a stored verdict.
+type verdictStore struct {
+	repository.InboxTagRepository
+	res *repository.InboxTagResult
+}
+
+func (v verdictStore) GetByMessageID(context.Context, uuid.UUID, string) (*repository.InboxTagResult, error) {
+	return v.res, nil
+}
+
+// With inbox tagging on, the model is asked whether the phrase the parser read
+// says when the sender is back. Only a firm no about the same day sends the
+// hold to the fallback; an unsure answer, or one about another day, leaves the
+// parsed date standing.
+func TestHoldForOutOfOfficeReadsTheReturnDateCheck(t *testing.T) {
+	cfg := models.ReplyIntentSettings{HoldOnOutOfOffice: true, OutOfOfficeHoldDays: 7}
+	back := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, 21)
+	msg := &models.EmailMessageStoreData{
+		MessageID: "<ooo@example.com>",
+		Subject:   "Abwesenheitsnotiz",
+		BodyText:  "Ich bin ab dem " + back.Format("02.01.2006") + " nicht im Büro.",
+	}
+	verdict := func(day time.Time, noul float64) *repository.InboxTagResult {
+		answers, _ := json.Marshal(map[string]inboxtag.Answer{inboxtag.QReturnDate: {Type: inboxtag.QuestionNoul, Noul: noul}})
+		return &repository.InboxTagResult{Kind: inboxtag.KindAutoReplyOOO, ReturnDate: &day, Answers: answers}
+	}
+	parsed := "back " + back.Format("2 Jan 2006")
+	cases := []struct {
+		name       string
+		res        *repository.InboxTagResult
+		wantReason string
+	}{
+		{"no verdict", nil, parsed},
+		{"confirmed", verdict(back, 0.93), parsed},
+		{"unsure is no evidence", verdict(back, 0.5), parsed},
+		{"a firm no takes the fallback", verdict(back, 0.12), "auto-reply, return date unclear"},
+		{"a no about another day does not count", verdict(back.AddDate(0, 0, 1), 0.12), parsed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &holdRecorder{}
+			s := &service{campaignProgressRepo: rec, inboxTags: verdictStore{res: tc.res}}
+			s.holdForOutOfOffice(context.Background(), uuid.New(), uuid.New(), cfg, msg)
+			if rec.reason != tc.wantReason {
+				t.Fatalf("hold reason = %q, want %q", rec.reason, tc.wantReason)
+			}
+			if tc.wantReason != parsed {
+				if d := time.Until(*rec.until); d < 6*24*time.Hour || d > 7*24*time.Hour+time.Minute {
+					t.Fatalf("fallback hold lifts in %s, want about seven days", d.Round(time.Hour))
+				}
+			}
+		})
 	}
 }

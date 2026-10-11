@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/app/token"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/notify/templates"
@@ -19,17 +20,21 @@ func (s *authService) RegistrationStart(ctx context.Context, data *AuthData, ori
 		return nil, errx.New(errx.Forbidden, "password sign-up is disabled on this deployment")
 	}
 
+	// Folded before the duplicate check, or "Vincent@" and "vincent@" both get
+	// past it and become two accounts for one person.
+	data.Email = normalizeEmail(data.Email)
+
 	if err := s.signupAllowed(ctx, data.Email, data.Invite); err != nil {
 		return nil, err
 	}
 
+	// The caller's 400, not an incident. See LoginStart.
 	if xerr := s.captcha.Verify(ctx, data.Turnstile, ipaddr); xerr != nil {
-		errs.CaptureException(xerr)
 		return nil, xerr
 	}
 
-	if !crypt.ValidatePassword(data.Password) {
-		return nil, errx.ErrPassword
+	if perr := crypt.PasswordError(data.Password); perr != nil {
+		return nil, perr
 	}
 
 	passwordHash, xerr := argon2.Hash(data.Password)
@@ -78,8 +83,8 @@ func (s *authService) RegistrationStart(ctx context.Context, data *AuthData, ori
 		return nil, errx.InternalError()
 	}
 
+	// Reported by the transport; see LoginStart.
 	if xerr := s.sendAuthEmail(ctx, data.Email, "Your Verification Code", text); xerr != nil {
-		errs.CaptureException(xerr)
 		return nil, errx.ErrMailUndeliverable
 	}
 
@@ -107,7 +112,7 @@ func (s *authService) RegistrationStart(ctx context.Context, data *AuthData, ori
 		return nil, err
 	}
 
-	sessionToken, xerr := s.tokenService.GenerateToken(uuid.Nil, sessionID, data.Email, nonce, issuedAt, expiresAt)
+	sessionToken, xerr := s.tokenService.GenerateTokenFor(token.PurposeRegistration, uuid.Nil, sessionID, data.Email, nonce, issuedAt, expiresAt)
 	if xerr != nil {
 		errs.CaptureException(xerr)
 		return nil, errx.InternalError()
@@ -120,22 +125,23 @@ func (s *authService) RegistrationStart(ctx context.Context, data *AuthData, ori
 }
 
 func (s *authService) RegistrationConfirm(ctx context.Context, data *ConfirmData, session string, origin SignupOrigin) (*models.AuthSession, *errx.Error) {
-	token, err := s.tokenService.VerifyToken(session)
+	claims, err := s.tokenService.VerifyTokenFor(token.PurposeRegistration, session)
 	if err != nil {
 		return nil, err
 	}
-	if token.ExpiresAt.Before(time.Now()) {
+	if claims.ExpiresAt.Before(time.Now()) {
 		return nil, errx.ErrSession
 	}
-	sess, err := s.getRegistrationSession(ctx, token.SessionID)
+	sess, err := s.getRegistrationSession(ctx, claims.SessionID)
 	if err != nil {
 		return nil, err
 	}
-	if sess == nil || sess.Nonce != token.Nonce {
+	if sess == nil || sess.Nonce != claims.Nonce {
 		return nil, errx.ErrSession
 	}
 
-	if sess.Tries >= AuthAttempts {
+	sessKey := getRegistrationSessionKey(claims.SessionID)
+	if !s.reserveCodeAttempt(ctx, sessKey, time.Until(claims.ExpiresAt.Time)) {
 		return nil, errx.ErrCodeLimit
 	}
 
@@ -146,27 +152,32 @@ func (s *authService) RegistrationConfirm(ctx context.Context, data *ConfirmData
 	}
 
 	if !v {
-		sess.Tries++
-		_ = s.saveRegistrationSession(ctx, token.SessionID, sess, token.ExpiresAt.Time)
 		return nil, errx.ErrCode
 	}
 
 	// Re-check the policy: a session minted while signups were open must not
 	// outlive a lockdown applied before the code came back.
-	if err := s.signupAllowed(ctx, token.Email, sess.Invite); err != nil {
+	if err := s.signupAllowed(ctx, claims.Email, sess.Invite); err != nil {
 		return nil, err
+	}
+
+	// Single-use: only the request that consumes the session creates the account.
+	if !s.consumeCodeSession(ctx, sessKey) {
+		return nil, errx.ErrSession
 	}
 
 	attr := SignupAttribution{ReferralCode: sess.ReferralCode, Invite: sess.Invite}
 	if sess.Acquisition != nil {
 		attr.Acquisition = *sess.Acquisition
 	}
-	u, cerr := s.createAccount(ctx, token.Email, sess.PasswordHash, attr, origin)
+	u, cerr := s.createAccount(ctx, claims.Email, sess.PasswordHash, attr, origin)
 	if cerr != nil {
 		return nil, cerr
 	}
 	return s.sessionForNewAccount(ctx, u, origin)
 }
+
+const newAccountSignInTimeout = 10 * time.Second
 
 // sessionForNewAccount signs the fresh account in, so registering lands in
 // the dashboard instead of on the sign-in form.
@@ -174,9 +185,15 @@ func (s *authService) sessionForNewAccount(ctx context.Context, u *models.User, 
 	if u == nil {
 		return &models.AuthSession{CodeRequired: false}, nil
 	}
-	result, xerr := s.finishLoginAs(ctx, u.ID, origin.IP, origin.UserAgent, "password")
+	// Detached from the request: provisioning the account can spend most of
+	// its deadline, and a sign-in that times out here sends a person who just
+	// signed up to the sign-in form.
+	signInCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), newAccountSignInTimeout)
+	defer cancel()
+	result, xerr := s.finishLoginAs(signInCtx, u.ID, origin.IP, origin.UserAgent, token.AuthProviderEmail)
 	if xerr != nil {
 		// The account exists; a sign-in hiccup must not read as a failed signup.
+		errs.CaptureException(xerr)
 		return &models.AuthSession{CodeRequired: false}, nil
 	}
 	return &models.AuthSession{CodeRequired: false, Token: result.Token, TwoFARequired: result.TwoFARequired, PendingToken: result.PendingToken, ExpiresIn: result.ExpiresIn}, nil

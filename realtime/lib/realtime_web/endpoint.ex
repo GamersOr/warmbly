@@ -8,15 +8,20 @@ defmodule RealtimeWeb.Endpoint do
 
   use Phoenix.Endpoint, otp_app: :realtime
 
+  # check_origin is deliberately absent here. A transport-level value takes
+  # precedence over the endpoint's, so hardcoding one made the CHECK_ORIGIN
+  # environment variable, and the installer flag that sets it, do nothing.
+  # The endpoint config in runtime.exs governs it now.
   socket("/socket", RealtimeWeb.UserSocket,
     websocket: [
       timeout: 60_000,
       compress: true,
-      check_origin: false,
       # Client frames are small (joins, presence, live cursor/select/patch);
       # without a cap cowboy accepts unbounded frames, which compress makes
       # cheap to send and the org fan-out makes expensive to receive.
-      max_frame_size: 65_536
+      max_frame_size: 65_536,
+      # x_headers carries the API key / OAuth token header; peer_data the client IP.
+      connect_info: [:peer_data, :x_headers]
     ],
     longpoll: false
   )

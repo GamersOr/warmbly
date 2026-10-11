@@ -9,9 +9,9 @@
 
 import React from "react";
 import { createPortal } from "react-dom";
-import { Link } from "react-router-dom";
+import { Link } from "@tanstack/react-router";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import {
     ArrowRightIcon,
     ArrowUpRightIcon,
@@ -357,7 +357,8 @@ export default function UpgradeDialog({
                             <div className="md:ml-auto flex flex-wrap items-center gap-x-4 gap-y-1">
                                 {access.isOwner && (
                                     <Link
-                                        to="/app/settings/billing/plans"
+                                        to="/app/settings/billing/{-$tab}"
+                                        params={{ tab: "plans" }}
                                         onClick={onClose}
                                         className="inline-flex items-center gap-1 font-medium text-slate-600 hover:text-slate-900 transition-colors"
                                     >
@@ -425,7 +426,7 @@ function Hero({
                   transition: { duration: 0.4, ease: EASE, delay },
               };
     return (
-        <div className="relative overflow-hidden px-5 pt-9 pb-8 md:px-10 md:pt-12 md:pb-10 text-center text-white">
+        <div className="theme-solid relative overflow-hidden px-5 pt-9 pb-8 md:px-10 md:pt-12 md:pb-10 text-center text-white">
             <div className="absolute inset-0" aria-hidden="true">
                 <div className="sky-base" />
                 <div className="sky-breathe" />

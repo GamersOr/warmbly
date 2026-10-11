@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/repository"
+	"github.com/warmbly/warmbly/internal/tasks/proto"
 )
 
 // warmupReconcileBatch caps how many mailboxes a single reconcile pass will
@@ -21,10 +23,58 @@ const warmupReconcileBatch = 500
 // campaign does not itself enqueue a task, so without this pass a freshly
 // enabled mailbox would never start warming.
 func (s *tasksService) ReconcileWarmupSchedules(ctx context.Context, limit int) (int, error) {
-	// Same lost-callback backstop as the campaign reconciler: a pending
-	// warmup task stranded past its slot blocks the candidate query below.
-	if n, err := s.taskRepo.CancelOverduePendingTasks(ctx, "warmup", overduePendingGrace); err == nil && n > 0 {
-		log.Info().Int64("cancelled", n).Msg("warmup reconcile: cancelled overdue pending tasks")
+	var recoverBatch func(context.Context, time.Time, int) (int, int, error)
+	if recovery, ok := s.taskRepo.(interface {
+		RecoverUnstartedWarmupDispatchBatch(context.Context, time.Time, int) (int, int, error)
+	}); ok {
+		recoverBatch = recovery.RecoverUnstartedWarmupDispatchBatch
+	} else if recovery, ok := s.taskRepo.(interface {
+		RecoverUnstartedWarmupDispatches(context.Context, time.Time, int) (int, error)
+	}); ok {
+		recoverBatch = func(ctx context.Context, before time.Time, limit int) (int, int, error) {
+			n, err := recovery.RecoverUnstartedWarmupDispatches(ctx, before, limit)
+			return n, n, err
+		}
+	}
+	if recoverBatch != nil {
+		recovered := 0
+		for batch := 0; batch < 10 && ctx.Err() == nil; batch++ {
+			n, selected, err := recoverBatch(ctx, time.Now().Add(-10*time.Minute), limit)
+			recovered += n
+			if err != nil {
+				if recovered > 0 {
+					log.Info().Int("recovered", recovered).Msg("warmup reconcile retired unstarted dispatches before failing")
+				}
+				return 0, err
+			}
+			if selected < limit || limit <= 0 {
+				break
+			}
+		}
+		if recovered > 0 {
+			log.Info().Int("recovered", recovered).Msg("warmup reconcile retired unstarted dispatches")
+		}
+	}
+	if lineage, ok := s.taskRepo.(repository.WarmupLineageRepository); ok {
+		pending, err := lineage.UnqueuedWarmupTasks(ctx, limit)
+		if err != nil {
+			return 0, err
+		}
+		for _, v := range pending {
+			handle, err := s.tasksClient.CreateTask(ctx, &proto.ProcessTask{TaskId: v.TaskID.String()}, v.At)
+			if err != nil {
+				return 0, err
+			}
+			acked, err := lineage.AckWarmupQueue(ctx, v, handle)
+			if err != nil {
+				return 0, err
+			}
+			if !acked {
+				_ = s.tasksClient.DeleteTask(ctx, handle)
+			} else if v.PreviousHandle != nil && *v.PreviousHandle != handle {
+				_ = s.tasksClient.DeleteTask(ctx, *v.PreviousHandle)
+			}
+		}
 	}
 
 	ids, err := s.emailRepo.ListWarmupScheduleCandidates(ctx, limit)
@@ -67,6 +117,9 @@ func (s *tasksService) ReconcileWarmupSchedules(ctx context.Context, limit int) 
 // context is cancelled. Mirrors the other background sweeps (warmup health,
 // dead-worker) and is started from the backend, which owns Cloud Tasks.
 func (s *tasksService) StartWarmupReconciler(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

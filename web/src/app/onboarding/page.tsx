@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "@tanstack/react-router";
 import { motion, AnimatePresence } from "motion/react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
+import { useInstanceAdmin } from "@/hooks/usePermission";
 import CloudLinkCard from "@/components/app/cloud/CloudLinkCard";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
@@ -14,15 +15,24 @@ import AuthButton from "@/components/auth/button";
 import useCompleteOnboarding from "@/lib/api/hooks/auth/useCompleteOnboarding";
 import useUpdateOrganization from "@/lib/api/hooks/app/organizations/useUpdateOrganization";
 import useCurrentOrganization from "@/lib/api/hooks/app/organizations/useCurrentOrganization";
+import type Organization from "@/lib/api/models/app/organizations/Organization";
+import { browserTimezone } from "@/lib/timezone";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
+import { PERSON_NAME_MAX, WORKSPACE_NAME_MAX, nameError, normalizeName, type NameKind } from "@/lib/displayName";
 
 /* ── Schema ─────────────────────── */
 
+const displayName = (label: string, kind: NameKind) =>
+    z.string().superRefine((value, ctx) => {
+        const message = nameError(label, value, kind);
+        if (message) ctx.addIssue({ code: "custom", message });
+    });
+
 const schema = z.object({
-    first_name: z.string().min(1, "First name is required").max(50, "50 characters max"),
-    last_name: z.string().min(1, "Last name is required").max(50, "50 characters max"),
-    workspace: z.string().min(1, "Workspace name is required").max(60, "60 characters max"),
+    first_name: displayName("First name", "person"),
+    last_name: displayName("Last name", "person"),
+    workspace: displayName("Workspace name", "workspace"),
     role: z.enum(["founder", "sales", "marketing", "agency", "recruiter", "other"], {
         error: "Pick the closest one",
     }),
@@ -154,12 +164,15 @@ export default function OnboardingPage() {
     const queryClient = useQueryClient();
     const completeOnboarding = useCompleteOnboarding();
     const updateOrganization = useUpdateOrganization();
-    const { data: org } = useCurrentOrganization();
+    const { data: org, refetch: refetchOrg } = useCurrentOrganization();
 
     const authConfig = useAuthConfig();
     const selfHosted = authConfig.data?.self_hosted === true;
-    const STEPS = useMemo(() => (selfHosted ? [...BASE_STEPS, CLOUD_STEP] : BASE_STEPS), [selfHosted]);
-    const cloudStep = selfHosted ? STEPS.length - 1 : -1;
+    // Linking is instance-wide, so only an instance admin who can complete it sees the step.
+    const instanceAdmin = useInstanceAdmin();
+    const canLink = selfHosted && instanceAdmin.allowed;
+    const STEPS = useMemo(() => (canLink ? [...BASE_STEPS, CLOUD_STEP] : BASE_STEPS), [canLink]);
+    const cloudStep = canLink ? STEPS.length - 1 : -1;
     const [cloudLinked, setCloudLinked] = useState(false);
     const [cloudOrg, setCloudOrg] = useState("");
     const [cloudStart, setCloudStart] = useState(0);
@@ -184,24 +197,33 @@ export default function OnboardingPage() {
     const finish = async () => {
         const data = getValues();
         try {
-            // Rename the auto-created workspace if the user changed it. Best
-            // effort: a rename hiccup must never block completing onboarding.
-            if (org?.name && org.name !== data.workspace) {
+            // Rename the auto-created workspace if the user changed it, and give
+            // it this browser's timezone when it has none, so campaigns and
+            // warmup windows start in the user's own day. Best effort: a hiccup
+            // here must never block completing onboarding.
+            const workspace = normalizeName(data.workspace);
+            // A submit that beats the organization query still has to know what to patch.
+            const current = org ?? (await refetchOrg().catch(() => undefined))?.data;
+            const patch: Partial<Organization> = {};
+            if (current?.name && current.name !== workspace) patch.name = workspace;
+            const zone = browserTimezone();
+            if (current && !current.timezone && zone) patch.timezone = zone;
+            if (Object.keys(patch).length > 0) {
                 try {
-                    await updateOrganization.mutateAsync({ name: data.workspace });
+                    await updateOrganization.mutateAsync(patch);
                 } catch {
                     /* keep going — onboarding completion matters more */
                 }
             }
             await completeOnboarding.mutateAsync({
-                first_name: data.first_name,
-                last_name: data.last_name,
+                first_name: normalizeName(data.first_name),
+                last_name: normalizeName(data.last_name),
                 referral_source: data.referral_source,
                 role: data.role,
                 team_size: data.team_size,
             });
             queryClient.removeQueries({ queryKey: ["auth", "me"] });
-            navigate("/app/emails");
+            navigate({ to: "/app/emails" });
         } catch (e) {
             toast.error(buildError(e as AppError));
         }
@@ -273,12 +295,12 @@ export default function OnboardingPage() {
                             <div className="space-y-4">
                                 <div>
                                     <FieldLabel>First name</FieldLabel>
-                                    <input type="text" placeholder="John" className={INPUT} maxLength={50} autoFocus {...register("first_name")} />
+                                    <input type="text" placeholder="John" className={INPUT} maxLength={PERSON_NAME_MAX} autoComplete="given-name" autoFocus {...register("first_name")} />
                                     <FieldError message={errors.first_name?.message} />
                                 </div>
                                 <div>
                                     <FieldLabel>Last name</FieldLabel>
-                                    <input type="text" placeholder="Doe" className={INPUT} maxLength={50} {...register("last_name")} />
+                                    <input type="text" placeholder="Doe" className={INPUT} maxLength={PERSON_NAME_MAX} autoComplete="family-name" {...register("last_name")} />
                                     <FieldError message={errors.last_name?.message} />
                                 </div>
                             </div>
@@ -287,7 +309,7 @@ export default function OnboardingPage() {
                         {step === 1 && (
                             <div>
                                 <FieldLabel>Workspace name</FieldLabel>
-                                <input type="text" placeholder="Acme Inc." className={INPUT} maxLength={60} autoFocus {...register("workspace")} />
+                                <input type="text" placeholder="Acme Inc." className={INPUT} maxLength={WORKSPACE_NAME_MAX} autoFocus {...register("workspace")} />
                                 <FieldError message={errors.workspace?.message} />
                             </div>
                         )}

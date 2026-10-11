@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { useAppStore } from "@/stores";
 import { hasPermission, PERMISSION_BITS } from "@/lib/permissions";
+import useUser from "@/lib/api/hooks/auth/useUser";
 
 export type PermissionKey = keyof typeof PERMISSION_BITS;
 
@@ -18,7 +19,7 @@ export function checkPermission(key: PermissionKey): boolean {
     return orgHasPermission(useAppStore.getState().currentOrganization, key);
 }
 
-function orgHasPermission(
+export function orgHasPermission(
     org: { role?: string; permissions?: number } | null | undefined,
     key: PermissionKey,
 ): boolean {
@@ -26,6 +27,16 @@ function orgHasPermission(
     if (org.role === "owner") return true;
     if (org.permissions === undefined) return true; // unknown — assume yes until loaded
     return hasPermission(org.permissions, PERMISSION_BITS[key]);
+}
+
+const ADMIN_MANAGE_SETTINGS = 1 << 14; // mirrors AdminPermManageSettings
+
+// useInstanceAdmin reports whether the user may change instance-wide settings:
+// the manage_settings admin bit, on a session that presented a second factor.
+export function useInstanceAdmin(): { holdsAdmin: boolean; allowed: boolean } {
+    const { data: user } = useUser();
+    const holdsAdmin = ((user?.admin_permissions ?? 0) & ADMIN_MANAGE_SETTINGS) === ADMIN_MANAGE_SETTINGS;
+    return { holdsAdmin, allowed: holdsAdmin && user?.session_mfa_verified === true };
 }
 
 // Friendly label for each permission, used in the "you don't have permission"
@@ -57,6 +68,22 @@ export function showPermissionDenied(key: PermissionKey) {
         new CustomEvent("permission-denied", {
             detail: {
                 message: `You need the ${PERMISSION_LABELS[key]} permission to do that.`,
+            },
+        }),
+    );
+}
+
+// An admin action from a session that never presented a second factor. The
+// backend answers admin_mfa_required; raising it before the request gives the
+// same dialog without a round trip that is known to fail.
+export function showAdminMFARequired() {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(
+        new CustomEvent("permission-denied", {
+            detail: {
+                code: "admin_mfa_required",
+                message:
+                    "Administrative access requires two-factor authentication. Turn on 2FA or add a passkey under Settings > Security, then sign in again.",
             },
         }),
     );
@@ -98,4 +125,15 @@ export function useWriteGuard(key: PermissionKey): WriteGuard {
         [allowed, key],
     );
     return { allowed, locked: !allowed, guard };
+}
+
+// useAccessRestricted reports whether the current member reaches only the
+// campaigns and mailboxes granted to them, read-only. The owner never does.
+export function useAccessRestricted(): boolean {
+    const org = useAppStore((s) => s.currentOrganization);
+    return isAccessRestricted(org);
+}
+
+export function isAccessRestricted(org: { role?: string; access_scope?: string } | null | undefined): boolean {
+    return !!org && org.role !== "owner" && org.access_scope === "restricted";
 }

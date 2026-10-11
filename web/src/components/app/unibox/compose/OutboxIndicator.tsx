@@ -9,14 +9,15 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { Loader2Icon, SendIcon } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import cancelScheduled from "@/lib/api/client/app/unibox/cancelScheduled";
 import { useOutboxStore, type OutboxEntry } from "@/hooks/useOutboxStore";
 import { useComposeStore } from "@/hooks/useComposeStore";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
+import useClickOutside from "@/hooks/useClickOutside";
 
 function secondsLeft(entry: OutboxEntry, now: number): number {
     return Math.max(0, Math.ceil((entry.scheduledAt - now) / 1000));
@@ -59,30 +60,7 @@ export default function OutboxIndicator() {
         if (entries.length === 0) setOpen(false);
     }, [entries.length]);
 
-    // Outside click / Escape closes the dropdown (same shape as FilterMenu).
-    React.useEffect(() => {
-        if (!open) return;
-        const onDown = (e: MouseEvent | TouchEvent) => {
-            const t = e.target as Node;
-            if (pillRef.current?.contains(t)) return;
-            if (panelRef.current?.contains(t)) return;
-            setOpen(false);
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") {
-                e.stopPropagation();
-                setOpen(false);
-            }
-        };
-        document.addEventListener("mousedown", onDown, true);
-        document.addEventListener("touchstart", onDown, true);
-        document.addEventListener("keydown", onKey, true);
-        return () => {
-            document.removeEventListener("mousedown", onDown, true);
-            document.removeEventListener("touchstart", onDown, true);
-            document.removeEventListener("keydown", onKey, true);
-        };
-    }, [open]);
+    useClickOutside(open, () => setOpen(false), [pillRef, panelRef]);
 
     const sorted = React.useMemo(
         () => [...entries].sort((a, b) => a.scheduledAt - b.scheduledAt),
@@ -113,7 +91,7 @@ export default function OutboxIndicator() {
                 toast.success("Send cancelled, back to your draft");
             } else if (entry.kind === "reply" && entry.reply) {
                 useOutboxStore.getState().setReplyRestore(entry.reply);
-                navigate(`/app/unibox/all/${encodeURIComponent(entry.reply.threadId)}`);
+                navigate({ to: "/app/unibox/{-$scope}/{-$threadId}", params: { scope: "all", threadId: entry.reply.threadId } });
                 toast.success("Send cancelled, back to your reply");
             } else {
                 toast.success("Send cancelled");

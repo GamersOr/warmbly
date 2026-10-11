@@ -9,15 +9,21 @@ import (
 	"fmt"
 	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
 	"github.com/warmbly/warmbly/internal/pkg/emailverify"
+	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/warmbly/warmbly/internal/app/cipher"
 	"github.com/warmbly/warmbly/internal/app/credits"
 	"github.com/warmbly/warmbly/internal/app/webhook"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
@@ -40,7 +46,8 @@ var ErrUseOAuth = errors.New("this provider connects via OAuth; start the author
 // talk to. Provider-specific behaviour (OAuth identity, event actions, inbound
 // webhooks) lives in the per-provider files in this package.
 type Service interface {
-	Catalog() []models.IntegrationCatalogEntry
+	// Catalog returns every built-in integration, ranked by popularity.
+	Catalog(ctx context.Context) []models.IntegrationCatalogEntry
 	ListConnections(ctx context.Context, orgID uuid.UUID) ([]models.IntegrationConnection, error)
 	GetConnection(ctx context.Context, orgID, id uuid.UUID) (*models.IntegrationConnection, error)
 
@@ -52,16 +59,24 @@ type Service interface {
 	Disconnect(ctx context.Context, orgID, id uuid.UUID) error
 
 	// OAuthStart returns the provider authorization URL for a one-click connect.
-	OAuthStart(ctx context.Context, orgID, userID uuid.UUID, provider models.IntegrationProvider, label string) (*models.IntegrationOAuthStartResponse, error)
+	// params carries provider options (Salesforce: "environment", "domain").
+	OAuthStart(ctx context.Context, orgID, userID uuid.UUID, provider models.IntegrationProvider, label string, params map[string]string) (*models.IntegrationOAuthStartResponse, error)
+	OAuthReturnOrigin(ctx context.Context, state string) string
 	// OAuthFinish completes the handshake: validates state, exchanges the code,
-	// resolves the account identity, and persists encrypted tokens.
-	OAuthFinish(ctx context.Context, userID uuid.UUID, code, state string) (*models.IntegrationConnection, error)
+	// resolves the account identity, and persists encrypted tokens. authorize
+	// runs against the state's organization before the code is exchanged.
+	OAuthFinish(ctx context.Context, userID uuid.UUID, code, state string, authorize func(ctx context.Context, orgID uuid.UUID) error) (*models.IntegrationConnection, error)
 	// Reauth starts a fresh OAuth handshake for an existing connection whose
 	// token expired or was revoked.
 	Reauth(ctx context.Context, orgID, userID, id uuid.UUID) (*models.IntegrationOAuthStartResponse, error)
 
-	// RotateInboundSecret regenerates the inbound URL secret (Calendly/Cal.com).
-	RotateInboundSecret(ctx context.Context, orgID, id uuid.UUID, provider models.IntegrationProvider) (string, error)
+	// RotateInboundSecret replaces a Calendly/Cal.com connection's inbound URL
+	// secret, so the old URL stops working at once, and returns the new URL.
+	RotateInboundSecret(ctx context.Context, orgID, id uuid.UUID) (string, error)
+	// SetInboundSigningKey stores (empty key: removes) the key Calendly/Cal.com
+	// deliveries must be signed with; InboundSigningKey reads it back.
+	SetInboundSigningKey(ctx context.Context, orgID, connID uuid.UUID, key string) (*models.IntegrationConnection, error)
+	InboundSigningKey(ctx context.Context, conn *models.IntegrationConnection) (string, error)
 
 	// Event subscriptions wire a Warmbly event to a provider action.
 	ListEventSubscriptions(ctx context.Context, orgID, connID uuid.UUID) ([]models.IntegrationEventSubscription, error)
@@ -121,6 +136,8 @@ type Service interface {
 	// UpdateConnectionConfig persists the onboarding/capability snapshot + sync
 	// direction for a connection.
 	UpdateConnectionConfig(ctx context.Context, orgID, connID uuid.UUID, configCapabilities map[string]any, syncDirection string) (*models.IntegrationConnection, error)
+	// SetConfigKey replaces one key of config_capabilities, keeping the rest.
+	SetConfigKey(ctx context.Context, orgID, connID uuid.UUID, key string, value any) error
 
 	// WebhookSigningSecret returns the HMAC signing secret for an automation
 	// connection's outbound webhook deliveries, generating + persisting one on
@@ -160,9 +177,19 @@ type Service interface {
 	// Dispatch; struct payloads are ignored.
 	DispatchAny(ctx context.Context, orgID uuid.UUID, eventType models.WebhookEventType, data any)
 
-	// NotifySlack posts a plain message to the org's connected Slack on its
-	// configured default channel. No-op (nil) when no Slack is connected.
-	NotifySlack(ctx context.Context, orgID uuid.UUID, title, body string) error
+	// Slack app access for internal/app/slackapp. The bot token never leaves
+	// this package except through SlackBotToken.
+	SlackConnection(ctx context.Context, orgID uuid.UUID) (*models.IntegrationConnection, error)
+	SlackConnectionsForTeam(ctx context.Context, teamID string) ([]models.IntegrationConnection, error)
+	SlackBotToken(ctx context.Context, orgID, connID uuid.UUID) (string, error)
+	SlackDefaultChannel(ctx context.Context, orgID uuid.UUID, conn *models.IntegrationConnection) string
+	UpdateSlackSettings(ctx context.Context, orgID, connID uuid.UUID, settings models.SlackSettings) (*models.IntegrationConnection, error)
+	MarkSlackTeamRevoked(ctx context.Context, teamID string, status models.IntegrationStatus, detail string) ([]uuid.UUID, error)
+	SlackOAuthConfigured() bool
+	SlackOAuthRedirectURL() string
+	// SlackOAuthClient is the Slack app's client id and secret, for Sign in
+	// with Slack.
+	SlackOAuthClient() (clientID, clientSecret string)
 
 	// VerificationProviderFor and ReportVerificationProviderError implement
 	// emailverify.ProviderSource: the org's paid verification backend, if any.
@@ -172,9 +199,68 @@ type Service interface {
 
 	// Repo exposes the underlying repository for the inbound webhook handlers.
 	Repo() repository.IntegrationRepository
+
+	// AccessToken returns a usable OAuth access token for one of the org's
+	// connections, refreshing it when near expiry. Used by the CRM sync engine.
+	AccessToken(ctx context.Context, orgID, connID uuid.UUID) (string, *models.IntegrationConnection, error)
+	// MarkConnectionHealth records a provider call's outcome on the connection.
+	MarkConnectionHealth(ctx context.Context, connID uuid.UUID, status models.IntegrationStatus, health models.IntegrationHealth, detail string)
+	// MergeConnectionDisplay overlays non-secret facts (a Pipedrive company
+	// domain) onto a connection's display fields.
+	MergeConnectionDisplay(ctx context.Context, connID uuid.UUID, patch map[string]any) error
+	// SetCRMModeCheck reports which CRM a workspace runs on, so the legacy
+	// upsert action of that provider steps aside.
+	SetCRMModeCheck(check func(ctx context.Context, orgID uuid.UUID) models.CRMProvider)
+	// ProviderAccess returns a usable OAuth access token for an org-owned
+	// connection, refreshing first when force is set or the token is expiring.
+	ProviderAccess(ctx context.Context, orgID, connID uuid.UUID, force bool) (*ProviderAccess, error)
+
+	// SetCredentialCheck registers the check Connect runs on a pasted credential.
+	SetCredentialCheck(provider models.IntegrationProvider, check CredentialCheck)
+	// ConnectionConfig opens an org-owned connection's sealed config.
+	ConnectionConfig(ctx context.Context, orgID, connID uuid.UUID) (map[string]any, *models.IntegrationConnection, error)
+	// MergeConnectionConfig overlays keys onto a connection's sealed config; an
+	// empty string removes a key.
+	MergeConnectionConfig(ctx context.Context, orgID, connID uuid.UUID, patch map[string]any) error
+	// ClaySubscriptions and SetClaySubscriptions read and replace the events a
+	// Clay connection sends to its default table.
+	ClaySubscriptions(ctx context.Context, orgID, connID uuid.UUID) ([]string, error)
+	SetClaySubscriptions(ctx context.Context, orgID, connID uuid.UUID, events []string) error
+	// ClayConnectionByInboundSecret resolves a Clay inbound URL to its connection.
+	ClayConnectionByInboundSecret(ctx context.Context, secret string) (*models.IntegrationConnection, error)
+	// SetSalesforce routes Salesforce pushes, upsert actions and new
+	// connections through the native sync.
+	SetSalesforce(b SalesforceBridge)
+	// SetSlackInstallHook is told who approved a Slack install, so the member
+	// who connected Slack is linked without a separate step.
+	SetSlackInstallHook(h SlackInstallHook)
+}
+
+// ProviderAccess is a live credential for one connection.
+type ProviderAccess struct {
+	Token       string
+	InstanceURL string
+	Conn        *models.IntegrationConnection
+}
+
+// SalesforceBridge is the native Salesforce sync as the integration surface
+// sees it. Implemented by the salesforce package, wired after construction.
+type SalesforceBridge interface {
+	PushContacts(ctx context.Context, orgID, connID uuid.UUID, contacts []PushContact) (*PushResult, error)
+	// UpsertFromEvent finds or creates the event's person; data may carry
+	// "_salesforce_fields", an automation's own projected field values.
+	UpsertFromEvent(ctx context.Context, orgID, connID uuid.UUID, data map[string]any) error
+	Connected(ctx context.Context, conn *models.IntegrationConnection)
+}
+
+// SlackInstallHook is implemented by the slackapp package.
+type SlackInstallHook interface {
+	SlackInstalled(ctx context.Context, conn *models.IntegrationConnection, slackUserID string, userID uuid.UUID)
 }
 
 type service struct {
+	refresh    singleflight.Group
+	crmMode    func(ctx context.Context, orgID uuid.UUID) models.CRMProvider
 	repo       repository.IntegrationRepository
 	cipher     cipher.CipherService
 	oauth      *OAuthManager
@@ -183,6 +269,16 @@ type service struct {
 	aiProvider generation.Provider
 	credits    credits.CreditService
 	aiSearch   generation.SearchClient
+	salesforce SalesforceBridge
+	slackHook  SlackInstallHook
+
+	checkMu sync.RWMutex
+	checks  map[models.IntegrationProvider]CredentialCheck
+
+	popMu         sync.Mutex
+	pop           map[models.IntegrationProvider]int
+	popAt         time.Time
+	popRefreshing bool
 }
 
 // NewService builds the integration service. cipherSvc seals provider secrets
@@ -203,11 +299,14 @@ func (s *service) SetAI(p generation.Provider, c credits.CreditService) {
 	s.credits = c
 }
 func (s *service) SetAISearch(sc generation.SearchClient) { s.aiSearch = sc }
+func (s *service) SetSalesforce(b SalesforceBridge)       { s.salesforce = b }
+func (s *service) SetSlackInstallHook(h SlackInstallHook) { s.slackHook = h }
 
 func (s *service) Repo() repository.IntegrationRepository { return s.repo }
 
-func (s *service) Catalog() []models.IntegrationCatalogEntry {
+func (s *service) Catalog(ctx context.Context) []models.IntegrationCatalogEntry {
 	entries := Catalog()
+	rankByPopularity(entries, s.popularity(ctx))
 	for i := range entries {
 		e := &entries[i]
 		if e.AuthMethod == string(models.IntegrationAuthOAuth) {
@@ -292,9 +391,19 @@ func (s *service) Connect(ctx context.Context, orgID, userID uuid.UUID, provider
 		}
 	}
 
+	if check := s.credentialCheck(provider); check != nil {
+		facts, err := check(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range facts {
+			displayFields[k] = v
+		}
+	}
+
 	var inboundSecret string
 	var err error
-	if provider == models.IntegrationCalendly || provider == models.IntegrationCalCom {
+	if mintsInboundURL(provider) {
 		inboundSecret, err = generateInboundSecret(provider)
 		if err != nil {
 			return nil, err
@@ -318,7 +427,7 @@ func (s *service) Connect(ctx context.Context, orgID, userID uuid.UUID, provider
 
 	status := models.IntegrationStatusPending
 	switch {
-	case provider == models.IntegrationCalendly || provider == models.IntegrationCalCom:
+	case mintsInboundURL(provider):
 		// Inbound providers are "connected" once the URL exists.
 		status = models.IntegrationStatusConnected
 	case isAutomationProvider(provider):
@@ -363,15 +472,64 @@ func (s *service) Connect(ctx context.Context, orgID, userID uuid.UUID, provider
 }
 
 func (s *service) Disconnect(ctx context.Context, orgID, id uuid.UUID) error {
+	if conn, err := s.repo.GetConnectionByID(ctx, orgID, id); err == nil && conn != nil && conn.Provider == models.IntegrationSalesforce {
+		s.revokeSalesforce(ctx, conn)
+	}
 	return s.repo.DeleteConnection(ctx, orgID, id)
 }
 
-func (s *service) OAuthStart(ctx context.Context, orgID, userID uuid.UUID, provider models.IntegrationProvider, label string) (*models.IntegrationOAuthStartResponse, error) {
+// revokeSalesforce invalidates the refresh token (and every access token it
+// minted) so a disconnected org stops trusting Warmbly at once. Best-effort.
+func (s *service) revokeSalesforce(ctx context.Context, conn *models.IntegrationConnection) {
+	sec, err := s.repo.GetConnectionSecrets(ctx, conn.ID)
+	if err != nil || sec == nil {
+		return
+	}
+	refresh, err := s.open(ctx, conn.OrganizationID, sec.RefreshTokenEnc)
+	if err != nil || refresh == "" {
+		return
+	}
+	host := configString(conn.DisplayFields, "login_host")
+	if host == "" {
+		host = "login.salesforce.com"
+	}
+	if _, herr := SalesforceLoginHost(host); herr != nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_ = s.oauth.Revoke(rctx, "https://"+host+"/services/oauth2/revoke", refresh)
+}
+
+func (s *service) OAuthStart(ctx context.Context, orgID, userID uuid.UUID, provider models.IntegrationProvider, label string, params map[string]string) (*models.IntegrationOAuthStartResponse, error) {
 	if !s.oauth.Configured(provider) {
 		return nil, ErrOAuthNotConfigured
 	}
+	stParams := map[string]string{}
+	if origin := config.DashboardOriginFromContext(ctx); origin != "" {
+		stParams["return_origin"] = origin
+	}
+	loginHost := ""
+	if provider == models.IntegrationSalesforce {
+		in := params["domain"]
+		if strings.TrimSpace(in) == "" {
+			in = params["environment"]
+		}
+		host, herr := SalesforceLoginHost(in)
+		if herr != nil {
+			return nil, errx.NewWithIdentifier(errx.BadRequest, "invalid_salesforce_domain", herr.Error())
+		}
+		loginHost = host
+		stParams["login_host"] = host
+		if strings.TrimSpace(label) == "" {
+			label = "Salesforce"
+			if host == "test.salesforce.com" || strings.Contains(host, ".sandbox.") {
+				label = "Salesforce sandbox"
+			}
+		}
+	}
 	state := randomURLToken(24)
-	authURL, verifier, err := s.oauth.AuthCodeURL(provider, state)
+	authURL, verifier, err := s.oauth.AuthCodeURL(provider, state, loginHost)
 	if err != nil {
 		return nil, err
 	}
@@ -384,6 +542,7 @@ func (s *service) OAuthStart(ctx context.Context, orgID, userID uuid.UUID, provi
 		CodeVerifier:    verifier,
 		Label:           strings.TrimSpace(label),
 		RequestedScopes: s.oauth.Scopes(provider),
+		Params:          stParams,
 		ExpiresAt:       time.Now().UTC().Add(oauthStateTTL),
 	}
 	if err := s.repo.CreateOAuthState(ctx, st); err != nil {
@@ -392,7 +551,18 @@ func (s *service) OAuthStart(ctx context.Context, orgID, userID uuid.UUID, provi
 	return &models.IntegrationOAuthStartResponse{URL: authURL, State: state}, nil
 }
 
-func (s *service) OAuthFinish(ctx context.Context, userID uuid.UUID, code, state string) (*models.IntegrationConnection, error) {
+func (s *service) OAuthReturnOrigin(ctx context.Context, state string) string {
+	origin, err := s.repo.OAuthReturnOrigin(ctx, state)
+	if err != nil {
+		return ""
+	}
+	if origin == "" {
+		return config.PrimaryDashboardOrigin()
+	}
+	return config.DashboardOrigin(origin)
+}
+
+func (s *service) OAuthFinish(ctx context.Context, userID uuid.UUID, code, state string, authorize func(ctx context.Context, orgID uuid.UUID) error) (*models.IntegrationConnection, error) {
 	code = strings.TrimSpace(code)
 	state = strings.TrimSpace(state)
 	if code == "" || state == "" {
@@ -409,8 +579,20 @@ func (s *service) OAuthFinish(ctx context.Context, userID uuid.UUID, code, state
 	if st.UserID != userID {
 		return nil, errors.New("oauth state does not belong to this user")
 	}
+	if authorize == nil {
+		return nil, errors.New("oauth finish needs an authorization check")
+	}
+	if err := authorize(ctx, st.OrganizationID); err != nil {
+		return nil, err
+	}
 
-	tokens, account, err := s.oauth.Exchange(ctx, st.Provider, code, st.CodeVerifier)
+	loginHost := st.Params["login_host"]
+	if loginHost != "" {
+		if _, herr := SalesforceLoginHost(loginHost); herr != nil {
+			return nil, herr
+		}
+	}
+	tokens, account, err := s.oauth.Exchange(ctx, st.Provider, code, st.CodeVerifier, loginHost)
 	if err != nil {
 		return nil, err
 	}
@@ -437,6 +619,45 @@ func (s *service) OAuthFinish(ctx context.Context, userID uuid.UUID, code, state
 	// display field so action handlers know which host to call.
 	if account.InstanceURL != "" {
 		display["instance_url"] = account.InstanceURL
+	}
+	if account.UIDomain != "" {
+		display["ui_domain"] = account.UIDomain
+	}
+	if account.APIDomain != "" {
+		display["api_domain"] = account.APIDomain
+	}
+	if account.CompanyID != "" {
+		display["company_id"] = account.CompanyID
+	}
+	if account.CompanyDomain != "" {
+		display["company_domain"] = account.CompanyDomain
+	}
+	if st.Provider == models.IntegrationSalesforce {
+		if loginHost == "" {
+			loginHost = "login.salesforce.com"
+		}
+		display["login_host"] = loginHost
+		display["environment"] = "production"
+		if loginHost == "test.salesforce.com" || strings.Contains(loginHost, ".sandbox.") {
+			display["environment"] = "sandbox"
+		}
+		if orgSF, userSF := salesforceIdentityIDs(account.IdentityURL); orgSF != "" {
+			display["sf_org_id"] = orgSF
+			display["sf_user_id"] = userSF
+		}
+	}
+	if st.Provider == models.IntegrationSalesforce {
+		// Connections are keyed by label; a login into a different org must
+		// become its own connection, never swap the org under this one's
+		// links and history.
+		if prev, perr := s.repo.GetConnection(ctx, st.OrganizationID, st.Provider, label); perr == nil && prev != nil {
+			prevOrg := configString(prev.DisplayFields, "sf_org_id")
+			if prevOrg != "" && display["sf_org_id"] != nil && prevOrg != display["sf_org_id"] {
+				label = fmt.Sprintf("%s (%s)", label, orFallback(account.Name, fmt.Sprint(display["sf_org_id"])))
+			}
+		}
+	} else if account.ID != "" {
+		label = s.accountLabel(ctx, st.OrganizationID, st.Provider, label, account)
 	}
 	df, _ := json.Marshal(display)
 
@@ -474,9 +695,39 @@ func (s *service) OAuthFinish(ctx context.Context, userID uuid.UUID, code, state
 			Status:         "success",
 			Detail:         "authorized " + string(st.Provider),
 		})
+		if st.Provider == models.IntegrationSalesforce && s.salesforce != nil {
+			s.salesforce.Connected(ctx, stored)
+		}
+		if st.Provider == models.IntegrationSlack && s.slackHook != nil && account.InstallerID != "" {
+			s.slackHook.SlackInstalled(ctx, stored, account.InstallerID, userID)
+		}
 		return stored, nil
 	}
 	return conn, nil
+}
+
+// accountLabel keeps a different account of the same provider from replacing
+// an existing connection: the label falls to the first one that is free or
+// already this account's.
+func (s *service) accountLabel(ctx context.Context, orgID uuid.UUID, provider models.IntegrationProvider, base string, account extAccount) string {
+	derived := fmt.Sprintf("%s (%s)", base, orFallback(account.Name, account.ID))
+	for n := 0; n < 50; n++ {
+		label := base
+		switch {
+		case n == 1:
+			label = derived
+		case n > 1:
+			label = fmt.Sprintf("%s %d", derived, n)
+		}
+		prev, err := s.repo.GetConnection(ctx, orgID, provider, label)
+		if err != nil {
+			return label
+		}
+		if prev == nil || prev.ExternalAccountID == "" || prev.ExternalAccountID == account.ID {
+			return label
+		}
+	}
+	return fmt.Sprintf("%s (%s)", base, account.ID)
 }
 
 func (s *service) Reauth(ctx context.Context, orgID, userID, id uuid.UUID) (*models.IntegrationOAuthStartResponse, error) {
@@ -491,26 +742,32 @@ func (s *service) Reauth(ctx context.Context, orgID, userID, id uuid.UUID) (*mod
 		return nil, ErrUseOAuth
 	}
 	_ = s.repo.SetConnectionStatus(ctx, id, models.IntegrationStatusAuthorizing, models.IntegrationHealthDegraded, "reauthorizing")
-	return s.OAuthStart(ctx, orgID, userID, conn.Provider, conn.Label)
+	var params map[string]string
+	if host := configString(conn.DisplayFields, "login_host"); host != "" {
+		params = map[string]string{"domain": host}
+	}
+	return s.OAuthStart(ctx, orgID, userID, conn.Provider, conn.Label, params)
 }
 
-func (s *service) RotateInboundSecret(ctx context.Context, orgID, id uuid.UUID, provider models.IntegrationProvider) (string, error) {
-	secret, err := generateInboundSecret(provider)
+func (s *service) RotateInboundSecret(ctx context.Context, orgID, id uuid.UUID) (string, error) {
+	conn, err := s.repo.GetConnectionByID(ctx, orgID, id)
 	if err != nil {
 		return "", err
 	}
-	conn := &models.IntegrationConnection{
-		ID:             id,
-		OrganizationID: orgID,
-		Provider:       provider,
-		Status:         models.IntegrationStatusConnected,
-		AuthMethod:     string(models.IntegrationAuthWebhook),
-		Health:         string(models.IntegrationHealthHealthy),
+	if conn == nil {
+		return "", repository.ErrInboundConnectionNotFound
 	}
-	if err := s.repo.UpsertConnection(ctx, &repository.ConnectionWrite{Conn: conn, InboundSecret: secret}); err != nil {
+	if !mintsInboundURL(conn.Provider) {
+		return "", ErrNotInboundProvider
+	}
+	secret, err := generateInboundSecret(conn.Provider)
+	if err != nil {
 		return "", err
 	}
-	return BuildInboundURL(provider, secret), nil
+	if err := s.repo.SetInboundSecret(ctx, orgID, id, secret); err != nil {
+		return "", err
+	}
+	return BuildInboundURL(conn.Provider, secret), nil
 }
 
 func (s *service) ListEventSubscriptions(ctx context.Context, orgID, connID uuid.UUID) ([]models.IntegrationEventSubscription, error) {
@@ -527,6 +784,9 @@ func (s *service) CreateEventSubscription(ctx context.Context, orgID, connID uui
 	}
 	if !models.IsValidWebhookEventType(eventType) {
 		return nil, fmt.Errorf("unknown event type: %s", eventType)
+	}
+	if !models.ProviderSupportsAction(conn.Provider, action) {
+		return nil, ErrActionProviderMismatch
 	}
 	// SSRF guard for action configs that carry an outbound URL.
 	if err := validateOutboundConfigURLs(config); err != nil {
@@ -752,6 +1012,9 @@ func (s *service) validateAutomationGraph(ctx context.Context, orgID uuid.UUID, 
 			if conn == nil {
 				return errors.New("an action node references an unknown integration")
 			}
+			if !models.ProviderSupportsAction(conn.Provider, n.Action) {
+				return ErrActionProviderMismatch
+			}
 			cfg := map[string]any{}
 			if len(n.Config) > 0 {
 				_ = json.Unmarshal(n.Config, &cfg)
@@ -955,13 +1218,14 @@ func (s *service) seal(ctx context.Context, orgID uuid.UUID, plaintext string) (
 		return "", nil
 	}
 	if s.cipher == nil {
-		return "", errors.New("cipher service unavailable")
+		return "", lowerLayer(errors.New("cipher service unavailable"))
 	}
 	c, err := s.cipher.Cipher(ctx, orgID)
 	if err != nil {
-		return "", err
+		return "", lowerLayer(err)
 	}
-	return c.Encrypt(ctx, plaintext)
+	out, err := c.Encrypt(ctx, plaintext)
+	return out, lowerLayer(err)
 }
 
 func (s *service) open(ctx context.Context, orgID uuid.UUID, ciphertext string) (string, error) {
@@ -969,13 +1233,14 @@ func (s *service) open(ctx context.Context, orgID uuid.UUID, ciphertext string) 
 		return "", nil
 	}
 	if s.cipher == nil {
-		return "", errors.New("cipher service unavailable")
+		return "", lowerLayer(errors.New("cipher service unavailable"))
 	}
 	c, err := s.cipher.Cipher(ctx, orgID)
 	if err != nil {
-		return "", err
+		return "", lowerLayer(err)
 	}
-	return c.Decrypt(ctx, ciphertext)
+	out, err := c.Decrypt(ctx, ciphertext)
+	return out, lowerLayer(err)
 }
 
 func (s *service) sealConfig(ctx context.Context, orgID uuid.UUID, config map[string]any) ([]byte, error) {
@@ -1016,15 +1281,24 @@ func (s *service) openConfig(ctx context.Context, sec *repository.ConnectionSecr
 // On an unrecoverable refresh failure it flips the connection to
 // reauth_required and returns an error.
 func (s *service) accessTokenFor(ctx context.Context, sec *repository.ConnectionSecrets) (string, error) {
+	tok, _, err := s.accessToken(ctx, sec, false)
+	return tok, err
+}
+
+// accessToken is accessTokenFor that can force a refresh, and also reports the
+// API host when the provider has one per org.
+func (s *service) accessToken(ctx context.Context, sec *repository.ConnectionSecrets, force bool) (token, instanceURL string, err error) {
 	orgID := sec.Conn.OrganizationID
+	// Display fields can arrive through an import, so the host is re-checked on every read.
+	instanceURL, _ = SalesforceInstanceURL(configString(sec.Conn.DisplayFields, "instance_url"))
 
 	access, err := s.open(ctx, orgID, sec.AccessTokenEnc)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	refresh, err := s.open(ctx, orgID, sec.RefreshTokenEnc)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	current := models.IntegrationTokens{
@@ -1033,18 +1307,138 @@ func (s *service) accessTokenFor(ctx context.Context, sec *repository.Connection
 		ExpiresAt:    sec.Conn.TokenExpiresAt,
 		Scopes:       sec.Conn.GrantedScopes,
 	}
-	refreshed, didRefresh, rerr := s.oauth.RefreshIfNeeded(ctx, sec.Conn.Provider, current)
+	loginHost := configString(sec.Conn.DisplayFields, "login_host")
+	if loginHost != "" {
+		if _, herr := SalesforceLoginHost(loginHost); herr != nil {
+			loginHost = ""
+		}
+	}
+	refreshed, didRefresh, rerr := s.oauth.RefreshIfNeeded(ctx, sec.Conn.Provider, current, force, loginHost)
 	if rerr != nil {
-		_ = s.repo.SetConnectionStatus(ctx, sec.Conn.ID, models.IntegrationStatusReauthRequired, models.IntegrationHealthDown, "token refresh failed: reconnect required")
-		return "", rerr
+		// Only the provider refusing the grant needs a person; a timeout or a
+		// 5xx at the token endpoint is retried on the next call.
+		if refreshRefused(rerr) {
+			_ = s.repo.SetConnectionStatus(ctx, sec.Conn.ID, models.IntegrationStatusReauthRequired, models.IntegrationHealthDown, "token refresh failed: reconnect required")
+		}
+		return "", "", rerr
 	}
 	if didRefresh {
 		accessEnc, _ := s.seal(ctx, orgID, refreshed.AccessToken)
 		refreshEnc, _ := s.seal(ctx, orgID, refreshed.RefreshToken)
 		_ = s.repo.UpdateConnectionTokens(ctx, sec.Conn.ID, accessEnc, refreshEnc, refreshed.ExpiresAt, refreshed.Scopes)
-		return refreshed.AccessToken, nil
+		// An org migration moves the instance host; the refresh is where it shows.
+		if refreshed.InstanceURL != "" && refreshed.InstanceURL != instanceURL {
+			instanceURL = refreshed.InstanceURL
+			_ = s.repo.MergeDisplayFields(ctx, sec.Conn.ID, map[string]any{"instance_url": instanceURL})
+		}
 	}
-	return refreshed.AccessToken, nil
+	return refreshed.AccessToken, instanceURL, nil
+}
+
+func orFallback(v, d string) string {
+	if strings.TrimSpace(v) == "" {
+		return d
+	}
+	return v
+}
+
+// refreshRefused reports a refresh the provider rejected outright: a revoked
+// or expired grant, or a client it no longer recognises.
+func refreshRefused(err error) bool {
+	var re *oauth2.RetrieveError
+	if !errors.As(err, &re) {
+		return false
+	}
+	switch re.ErrorCode {
+	case "invalid_grant", "invalid_client", "unauthorized_client", "invalid_scope":
+		return true
+	}
+	return re.Response != nil && (re.Response.StatusCode == http.StatusBadRequest || re.Response.StatusCode == http.StatusUnauthorized)
+}
+
+// ProviderAccess returns a usable token for an org-owned OAuth connection.
+func (s *service) ProviderAccess(ctx context.Context, orgID, connID uuid.UUID, force bool) (*ProviderAccess, error) {
+	conn, err := s.repo.GetConnectionByID(ctx, orgID, connID)
+	if err != nil {
+		return nil, err
+	}
+	if conn == nil {
+		return nil, errors.New("connection not found")
+	}
+	if conn.Status == models.IntegrationStatusReauthRequired || conn.Status == models.IntegrationStatusDisconnected {
+		return nil, ErrPushReauth
+	}
+	sec, err := s.repo.GetConnectionSecrets(ctx, connID)
+	if err != nil {
+		return nil, err
+	}
+	if sec == nil || sec.Conn.OrganizationID != orgID {
+		return nil, errors.New("connection not found")
+	}
+	// Concurrent callers share one refresh: with refresh-token rotation, two
+	// parallel refreshes would leave one holding a dead token.
+	// Its own keyspace: AccessToken shares the group with a different result type.
+	key := "provider:" + connID.String()
+	if force {
+		key += ":force"
+	}
+	v, err, _ := s.refresh.Do(key, func() (any, error) {
+		tok, instance, err := s.accessToken(ctx, sec, force)
+		if err != nil {
+			return nil, err
+		}
+		return [2]string{tok, instance}, nil
+	})
+	if err != nil {
+		if refreshRefused(err) {
+			return nil, fmt.Errorf("%w: %v", ErrPushReauth, err)
+		}
+		return nil, fmt.Errorf("could not refresh the access token: %w", err)
+	}
+	pair := v.([2]string)
+	return &ProviderAccess{Token: pair[0], InstanceURL: pair[1], Conn: conn}, nil
+}
+
+// AccessToken loads, refreshes and returns a connection's OAuth token after
+// checking the connection belongs to orgID. Concurrent callers share one refresh.
+func (s *service) AccessToken(ctx context.Context, orgID, connID uuid.UUID) (string, *models.IntegrationConnection, error) {
+	v, err, _ := s.refresh.Do(connID.String(), func() (any, error) {
+		sec, err := s.repo.GetConnectionSecrets(ctx, connID)
+		if err != nil {
+			return nil, err
+		}
+		if sec == nil || sec.Conn.OrganizationID != orgID {
+			return nil, errors.New("connection not found")
+		}
+		tok, err := s.accessTokenFor(ctx, sec)
+		if err != nil {
+			return nil, err
+		}
+		conn := sec.Conn
+		return tokenResult{token: tok, conn: &conn}, nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	r := v.(tokenResult)
+	return r.token, r.conn, nil
+}
+
+type tokenResult struct {
+	token string
+	conn  *models.IntegrationConnection
+}
+
+func (s *service) SetCRMModeCheck(check func(ctx context.Context, orgID uuid.UUID) models.CRMProvider) {
+	s.crmMode = check
+}
+
+func (s *service) MergeConnectionDisplay(ctx context.Context, connID uuid.UUID, patch map[string]any) error {
+	return s.repo.MergeDisplayFields(ctx, connID, patch)
+}
+
+func (s *service) MarkConnectionHealth(ctx context.Context, connID uuid.UUID, status models.IntegrationStatus, health models.IntegrationHealth, detail string) {
+	_ = s.repo.SetConnectionStatus(ctx, connID, status, health, detail)
 }
 
 // --- shared helpers ---------------------------------------------------------
@@ -1112,38 +1506,95 @@ func generateSigningSecret() (string, error) {
 	return "whsec_" + hex.EncodeToString(buf), nil
 }
 
+// signingSecretField is the sealed-config key of an automation connection's outbound HMAC secret.
+const signingSecretField = "signing_secret"
+
 // WebhookSigningSecret returns the connection's outbound-webhook HMAC secret,
-// generating + persisting one (into the non-secret config_capabilities, matching
-// how customer-webhook signing secrets are stored) on first request.
+// generating one on first request. It is kept in the connection's sealed config.
 func (s *service) WebhookSigningSecret(ctx context.Context, orgID, connID uuid.UUID) (string, error) {
-	conn, err := s.repo.GetConnectionByID(ctx, orgID, connID)
+	sec, err := s.repo.GetConnectionSecrets(ctx, connID)
 	if err != nil {
 		return "", err
 	}
-	if conn == nil {
+	if sec == nil || sec.Conn.OrganizationID != orgID {
 		return "", fmt.Errorf("connection not found")
 	}
-	cc := map[string]any{}
-	if len(conn.ConfigCapabilities) > 0 {
-		_ = json.Unmarshal(conn.ConfigCapabilities, &cc)
+	cfg, err := s.openConfig(ctx, sec)
+	if err != nil {
+		return "", err
 	}
-	if existing, ok := cc["signing_secret"].(string); ok && existing != "" {
+	if existing := s.signingSecretFor(ctx, sec, cfg); existing != "" {
 		return existing, nil
 	}
 	secret, err := generateSigningSecret()
 	if err != nil {
 		return "", err
 	}
-	cc["signing_secret"] = secret
-	raw, _ := json.Marshal(cc)
-	dir := conn.SyncDirection
-	if dir == "" {
-		dir = "push"
+	cfg[signingSecretField] = secret
+	sealed, err := s.sealConfig(ctx, orgID, cfg)
+	if err != nil {
+		return "", err
 	}
-	if err := s.repo.UpdateConnectionConfig(ctx, orgID, connID, raw, dir); err != nil {
+	if err := s.repo.SetSigningSecretConfig(ctx, orgID, connID, sealed); err != nil {
 		return "", err
 	}
 	return secret, nil
+}
+
+// signingSecretFor reads the signing secret from the opened config, moving one
+// still held in config_capabilities into it (best effort; the value is used either way).
+func (s *service) signingSecretFor(ctx context.Context, sec *repository.ConnectionSecrets, cfg map[string]any) string {
+	if v := stringFromMap(cfg, signingSecretField); v != "" {
+		return v
+	}
+	legacy := configString(sec.Conn.ConfigCapabilities, models.ConfigCapabilitiesSigningSecret)
+	if legacy == "" {
+		return ""
+	}
+	next := make(map[string]any, len(cfg)+1)
+	for k, v := range cfg {
+		next[k] = v
+	}
+	next[signingSecretField] = legacy
+	if sealed, err := s.sealConfig(ctx, sec.Conn.OrganizationID, next); err == nil {
+		if err := s.repo.SetSigningSecretConfig(ctx, sec.Conn.OrganizationID, sec.Conn.ID, sealed); err != nil {
+			log.Warn().Err(err).Str("connection_id", sec.Conn.ID.String()).Msg("integration: sealing signing secret failed")
+		}
+	}
+	return legacy
+}
+
+// StartSigningSecretMigration seals every signing secret still held in
+// config_capabilities, in one paced pass per process.
+func (s *service) StartSigningSecretMigration(ctx context.Context) {
+	var cursor uuid.UUID
+	for {
+		ids, err := s.repo.ListPlaintextSigningSecrets(ctx, cursor, 100)
+		if err != nil {
+			log.Warn().Err(err).Msg("integration: listing signing secrets to seal failed")
+			return
+		}
+		if len(ids) == 0 {
+			return
+		}
+		for _, id := range ids {
+			cursor = id
+			sec, err := s.repo.GetConnectionSecrets(ctx, id)
+			if err != nil || sec == nil {
+				continue
+			}
+			cfg, err := s.openConfig(ctx, sec)
+			if err != nil {
+				continue
+			}
+			_ = s.signingSecretFor(ctx, sec, cfg)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // SendTestEvent fires a synthetic event through the connection's notify/webhook
@@ -1191,7 +1642,8 @@ func (s *service) SendTestEvent(ctx context.Context, orgID, connID uuid.UUID) (i
 		switch sub.Action {
 		case models.IntegrationActionSlackNotify,
 			models.IntegrationActionDiscordNotify,
-			models.IntegrationActionGenericWebhookPing:
+			models.IntegrationActionGenericWebhookPing,
+			models.IntegrationActionClaySendRow:
 			target := repository.DispatchTarget{Subscription: sub, Secrets: *sec}
 			if err := s.execAction(ctx, target, sample); err != nil {
 				return count, err
@@ -1219,7 +1671,8 @@ func (s *service) SendTestEvent(ctx context.Context, orgID, connID uuid.UUID) (i
 			switch n.Action {
 			case models.IntegrationActionSlackNotify,
 				models.IntegrationActionDiscordNotify,
-				models.IntegrationActionGenericWebhookPing:
+				models.IntegrationActionGenericWebhookPing,
+				models.IntegrationActionClaySendRow:
 				sub := models.IntegrationEventSubscription{
 					ID:             uuid.New(),
 					ConnectionID:   connID,
@@ -1239,6 +1692,9 @@ func (s *service) SendTestEvent(ctx context.Context, orgID, connID uuid.UUID) (i
 		}
 	}
 
+	if count == 0 && conn.Provider == models.IntegrationClay {
+		return 0, fmt.Errorf("choose at least one event to send to Clay, then send a test")
+	}
 	if count == 0 {
 		return 0, fmt.Errorf("add a notification or webhook automation first, then send a test")
 	}
@@ -1257,6 +1713,8 @@ func generateInboundSecret(provider models.IntegrationProvider) (string, error) 
 		prefix = "calendly"
 	case models.IntegrationCalCom:
 		prefix = "calcom"
+	case models.IntegrationClay:
+		prefix = "clay"
 	}
 	return prefix + "_" + hex.EncodeToString(buf), nil
 }
@@ -1269,6 +1727,8 @@ func BuildInboundURL(provider models.IntegrationProvider, secret string) string 
 		return "/api/v1/integrations/inbound/calendly/" + secret
 	case models.IntegrationCalCom:
 		return "/api/v1/integrations/inbound/cal-com/" + secret
+	case models.IntegrationClay:
+		return "/api/v1/integrations/inbound/clay/" + secret
 	}
 	return ""
 }
@@ -1373,6 +1833,12 @@ func buildDisplayFields(provider models.IntegrationProvider, config map[string]a
 		// Outbound-via-Warmbly-API providers: minimal display fields.
 	case models.IntegrationMillionVerifier, models.IntegrationCleanMyList:
 		// Credits are filled in at connect time from the provider.
+	case models.IntegrationApollo:
+		// The account the key acts as is filled in by the credential check.
+	case models.IntegrationClay:
+		if raw, ok := config["webhook_url"].(string); ok && raw != "" {
+			df["webhook_host"] = urlHost(raw)
+		}
 	}
 	return df
 }
@@ -1528,34 +1994,4 @@ func (s *service) slackChannelFor(ctx context.Context, orgID uuid.UUID, c models
 		}
 	}
 	return ""
-}
-
-// NotifySlack posts a one-off message to the org's connected Slack workspace,
-// on the default channel chosen at connect time. Used by the notification
-// system's Slack delivery channel (distinct from event-subscription actions).
-// Best-effort: returns nil when no healthy Slack connection exists.
-func (s *service) NotifySlack(ctx context.Context, orgID uuid.UUID, title, body string) error {
-	conns, err := s.repo.ListConnections(ctx, orgID)
-	if err != nil {
-		return err
-	}
-	for _, c := range conns {
-		if c.Provider != models.IntegrationSlack || c.Status != models.IntegrationStatusConnected {
-			continue
-		}
-		channel := s.slackChannelFor(ctx, orgID, c)
-		if channel == "" {
-			continue
-		}
-		sec, serr := s.repo.GetConnectionSecrets(ctx, c.ID)
-		if serr != nil {
-			continue
-		}
-		token, terr := s.accessTokenFor(ctx, sec)
-		if terr != nil {
-			continue
-		}
-		return slackPostMessage(ctx, token, channel, eventMessage{Title: title, Detail: body})
-	}
-	return nil
 }

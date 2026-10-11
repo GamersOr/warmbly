@@ -2,6 +2,8 @@ package admin
 
 import (
 	"context"
+	"fmt"
+	"math/bits"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,28 +25,28 @@ type AdminService interface {
 	BanUser(ctx context.Context, adminID, userID uuid.UUID, reason string, scope models.BanScope, ipAddress, userAgent string) *errx.Error
 	UnbanUser(ctx context.Context, adminID, userID uuid.UUID, reason string, ipAddress, userAgent string) *errx.Error
 	GetUserBans(ctx context.Context, userID uuid.UUID) ([]models.UserBan, *errx.Error)
-	GetUserCampaigns(ctx context.Context, userID uuid.UUID, cursor *uuid.UUID, limit int) (*models.AdminCampaignsResult, *errx.Error)
-	GetUserEmails(ctx context.Context, userID uuid.UUID, cursor *uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error)
+	GetUserCampaigns(ctx context.Context, userID uuid.UUID, offset, limit int) (*models.AdminCampaignsResult, *errx.Error)
+	GetUserEmails(ctx context.Context, userID uuid.UUID, offset, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error)
 	GetUserRateLimits(ctx context.Context, userID uuid.UUID) (*models.AdminUserRateLimits, *errx.Error)
 	UpdateUserRateLimits(ctx context.Context, adminID, userID uuid.UUID, update *models.UpdateUserRateLimitsRequest, ipAddress, userAgent string) (*models.AdminUserRateLimits, *errx.Error)
 
 	// Worker Management
-	ListWorkers(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminWorkersResult, *errx.Error)
+	ListWorkers(ctx context.Context, offset, limit int) (*models.AdminWorkersResult, *errx.Error)
 	GetWorkerDetail(ctx context.Context, workerID uuid.UUID) (*models.AdminWorkerDetail, *errx.Error)
 	UpdateWorker(ctx context.Context, adminID, workerID uuid.UUID, update *models.AdminUpdateWorker, ipAddress, userAgent string) *errx.Error
-	GetWorkerEmails(ctx context.Context, workerID uuid.UUID, cursor *uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error)
+	GetWorkerEmails(ctx context.Context, workerID uuid.UUID, beforeAt time.Time, beforeID uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error)
 	GetWorkerStats(ctx context.Context, workerID uuid.UUID) (*models.WorkerStats, *errx.Error)
 	ReassignEmails(ctx context.Context, adminID uuid.UUID, emailIDs []uuid.UUID, newWorkerID uuid.UUID, ipAddress, userAgent string) *errx.Error
 
 	// Warmup Management
 	ListWarmupPools(ctx context.Context) ([]models.WarmupPoolInfo, *errx.Error)
-	GetPoolParticipants(ctx context.Context, poolType string, cursor *uuid.UUID, limit int) (*models.WarmupPoolParticipantsResult, *errx.Error)
-	ListBlockedAccounts(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminBlockedAccountsResult, *errx.Error)
+	GetPoolParticipants(ctx context.Context, poolType string, offset, limit int) (*models.WarmupPoolParticipantsResult, *errx.Error)
+	ListBlockedAccounts(ctx context.Context, offset, limit int) (*models.AdminBlockedAccountsResult, *errx.Error)
 	BlockAccount(ctx context.Context, adminID, accountID uuid.UUID, reason string, ipAddress, userAgent string) *errx.Error
 	UnblockAccount(ctx context.Context, adminID, accountID uuid.UUID, ipAddress, userAgent string) *errx.Error
 
 	// Appeals
-	ListAppeals(ctx context.Context, status string, cursor *uuid.UUID, limit int) (*models.WarmupAppealsResult, *errx.Error)
+	ListAppeals(ctx context.Context, status string, offset, limit int) (*models.WarmupAppealsResult, *errx.Error)
 	GetAppeal(ctx context.Context, appealID uuid.UUID) (*models.WarmupAppeal, *errx.Error)
 	ReviewAppeal(ctx context.Context, adminID, appealID uuid.UUID, approved bool, notes string, ipAddress, userAgent string) *errx.Error
 
@@ -61,7 +63,7 @@ type AdminService interface {
 	GetUserGrowthStats(ctx context.Context, startDate, endDate time.Time) ([]models.UserGrowthStats, *errx.Error)
 
 	// Admin Management
-	ListAdmins(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminsResult, *errx.Error)
+	ListAdmins(ctx context.Context, offset, limit int) (*models.AdminsResult, *errx.Error)
 	GrantAdminPermissions(ctx context.Context, adminID, targetUserID uuid.UUID, permissions models.AdminPermission, ipAddress, userAgent string) *errx.Error
 	RevokeAdminPermissions(ctx context.Context, adminID, targetUserID uuid.UUID, ipAddress, userAgent string) *errx.Error
 
@@ -74,16 +76,71 @@ type AdminService interface {
 	LogAdminAction(ctx context.Context, adminID uuid.UUID, action, targetType string, targetID *uuid.UUID, details map[string]any, ipAddress, userAgent string)
 }
 
+// SessionRevoker ends a user's live sessions. Implemented by the token
+// service, which also clears the Redis session cache: a database-only revoke
+// stays invisible to every request served from cache, which is most of them.
+type SessionRevoker interface {
+	RevokeOtherSessions(ctx context.Context, userID, currentSessionID uuid.UUID) *errx.Error
+}
+
 type adminService struct {
 	repo repository.AdminRepository
 	// The owner-visible campaign activity feed.
 	campaignLogRepo repository.CampaignLogRepository
+	// sessions ends a banned user's live sessions. Nil-safe: without it a ban
+	// still lands, it just does not take effect until the tokens expire.
+	sessions SessionRevoker
+	// opsNotify tells the operator's channels about admin access changes. Nil-safe.
+	opsNotify OperatorNotifier
+}
+
+// OperatorNotifier is the slice of opsnotify this package emits through.
+type OperatorNotifier interface {
+	NotifyOperator(key, title, summary string, fields map[string]string)
+}
+
+// WireOperatorNotifier attaches the operator alert channels.
+func (s *adminService) WireOperatorNotifier(n OperatorNotifier) { s.opsNotify = n }
+
+// notifyAccessChange raises admin.access_changed when the mask actually moved.
+// The key is a literal so this package stays free of opsnotify; it matches
+// opsnotify.EventAdminAccess.
+func (s *adminService) notifyAccessChange(target, actor *models.AdminUserDetail, perms models.AdminPermission) {
+	if s.opsNotify == nil || target == nil || target.AdminPermissions == perms {
+		return
+	}
+	title := "Admin access changed"
+	switch {
+	case target.AdminPermissions == 0:
+		title = "Admin access granted"
+	case perms == 0:
+		title = "Admin access revoked"
+	}
+	by := ""
+	if actor != nil {
+		by = actor.Email
+	}
+	access := "None"
+	switch {
+	case perms.IsSuperAdmin():
+		access = "Every permission (super admin)"
+	case perms != 0:
+		access = fmt.Sprintf("%d permissions", bits.OnesCount32(uint32(perms)))
+	}
+	s.opsNotify.NotifyOperator("admin.access_changed", title, target.Email+": "+title+".", map[string]string{
+		"Account":    target.Email,
+		"Changed by": by,
+		"Access now": access,
+	})
 }
 
 // NewService creates a new admin service
 func NewService(repo repository.AdminRepository, campaignLogRepo repository.CampaignLogRepository) AdminService {
 	return &adminService{repo: repo, campaignLogRepo: campaignLogRepo}
 }
+
+// WithSessionRevoker wires the session revoker used when a login ban lands.
+func (s *adminService) WithSessionRevoker(r SessionRevoker) { s.sessions = r }
 
 // logAction logs an admin action
 func (s *adminService) logAction(ctx context.Context, adminID uuid.UUID, action, targetType string, targetID uuid.UUID, details map[string]any, ipAddress, userAgent string) {
@@ -199,7 +256,21 @@ func (s *adminService) BanUser(ctx context.Context, adminID, userID uuid.UUID, r
 		return errx.New(errx.Internal, "failed to ban user")
 	}
 
+	// A login ban that leaves live sessions alone bans nothing for up to twelve
+	// hours: the access token keeps working, the refresh token mints new ones
+	// from it, and the websocket keeps streaming. uuid.Nil matches no session,
+	// so every one of them is revoked, and a failure is reported rather than
+	// letting the admin trust a ban that left sessions running.
+	var revokeErr *errx.Error
+	if models.BanScope(scope).Has(models.BanScopeLogin) && s.sessions != nil {
+		revokeErr = s.sessions.RevokeOtherSessions(ctx, userID, uuid.Nil)
+	}
+
 	s.logAction(ctx, adminID, "ban_user", "user", userID, map[string]any{"reason": reason, "scope": uint32(scope)}, ipAddress, userAgent)
+	if revokeErr != nil {
+		errs.CaptureException(revokeErr)
+		return errx.NewPublic(errx.Internal, "The ban is recorded, but some of the user's sessions could not be ended. Unban and ban again to retry.")
+	}
 	return nil
 }
 
@@ -237,10 +308,10 @@ func (s *adminService) GetUserBans(ctx context.Context, userID uuid.UUID) ([]mod
 	return bans, nil
 }
 
-func (s *adminService) GetUserCampaigns(ctx context.Context, userID uuid.UUID, cursor *uuid.UUID, limit int) (*models.AdminCampaignsResult, *errx.Error) {
+func (s *adminService) GetUserCampaigns(ctx context.Context, userID uuid.UUID, offset, limit int) (*models.AdminCampaignsResult, *errx.Error) {
 	search := &models.AdminCampaignSearch{
-		UserID: &userID,
-		Cursor: cursor,
+		UserID: &models.ParamUUID{UUID: userID},
+		Offset: offset,
 		Limit:  limit,
 	}
 	result, err := s.repo.SearchCampaigns(ctx, search)
@@ -251,8 +322,8 @@ func (s *adminService) GetUserCampaigns(ctx context.Context, userID uuid.UUID, c
 	return result, nil
 }
 
-func (s *adminService) GetUserEmails(ctx context.Context, userID uuid.UUID, cursor *uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error) {
-	emails, pagination, err := s.repo.GetUserEmails(ctx, userID, cursor, limit)
+func (s *adminService) GetUserEmails(ctx context.Context, userID uuid.UUID, offset, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error) {
+	emails, pagination, err := s.repo.GetUserEmails(ctx, userID, offset, limit)
 	if err != nil {
 		errs.CaptureException(err)
 		return nil, nil, errx.New(errx.Internal, "failed to get user emails")
@@ -285,8 +356,8 @@ func (s *adminService) UpdateUserRateLimits(ctx context.Context, adminID, userID
 
 // Worker Management
 
-func (s *adminService) ListWorkers(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminWorkersResult, *errx.Error) {
-	result, err := s.repo.ListWorkers(ctx, cursor, limit)
+func (s *adminService) ListWorkers(ctx context.Context, offset, limit int) (*models.AdminWorkersResult, *errx.Error) {
+	result, err := s.repo.ListWorkers(ctx, offset, limit)
 	if err != nil {
 		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list workers")
@@ -316,8 +387,8 @@ func (s *adminService) UpdateWorker(ctx context.Context, adminID, workerID uuid.
 	return nil
 }
 
-func (s *adminService) GetWorkerEmails(ctx context.Context, workerID uuid.UUID, cursor *uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error) {
-	emails, pagination, err := s.repo.GetWorkerEmails(ctx, workerID, cursor, limit)
+func (s *adminService) GetWorkerEmails(ctx context.Context, workerID uuid.UUID, beforeAt time.Time, beforeID uuid.UUID, limit int) ([]models.AdminWorkerEmail, *models.Pagination, *errx.Error) {
+	emails, pagination, err := s.repo.GetWorkerEmails(ctx, workerID, beforeAt, beforeID, limit)
 	if err != nil {
 		errs.CaptureException(err)
 		return nil, nil, errx.New(errx.Internal, "failed to get worker emails")
@@ -355,8 +426,8 @@ func (s *adminService) ListWarmupPools(ctx context.Context) ([]models.WarmupPool
 	return pools, nil
 }
 
-func (s *adminService) GetPoolParticipants(ctx context.Context, poolType string, cursor *uuid.UUID, limit int) (*models.WarmupPoolParticipantsResult, *errx.Error) {
-	result, err := s.repo.GetPoolParticipants(ctx, poolType, cursor, limit)
+func (s *adminService) GetPoolParticipants(ctx context.Context, poolType string, offset, limit int) (*models.WarmupPoolParticipantsResult, *errx.Error) {
+	result, err := s.repo.GetPoolParticipants(ctx, poolType, offset, limit)
 	if err != nil {
 		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to get pool participants")
@@ -364,8 +435,8 @@ func (s *adminService) GetPoolParticipants(ctx context.Context, poolType string,
 	return result, nil
 }
 
-func (s *adminService) ListBlockedAccounts(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminBlockedAccountsResult, *errx.Error) {
-	result, err := s.repo.ListBlockedAccounts(ctx, cursor, limit)
+func (s *adminService) ListBlockedAccounts(ctx context.Context, offset, limit int) (*models.AdminBlockedAccountsResult, *errx.Error) {
+	result, err := s.repo.ListBlockedAccounts(ctx, offset, limit)
 	if err != nil {
 		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list blocked accounts")
@@ -395,8 +466,8 @@ func (s *adminService) UnblockAccount(ctx context.Context, adminID, accountID uu
 
 // Appeals
 
-func (s *adminService) ListAppeals(ctx context.Context, status string, cursor *uuid.UUID, limit int) (*models.WarmupAppealsResult, *errx.Error) {
-	result, err := s.repo.ListAppeals(ctx, status, cursor, limit)
+func (s *adminService) ListAppeals(ctx context.Context, status string, offset, limit int) (*models.WarmupAppealsResult, *errx.Error) {
+	result, err := s.repo.ListAppeals(ctx, status, offset, limit)
 	if err != nil {
 		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list appeals")
@@ -555,8 +626,8 @@ func (s *adminService) GetUserGrowthStats(ctx context.Context, startDate, endDat
 
 // Admin Management
 
-func (s *adminService) ListAdmins(ctx context.Context, cursor *uuid.UUID, limit int) (*models.AdminsResult, *errx.Error) {
-	result, err := s.repo.ListAdmins(ctx, cursor, limit)
+func (s *adminService) ListAdmins(ctx context.Context, offset, limit int) (*models.AdminsResult, *errx.Error) {
+	result, err := s.repo.ListAdmins(ctx, offset, limit)
 	if err != nil {
 		errs.CaptureException(err)
 		return nil, errx.New(errx.Internal, "failed to list admins")
@@ -570,12 +641,50 @@ func (s *adminService) GrantAdminPermissions(ctx context.Context, adminID, targe
 		return errx.New(errx.BadRequest, "cannot modify your own permissions")
 	}
 
+	// An admin may only hand out permissions they hold themselves, so holding
+	// grant_admin_access is not by itself a route to every other bit, directly
+	// or in two hops through a colleague. A super admin holds every bit, so this
+	// never blocks them.
+	granter, gerr := s.repo.GetUserDetail(ctx, adminID)
+	if gerr != nil {
+		errs.CaptureException(gerr)
+		return errx.New(errx.Internal, "failed to check admin permissions")
+	}
+	if granter == nil {
+		return errx.ErrForbidden
+	}
+	if permissions&^granter.AdminPermissions != 0 {
+		return errx.New(errx.Forbidden, "cannot grant an admin permission you do not hold yourself")
+	}
+	// The grant replaces the whole mask, so the bits it removes are checked like the bits it adds.
+	target, terr := s.repo.GetUserDetail(ctx, targetUserID)
+	if terr != nil {
+		errs.CaptureException(terr)
+		return errx.New(errx.Internal, "failed to load user")
+	}
+	if target != nil {
+		if (target.AdminPermissions&^permissions)&^granter.AdminPermissions != 0 {
+			return errx.New(errx.Forbidden, "cannot remove an admin permission you do not hold yourself")
+		}
+		if target.AdminPermissions.IsSuperAdmin() && !permissions.IsSuperAdmin() {
+			remaining, cerr := s.repo.CountSuperAdmins(ctx)
+			if cerr != nil {
+				errs.CaptureException(cerr)
+				return errx.New(errx.Internal, "failed to count admins")
+			}
+			if remaining <= 1 {
+				return errx.New(errx.BadRequest, "this is the last super admin; grant another one before changing this one")
+			}
+		}
+	}
+
 	if err := s.repo.UpdateUserAdminPermissions(ctx, targetUserID, uint32(permissions), adminID); err != nil {
 		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to grant admin permissions")
 	}
 
 	s.logAction(ctx, adminID, "grant_admin", "user", targetUserID, map[string]any{"permissions": permissions}, ipAddress, userAgent)
+	s.notifyAccessChange(target, granter, permissions)
 	return nil
 }
 
@@ -585,12 +694,41 @@ func (s *adminService) RevokeAdminPermissions(ctx context.Context, adminID, targ
 		return errx.New(errx.BadRequest, "cannot modify your own permissions")
 	}
 
+	// Refuse to remove the last super admin. warmblyctl already guards this;
+	// the API did not, so the instance could be left with nobody able to grant
+	// admin access back, recoverable only with database access.
+	target, terr := s.repo.GetUserDetail(ctx, targetUserID)
+	if terr != nil {
+		errs.CaptureException(terr)
+		return errx.New(errx.Internal, "failed to load user")
+	}
+	// Revoking removes every bit the target holds, so the revoker must hold them all.
+	revoker, rerr := s.repo.GetUserDetail(ctx, adminID)
+	if rerr != nil {
+		errs.CaptureException(rerr)
+		return errx.New(errx.Internal, "failed to check admin permissions")
+	}
+	if revoker == nil || (target != nil && target.AdminPermissions&^revoker.AdminPermissions != 0) {
+		return errx.New(errx.Forbidden, "cannot remove an admin permission you do not hold yourself")
+	}
+	if target != nil && target.AdminPermissions.IsSuperAdmin() {
+		remaining, cerr := s.repo.CountSuperAdmins(ctx)
+		if cerr != nil {
+			errs.CaptureException(cerr)
+			return errx.New(errx.Internal, "failed to count admins")
+		}
+		if remaining <= 1 {
+			return errx.New(errx.BadRequest, "this is the last super admin; grant another one before revoking this one")
+		}
+	}
+
 	if err := s.repo.UpdateUserAdminPermissions(ctx, targetUserID, 0, adminID); err != nil {
 		errs.CaptureException(err)
 		return errx.New(errx.Internal, "failed to revoke admin permissions")
 	}
 
 	s.logAction(ctx, adminID, "revoke_admin", "user", targetUserID, nil, ipAddress, userAgent)
+	s.notifyAccessChange(target, revoker, 0)
 	return nil
 }
 

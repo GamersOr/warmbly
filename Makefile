@@ -37,12 +37,12 @@ PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.1
 PROTO_DIR := internal/tasks/proto
 PROTO_GEN_FILES := $(PROTO_DIR)/tasks.pb.go
 
-.PHONY: poollink-dev poollink-dev-down poollink-dev-reset setup-tools fmt lint check-migrations join-check split-cloud-check pages-check kafka-check proto check-proto \
+.PHONY: poollink-dev poollink-dev-down poollink-dev-reset setup-tools fmt schemas lint check-migrations join-check split-cloud-check pages-check kafka-check proto check-proto \
         up upgrade claim doctor cli seed-demo seed seed-plan sandbox sandbox-seed sandbox-simulate reset logs status stop down test-seed \
         restart restart-go restart-all infra infra-down app app-down app-logs \
         backend forms forms-web consumer worker run dev tracking realtime web \
         admin site docs grant-admin revoke-admin gen-key installer-sha installer-check installer-demo \
-        db-reset db-wipe migrate warmbly warmbly-dist cli-sha cli-check images-check
+        db-reset db-wipe migrate warmbly warmbly-dist cli-sha cli-check images-check casa-evidence
 
 setup-tools:
 	@echo "Installing required Go tools into $(GO_BIN)"
@@ -81,6 +81,11 @@ cli-check:
 # formatting signal to run before committing, not `go build`.
 fmt:
 	gofmt -w ./cmd ./internal
+
+# Record the bus schemas the next release publishes. CI refuses a change the
+# registry would refuse, and a compatible one until it is recorded here.
+schemas:
+	go test ./internal/app/eventschemas -run TestPublishedSchemasStayCompatible -update
 
 lint: check-migrations join-check split-cloud-check pages-check check-dockerfiles
 	./scripts/check-forms-mirror.sh
@@ -283,7 +288,7 @@ sandbox:
 	@echo "Login: sandbox@warmbly.test / password123 (org: Sunrise Labs). Ctrl-C stops the app; infra stays up."
 	@echo ""
 	@trap 'kill 0' INT TERM; \
-	$(MAKE) --no-print-directory backend & \
+	$(MAKE) --no-print-directory backend MAILVENDOR_SANDBOX_URL=http://127.0.0.1:18099 & \
 	$(MAKE) --no-print-directory consumer & \
 	$(MAKE) --no-print-directory worker & \
 	$(MAKE) --no-print-directory web & \
@@ -630,9 +635,12 @@ WORKER_DEV_ENV := \
 
 # API server on :8080. Applies the embedded migrations on boot against
 # the docker postgres.
+# The sandbox's mock inbox vendor API; empty keeps the real vendors.
+MAILVENDOR_SANDBOX_URL ?=
 backend:
 	$(GO_DEV_ENV) \
 	$(AI_DEV_ENV) \
+	MAILVENDOR_SANDBOX_URL=$(MAILVENDOR_SANDBOX_URL) \
 	API_HOST=0.0.0.0:8080 \
 	FORMS_DOMAIN=localhost:$(FORMS_PORT) \
 	GIN_MODE=debug \
@@ -726,6 +734,12 @@ installer-sha:
 
 # Everything CI runs against the installer: POSIX parse, shellcheck, --help,
 # --print-env, a compose file per answer shape, and the checksum.
+# Generate the CASA dependency-scan artifacts. Read-only against the tree, and
+# it writes outside this repository on purpose: CASA_EVIDENCE_DIR, defaulting
+# to ~/warmbly-casa-private/casa/artifacts.
+casa-evidence:
+	./scripts/casa-evidence.sh
+
 installer-check:
 	@./scripts/check-installer.sh
 

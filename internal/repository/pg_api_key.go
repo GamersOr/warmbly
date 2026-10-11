@@ -104,11 +104,14 @@ func (r *apiKeyRepository) Create(ctx context.Context, orgID, userID uuid.UUID, 
 	return &key, nil
 }
 
+// keyHolderNotBanned stops a key the moment its creator is banned from signing in.
+const keyHolderNotBanned = `
+		AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = api_keys.user_id AND (u.ban_scope & 1) <> 0)`
+
 func (r *apiKeyRepository) GetByHash(ctx context.Context, keyHash string) (*models.APIKey, *errx.Error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM api_keys
-		WHERE key_hash = $1 AND status = 'active'
-	`, API_KEY_SELECT)
+		WHERE key_hash = $1 AND status = 'active'`+keyHolderNotBanned, API_KEY_SELECT)
 
 	var key models.APIKey
 	row := r.DB.QueryRow(ctx, query, keyHash)
@@ -183,7 +186,8 @@ func (r *apiKeyRepository) List(ctx context.Context, orgID uuid.UUID, limit int,
 	hasMore := false
 	if len(keys) > limit {
 		hasMore = true
-		nextCursor = paging.EncodeUUID(keys[limit].ID)
+		// The last row returned: the next page starts strictly below it.
+		nextCursor = paging.EncodeUUID(keys[limit-1].ID)
 		keys = keys[:limit]
 	}
 
@@ -538,7 +542,8 @@ func (r *apiKeyRepository) ListUsageLogs(ctx context.Context, orgID, keyID uuid.
 	hasMore := false
 	if len(logs) > limit {
 		hasMore = true
-		nextCursor = paging.EncodeUUID(logs[limit].ID)
+		// The last row returned: the next page starts strictly below it.
+		nextCursor = paging.EncodeUUID(logs[limit-1].ID)
 		logs = logs[:limit]
 	}
 

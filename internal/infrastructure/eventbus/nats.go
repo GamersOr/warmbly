@@ -194,7 +194,7 @@ func (b *NATSBus) Publish(ctx context.Context, topic, key string, payload []byte
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return errors.New("eventbus nats: bus closed")
+		return ErrBusClosed
 	}
 	b.mu.Unlock()
 
@@ -259,7 +259,8 @@ func (b *NATSBus) Subscribe(ctx context.Context, topics []string, group string, 
 	}
 
 	cc, err := cons.Consume(func(m jetstream.Msg) {
-		hctx, cancel := context.WithTimeout(ctx, handlerTimeout())
+		// A message already being handled finishes after a shutdown signal; only reading the next one stops.
+		hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), handlerTimeout())
 		defer cancel()
 		key := m.Headers().Get("Warmbly-Key")
 		if key == "" {
@@ -302,7 +303,8 @@ func (b *NATSBus) Subscribe(ctx context.Context, topics []string, group string, 
 	if b.closed {
 		b.mu.Unlock()
 		cc.Stop()
-		return errors.New("eventbus nats: bus closed")
+		<-cc.Closed()
+		return ErrBusClosed
 	}
 	b.subscribers = append(b.subscribers, cc)
 	b.mu.Unlock()
@@ -310,6 +312,8 @@ func (b *NATSBus) Subscribe(ctx context.Context, topics []string, group string, 
 	// Block until ctx is cancelled, mirroring KafkaBus.Subscribe semantics.
 	<-ctx.Done()
 	cc.Stop()
+	// Closed fires once the callback in progress has returned, so shutdown waits for it.
+	<-cc.Closed()
 	return ctx.Err()
 }
 
@@ -326,6 +330,7 @@ func (b *NATSBus) Close() error {
 
 	for _, s := range subs {
 		s.Stop()
+		<-s.Closed()
 	}
 	if b.nc != nil {
 		// Drain rather than hard-close to flush in-flight publishes.

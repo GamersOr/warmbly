@@ -10,6 +10,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/audit"
 	"github.com/warmbly/warmbly/internal/app/notification"
 	"github.com/warmbly/warmbly/internal/models"
+	"github.com/warmbly/warmbly/internal/pkg/displayname"
 	"github.com/warmbly/warmbly/internal/repository"
 )
 
@@ -22,6 +23,10 @@ type Service interface {
 	Sweep(ctx context.Context) (int, error)
 	// Clear wipes a campaign's tripped marker. Called when it is started again.
 	Clear(ctx context.Context, campaignID uuid.UUID) error
+	// PausePlacementAlert auto-pauses a campaign whose scheduled placement
+	// test landed below its threshold. The placement alert is the
+	// notification, so this only pauses and records it.
+	PausePlacementAlert(ctx context.Context, orgID, campaignID uuid.UUID, reason string) error
 }
 
 type service struct {
@@ -73,6 +78,28 @@ func (s *service) Sweep(ctx context.Context) (int, error) {
 		s.announce(ctx, c, breach)
 	}
 	return paused, nil
+}
+
+func (s *service) PausePlacementAlert(ctx context.Context, orgID, campaignID uuid.UUID, reason string) error {
+	tripped, err := s.repo.TripGuardrail(ctx, campaignID, reason)
+	if err != nil || !tripped {
+		return err
+	}
+	if s.logRepo != nil {
+		_ = s.logRepo.CreateLog(ctx, &repository.CampaignLogEntry{
+			CampaignID: campaignID,
+			EventType:  "guardrail_paused",
+			Message:    reason,
+			Metadata:   map[string]interface{}{"rule": string(RulePlacement)},
+		})
+	}
+	if s.audit != nil {
+		s.audit.LogAction(ctx, orgID, uuid.Nil,
+			models.AuditActionPause, models.AuditEntityCampaign, &campaignID, "", "",
+			map[string]string{"status": "active -> paused_guardrail"},
+			map[string]string{"reason": string(RulePlacement)})
+	}
+	return nil
 }
 
 func (s *service) Clear(ctx context.Context, campaignID uuid.UUID) error {
@@ -132,7 +159,7 @@ func (s *service) announce(ctx context.Context, c repository.GuardrailCampaign, 
 	if s.notifier != nil {
 		s.notifier.NotifyOrg(ctx, orgID, models.PermViewCampaigns, uuid.Nil,
 			models.NotifCampaignPaused,
-			fmt.Sprintf("%s was paused automatically", c.Name),
+			fmt.Sprintf("%s was paused automatically", displayname.DisplayableOr(c.Name, "A campaign")),
 			b.Reason,
 			"/app/campaigns/"+campaignID.String(),
 			map[string]any{

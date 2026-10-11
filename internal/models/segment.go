@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/errx"
+	"github.com/warmbly/warmbly/internal/pkg/mailhost"
 	"github.com/warmbly/warmbly/internal/utils"
 )
 
@@ -109,6 +110,26 @@ type SegmentFieldSpec struct {
 	Kind  SegmentFieldKind `json:"kind"`
 	// Options lists the accepted values of an enum field.
 	Options []string `json:"options,omitempty"`
+	// OptionLabels names an enum's values for display where the value alone
+	// is not readable; a value missing from it shows as itself.
+	OptionLabels map[string]string `json:"option_labels,omitempty"`
+}
+
+func mailHostOptions() []string {
+	hosts := mailhost.Hosts()
+	out := make([]string, len(hosts))
+	for i, h := range hosts {
+		out[i] = string(h)
+	}
+	return out
+}
+
+func mailHostLabels() map[string]string {
+	out := map[string]string{}
+	for _, h := range mailhost.Hosts() {
+		out[string(h)] = h.Label()
+	}
+	return out
 }
 
 // SegmentFieldCatalog is every non-custom field a condition may name.
@@ -120,13 +141,14 @@ var SegmentFieldCatalog = []SegmentFieldSpec{
 	{Field: "phone", Label: "Phone", Group: "Contact", Kind: SegmentFieldText},
 	{Field: "subscribed", Label: "Subscribed", Group: "Contact", Kind: SegmentFieldBool},
 	{Field: "suppressed", Label: "On the suppression list", Group: "Contact", Kind: SegmentFieldBool},
-	{Field: "source", Label: "Source", Group: "Contact", Kind: SegmentFieldEnum, Options: []string{"unknown", "manual", "campaign", "import", "sheet_sync", "api", "ai_assistant", "form"}},
+	{Field: "source", Label: "Source", Group: "Contact", Kind: SegmentFieldEnum, Options: []string{"unknown", "manual", "campaign", "import", "sheet_sync", "api", "ai_assistant", "form", "apollo", "clay"}},
 	{Field: "verification_status", Label: "Verification status", Group: "Contact", Kind: SegmentFieldEnum, Options: []string{"valid", "risky", "invalid", "unknown"}},
 	{Field: "is_catch_all", Label: "Catch-all domain", Group: "Contact", Kind: SegmentFieldBool},
-	{Field: "esp_provider", Label: "Email provider", Group: "Contact", Kind: SegmentFieldEnum, Options: []string{"gmail", "outlook", "other"}},
+	{Field: "mail_host", Label: "Email provider", Group: "Contact", Kind: SegmentFieldEnum, Options: mailHostOptions(), OptionLabels: mailHostLabels()},
+	{Field: "esp_provider", Label: "Email provider family", Group: "Contact", Kind: SegmentFieldEnum, Options: []string{"gmail", "outlook", "other"}, OptionLabels: map[string]string{"gmail": "Google", "outlook": "Microsoft", "other": "Other"}},
 	{Field: "created_at", Label: "Created", Group: "Contact", Kind: SegmentFieldDate},
 	{Field: "updated_at", Label: "Updated", Group: "Contact", Kind: SegmentFieldDate},
-	{Field: "category", Label: "Category", Group: "Contact", Kind: SegmentFieldCategory},
+	{Field: "category", Label: "Label", Group: "Contact", Kind: SegmentFieldCategory},
 
 	{Field: "company", Label: "Company name", Group: "Company", Kind: SegmentFieldText},
 
@@ -243,6 +265,15 @@ const CampaignSegmentsMax = 20
 // CampaignSegmentsWrite replaces a campaign's linked segments.
 type CampaignSegmentsWrite struct {
 	SegmentIDs []string `json:"segment_ids"`
+}
+
+// CampaignAudienceChange is what replacing a campaign's linked segments did to
+// the leads that were already there. Detaching a link withdraws the audience
+// it brought; Contacted is the part of that audience the campaign had already
+// written to, which stays.
+type CampaignAudienceChange struct {
+	Withdrawn int `json:"withdrawn"`
+	Contacted int `json:"contacted"`
 }
 
 // CampaignSegmentLink is one segment linked to a campaign, for the Leads tab;

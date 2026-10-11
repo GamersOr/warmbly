@@ -36,6 +36,10 @@ type CampaignContactProgress struct {
 	// step ("" when the step has no labels or the AI could not decide). Read by
 	// the ai_label branch conditions.
 	AILabel string
+	// ReplyIntent is the inbox tagging intent of the contact's human reply on
+	// this step (agreed, wants_pricing, not_now, ...; "" when tagging is off or
+	// the classifier was not sure). Read by the reply_intent branch condition.
+	ReplyIntent string
 }
 
 // CampaignProgress represents overall campaign progress
@@ -72,6 +76,10 @@ type ContactSequencePair struct {
 	// "due now". The placer floors its base time with it, so a wait routing
 	// honours can never be dropped by the placement pass.
 	NotBefore *time.Time
+	// Instant is true when the branch that chose SequenceID is an instant one.
+	// Its signal already happened, so the target step's own wait_after does not
+	// gate it and the placer must not re-add that delay (issue #583).
+	Instant bool
 	// AssignedSender is the mailbox this lead's sequence is bound to, set when
 	// its first email was reserved. The placer sends from it rather than
 	// rotating, so every step of one conversation comes from one address.
@@ -107,10 +115,14 @@ type ThreadParent struct {
 	// only means something inside the mailbox that owns it, so a follow-up
 	// leaving from a different address must not carry it.
 	SenderID uuid.UUID
-	// Subject is the conversation's subject, unrendered: the template of the
-	// step that opened the thread, not the parent's own. A reply carries it,
-	// and Gmail refuses to file a message in a thread it does not match.
+	// Subject is the conversation's subject: the one the opening send carried
+	// (its A/B arm's when one replaced the step's), not the parent's own. A
+	// reply carries it, and Gmail refuses to file a message in a thread it
+	// does not match.
 	Subject string
+	// SubjectSent marks Subject as recorded off a send, already rendered for
+	// this contact; otherwise it is the opening step's template.
+	SubjectSent bool
 }
 
 // CampaignProgressRepository defines methods for campaign progress tracking
@@ -157,6 +169,12 @@ type CampaignProgressRepository interface {
 	// A lead with nothing else delivered is unbound from the mailbox that
 	// failed, so rotation can offer it a working one.
 	RecordSendFailure(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string) (attempts int, exhausted bool, rolledBack bool, err error)
+	// WalkBackSend is RecordSendFailure with the attempt optionally left
+	// uncounted, for a failure the retry is known not to repeat.
+	WalkBackSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string, countAttempt bool) (attempts int, exhausted bool, rolledBack bool, err error)
+	// BouncedCopyAddresses reports which of the campaign's own CC/BCC
+	// addresses have bounced on a send of this campaign.
+	BouncedCopyAddresses(ctx context.Context, campaignID uuid.UUID, addresses []string) (map[string]bool, error)
 	// LastSenderForLead is the mailbox a lead was LAST actually sent from,
 	// read from the campaign tasks that dispatched its steps. It answers the
 	// case campaign_leads.email_account_id cannot: a lead removed from the
@@ -183,7 +201,16 @@ type CampaignProgressRepository interface {
 	// the reference point for telling an instant machine open or click from a
 	// person's.
 	GetStepSentAt(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (*time.Time, error)
-	RecordEmailReplied(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
+	// IsInboundReplySource confirms the stored unibox row is not outbound.
+	IsInboundReplySource(ctx context.Context, emailAccountID, messageID uuid.UUID) (bool, error)
+	// CampaignContactSentFromAccount confirms the mailbox sent this contact a campaign step.
+	CampaignContactSentFromAccount(ctx context.Context, campaignID, contactID, emailAccountID uuid.UUID) (bool, error)
+	// ClaimIncomingReply leases one stored inbound message for reply processing.
+	ClaimIncomingReply(ctx context.Context, emailAccountID, messageID uuid.UUID) (uuid.UUID, error)
+	// CompleteIncomingReply prevents a successfully processed message from being retried.
+	CompleteIncomingReply(ctx context.Context, emailAccountID, messageID, claimToken uuid.UUID) error
+	// RecordEmailReplied stamps a human reply while its source is still inbound.
+	RecordEmailReplied(ctx context.Context, campaignID, contactID, sequenceID, emailAccountID, messageID uuid.UUID) (bool, error)
 	RecordEmailBounced(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
 	RecordEmailComplained(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error
 
@@ -198,6 +225,10 @@ type CampaignProgressRepository interface {
 	// on that step. Upserts (the AI step runs before its progress row is stamped
 	// sent). Read by the ai_label branch conditions when routing out of the step.
 	RecordAILabel(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, label string) error
+	// RecordReplyIntent stores the inbox tagging intent of the contact's reply on
+	// the given step. Upserts on the same key as RecordReplyClassification and
+	// touches only reply_intent. Read by the reply_intent branch condition.
+	RecordReplyIntent(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, intent string) error
 	// GetLatestReplyClass returns the most-recent classified reply class for a
 	// contact in a campaign ("" when none). Convenience getter for the branch
 	// evaluator / callers that need only the class.
@@ -264,6 +295,14 @@ type CampaignProgressRepository interface {
 	// their flow goes next, plus the pre-send gate that excludes them, so a
 	// per-contact preview reads the facts the send path reads.
 	RouteContact(ctx context.Context, campaignID, contactID uuid.UUID) (*ContactRoute, error)
+	// LeadSupply runs the same routing over every lead and counts where
+	// each one stands, so a day's plan knows how many sends the leads can
+	// take rather than only how many the mailboxes can give. until is the
+	// end of the day being planned.
+	// unavailable is the pool mailboxes that cannot send for the rest of the
+	// day: a lead bound to one waits for it, as FindRoutedPairs makes it,
+	// rather than counting as a send another mailbox could make.
+	LeadSupply(ctx context.Context, campaignID uuid.UUID, until time.Time, unavailable map[uuid.UUID]bool) (*LeadSupply, error)
 
 	// CountUndeliverableLeads counts the leads FindRoutedPairs excludes
 	// because address verification refused them. Reported when a campaign
@@ -279,6 +318,14 @@ type CampaignProgressRepository interface {
 	// A manual hold always wins. Reports whether it wrote one.
 	// Returns the hold it wrote, or nil when it wrote none.
 	HoldLead(ctx context.Context, campaignID, contactID uuid.UUID, until *time.Time, reason, source string) (*models.LeadHold, error)
+	// HoldLeadEverywhere parks ONE contact's flow in EVERY campaign they are
+	// still a lead of, under the same guard as HoldLead. Returns the campaigns
+	// it actually held, so a caller can tell a refusal from a hold.
+	//
+	// Being away is a property of the person, not of one sequence: a contact
+	// in two live campaigns used to have one of them held while the other kept
+	// writing to the empty desk (issue #518).
+	HoldLeadEverywhere(ctx context.Context, contactID uuid.UUID, until *time.Time, reason, source string) ([]uuid.UUID, error)
 	// ResumeLead lifts the hold now and reports whether there was one to lift.
 	// The held time is dropped rather than carried, because "resume now" means
 	// now: the step's remaining wait is only preserved when a hold ends on its
@@ -291,6 +338,24 @@ type CampaignProgressRepository interface {
 	// including a dated hold that has since expired). Returns
 	// ErrLeadNotInCampaign when the contact is not a lead of the campaign.
 	GetLeadHold(ctx context.Context, campaignID, contactID uuid.UUID) (*models.LeadHold, error)
+
+	// ListLeadCC reads the contacts copied on one lead, each with whether the
+	// next email carries them.
+	ListLeadCC(ctx context.Context, campaignID, contactID uuid.UUID) ([]models.CampaignLeadCC, error)
+	// SetLeadCC replaces the contacts copied on one lead. See the ErrLeadCC
+	// errors for what it refuses.
+	SetLeadCC(ctx context.Context, orgID, campaignID, contactID uuid.UUID, ccIDs []uuid.UUID) error
+	// MarkLeadCCBounced records a bounce on the copy of one lead's thread sent
+	// to address, and returns that copy's contact, or nil when address is not
+	// one of the lead's copies.
+	MarkLeadCCBounced(ctx context.Context, campaignID, contactID uuid.UUID, address string) (*uuid.UUID, error)
+	// LeadForCopiedReply finds the lead whose thread a copied contact is
+	// answering in: the latest email step sent to a lead that copies them
+	// from emailAccountID, or with its Reply-To naming it. Nil when there is none.
+	LeadForCopiedReply(ctx context.Context, ccContactID, emailAccountID uuid.UUID) (*CopiedLeadRef, error)
+	// SuggestLeadCC offers the lead's likely colleagues: same company name, or
+	// the same email domain when that domain is not a personal mail service.
+	SuggestLeadCC(ctx context.Context, orgID, campaignID, contactID uuid.UUID, limit int) ([]models.CampaignLeadCCSuggestion, error)
 }
 
 // ErrLeadNotInCampaign is returned when a hold is asked for on a contact that
@@ -317,7 +382,7 @@ func NewCampaignProgressRepository(db *pgxpool.Pool) CampaignProgressRepository 
 // row, so two ticks that picked the same pair cannot both dispatch. A step
 // walked back after a worker failure has both cleared and is claimable again.
 func (r *campaignProgressRepository) ReserveSend(ctx context.Context, campaignID, contactID, sequenceID, taskID, senderID uuid.UUID, newLead bool) (bool, error) {
-	tx, err := r.db.Begin(ctx)
+	tx, err := beginResultTx(ctx, r.db)
 	if err != nil {
 		return false, err
 	}
@@ -403,7 +468,7 @@ func (r *campaignProgressRepository) ReserveSend(ctx context.Context, campaignID
 // Guarded on sent_at IS NULL so a reservation that was stamped in the meantime
 // (the worker answered first) is never released.
 func (r *campaignProgressRepository) ReleaseSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, newLead bool) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := beginResultTx(ctx, r.db)
 	if err != nil {
 		return err
 	}
@@ -415,8 +480,9 @@ func (r *campaignProgressRepository) ReleaseSend(ctx context.Context, campaignID
 		SET dispatched_at = NULL, dispatch_task_id = NULL
 		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
 		  AND sent_at IS NULL AND dispatched_at IS NOT NULL
+		  AND ($4::uuid IS NULL OR dispatch_task_id = $4 OR dispatch_task_id IS NULL)
 		RETURNING true
-	`, campaignID, contactID, sequenceID).Scan(&released)
+	`, campaignID, contactID, sequenceID, resultTaskID(ctx)).Scan(&released)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -471,7 +537,7 @@ func (r *campaignProgressRepository) RecordEmailSent(ctx context.Context, campai
 		              failed_at = NULL, failure_reason = ''
 	`
 
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
 }
 
@@ -480,12 +546,13 @@ func (r *campaignProgressRepository) RecordEmailSent(ctx context.Context, campai
 // somebody really reserved, and on sent_at so it never moves a stamp that is
 // already there.
 func (r *campaignProgressRepository) StampDispatchedSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) (bool, error) {
-	tag, err := r.db.Exec(ctx, `
+	tag, err := resultDB(ctx, r.db).Exec(ctx, `
 		UPDATE campaign_contact_progress
 		SET sent_at = NOW(), failed_at = NULL, failure_reason = ''
 		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
 		  AND sent_at IS NULL AND dispatched_at IS NOT NULL
-	`, campaignID, contactID, sequenceID)
+		  AND ($4::uuid IS NULL OR dispatch_task_id = $4 OR dispatch_task_id IS NULL)
+	`, campaignID, contactID, sequenceID, resultTaskID(ctx))
 	if err != nil {
 		return false, err
 	}
@@ -498,7 +565,7 @@ func (r *campaignProgressRepository) ListStuckDispatches(ctx context.Context, ol
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := r.db.Query(ctx, `
+	rows, err := resultDB(ctx, r.db).Query(ctx, `
 		SELECT campaign_id, contact_id, sequence_id, dispatch_task_id, dispatched_at
 		FROM campaign_contact_progress
 		WHERE sent_at IS NULL
@@ -527,6 +594,14 @@ func (r *campaignProgressRepository) ListStuckDispatches(ctx context.Context, ol
 // so a duplicate worker result after the step was already walked back (or
 // re-sent) is a no-op.
 func (r *campaignProgressRepository) RecordSendFailure(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string) (int, bool, bool, error) {
+	return r.WalkBackSend(ctx, campaignID, contactID, sequenceID, reason, true)
+}
+
+func (r *campaignProgressRepository) WalkBackSend(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, reason string, countAttempt bool) (int, bool, bool, error) {
+	inc := 0
+	if countAttempt {
+		inc = 1
+	}
 	if len(reason) > 500 {
 		reason = reason[:500]
 	}
@@ -541,11 +616,12 @@ func (r *campaignProgressRepository) RecordSendFailure(ctx context.Context, camp
 			SET sent_at = NULL,
 			    dispatched_at = NULL,
 			    dispatch_task_id = NULL,
-			    send_attempts = send_attempts + 1,
+			    send_attempts = send_attempts + $5,
 			    failed_at = NOW(),
 			    failure_reason = $4
 			WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
 			  AND (sent_at IS NOT NULL OR dispatched_at IS NOT NULL)
+			  AND ($6::uuid IS NULL OR dispatch_task_id = $6 OR dispatch_task_id IS NULL)
 			RETURNING send_attempts
 		), unbound AS (
 			UPDATE campaign_leads cl
@@ -562,7 +638,7 @@ func (r *campaignProgressRepository) RecordSendFailure(ctx context.Context, camp
 		SELECT send_attempts FROM walked
 	`
 	var attempts int
-	err := r.db.QueryRow(ctx, query, campaignID, contactID, sequenceID, reason).Scan(&attempts)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, campaignID, contactID, sequenceID, reason, inc, resultTaskID(ctx)).Scan(&attempts)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, false, false, nil
@@ -578,7 +654,7 @@ func (r *campaignProgressRepository) RecordSendFailure(ctx context.Context, camp
 // set of sends the contact actually received.
 func (r *campaignProgressRepository) LastSenderForLead(ctx context.Context, campaignID, contactID uuid.UUID) (*uuid.UUID, error) {
 	var id uuid.UUID
-	err := r.db.QueryRow(ctx, `
+	err := resultDB(ctx, r.db).QueryRow(ctx, `
 		SELECT t.email_account_id
 		FROM campaign_tasks ct
 		JOIN tasks t ON t.id = ct.task_id
@@ -611,9 +687,12 @@ const threadParentScan = 50
 // Action and wait nodes never reach the tracking stamp that writes a
 // campaign_tasks row, and never carry a Message-ID, so they cannot be picked
 // as a parent.
+//
+// The conversation's subject is read off the sends themselves where they
+// recorded it, and walked from the steps only for sends from before they did.
 func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, campaignID, contactID uuid.UUID) (*ThreadParent, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT t.message_id, t.thread_id, t.email_account_id,
+	rows, err := resultDB(ctx, r.db).Query(ctx, `
+		SELECT t.message_id, t.thread_id, t.email_account_id, ct.subject,
 		       s.id IS NOT NULL, COALESCE(s.subject, ''), COALESCE(s.thread_reply, true)
 		FROM campaign_tasks ct
 		JOIN tasks t ON t.id = ct.task_id
@@ -631,17 +710,24 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 
 	var parent *ThreadParent
 	var subject string
+	var recorded bool
 	for rows.Next() {
 		var (
 			messageID, threadID, stepSubject string
+			sentSubject                      *string
 			senderID                         uuid.UUID
 			stepKnown, threadReply           bool
 		)
-		if err := rows.Scan(&messageID, &threadID, &senderID, &stepKnown, &stepSubject, &threadReply); err != nil {
+		if err := rows.Scan(&messageID, &threadID, &senderID, &sentSubject, &stepKnown, &stepSubject, &threadReply); err != nil {
 			return nil, err
 		}
 		if parent == nil {
 			parent = &ThreadParent{MessageID: messageID, ThreadID: threadID, SenderID: senderID}
+		}
+		// A recorded subject is the conversation's as sent, whichever A/B arm it came from.
+		if sentSubject != nil && *sentSubject != "" {
+			subject, recorded = *sentSubject, true
+			break
 		}
 		// A step that has since been deleted (campaign_tasks.sequence_id is
 		// ON DELETE SET NULL) says nothing about whether it opened a thread or
@@ -668,7 +754,7 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 	if parent == nil {
 		return nil, nil
 	}
-	parent.Subject = subject
+	parent.Subject, parent.SubjectSent = subject, recorded
 	return parent, nil
 }
 
@@ -676,7 +762,7 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 // the contact.
 func (r *campaignProgressRepository) HasSentSteps(ctx context.Context, campaignID, contactID uuid.UUID) (bool, error) {
 	var has bool
-	err := r.db.QueryRow(ctx, `
+	err := resultDB(ctx, r.db).QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM campaign_contact_progress
 			WHERE campaign_id = $1 AND contact_id = $2 AND sent_at IS NOT NULL
@@ -700,7 +786,7 @@ func (r *campaignProgressRepository) RecordEmailOpened(ctx context.Context, camp
 		  AND (opened_at IS NULL OR (opened_machine = true AND $4 = false))
 	`
 
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID, machine)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID, machine)
 	return err
 }
 
@@ -722,7 +808,7 @@ func (r *campaignProgressRepository) RecordEmailClicked(ctx context.Context, cam
 		  AND clicked_at IS NULL
 	`
 
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
 }
 
@@ -756,7 +842,7 @@ func (r *campaignProgressRepository) UnrecordEmailClicked(ctx context.Context, c
 		  )
 	`
 
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
 }
 
@@ -769,7 +855,7 @@ func (r *campaignProgressRepository) GetStepSentAt(ctx context.Context, campaign
 	`
 
 	var sentAt *time.Time
-	err := r.db.QueryRow(ctx, query, campaignID, contactID, sequenceID).Scan(&sentAt)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, campaignID, contactID, sequenceID).Scan(&sentAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -779,19 +865,110 @@ func (r *campaignProgressRepository) GetStepSentAt(ctx context.Context, campaign
 	return sentAt, nil
 }
 
-// RecordEmailReplied records that a contact replied
-func (r *campaignProgressRepository) RecordEmailReplied(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID) error {
+// IsInboundReplySource verifies direction from the row stored by the consumer.
+func (r *campaignProgressRepository) IsInboundReplySource(ctx context.Context, emailAccountID, messageID uuid.UUID) (bool, error) {
+	var inbound bool
+	err := resultDB(ctx, r.db).QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM unibox_emails
+			WHERE id = $1
+			  AND email_id = $2
+			  AND folder NOT IN ('sent', 'drafts')
+			  AND provider_folder NOT IN ('sent', 'drafts')
+		)
+	`, messageID, emailAccountID).Scan(&inbound)
+	return inbound, err
+}
+
+// CampaignContactSentFromAccount proves a cross-mailbox reply arrived at a sender used for this lead.
+func (r *campaignProgressRepository) CampaignContactSentFromAccount(ctx context.Context, campaignID, contactID, emailAccountID uuid.UUID) (bool, error) {
+	var sent bool
+	err := resultDB(ctx, r.db).QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM campaign_tasks campaign_task
+			JOIN tasks task ON task.id = campaign_task.task_id
+			WHERE campaign_task.campaign_id = $1
+			  AND campaign_task.contact_id = $2
+			  AND task.task_type = 'campaign'
+			  AND task.status = 'completed'
+			  AND task.email_account_id = $3
+		)
+	`, campaignID, contactID, emailAccountID).Scan(&sent)
+	return sent, err
+}
+
+const incomingReplyClaimLease = "10 minutes"
+
+// ClaimIncomingReply leases one inbound message so duplicate events cannot repeat its effects.
+func (r *campaignProgressRepository) ClaimIncomingReply(ctx context.Context, emailAccountID, messageID uuid.UUID) (uuid.UUID, error) {
+	claimToken := uuid.New()
+	result, err := resultDB(ctx, r.db).Exec(ctx, `
+		UPDATE unibox_emails
+		SET campaign_reply_claimed_at = NOW(),
+		    campaign_reply_claim_token = $3
+		WHERE id = $1
+		  AND email_id = $2
+		  AND folder NOT IN ('sent', 'drafts')
+		  AND provider_folder NOT IN ('sent', 'drafts')
+		  AND campaign_reply_processed_at IS NULL
+		  AND (
+			campaign_reply_claimed_at IS NULL
+			OR campaign_reply_claimed_at < NOW() - INTERVAL '`+incomingReplyClaimLease+`'
+		  )
+	`, messageID, emailAccountID, claimToken)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if result.RowsAffected() == 0 {
+		return uuid.Nil, nil
+	}
+	return claimToken, nil
+}
+
+// CompleteIncomingReply marks a claimed message as processed.
+func (r *campaignProgressRepository) CompleteIncomingReply(ctx context.Context, emailAccountID, messageID, claimToken uuid.UUID) error {
+	result, err := resultDB(ctx, r.db).Exec(ctx, `
+		UPDATE unibox_emails
+		SET campaign_reply_processed_at = NOW()
+		WHERE id = $1
+		  AND email_id = $2
+		  AND campaign_reply_claim_token = $3
+		  AND campaign_reply_processed_at IS NULL
+	`, messageID, emailAccountID, claimToken)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("incoming reply claim is no longer owned")
+	}
+	return nil
+}
+
+// RecordEmailReplied records that a contact replied when its source is still inbound.
+func (r *campaignProgressRepository) RecordEmailReplied(ctx context.Context, campaignID, contactID, sequenceID, emailAccountID, messageID uuid.UUID) (bool, error) {
 	query := `
 		UPDATE campaign_contact_progress
-		SET replied_at = NOW()
+		SET replied_at = COALESCE(replied_at, NOW())
 		WHERE campaign_id = $1
 		  AND contact_id = $2
 		  AND sequence_id = $3
-		  AND replied_at IS NULL
+		  AND EXISTS (
+			SELECT 1
+			FROM unibox_emails
+			WHERE id = $4
+			  AND email_id = $5
+			  AND folder NOT IN ('sent', 'drafts')
+			  AND provider_folder NOT IN ('sent', 'drafts')
+		  )
 	`
 
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
-	return err
+	result, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID, messageID, emailAccountID)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, nil
 }
 
 // RecordEmailBounced records that an email bounced
@@ -805,7 +982,7 @@ func (r *campaignProgressRepository) RecordEmailBounced(ctx context.Context, cam
 		  AND bounced_at IS NULL
 	`
 
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
 }
 
@@ -820,7 +997,7 @@ func (r *campaignProgressRepository) RecordEmailComplained(ctx context.Context, 
 		  AND complained_at IS NULL
 	`
 
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID)
 	return err
 }
 
@@ -838,7 +1015,7 @@ func (r *campaignProgressRepository) RecordReplyClassification(ctx context.Conte
 		              reply_confidence = EXCLUDED.reply_confidence,
 		              reply_source = EXCLUDED.reply_source
 	`
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID, class, confidence, source)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID, class, confidence, source)
 	return err
 }
 
@@ -850,7 +1027,19 @@ func (r *campaignProgressRepository) RecordAILabel(ctx context.Context, campaign
 		ON CONFLICT (campaign_id, contact_id, sequence_id)
 		DO UPDATE SET ai_label = EXCLUDED.ai_label
 	`
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID, label)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID, label)
+	return err
+}
+
+// RecordReplyIntent persists the inbox tagging intent on the progress row.
+func (r *campaignProgressRepository) RecordReplyIntent(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, intent string) error {
+	query := `
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, reply_intent)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (campaign_id, contact_id, sequence_id)
+		DO UPDATE SET reply_intent = EXCLUDED.reply_intent
+	`
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID, intent)
 	return err
 }
 
@@ -864,7 +1053,7 @@ func (r *campaignProgressRepository) GetResolvedAIVariables(ctx context.Context,
 		WHERE campaign_id = $1 AND contact_id = $2 AND sequence_id = $3
 	`
 	var raw []byte
-	err := r.db.QueryRow(ctx, query, campaignID, contactID, sequenceID).Scan(&raw)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, campaignID, contactID, sequenceID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return map[string]string{}, nil
 	}
@@ -893,7 +1082,7 @@ func (r *campaignProgressRepository) SaveResolvedAIVariable(ctx context.Context,
 			COALESCE(campaign_contact_progress.ai_variables_resolved, '{}'::jsonb)
 			|| jsonb_build_object($4::text, $5::text)
 	`
-	_, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID, varID, text)
+	_, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID, varID, text)
 	return err
 }
 
@@ -908,7 +1097,7 @@ func (r *campaignProgressRepository) GetLatestReplyClass(ctx context.Context, co
 		LIMIT 1
 	`
 	var class string
-	err := r.db.QueryRow(ctx, query, contactID, campaignID).Scan(&class)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, contactID, campaignID).Scan(&class)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -930,58 +1119,54 @@ func (r *campaignProgressRepository) ClaimInstantFire(ctx context.Context, campa
 		  AND sequence_id = $3
 		  AND NOT ($4 = ANY(instant_fired))
 	`
-	tag, err := r.db.Exec(ctx, query, campaignID, contactID, sequenceID, eventKind)
+	tag, err := resultDB(ctx, r.db).Exec(ctx, query, campaignID, contactID, sequenceID, eventKind)
 	if err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
-// GetCampaignProgress retrieves overall campaign progress statistics
+// progressIsEmailStep holds for a campaign_contact_progress row (alias) whose
+// step is an email: action, wait and end steps stamp sent_at for routing but
+// send nothing, so every count of sent mail or replies needs it.
+func progressIsEmailStep(alias string) string {
+	return "EXISTS (SELECT 1 FROM sequences es WHERE es.id = " + alias + ".sequence_id AND es.kind = 'email')"
+}
+
+// GetCampaignProgress retrieves overall campaign progress statistics.
+//
+// Each count comes from its own table. The earlier version joined leads,
+// steps and progress rows side by side on campaign_id, which multiplied every
+// progress count by leads x steps: one sent email on a 63-lead, 6-step
+// campaign read as 378 sent, and the dashboard showed "378 of 63 contacts" at
+// 100%.
 func (r *campaignProgressRepository) GetCampaignProgress(ctx context.Context, campaignID uuid.UUID) (*CampaignProgress, error) {
 	query := `
-		WITH campaign_stats AS (
-			SELECT
-				COUNT(DISTINCT cl.contact_id) as total_contacts,
-				COUNT(DISTINCT s.id) as total_sequences,
-				COUNT(CASE WHEN ccp.sent_at IS NOT NULL THEN 1 END) as emails_sent,
-				COUNT(CASE WHEN ccp.opened_at IS NOT NULL THEN 1 END) as emails_opened,
-				COUNT(CASE WHEN ccp.clicked_at IS NOT NULL THEN 1 END) as emails_clicked,
-				COUNT(CASE WHEN ccp.replied_at IS NOT NULL THEN 1 END) as emails_replied,
-				COUNT(CASE WHEN ccp.bounced_at IS NOT NULL THEN 1 END) as emails_bounced,
-				COUNT(CASE WHEN ccp.complained_at IS NOT NULL THEN 1 END) as emails_complained
-			FROM campaigns c
-			LEFT JOIN campaign_leads cl ON c.id = cl.campaign_id
-			LEFT JOIN sequences s ON c.id = s.campaign_id
-			LEFT JOIN campaign_contact_progress ccp ON c.id = ccp.campaign_id
-			WHERE c.id = $1
-			GROUP BY c.id
-		)
 		SELECT
-			total_contacts,
-			total_sequences,
-			emails_sent,
-			(total_contacts * total_sequences) - emails_sent as emails_pending,
-			emails_opened,
-			emails_clicked,
-			emails_replied,
-			emails_bounced,
-			emails_complained
-		FROM campaign_stats
+			(SELECT COUNT(DISTINCT contact_id) FROM campaign_leads WHERE campaign_id = $1) AS total_contacts,
+			(SELECT COUNT(*) FROM sequences WHERE campaign_id = $1 AND kind = 'email') AS total_sequences,
+			COUNT(*) FILTER (WHERE ccp.sent_at IS NOT NULL AND ` + progressIsEmailStep("ccp") + `) AS emails_sent,
+			COUNT(*) FILTER (WHERE ccp.opened_at IS NOT NULL AND NOT ccp.opened_machine) AS emails_opened,
+			COUNT(*) FILTER (WHERE ccp.clicked_at IS NOT NULL) AS emails_clicked,
+			COUNT(*) FILTER (WHERE ccp.replied_at IS NOT NULL) AS emails_replied,
+			COUNT(*) FILTER (WHERE ccp.bounced_at IS NOT NULL) AS emails_bounced,
+			COUNT(*) FILTER (WHERE ccp.complained_at IS NOT NULL) AS emails_complained
+		FROM campaign_contact_progress ccp
+		WHERE ccp.campaign_id = $1
 	`
 
 	progress := &CampaignProgress{}
-	err := r.db.QueryRow(ctx, query, campaignID).Scan(
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, campaignID).Scan(
 		&progress.TotalContacts,
 		&progress.TotalSequences,
 		&progress.EmailsSent,
-		&progress.EmailsPending,
 		&progress.EmailsOpened,
 		&progress.EmailsClicked,
 		&progress.EmailsReplied,
 		&progress.EmailsBounced,
 		&progress.EmailsComplained,
 	)
+	progress.EmailsPending = max(progress.TotalContacts*progress.TotalSequences-progress.EmailsSent, 0)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return &CampaignProgress{}, nil
@@ -999,11 +1184,11 @@ func (r *campaignProgressRepository) GetCampaignRollingRates(ctx context.Context
 			COUNT(*) FILTER (WHERE sent_at IS NOT NULL AND sent_at >= $2)             AS sent,
 			COUNT(*) FILTER (WHERE bounced_at IS NOT NULL AND bounced_at >= $2)       AS bounced,
 			COUNT(*) FILTER (WHERE complained_at IS NOT NULL AND complained_at >= $2) AS complained
-		FROM campaign_contact_progress
-		WHERE campaign_id = $1
+		FROM campaign_contact_progress p
+		WHERE campaign_id = $1 AND ` + progressIsEmailStep("p") + `
 	`
 	out := &CampaignRollingRates{}
-	err := r.db.QueryRow(ctx, query, campaignID, since).Scan(&out.Sent, &out.Bounced, &out.Complained)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, campaignID, since).Scan(&out.Sent, &out.Bounced, &out.Complained)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &CampaignRollingRates{}, nil
 	}
@@ -1017,13 +1202,14 @@ func (r *campaignProgressRepository) GetContactProgress(ctx context.Context, cam
 	query := `
 		SELECT campaign_id, contact_id, sequence_id, sent_at,
 		       CASE WHEN opened_machine THEN NULL ELSE opened_at END,
-		       clicked_at, replied_at, bounced_at, complained_at, COALESCE(reply_class, ''), COALESCE(ai_label, '')
+		       clicked_at, replied_at, bounced_at, complained_at, COALESCE(reply_class, ''), COALESCE(ai_label, ''),
+		       COALESCE(reply_intent, '')
 		FROM campaign_contact_progress
 		WHERE campaign_id = $1 AND contact_id = $2
 		ORDER BY sent_at ASC
 	`
 
-	rows, err := r.db.Query(ctx, query, campaignID, contactID)
+	rows, err := resultDB(ctx, r.db).Query(ctx, query, campaignID, contactID)
 	if err != nil {
 		return nil, err
 	}
@@ -1044,6 +1230,7 @@ func (r *campaignProgressRepository) GetContactProgress(ctx context.Context, cam
 			&progress.ComplainedAt,
 			&progress.ReplyClass,
 			&progress.AILabel,
+			&progress.ReplyIntent,
 		)
 		if err != nil {
 			return nil, err
@@ -1063,7 +1250,7 @@ func (r *campaignProgressRepository) GetContactLastSequenceTime(ctx context.Cont
 	`
 
 	var lastTime *time.Time
-	err := r.db.QueryRow(ctx, query, contactID, campaignID).Scan(&lastTime)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, contactID, campaignID).Scan(&lastTime)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1085,7 +1272,7 @@ func (r *campaignProgressRepository) CheckContactHasReplied(ctx context.Context,
 	`
 
 	var hasReplied bool
-	err := r.db.QueryRow(ctx, query, contactID, campaignID).Scan(&hasReplied)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, contactID, campaignID).Scan(&hasReplied)
 	return hasReplied, err
 }
 
@@ -1104,21 +1291,22 @@ func (r *campaignProgressRepository) CountEmailsSentTodayByOrganization(ctx cont
 	`
 
 	var count int
-	err := r.db.QueryRow(ctx, query, organizationID).Scan(&count)
+	err := resultDB(ctx, r.db).QueryRow(ctx, query, organizationID).Scan(&count)
 	return count, err
 }
 
 func (r *campaignProgressRepository) GetLatestCampaignSequenceForContact(ctx context.Context, contactID uuid.UUID) (*CampaignSequencePair, error) {
 	query := `
 		SELECT campaign_id, sequence_id
-		FROM campaign_contact_progress
+		FROM campaign_contact_progress p
 		WHERE contact_id = $1
 		  AND sent_at IS NOT NULL
+		  AND ` + progressIsEmailStep("p") + `
 		ORDER BY sent_at DESC
 		LIMIT 1
 	`
 	out := &CampaignSequencePair{}
-	if err := r.db.QueryRow(ctx, query, contactID).Scan(&out.CampaignID, &out.SequenceID); err != nil {
+	if err := resultDB(ctx, r.db).QueryRow(ctx, query, contactID).Scan(&out.CampaignID, &out.SequenceID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1205,7 +1393,22 @@ func (r *campaignProgressRepository) FindRoutedPairs(ctx context.Context, campai
 		return nil, nil, false, nil
 	}
 
-	// 2. Ordered candidate contacts + their last-sent step (with engagement) + sent set.
+	// Candidate selection runs in two phases so a pass never pays for the
+	// campaign's whole audience to find a small batch. Phase one enumerates the
+	// ordered candidate ids cheaply, without the history, classification,
+	// suppression or sent-set work. Phase two hydrates and routes those ids one
+	// bounded chunk at a time through the shared routedLeadsQuery, stopping as
+	// soon as the batch is full. The ordering, holds, due/not-due and
+	// sender-pacing decisions below are exactly the ones the single-query scan
+	// made; only the shape of the SQL work changed.
+
+	// p1args carries phase one's bound parameters. The custom-field key is the
+	// only part of this ORDER BY that comes from a customer, so it is bound
+	// rather than written into the SQL text. This query runs on the scheduler
+	// rather than in a request, which is the worst place to learn that an
+	// identifier was not what it claimed.
+	p1args := []any{campaignID}
+
 	var contactOrder string
 	switch orderBy {
 	case "email":
@@ -1214,7 +1417,8 @@ func (r *campaignProgressRepository) FindRoutedPairs(ctx context.Context, campai
 		contactOrder = "c.first_name, c.last_name"
 	case "custom_field":
 		if orderField != "" {
-			contactOrder = "c.custom_fields->>'" + orderField + "'"
+			p1args = append(p1args, orderField)
+			contactOrder = fmt.Sprintf("c.custom_fields->>$%d", len(p1args))
 		} else {
 			contactOrder = "c.created_at"
 		}
@@ -1228,67 +1432,28 @@ func (r *campaignProgressRepository) FindRoutedPairs(ctx context.Context, campai
 		dir = "DESC"
 	}
 	orderPrefix := ""
+	newLeadJoin := ""
 	if prioritizeNewLeads {
-		// New leads (no last-sent step) first.
+		// New leads (no last-sent step) first. The cheap last-step lookup is the
+		// only join phase one needs, and only for this ordering.
 		orderPrefix = "(lp.sequence_id IS NULL) DESC, "
+		newLeadJoin = `
+			LEFT JOIN LATERAL (
+				SELECT sequence_id FROM campaign_contact_progress p
+				WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
+				ORDER BY p.sent_at DESC LIMIT 1
+			) lp ON true`
 	}
 
-	query := `
-		SELECT cl.contact_id, cl.added_at, cl.email_account_id,
-		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''),
-		       COALESCE(ss.ids, '{}') AS sent_ids,
-		       EXISTS (
-		         SELECT 1 FROM campaign_contact_progress rp
-		         WHERE rp.campaign_id = $1 AND rp.contact_id = cl.contact_id AND rp.replied_at IS NOT NULL
-		       ) AS has_replied,
-		       ` + leadHoldColumns + `
-		FROM campaign_leads cl
-		JOIN contacts c ON c.id = cl.contact_id
-		LEFT JOIN LATERAL (
-			SELECT sequence_id, sent_at,
-			       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END AS opened_at,
-			       clicked_at, replied_at, reply_class, ai_label
-			FROM campaign_contact_progress p
-			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
-			ORDER BY p.sent_at DESC LIMIT 1
-		) lp ON true
-		LEFT JOIN LATERAL (
-			SELECT array_agg(sequence_id) AS ids
-			FROM campaign_contact_progress p2
-			WHERE p2.campaign_id = $1 AND p2.contact_id = cl.contact_id
-			  AND (p2.sent_at IS NOT NULL OR p2.dispatched_at IS NOT NULL)
-		) ss ON true
-		WHERE cl.campaign_id = $1
-		  AND NOT EXISTS (
-		    SELECT 1 FROM campaign_contact_progress b
-		    WHERE b.contact_id = cl.contact_id AND b.bounced_at IS NOT NULL
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM campaign_contact_progress f
-		    WHERE f.campaign_id = $1 AND f.contact_id = cl.contact_id
-		      AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
-		      AND f.send_attempts >= $2
-		  )
-		  -- The workspace suppression list (addresses and domains) and the
-		  -- contact's own subscription flag are both send gates; the audience
-		  -- count applies the same two, so the number shown is the number sent.
-		  AND NOT recipient_suppressed((SELECT organization_id FROM campaigns WHERE id = $1), c.email)
-		  AND c.subscribed IS NOT FALSE
-		  -- Addresses the pre-send gates in the campaign task would refuse.
-		  -- Without this the finder keeps handing back the same undeliverable
-		  -- contact, the task skips it, and the campaign never reaches the
-		  -- healthy leads behind it (issue #200). Read from the contact's
-		  -- CURRENT verification state, so re-verifying an address puts it
-		  -- straight back into routing.
-		  AND NOT ` + undeliverableClause("$1") + `
-		ORDER BY ` + orderPrefix + contactOrder + ` ` + dir + `
-	`
-
-	rows, err := r.db.Query(ctx, query, campaignID, config.CampaignSendMaxAttempts)
+	// A unique, NOT NULL tiebreaker makes the order total and deterministic, so
+	// chunk boundaries land in the same place every pass and a tie (same
+	// created_at, say) resolves the same way rather than arbitrarily.
+	orderExpr := orderPrefix + contactOrder + ` ` + dir + `, cl.contact_id`
+	ordered, err := r.orderedCandidateIDs(ctx, orderExpr, newLeadJoin, p1args)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	defer rows.Close()
+
 	// nextDue is the soonest moment anything becomes sendable: a step whose
 	// wait elapses or a condition window that closes. Only reported when no
 	// contact is due right now.
@@ -1304,64 +1469,132 @@ func (r *campaignProgressRepository) FindRoutedPairs(ctx context.Context, campai
 			waitingOnSender = onSender
 		}
 	}
-	for rows.Next() {
-		var in routeInput
-		var contactID uuid.UUID
-		if serr := rows.Scan(&contactID, &in.addedAt, &in.sender, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.sentIDs, &in.hasReplied,
-			&in.pausedAt, &in.pausedUntil, &in.pauseReason, &in.pauseSource); serr != nil {
-			return nil, nil, false, serr
+
+	hydrateQuery := routedLeadsQuery("", " AND cl.contact_id = ANY($3)")
+	chunkSize := config.CampaignRoutedCandidateChunk
+	for start := 0; start < len(ordered); start += chunkSize {
+		end := start + chunkSize
+		if end > len(ordered) {
+			end = len(ordered)
 		}
-		if in.lastSeq == nil && excludeNewLeads {
-			continue
+		window := ordered[start:end]
+		hydrated, herr := r.hydrateRoutedLeads(ctx, hydrateQuery, campaignID, window)
+		if herr != nil {
+			return nil, nil, false, herr
 		}
-		res := router.route(campaignID, contactID, in)
-		// Held with no end: there is nothing to wake up for, so it must not be
-		// reported as a next-due time either — that would park the campaign's
-		// chain on a moment that never arrives. Checked before the condition
-		// window, which a held lead can also be sitting in.
-		if res.Hold != nil && res.Hold.Until == nil {
-			continue
-		}
-		if res.WaitUntil != nil {
-			// Not decidable yet — remember the soonest window so the scheduler
-			// can re-check exactly then instead of guessing or completing.
-			noteDue(*res.WaitUntil, false)
-			continue
-		}
-		if res.Target == nil {
-			continue // reached the end / a STOP / a step already received
-		}
-		// When is this step due? Skip it (but remember when) if not yet: the
-		// contacts behind this one may be sendable right now.
-		if res.DueAt != nil && res.DueAt.After(router.dueBy) {
-			noteDue(*res.DueAt, false)
-			continue
-		}
-		// Due, but the mailbox this lead's conversation belongs to has nothing
-		// left today. Wait for it — the address a contact has already heard
-		// from is worth more than sending the follow-up a few hours earlier
-		// from a stranger. Only an email step waits: an action or wait node
-		// sends nothing, so no mailbox has to be free for it.
-		if back, ok := paced.reopening(in.sender); ok && router.isEmailStep(*res.Target) {
-			noteDue(back, true)
-			continue
-		}
-		pairs = append(pairs, ContactSequencePair{ContactID: contactID, SequenceID: *res.Target, IsNewLead: res.IsNewLead, NotBefore: res.DueAt, AssignedSender: in.sender})
-		if len(pairs) >= limit {
-			break
+		// Route the window in its phase-one order so the batch keeps routing
+		// order across chunk boundaries.
+		for _, contactID := range window {
+			in, ok := hydrated[contactID]
+			if !ok {
+				// A pre-send gate (bounced, failed past the ceiling, suppressed,
+				// unsubscribed, undeliverable) dropped the lead in hydration,
+				// exactly as the single-query WHERE would have. It is not a
+				// candidate, so it contributes no next-due time either.
+				continue
+			}
+			if in.lastSeq == nil && excludeNewLeads {
+				continue
+			}
+			res := router.route(campaignID, contactID, in)
+			// Held with no end: there is nothing to wake up for, so it must not
+			// be reported as a next-due time either — that would park the
+			// campaign's chain on a moment that never arrives. Checked before the
+			// condition window, which a held lead can also be sitting in.
+			if res.Hold != nil && res.Hold.Until == nil {
+				continue
+			}
+			if res.WaitUntil != nil {
+				// Not decidable yet — remember the soonest window so the scheduler
+				// can re-check exactly then instead of guessing or completing.
+				noteDue(*res.WaitUntil, false)
+				continue
+			}
+			if res.Target == nil {
+				continue // reached the end / a STOP / a step already received
+			}
+			// When is this step due? Skip it (but remember when) if not yet: the
+			// contacts behind this one may be sendable right now.
+			if res.DueAt != nil && res.DueAt.After(router.dueBy) {
+				noteDue(*res.DueAt, false)
+				continue
+			}
+			// Due, but the mailbox this lead's conversation belongs to has
+			// nothing left today. Wait for it — the address a contact has already
+			// heard from is worth more than sending the follow-up a few hours
+			// earlier from a stranger. Only an email step waits: an action or
+			// wait node sends nothing, so no mailbox has to be free for it.
+			if back, ok := paced.reopening(in.sender); ok && router.isEmailStep(*res.Target) {
+				noteDue(back, true)
+				continue
+			}
+			pairs = append(pairs, ContactSequencePair{ContactID: contactID, SequenceID: *res.Target, IsNewLead: res.IsNewLead, Instant: res.Instant, NotBefore: res.DueAt, AssignedSender: in.sender})
+			if len(pairs) >= limit {
+				// A full batch makes the deferral times collected so far
+				// irrelevant: the caller is sending, not waiting. Stop before
+				// hydrating any further chunk.
+				return pairs, nil, false, nil
+			}
 		}
 	}
-	if rerr := rows.Err(); rerr != nil {
-		return nil, nil, false, rerr
-	}
-	// A due pair makes the deferral times collected so far irrelevant: the
-	// caller is sending, not waiting.
+	// A due pair makes the deferral times irrelevant: the caller is sending.
 	if len(pairs) > 0 {
 		return pairs, nil, false, nil
 	}
 	// Nobody sendable now. Hand back the soonest moment somebody will be so the
 	// scheduler defers until then rather than completing.
 	return nil, nextDue, waitingOnSender, nil
+}
+
+// orderedCandidateIDs enumerates a campaign's leads in routing order without
+// the history, classification, suppression or sent-set work the full scan
+// does, so the ordered candidate window is cheap to produce. The pre-send
+// exclusion gates are applied when each lead is hydrated, so an excluded lead
+// never comes back from hydration and the surviving candidates keep the same
+// relative order the single-query scan gave them.
+func (r *campaignProgressRepository) orderedCandidateIDs(ctx context.Context, orderExpr, newLeadJoin string, args []any) ([]uuid.UUID, error) {
+	query := `
+		SELECT cl.contact_id
+		FROM campaign_leads cl
+		JOIN contacts c ON c.id = cl.contact_id` + newLeadJoin + `
+		WHERE cl.campaign_id = $1
+		ORDER BY ` + orderExpr
+	rows, err := resultDB(ctx, r.db).Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if serr := rows.Scan(&id); serr != nil {
+			return nil, serr
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// hydrateRoutedLeads runs the shared routedLeadsQuery for one bounded chunk of
+// already ordered candidate ids, returning the routing input keyed by contact.
+// A candidate a pre-send gate excludes is simply absent from the result.
+func (r *campaignProgressRepository) hydrateRoutedLeads(ctx context.Context, query string, campaignID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]routeInput, error) {
+	rows, err := resultDB(ctx, r.db).Query(ctx, query, campaignID, config.CampaignSendMaxAttempts, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[uuid.UUID]routeInput, len(ids))
+	for rows.Next() {
+		var in routeInput
+		var contactID uuid.UUID
+		if serr := rows.Scan(&contactID, &in.addedAt, &in.sender, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.replyIntent, &in.sentIDs, &in.hasReplied,
+			&in.pausedAt, &in.pausedUntil, &in.pauseReason, &in.pauseSource); serr != nil {
+			return nil, serr
+		}
+		out[contactID] = in
+	}
+	return out, rows.Err()
 }
 
 // ContactRoute is where a contact's flow goes next inside one campaign.
@@ -1371,6 +1604,9 @@ type ContactRoute struct {
 	// condition window is still open (WaitUntil set).
 	Target    *uuid.UUID
 	IsNewLead bool
+	// Instant is true when the branch that chose Target is an instant one, so
+	// Target is due without applying its own wait_after.
+	Instant bool
 	// DueAt is when the target's wait elapses: the campaign's entry delay after
 	// the contact entered for a first step, otherwise the step's wait_after plus
 	// a preceding wait node. Nil means due now.
@@ -1404,7 +1640,7 @@ func (r *campaignProgressRepository) RouteContact(ctx context.Context, campaignI
 	}
 	query := `
 		SELECT cl.added_at, cl.email_account_id,
-		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''),
+		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''), COALESCE(lp.reply_intent, ''),
 		       COALESCE(ss.ids, '{}') AS sent_ids,
 		       ` + leadHoldColumns + `,
 		       EXISTS (
@@ -1429,7 +1665,7 @@ func (r *campaignProgressRepository) RouteContact(ctx context.Context, campaignI
 		LEFT JOIN LATERAL (
 			SELECT sequence_id, sent_at,
 			       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END AS opened_at,
-			       clicked_at, replied_at, reply_class, ai_label
+			       clicked_at, replied_at, reply_class, ai_label, reply_intent
 			FROM campaign_contact_progress p
 			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
 			ORDER BY p.sent_at DESC LIMIT 1
@@ -1444,8 +1680,8 @@ func (r *campaignProgressRepository) RouteContact(ctx context.Context, campaignI
 	`
 	var in routeInput
 	var bounced, failed, suppressed, undeliverable bool
-	err = r.db.QueryRow(ctx, query, campaignID, config.CampaignSendMaxAttempts, contactID).Scan(
-		&in.addedAt, &in.sender, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.sentIDs,
+	err = resultDB(ctx, r.db).QueryRow(ctx, query, campaignID, config.CampaignSendMaxAttempts, contactID).Scan(
+		&in.addedAt, &in.sender, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.replyIntent, &in.sentIDs,
 		&in.pausedAt, &in.pausedUntil, &in.pauseReason, &in.pauseSource,
 		&in.hasReplied, &bounced, &failed, &suppressed, &undeliverable,
 	)
@@ -1470,7 +1706,7 @@ func (r *campaignProgressRepository) RouteContact(ctx context.Context, campaignI
 		return out, nil
 	}
 	res := router.route(campaignID, contactID, in)
-	out.Target, out.IsNewLead, out.DueAt, out.WaitUntil = res.Target, res.IsNewLead, res.DueAt, res.WaitUntil
+	out.Target, out.IsNewLead, out.Instant, out.DueAt, out.WaitUntil = res.Target, res.IsNewLead, res.Instant, res.DueAt, res.WaitUntil
 	out.Hold = res.Hold
 	return out, nil
 }
@@ -1484,10 +1720,10 @@ type routeInput struct {
 	addedAt *time.Time
 	// sender is the mailbox this lead's sequence is bound to, nil until its
 	// first email was reserved.
-	sender              *uuid.UUID
-	replyClass, aiLabel string
-	sentIDs             []uuid.UUID
-	hasReplied          bool
+	sender                           *uuid.UUID
+	replyClass, aiLabel, replyIntent string
+	sentIDs                          []uuid.UUID
+	hasReplied                       bool
 	// The per-lead hold. pausedAt non-nil is the hold itself; pausedUntil nil
 	// means it has no end and only a person lifts it.
 	pausedAt, pausedUntil    *time.Time
@@ -1586,13 +1822,16 @@ type routeResult struct {
 	target *uuid.UUID
 	stop   bool
 	wait   *time.Time
+	// instant is true when the branch that produced `target` is an instant
+	// one, so the target's own wait_after does not gate it.
+	instant bool
 }
 
 // loadRouter reads the steps (position + branch tree + wait) once, ordered by
 // position, and precomputes the reply-flow step set for route-aware
 // stop_on_reply. Returns nil when the campaign has no steps.
 func (r *campaignProgressRepository) loadRouter(ctx context.Context, campaignID uuid.UUID) (*campaignRouter, error) {
-	srows, err := r.db.Query(ctx, `SELECT id, conditions, wait_after, kind, action FROM sequences WHERE campaign_id = $1 ORDER BY position ASC, created_at ASC`, campaignID)
+	srows, err := resultDB(ctx, r.db).Query(ctx, `SELECT id, conditions, wait_after, kind, action FROM sequences WHERE campaign_id = $1 ORDER BY position ASC, created_at ASC`, campaignID)
 	if err != nil {
 		return nil, err
 	}
@@ -1635,7 +1874,7 @@ func (r *campaignProgressRepository) loadRouter(ctx context.Context, campaignID 
 	// reply branch's path (its actions AND any follow-up emails) runs to
 	// completion. Compute the reply-flow step set once and load the flag.
 	var entryDelayMinutes int
-	if serr := r.db.QueryRow(ctx,
+	if serr := resultDB(ctx, r.db).QueryRow(ctx,
 		`SELECT stop_on_reply, entry_delay_minutes, created_at FROM campaigns WHERE id = $1`,
 		campaignID).Scan(&cr.stopOnReply, &entryDelayMinutes, &cr.campaignCreatedAt); serr != nil {
 		return nil, serr
@@ -1733,7 +1972,7 @@ func (cr *campaignRouter) routeNext(fromID uuid.UUID, prog *CampaignContactProgr
 			return routeResult{stop: true}
 		}
 		t := *b.TargetSequenceID
-		return routeResult{target: &t}
+		return routeResult{target: &t, instant: branchIsInstant(b)}
 	}
 	// Nothing matched -> the flow ends with STOP.
 	return routeResult{stop: true}
@@ -1765,7 +2004,7 @@ func (cr *campaignRouter) routeReplyOnly(fromID uuid.UUID, prog *CampaignContact
 			continue
 		}
 		t := *b.TargetSequenceID
-		return routeResult{target: &t}
+		return routeResult{target: &t, instant: branchIsInstant(b)}
 	}
 	return routeResult{stop: true}
 }
@@ -1783,7 +2022,7 @@ func (cr *campaignRouter) route(campaignID, contactID uuid.UUID, in routeInput) 
 		prog := &CampaignContactProgress{
 			CampaignID: campaignID, ContactID: contactID, SequenceID: *in.lastSeq,
 			SentAt: in.sentAt, OpenedAt: in.openedAt, ClickedAt: in.clickedAt, RepliedAt: in.repliedAt,
-			ReplyClass: in.replyClass, AILabel: in.aiLabel,
+			ReplyClass: in.replyClass, AILabel: in.aiLabel, ReplyIntent: in.replyIntent,
 		}
 		sa := time.Time{}
 		if in.sentAt != nil {
@@ -1830,6 +2069,7 @@ func (cr *campaignRouter) route(campaignID, contactID uuid.UUID, in routeInput) 
 		}
 	}
 	out.Target = res.target
+	out.Instant = res.instant
 	switch {
 	case out.IsNewLead:
 		// The entry delay: a contact's first email waits this long after they
@@ -1841,7 +2081,8 @@ func (cr *campaignRouter) route(campaignID, contactID uuid.UUID, in routeInput) 
 			out.DueAt = &due
 		}
 	case in.sentAt != nil:
-		due := in.sentAt.Add(24 * time.Hour * time.Duration(cr.steps[cr.idxByID[*res.target]].waitAfter))
+		wait := BranchWaitAfter(cr.steps[cr.idxByID[*res.target]].waitAfter, res.instant)
+		due := in.sentAt.Add(24 * time.Hour * time.Duration(wait))
 		if last, ok := cr.idxByID[*in.lastSeq]; ok && cr.steps[last].waitMinutes > 0 {
 			due = due.Add(time.Duration(cr.steps[last].waitMinutes) * time.Minute)
 		}
@@ -1948,7 +2189,7 @@ func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context
 	}
 	query := `
 		SELECT cl.contact_id, cl.added_at,
-		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''),
+		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''), COALESCE(lp.reply_intent, ''),
 		       COALESCE(ss.ids, '{}') AS sent_ids,
 		       EXISTS (
 		         SELECT 1 FROM campaign_contact_progress rp
@@ -1959,7 +2200,7 @@ func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context
 		LEFT JOIN LATERAL (
 			SELECT sequence_id, sent_at,
 			       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END AS opened_at,
-			       clicked_at, replied_at, reply_class, ai_label
+			       clicked_at, replied_at, reply_class, ai_label, reply_intent
 			FROM campaign_contact_progress p
 			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
 			ORDER BY p.sent_at DESC LIMIT 1
@@ -1988,7 +2229,7 @@ func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context
 		  AND c.subscribed IS NOT FALSE
 		  AND ` + undeliverableClause("$1") + `
 	`
-	rows, err := r.db.Query(ctx, query, campaignID, config.CampaignSendMaxAttempts)
+	rows, err := resultDB(ctx, r.db).Query(ctx, query, campaignID, config.CampaignSendMaxAttempts)
 	if err != nil {
 		return 0, err
 	}
@@ -1997,7 +2238,7 @@ func (r *campaignProgressRepository) CountUndeliverableLeads(ctx context.Context
 	for rows.Next() {
 		var in routeInput
 		var contactID uuid.UUID
-		if serr := rows.Scan(&contactID, &in.addedAt, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.sentIDs, &in.hasReplied); serr != nil {
+		if serr := rows.Scan(&contactID, &in.addedAt, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.replyIntent, &in.sentIDs, &in.hasReplied); serr != nil {
 			return 0, serr
 		}
 		res := router.route(campaignID, contactID, in)
@@ -2035,6 +2276,35 @@ func scanHold(row pgx.Row, now time.Time) (*models.LeadHold, error) {
 	return &models.LeadHold{Since: *pausedAt, Until: until, Reason: reason, Source: source}, nil
 }
 
+// automaticHoldGuard is what keeps an out-of-office auto-reply from ever
+// shortening or overruling a person's decision: the write is refused unless
+// the lead is unheld, or held by an earlier automatic hold this one extends.
+// alias names the campaign_leads row; untilParam is cast explicitly because
+// inside the guard it is only ever compared, so Postgres has nothing to infer
+// its type from and refuses the statement.
+func automaticHoldGuard(alias, untilParam string) string {
+	return `
+		  AND (
+		    NOT (` + liveHold(alias) + `)
+		    OR (` + alias + `.pause_source IN ('out_of_office', 'inbox_tagging') AND ` + alias + `.paused_until IS NOT NULL
+		        AND (` + untilParam + `::timestamptz IS NULL
+		             OR ` + alias + `.paused_until < ` + untilParam + `::timestamptz))
+		  )`
+}
+
+// crmHoldGuard lets a CRM rule hold a lead that is not held, or replace an
+// automatic hold; it never replaces a member's own pause or a CC hold.
+func crmHoldGuard(alias string) string {
+	return `
+		  AND (NOT (` + liveHold(alias) + `) OR ` + alias + `.pause_source IN ('out_of_office', 'inbox_tagging'))`
+}
+
+// automaticHoldSource reports a hold the system wrote, which a member's own
+// pause always outranks and a longer automatic hold is never cut short by.
+func automaticHoldSource(source string) bool {
+	return source == models.LeadHoldSourceOutOfOffice || source == models.LeadHoldSourceInboxTagging
+}
+
 // HoldLead parks one lead's flow and returns the hold it wrote.
 //
 // Replacing a hold that is still LIVE keeps the original paused_at, because the
@@ -2046,18 +2316,13 @@ func scanHold(row pgx.Row, now time.Time) (*models.LeadHold, error) {
 // overruling a person's decision.
 func (r *campaignProgressRepository) HoldLead(ctx context.Context, campaignID, contactID uuid.UUID, until *time.Time, reason, source string) (*models.LeadHold, error) {
 	guard := ""
-	if source == models.LeadHoldSourceOutOfOffice {
-		// $3 is cast explicitly: inside the guard it is only ever compared, so
-		// Postgres has nothing to infer its type from and refuses the statement.
-		guard = `
-		  AND (
-		    NOT (` + liveHold("campaign_leads") + `)
-		    OR (pause_source = 'out_of_office' AND paused_until IS NOT NULL
-		        AND $3::timestamptz IS NOT NULL AND paused_until < $3::timestamptz)
-		  )`
+	if automaticHoldSource(source) {
+		guard = automaticHoldGuard("campaign_leads", "$3")
+	} else if source == models.LeadHoldSourceCRM {
+		guard = crmHoldGuard("campaign_leads")
 	}
 	now := time.Now()
-	hold, err := scanHold(r.db.QueryRow(ctx, `
+	hold, err := scanHold(resultDB(ctx, r.db).QueryRow(ctx, `
 		UPDATE campaign_leads
 		SET paused_at = CASE WHEN `+liveHold("campaign_leads")+` THEN paused_at ELSE NOW() END,
 		    paused_until = $3,
@@ -2077,6 +2342,54 @@ func (r *campaignProgressRepository) HoldLead(ctx context.Context, campaignID, c
 	return hold, nil
 }
 
+// HoldLeadEverywhere parks one contact's flow in every campaign they are still
+// a lead of, and returns the campaigns it held.
+//
+// One statement rather than a read-then-write loop, so two away messages
+// arriving at once cannot each decide against a snapshot the other has already
+// moved: the guard is evaluated against the row it updates, exactly as in
+// HoldLead.
+//
+// Completed campaigns are left out because nothing in them will send again;
+// draft and paused ones are held, since the contact is still their lead and an
+// away message that lands the day before a campaign starts is about the same
+// desk. Every automatic hold carries an end, so one written into a campaign
+// that never launches expires on its own.
+func (r *campaignProgressRepository) HoldLeadEverywhere(ctx context.Context, contactID uuid.UUID, until *time.Time, reason, source string) ([]uuid.UUID, error) {
+	guard := ""
+	if automaticHoldSource(source) {
+		guard = automaticHoldGuard("cl", "$2")
+	} else if source == models.LeadHoldSourceCRM {
+		guard = crmHoldGuard("cl")
+	}
+	rows, err := resultDB(ctx, r.db).Query(ctx, `
+		UPDATE campaign_leads cl
+		SET paused_at = CASE WHEN `+liveHold("cl")+` THEN cl.paused_at ELSE NOW() END,
+		    paused_until = $2,
+		    pause_reason = NULLIF($3, ''),
+		    pause_source = $4
+		FROM campaigns c
+		WHERE cl.contact_id = $1
+		  AND c.id = cl.campaign_id
+		  AND c.status <> 'completed'`+guard+`
+		RETURNING cl.campaign_id`,
+		contactID, until, reason, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var held []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		held = append(held, id)
+	}
+	return held, rows.Err()
+}
+
 // ResumeLead lifts the hold now. The held time goes with it: "resume now"
 // means now, and the step's remaining wait is only preserved when a hold ends
 // on its own. Reports whether a hold was actually lifted, and
@@ -2086,7 +2399,7 @@ func (r *campaignProgressRepository) ResumeLead(ctx context.Context, campaignID,
 	// RETURNING sees the row AFTER the update, so whether there was a hold to
 	// lift is read from the pre-update snapshot the CTE holds.
 	var held bool
-	err := r.db.QueryRow(ctx, `
+	err := resultDB(ctx, r.db).QueryRow(ctx, `
 		WITH prev AS (
 			SELECT paused_at FROM campaign_leads WHERE campaign_id = $1 AND contact_id = $2
 		), lifted AS (
@@ -2110,7 +2423,7 @@ func (r *campaignProgressRepository) ResumeLead(ctx context.Context, campaignID,
 // so the caller can answer 404 rather than 200 for a contact that was never in
 // the campaign.
 func (r *campaignProgressRepository) GetLeadHold(ctx context.Context, campaignID, contactID uuid.UUID) (*models.LeadHold, error) {
-	hold, err := scanHold(r.db.QueryRow(ctx,
+	hold, err := scanHold(resultDB(ctx, r.db).QueryRow(ctx,
 		`SELECT `+holdColumns+` FROM campaign_leads WHERE campaign_id = $1 AND contact_id = $2`,
 		campaignID, contactID), time.Now())
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -2125,9 +2438,162 @@ func (r *campaignProgressRepository) GetLeadHold(ctx context.Context, campaignID
 // that as "everything sent" and close the campaign (issue #470).
 func (r *campaignProgressRepository) CountHeldLeads(ctx context.Context, campaignID uuid.UUID) (int, error) {
 	var n int
-	err := r.db.QueryRow(ctx, `
+	err := resultDB(ctx, r.db).QueryRow(ctx, `
 		SELECT COUNT(*) FROM campaign_leads cl
-		WHERE cl.campaign_id = $1 AND `+liveHold("cl"),
+		WHERE cl.campaign_id = $1 AND `+liveHold("cl")+`
+		  -- Reached in another lead's thread: nothing is left to wait for.
+		  AND cl.pause_source IS DISTINCT FROM 'cc'`,
 		campaignID).Scan(&n)
 	return n, err
+}
+
+// routedLeadsQuery is the lead scan FindRoutedPairs and LeadSupply share: the
+// campaign's leads with their last-sent step and engagement, minus every lead
+// a pre-send gate would refuse. Both walk it through the same router, so a
+// count can never include a lead the send path would not offer. order is the
+// ORDER BY expression (omitted when empty); extraWhere is appended inside the
+// WHERE so FindRoutedPairs can restrict the scan to a bounded chunk of already
+// ordered candidate ids. $1 is the campaign and $2 the send-attempt ceiling.
+func routedLeadsQuery(order, extraWhere string) string {
+	q := `
+		SELECT cl.contact_id, cl.added_at, cl.email_account_id,
+		       lp.sequence_id, lp.sent_at, lp.opened_at, lp.clicked_at, lp.replied_at, COALESCE(lp.reply_class, ''), COALESCE(lp.ai_label, ''), COALESCE(lp.reply_intent, ''),
+		       COALESCE(ss.ids, '{}') AS sent_ids,
+		       EXISTS (
+		         SELECT 1 FROM campaign_contact_progress rp
+		         WHERE rp.campaign_id = $1 AND rp.contact_id = cl.contact_id AND rp.replied_at IS NOT NULL
+		       ) AS has_replied,
+		       ` + leadHoldColumns + `
+		FROM campaign_leads cl
+		JOIN contacts c ON c.id = cl.contact_id
+		LEFT JOIN LATERAL (
+			SELECT sequence_id, sent_at,
+			       CASE WHEN p.opened_machine THEN NULL ELSE p.opened_at END AS opened_at,
+			       clicked_at, replied_at, reply_class, ai_label, reply_intent
+			FROM campaign_contact_progress p
+			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
+			ORDER BY p.sent_at DESC LIMIT 1
+		) lp ON true
+		LEFT JOIN LATERAL (
+			SELECT array_agg(sequence_id) AS ids
+			FROM campaign_contact_progress p2
+			WHERE p2.campaign_id = $1 AND p2.contact_id = cl.contact_id
+			  AND (p2.sent_at IS NOT NULL OR p2.dispatched_at IS NOT NULL)
+		) ss ON true
+		WHERE cl.campaign_id = $1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM campaign_contact_progress b
+		    WHERE b.contact_id = cl.contact_id AND b.bounced_at IS NOT NULL
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM campaign_contact_progress f
+		    WHERE f.campaign_id = $1 AND f.contact_id = cl.contact_id
+		      AND f.sent_at IS NULL AND f.failed_at IS NOT NULL
+		      AND f.send_attempts >= $2
+		  )
+		  -- The workspace suppression list (addresses and domains) and the
+		  -- contact's own subscription flag are both send gates; the audience
+		  -- count applies the same two, so the number shown is the number sent.
+		  AND NOT recipient_suppressed((SELECT organization_id FROM campaigns WHERE id = $1), c.email)
+		  AND c.subscribed IS NOT FALSE
+		  -- Addresses the pre-send gates in the campaign task would refuse.
+		  -- Without this the finder keeps handing back the same undeliverable
+		  -- contact, the task skips it, and the campaign never reaches the
+		  -- healthy leads behind it (issue #200). Read from the contact's
+		  -- CURRENT verification state, so re-verifying an address puts it
+		  -- straight back into routing.
+		  AND NOT ` + undeliverableClause("$1") + extraWhere
+	if order != "" {
+		q += "\n\t\tORDER BY " + order
+	}
+	return q + "\n\t"
+}
+
+// LeadSupply is where a campaign's routable leads stand, counted for a day's
+// plan. Only email steps count as sends; an action or wait node due now is
+// executed without a mailbox and is not counted anywhere here.
+type LeadSupply struct {
+	// DueNow is the email steps that could go this minute, and
+	// DueNowNewLeads how many of them are first emails.
+	DueNow         int
+	DueNowNewLeads int
+	// DueLaterToday is the email steps whose wait elapses before `until`,
+	// and DueLaterTodayNewLeads how many of those are first emails.
+	DueLaterTodayNewLeads int
+	DueLaterToday         int
+	// WaitingOnStep is the leads whose next step is due after `until`.
+	WaitingOnStep int
+	// WaitingOnCondition is the leads inside an undecided branch window.
+	WaitingOnCondition int
+	// Held is the leads under a live hold with no end.
+	Held int
+	// WaitingOnSender is the due email steps whose own mailbox has nothing
+	// left today; each contact keeps the address they first heard from.
+	WaitingOnSender int
+	// NextDueAt is the soonest moment a waiting lead becomes due.
+	NextDueAt *time.Time
+}
+
+// LeadSupply walks every routable lead through the campaign's routing and
+// tallies where each one stands relative to now and `until`.
+func (r *campaignProgressRepository) LeadSupply(ctx context.Context, campaignID uuid.UUID, until time.Time, unavailable map[uuid.UUID]bool) (*LeadSupply, error) {
+	out := &LeadSupply{}
+	router, err := r.loadRouter(ctx, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	if router == nil {
+		return out, nil
+	}
+	rows, err := resultDB(ctx, r.db).Query(ctx, routedLeadsQuery("c.created_at ASC", ""), campaignID, config.CampaignSendMaxAttempts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	noteDue := func(at time.Time) {
+		if out.NextDueAt == nil || at.Before(*out.NextDueAt) {
+			t := at
+			out.NextDueAt = &t
+		}
+	}
+	for rows.Next() {
+		var in routeInput
+		var contactID uuid.UUID
+		if serr := rows.Scan(&contactID, &in.addedAt, &in.sender, &in.lastSeq, &in.sentAt, &in.openedAt, &in.clickedAt, &in.repliedAt, &in.replyClass, &in.aiLabel, &in.replyIntent, &in.sentIDs, &in.hasReplied,
+			&in.pausedAt, &in.pausedUntil, &in.pauseReason, &in.pauseSource); serr != nil {
+			return nil, serr
+		}
+		res := router.route(campaignID, contactID, in)
+		switch {
+		case res.Hold != nil && res.Hold.Until == nil:
+			out.Held++
+		case res.WaitUntil != nil:
+			out.WaitingOnCondition++
+			noteDue(*res.WaitUntil)
+		case res.Target == nil || !router.isEmailStep(*res.Target):
+			// Finished, or a node that sends nothing.
+		case res.DueAt != nil && res.DueAt.After(router.dueBy):
+			noteDue(*res.DueAt)
+			if res.DueAt.After(until) {
+				out.WaitingOnStep++
+				continue
+			}
+			if in.sender != nil && unavailable[*in.sender] {
+				out.WaitingOnSender++
+				continue
+			}
+			out.DueLaterToday++
+			if res.IsNewLead {
+				out.DueLaterTodayNewLeads++
+			}
+		case in.sender != nil && unavailable[*in.sender]:
+			out.WaitingOnSender++
+		default:
+			out.DueNow++
+			if res.IsNewLead {
+				out.DueNowNewLeads++
+			}
+		}
+	}
+	return out, rows.Err()
 }

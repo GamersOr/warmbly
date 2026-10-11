@@ -2,9 +2,11 @@
 // with its live member count; clicking opens the segment's contact list.
 
 import React from "react";
-import { useNavigate } from "react-router-dom";
+import useBrowseState from "@/hooks/useBrowseState";
+import { browseText } from "@/lib/browse-contacts-campaigns";
+import { useNavigate } from "@tanstack/react-router";
 import { MoreHorizontalIcon, PlusIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import { EmptyBlock, Page, PageBody, PageTopbar, SectionBar, StatStrip, Stat, TopbarAction } from "@/components/layout/Page";
 import { NoAccess } from "@/components/layout/NoAccess";
@@ -54,13 +56,13 @@ function SegmentsList() {
                 conditions: s.conditions,
             });
             toast.success(`Duplicated as ${copy.name}`);
-            navigate(`/app/contacts/segments/${copy.id}`);
+            navigate({ to: "/app/contacts/segments/$id", params: { id: copy.id } });
         } catch (err) {
             toast.error(buildError(err as AppError));
         }
     }
 
-    const [query, setQuery] = React.useState("");
+    const [query, setQuery] = useBrowseState("contacts:segments:query", "", browseText);
     const [editorOpen, setEditorOpen] = React.useState(false);
     const [editing, setEditing] = React.useState<Segment | null>(null);
     const [campaignFor, setCampaignFor] = React.useState<Segment | null>(null);
@@ -151,7 +153,7 @@ function SegmentsList() {
                         body={
                             query
                                 ? "Try a different search."
-                                : "Build an audience from contact fields, categories, campaign activity and engagement, then add it to a campaign in one step."
+                                : "Build an audience from contact fields, labels, campaign activity and engagement, then add it to a campaign in one step."
                         }
                         cta={
                             query ? undefined : (
@@ -168,9 +170,9 @@ function SegmentsList() {
                                 key={s.id}
                                 role="link"
                                 tabIndex={0}
-                                onClick={() => navigate(`/app/contacts/segments/${s.id}`)}
+                                onClick={() => navigate({ to: "/app/contacts/segments/$id", params: { id: s.id } })}
                                 onKeyDown={(e) => {
-                                    if (e.key === "Enter") navigate(`/app/contacts/segments/${s.id}`);
+                                    if (e.key === "Enter") navigate({ to: "/app/contacts/segments/$id", params: { id: s.id } });
                                 }}
                                 className="group h-11 px-5 flex items-center gap-3 border-b border-slate-200/60 transition-colors hover:bg-slate-50/80 cursor-pointer"
                             >
@@ -208,7 +210,7 @@ function SegmentsList() {
                                         </button>
                                     </PopoverMenuTrigger>
                                     <PopoverMenuContent minWidth={180}>
-                                        <PopoverMenuItem onSelect={() => navigate(`/app/contacts/segments/${s.id}`)}>View contacts</PopoverMenuItem>
+                                        <PopoverMenuItem onSelect={() => navigate({ to: "/app/contacts/segments/$id", params: { id: s.id } })}>View contacts</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={guarded(() => openEdit(s))}>Edit conditions</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={campaignGuarded(() => setCampaignFor(s))}>Add to campaign</PopoverMenuItem>
                                         <PopoverMenuItem onSelect={guarded(() => duplicate(s))}>Duplicate</PopoverMenuItem>
@@ -228,7 +230,7 @@ function SegmentsList() {
                 onClose={() => setEditorOpen(false)}
                 segment={editing}
                 onSaved={(saved) => {
-                    if (!editing) navigate(`/app/contacts/segments/${saved.id}`);
+                    if (!editing) navigate({ to: "/app/contacts/segments/$id", params: { id: saved.id } });
                 }}
             />
             {campaignFor && (

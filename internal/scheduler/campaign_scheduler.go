@@ -171,10 +171,14 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// their slots.
 	var leadSlot time.Time
 	leadAccount := accounts[0].ID
+	busy := 0
 	for i := range candidates {
 		at, sendable, accountID, perr := s.placeCampaignSend(ctx, campaign, accounts, senderMetaByID, &candidates[i], pass, false)
 		if !errors.Is(perr, ErrLeadDeferred) {
 			return at, sendable, accountID, perr
+		}
+		if errors.Is(perr, ErrSenderBusy) {
+			busy++
 		}
 		if leadSlot.IsZero() || (!at.IsZero() && at.Before(leadSlot)) {
 			leadSlot, leadAccount = at, accountID
@@ -183,7 +187,11 @@ func (s *schedulerService) CalculateNextCampaignTime(ctx context.Context, campai
 	// Every due lead was refused for its own reason. Re-check on the deferral
 	// horizon rather than completing: the leads are still there, and what
 	// refuses them (a mailbox under budget again, a recipient's morning) comes
-	// back from outside this chain.
+	// back from outside this chain. Said once a day, so a campaign waiting on
+	// its leads is not a campaign that looks stalled for no reason.
+	s.logCampaignDecisionOnce(ctx, campaignID, "leads_waiting",
+		fmt.Sprintf("None of the %d leads due now can be sent this minute: each is waiting for its own mailbox, a same-provider mailbox or its recipient's working hours", len(candidates)),
+		map[string]interface{}{"leads_tried": len(candidates), "waiting_on_sender": busy, "recheck_at": leadSlot.UTC().Format(time.RFC3339)})
 	return leadSlot, nil, leadAccount, ErrCampaignDeferred
 }
 
@@ -255,9 +263,9 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 		}
 	}
 
-	// STEP 3.5: Resolve the recipient ESP/provider for ESP matching. Cheap:
-	// prefer the cached contact.esp_provider, else derive from the domain
-	// string. NEVER dial MX on the hot path. Empty => unknown => wildcard.
+	// STEP 3.5: Resolve the recipient ESP/provider for ESP matching from what
+	// the provider sweep stored, else the domain string. NEVER dial MX on the
+	// hot path. Empty => unknown => wildcard.
 	// STEP 3.4: Recipient-timezone policy. Disabled, absent or unreadable all
 	// leave the send on the sending mailbox's clock.
 	sendPref := s.sendTimePreference(ctx, campaign.OrganizationID)
@@ -272,15 +280,7 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 
 	recipientProvider := ""
 	if campaign.ESPMatchMode != "off" && recipientContact != nil {
-		if recipientContact.ESPProvider != "" {
-			recipientProvider = recipientContact.ESPProvider
-		} else {
-			recipientProvider = providerForEmailDomain(recipientContact.Email)
-			// Opportunistically cache the derived provider (best-effort).
-			if recipientProvider != "" && !preview {
-				_ = s.contactRepo.SetContactESP(ctx, recipientContact.ID, recipientProvider)
-			}
-		}
+		recipientProvider = recipientESP(recipientContact)
 	}
 
 	// STEP 4: Calculate base time from sequence wait_after
@@ -299,8 +299,11 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 			return time.Time{}, nil, uuid.Nil, err
 		}
 
-		// Add wait_after days to last sent time
-		waitDuration := time.Hour * 24 * time.Duration(sequence.WaitAfter)
+		// Add wait_after days to last sent time. A pair an instant branch chose
+		// carries no wait: routing already resolved the branch's flag against
+		// the target step's own wait_after, and re-adding it here would put the
+		// delay straight back (issue #583).
+		waitDuration := time.Hour * 24 * time.Duration(repository.BranchWaitAfter(sequence.WaitAfter, nextPair.Instant))
 		baseTime = lastSentTime.Add(waitDuration)
 	}
 
@@ -327,7 +330,7 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 
 	// STEP 5: Apply campaign schedule constraints
 	// Fall back to UTC if campaign has no timezone set (account timezone checked later)
-	campaignTZName := campaign.Timezone
+	campaignTZName := campaign.ClockTimezone()
 	campaignTZ := loadLocation(campaignTZName)
 	// Authoritative per-day sending windows (or derived from the legacy
 	// days/start/end fields). Drives every day-of-week + time-window gate below.
@@ -412,6 +415,10 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 	budgetSpent := 0
 	hoursClosed := 0
 	healthHeld := 0
+	noWorker := 0
+	recoveryHeld := 0
+	cooling := 0
+	var sendRecheck time.Time
 	var reopensAt time.Time
 	gates := map[uuid.UUID]mailboxGate{}
 
@@ -458,6 +465,15 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 				healthHeld++
 			case gateBudget:
 				budgetSpent++
+			case gateNoWorker:
+				noWorker++
+			case gateRecovery, gateAdmission:
+				recoveryHeld++
+			case gateCooldown:
+				cooling++
+			}
+			if !gate.reopensAt.IsZero() && (sendRecheck.IsZero() || gate.reopensAt.Before(sendRecheck)) {
+				sendRecheck = gate.reopensAt
 			}
 			continue
 		}
@@ -492,7 +508,7 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 			RemainingToday: remaining,
 			WarmupAgeDays:  warmupAgeDays,
 			Weight:         computeWeight(remaining, warmupAgeDays),
-			ProviderMatch:  providerMatches(acct.Provider),
+			ProviderMatch:  providerMatches(senderESP(acct)),
 			Behavior:       pass.behaviors[acct.ID],
 			OpenAt:         openAt,
 			OpenLoc:        openLoc,
@@ -540,6 +556,33 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 	// until midnight are logged once a day, or the feed drowns in them.
 	if len(candidates) == 0 {
 		switch {
+		case recoveryHeld > 0 || cooling > 0:
+			resume := time.Now().Add(workerRecheck)
+			if !sendRecheck.IsZero() && sendRecheck.Before(resume) {
+				resume = sendRecheck
+			}
+			logDecisionOnce("mailboxes_send_recovery",
+				fmt.Sprintf("No mailbox can send right now: %d require send recovery, %d cooling down", recoveryHeld, cooling),
+				map[string]interface{}{"recovery_held": recoveryHeld, "cooling_down": cooling, "pool_size": len(accounts),
+					"mailboxes": s.poolBudget(pass, accounts, gates, uuid.Nil)})
+			return resume, nil, accounts[0].ID, ErrCampaignDeferred
+		case noWorker > 0:
+			// Mailboxes that could send once a worker holds them again, which
+			// the worker reconciler sees to within minutes, unless a mailbox
+			// whose hours reopen sooner comes back first. A deferral, never a
+			// pause, logged under its own name so an earlier line about
+			// budgets or hours does not hide it for the rest of the day.
+			resume := time.Now().Add(workerRecheck)
+			if hoursClosed > 0 {
+				if open := nextScheduleSlot(reopensAt, windows, campaignTZ); open.Before(resume) {
+					resume = open
+				}
+			}
+			logDecisionOnce("mailboxes_no_worker",
+				fmt.Sprintf("No mailbox can send right now: %d not connected to a running sending worker; sending resumes as soon as one is", noWorker),
+				map[string]interface{}{"no_worker": noWorker, "capped_mailboxes": budgetSpent, "hours_closed": hoursClosed,
+					"health_held": healthHeld, "resting_mailboxes": lifecycleGated, "auth_gated": authGated, "pool_size": len(accounts)})
+			return resume, nil, accounts[0].ID, ErrCampaignDeferred
 		case budgetSpent > 0 || hoursClosed > 0:
 			// Resume when the first of them can send again: tomorrow for a
 			// spent budget, the reopening of the mailbox's own 8am-8pm band
@@ -570,7 +613,8 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 			case budgetSpent > 0 && hoursClosed == 0:
 				logDecisionOnce("daily_cap_reached",
 					"Every available mailbox has used its daily budget; sending resumes tomorrow",
-					map[string]interface{}{"capped_mailboxes": budgetSpent, "pool_size": len(accounts)})
+					map[string]interface{}{"capped_mailboxes": budgetSpent, "pool_size": len(accounts),
+						"mailboxes": s.poolBudget(pass, accounts, gates, uuid.Nil)})
 			case budgetSpent > 0:
 				logDecisionOnce("mailboxes_unavailable",
 					fmt.Sprintf("No mailbox can send right now: %d out of budget for today, %d outside their own sending hours",
@@ -580,6 +624,7 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 						"hours_closed":     hoursClosed,
 						"pool_size":        len(accounts),
 						"resumes_at":       resume.UTC().Format(time.RFC3339),
+						"mailboxes":        s.poolBudget(pass, accounts, gates, uuid.Nil),
 					})
 			}
 			return resume, nil, accounts[0].ID, ErrCampaignDeferred
@@ -618,6 +663,9 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 	// from, so once this is set there is nothing left to choose: no rotation, no
 	// ESP matching, no weighting. Those decide which mailbox STARTS a lead.
 	boundCand := pickBound(candidates, prefer)
+	// Every mailbox with budget today, before ESP matching narrows the set:
+	// the "last email today" line below must speak for the whole pool.
+	wholePool := candidates
 
 	// STEP 8.25: Apply ESP matching to the under-budget candidate set.
 	//   strict → only matching mailboxes are eligible; if none, DEFER (never
@@ -693,7 +741,17 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 			// anyway, and the drawer is reporting a time, not a sender.
 			selected = stableCandidate(candidates)
 		} else {
-			selected = selectAccountByRotationMode(campaign.RotationMode, candidates)
+			// A new lead starts on a mailbox whose gap has passed. "prefer"
+			// falls back to the whole pool when no matching one is clear.
+			pick := candidates
+			if clear := s.gapClearCandidates(ctx, pass, candidates); len(clear) > 0 {
+				pick = clear
+			} else if campaign.ESPMatchMode == "prefer" && len(candidates) < len(wholePool) {
+				if clear := s.gapClearCandidates(ctx, pass, wholePool); len(clear) > 0 {
+					pick = clear
+				}
+			}
+			selected = selectAccountByRotationMode(campaign.RotationMode, pick, campaign.ID)
 		}
 	}
 	if selected == nil {
@@ -712,6 +770,11 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 		gapSeconds = s.behaviorGapFloor(selected.Behavior, candidateTime, account.MinWaitTime)
 	} else {
 		gapSeconds = s.behaviorGap(selected.Behavior, candidateTime, account.MinWaitTime)
+		// The gap the selection filter drew, while the send is still today.
+		if drawn, ok := pass.gapDraws[account.ID]; ok &&
+			(!selected.Behavior.Enabled || sameLocalDay(time.Now(), candidateTime, selected.Behavior.Loc)) {
+			gapSeconds = drawn
+		}
 	}
 
 	// leadFloor records that the hard floor below belongs to THIS lead and not
@@ -756,17 +819,20 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 	// per-mailbox guard still binds afterwards — each mailbox's own daily cap
 	// and hourly ceiling gated it into this set, and the min-gap plus conflict
 	// resolution below space its own sends.
-	if remainingEmails := poolRemainingOn(pool, candidateTime); !preview && remainingEmails > 0 {
+	remainingEmails := poolRemainingOn(pool, candidateTime)
+	if !preview && remainingEmails == 1 && poolRemainingOn(wholePool, candidateTime) == 1 {
+		// This send uses the pool's last budget for the day, so the successor
+		// it paces lands tomorrow and no tick runs today to say why. A
+		// campaign sending one email a morning is this line's whole story:
+		// the breakdown names the clamp behind each mailbox's cap.
+		logDecisionOnce("daily_cap_reached",
+			"Sending today's last email: after this one every mailbox on the campaign has used its daily budget, so sending resumes tomorrow",
+			map[string]interface{}{"pool_size": len(accounts), "mailboxes": s.poolBudget(pass, accounts, gates, account.ID)})
+	}
+	if !preview && remainingEmails > 0 {
 		remainingMinutes, ok := remainingSendMinutes(selected, candidateTime, windows, campaignTZ)
 		if ok && remainingMinutes > 0 {
-			// Vary the pace multiplicatively (bursts and lulls) — evenly
-			// metronomed sends are a pattern even with additive jitter.
-			varied := float64(remainingMinutes/remainingEmails) * (0.55 + rand.Float64()*0.9)
-			idealInterval := time.Duration(varied * float64(time.Minute))
-			minInterval := time.Second * time.Duration(gapSeconds)
-			if idealInterval < minInterval {
-				idealInterval = minInterval
-			}
+			idealInterval := poolSendInterval(remainingMinutes, remainingEmails, gapSeconds, len(pool), rand.Float64())
 			distributedTime := time.Now().Add(idealInterval)
 			if distributedTime.After(candidateTime) {
 				candidateTime = distributedTime
@@ -795,14 +861,11 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 			// which is this lead's wait and nobody else's: the lead behind it,
 			// on another mailbox, can still go now.
 			//
-			// An unbound lead keeps the pool-wide answer. Selection does not
-			// look at the min-gap, so rotation can hand an unbound lead a
-			// mailbox that has just sent — but round_robin and
-			// least_recently_used both pick the least-used mailbox, which is
-			// the one that has NOT just sent, and weighted re-draws on the next
-			// tick. Skipping the lead would spend the whole candidate budget
-			// re-deriving one shared gap on a single-mailbox campaign, which is
-			// most of them.
+			// An unbound lead keeps the pool-wide answer. Selection already
+			// prefers a mailbox whose gap has elapsed (gapClearCandidates), so
+			// reaching here means none has. Skipping the lead would spend the
+			// whole candidate budget re-deriving one shared gap on a
+			// single-mailbox campaign, which is most of them.
 			if bound != nil && bound.ID == account.ID {
 				leadFloor = true
 			}
@@ -824,13 +887,16 @@ func (s *schedulerService) placeCampaignSend(ctx context.Context, campaign *mode
 	}
 	candidateTime = notBefore(candidateTime)
 
-	// STEP 12: Check conflicts with other scheduled tasks
+	// STEP 12: Keep clear of sends already booked on this mailbox. Another
+	// campaign's parked wake-up is not one (issue #942): it re-picks its
+	// mailbox when it fires, and the gap is enforced then by STEP 10 and the
+	// send claim, so spacing around it only throttles campaigns sharing a pool.
 	if !preview {
-		scheduledTasks, terr := s.taskRepo.GetScheduledTasksForAccount(ctx, account.ID, candidateTime)
+		booked, terr := s.taskRepo.GetBookedSendsForAccount(ctx, account.ID, candidateTime)
 		if terr != nil {
 			return time.Time{}, nil, uuid.Nil, terr
 		}
-		candidateTime = resolveConflicts(candidateTime, scheduledTasks, gapSeconds)
+		candidateTime = resolveConflicts(candidateTime, booked, gapSeconds)
 	}
 
 	// STEP 13: Apply human-like distribution (favor morning/afternoon peaks).
@@ -919,7 +985,7 @@ func scheduledSlot(t time.Time, preview bool) time.Time {
 // floor is the honest answer anyway, because what the step is waiting for is
 // the day rolling over, not the wake-up the chain happens to have picked.
 func (s *schedulerService) deferToNextDay(campaign *models.Campaign, preview bool) time.Time {
-	tz := loadLocation(campaign.Timezone)
+	tz := loadLocation(campaign.ClockTimezone())
 	windows := effectiveWindows(campaign)
 	if preview {
 		local := time.Now().In(tz)

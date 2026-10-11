@@ -2,12 +2,15 @@
 //
 // The Leads tab could import a file, sync a sheet, or type a new contact, but
 // had no way to pull in people already in the workspace. This dialog searches
-// the contact list (query + categories), shows who is already a lead, and
+// the contact list (query + labels), shows who is already a lead, and
 // attaches the selection through the bulk contact update (add_campaigns), the
 // same path the import wizard uses. "Select all matching" hands the server the
-// search itself, so a whole category is one request with no cap.
+// search itself, so a whole category is one request.
 
 import React from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { browseText, browseIds } from "@/lib/browse-contacts-campaigns";
+import useBrowseDebouncedValue from "@/hooks/useBrowseDebouncedValue";
 import { AnimatePresence, motion } from "framer-motion";
 import {
     AlertCircleIcon,
@@ -16,7 +19,7 @@ import {
     UsersIcon,
     XIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { SearchInput } from "@/components/ui/field";
 import CategoryPicker from "./CategoryPicker";
 import useSearchContacts from "@/lib/api/hooks/app/contacts/useSearchContacts";
@@ -27,16 +30,16 @@ import type Contact from "@/lib/api/models/app/contacts/Contact";
 import type MiniCampaign from "@/lib/api/models/app/campaigns/MiniCampaign";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
-import { cn, hexToRgba } from "@/lib/utils";
+import { cn, hexToRgba, labelInk } from "@/lib/utils";
 import type ContactSelection from "@/lib/api/models/app/contacts/ContactSelection";
 import * as rowSelection from "./selection";
 import type { RowSelection } from "./selection";
 
-// Backend caps: 100 rows per search page, 1000 contacts per explicit batch.
+// Backend caps: 100 rows per search page, 10,000 contacts per explicit batch.
 // "Select all matching" sends the filter instead, so it is not bound by the
 // second one.
 const PAGE = 100;
-const MAX_SELECTION = 1000;
+const MAX_SELECTION = 10_000;
 
 // The target is either a campaign (contacts become leads) or a segment
 // (contacts are pinned in as manual includes).
@@ -65,18 +68,15 @@ export default function AddFromContactsDialog({ open, onClose, campaign: campaig
     );
     const targetName = target.kind === "campaign" ? target.campaign.name : target.segment.name;
 
-    const [query, setQuery] = React.useState("");
-    const [categoryIds, setCategoryIds] = React.useState<string[]>([]);
+    const browseName = `contacts:add-from:${target.kind}:${target.kind === "campaign" ? target.campaign.id : target.segment.id}`;
+    const [query, setQuery] = useBrowseState(`${browseName}:query`, "", browseText);
+    const [categoryIds, setCategoryIds] = useBrowseState<string[]>(`${browseName}:labels`, [], browseIds);
     // Ticked rows, or the search itself minus what was unticked after it; the
     // same two shapes the contacts table uses (./selection).
     const [rowSel, setRowSel] = React.useState<RowSelection>(rowSelection.emptySelection);
 
     // Debounce the query so a fast typist does not fire a search per keystroke.
-    const [debounced, setDebounced] = React.useState("");
-    React.useEffect(() => {
-        const t = setTimeout(() => setDebounced(query.trim()), 200);
-        return () => clearTimeout(t);
-    }, [query]);
+    const debounced = useBrowseDebouncedValue(query.trim(), browseName, 200);
 
     const options = React.useMemo<SearchContacts>(
         () => ({
@@ -95,9 +95,6 @@ export default function AddFromContactsDialog({ open, onClose, campaign: campaig
 
     React.useEffect(() => {
         if (!open) {
-            setQuery("");
-            setDebounced("");
-            setCategoryIds([]);
             setRowSel(rowSelection.emptySelection);
         }
     }, [open]);
@@ -232,9 +229,10 @@ export default function AddFromContactsDialog({ open, onClose, campaign: campaig
                             />
                             <div className="flex-1 min-w-0">
                                 <CategoryPicker
+                                    showMissing
                                     value={categoryIds}
                                     onChange={setCategoryIds}
-                                    placeholder="Filter by category…"
+                                    placeholder="Filter by label…"
                                     allowCreate={false}
                                 />
                             </div>
@@ -290,7 +288,7 @@ export default function AddFromContactsDialog({ open, onClose, campaign: campaig
                                     </p>
                                     <p className="text-[11.5px] text-slate-400 mt-0.5">
                                         {debounced || categoryIds.length > 0
-                                            ? "Try a different search or category."
+                                            ? "Try a different search or label."
                                             : "Import a file or add contacts first."}
                                     </p>
                                 </div>
@@ -343,7 +341,7 @@ export default function AddFromContactsDialog({ open, onClose, campaign: campaig
                                                                 className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10.5px] font-medium truncate"
                                                                 style={{
                                                                     backgroundColor: hexToRgba(cat.color, 0.12),
-                                                                    color: cat.color,
+                                                                    color: labelInk(cat.color),
                                                                 }}
                                                             >
                                                                 <span className="size-1.5 rounded-full shrink-0" style={{ backgroundColor: cat.color }} />

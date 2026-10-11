@@ -125,7 +125,7 @@ ws.example.com      track.example.com    forms.example.com
 
 It also gets a certificate for hostnames that do not exist yet. A workspace on this instance can point its own [tracking domain](/guides/mailboxes/#custom-tracking-domain) or [forms domain](/guides/forms/#custom-domain) here months after the install, and a site block cannot name a host nobody has heard of. The generated Caddyfile carries `on_demand_tls` with an `ask` pointed at the backend, so Caddy obtains a certificate the first time such a name is requested, after the backend confirms this instance has verified it. A name nobody here has verified is refused, so pointing a domain at the machine is not enough to get a certificate out of it.
 
-Behind your own proxy this is yours to arrange: the same custom domains need certificates there, and how depends on the proxy. Caddy takes the same `on_demand_tls` block; nginx needs a certificate per domain.
+Behind your own proxy this is yours to arrange: the same custom domains need certificates there, and how depends on the proxy. Caddy takes the same `on_demand_tls` block; nginx and Traefik need each domain added by hand. [Root redirects](/guides/sending-domains/#root-redirects) are custom domains too: the proxy sends the bare domain and its `www` to the tracking port with the original `Host` header. The sending domains page shows **Not reaching visitors**, and the change for Traefik, nginx, Caddy, Coolify or Dokploy, until it does. An instance [linked to Warmbly Cloud](/guides/warmbly-cloud/#root-redirects-served-by-warmbly-cloud) can have Cloud serve redirects instead.
 
 </Step>
 
@@ -155,7 +155,7 @@ A worker running on another host writes to its own disk. Once you scale workers 
 
 ### Keys and secrets
 
-Five secrets are generated: `AUTH_SECRET`, `INTERNAL_API_TOKEN`, `SECRET_KEY_BASE`, `KMS_LOCAL_MASTER_KEY` and `CREDENTIALS_ENCRYPTION_KEY`. They are written 0600, `APP_ENV` is set to `prod`, and no published default is ever reachable through this path.
+Seven secrets are generated: `AUTH_SECRET`, `INTERNAL_API_TOKEN`, `NODE_BROKER_TOKEN`, `UPDATER_TOKEN`, `SECRET_KEY_BASE`, `KMS_LOCAL_MASTER_KEY` and `CREDENTIALS_ENCRYPTION_KEY`. `INTERNAL_API_TOKEN` is what the tracking and forms services present, `NODE_BROKER_TOKEN` is what workers and consumers present, and `UPDATER_TOKEN` is what the backend presents to the updater, so none of the three opens what another guards. A re-run adopts the ones already in `.env` and adds a missing `UPDATER_TOKEN`; it never adds a `NODE_BROKER_TOKEN` to an existing install, because nodes already joined to it hold only the shared token. They are written 0600, `APP_ENV` is set to `prod`, and no published default is ever reachable through this path.
 
 The last two are unrecoverable. Every mailbox credential and every per-organization key is sealed with them, so a database backup that does not travel with them restores an instance whose mailboxes authenticate against nothing. The wizard prints both, writes them to `keys-backup.txt` next to the install, and waits until you type that you have a copy somewhere else.
 
@@ -176,8 +176,10 @@ Two groups, both editable afterwards in **Instance > Configuration > Settings**:
 | Opens and clicks | 365 days | Per-event logs, with the client, device and approximate location of each |
 | Form funnel events | 180 days | Views, starts, field-level drop-off |
 | Audit log | 90 days | Who did what, from which IP address and user agent |
+| Warmup mail in mailboxes | 30 days | Warmup mail is deleted from each mailbox once older than this, wherever it is filed |
+| Warmup records | 365 days | Per-message warmup tokens, receipts, tampering events and spam reports |
 
-The last three are also how long that personal data is held. A "minimal retention" preset sets every event window to 30 days.
+The opens, forms and audit windows are also how long that personal data is held. A "minimal retention" preset sets those three to 30 days, warmup mail to 7 and warmup records to 30.
 
 </Step>
 
@@ -290,6 +292,22 @@ Put your own compose changes in a `docker-compose.override.yml`, which compose m
 
 ## Updating
 
+Upgrade the backend first and confirm its database migrations complete before upgrading consumers. Consumers wait up to two minutes for the clean migration version required by their embedded code before starting database-dependent work. If the backend is still old or a migration failed, the consumer exits with an actionable schema-readiness error and can retry through the container restart policy. It does not run migrations or ignore missing tables.
+
+### Mailbox sync upgrade order
+
+For durable mailbox arrivals, upgrade the backend, let its migrations complete, then upgrade and start the consumer before upgrading workers. The backend admits each new provider map and its organization-encrypted arrival payload in one database transaction; the consumer delivers pending stages after restart. Workers continue using internal HTTP endpoints and do not need database access. Preserve the instance's organization keys and body storage with the database, as described in [data control](/development/data-control/#mailbox-sync-recovery-data).
+
+An old worker with a new backend still writes legacy map-only records. A new worker with an old backend falls back only when the durable internal endpoint is absent (HTTP 404 or 405). Neither mixed-version path has the new durable-admission guarantee. A backend failure or an acknowledgement without the durable marker is not treated as success. When a conflicting map has no retained pending payload, the backend fails closed instead of claiming a durable admission; this includes a retry after the pending row has already been delivered and removed. Ordinary map lookup still deduplicates that message.
+
+Existing completed imports and maps are preserved. Pre-upgrade maps contain no replay payload, so an old lost arrival cannot be reconstructed from the map alone. Bounded provider recovery covers supported recent history, not an unlimited historical repair. [Mailbox sync](/guides/mailboxes/#what-gets-synced) explains the provider limits.
+
+Keep the upgraded consumer running until all pending arrivals finish before downgrading. The migration refuses to remove the arrival table while any pending row remains. Do not delete queued rows or force a migration version to bypass that refusal. An older consumer cannot drain this queue. Pending arrivals are instance-local and do not move in a workspace export.
+
+Fleet auto-updates select releases no newer than the running backend. Existing fleet and node pins are checked again when answering heartbeats, so an incompatible stored target is not sent to nodes; new incompatible pins are rejected. Newly joined machines fall back to the backend's exact release, not the moving `prod` tag. Main builds use their published commit-SHA image tag. Unstamped custom builds must set `WARMBLY_VERSION` to their published image tag; unknown versions cannot be ordered safely. Upgrade the backend before moving the fleet to a newer release. This protection only takes effect after installing the compatibility release; it cannot change the behavior of an older backend already running.
+
+The dashboard discovers a separate realtime origin from the backend's existing public configuration at container startup or static build time. Bring the backend up first; if discovery warns that it is unavailable, restart the dashboard after backend readiness or rebuild the static deployment. See [configuration](/development/configuration/).
+
 The version pill in the admin panel, then **Update and restart**. On an install created this way the updater runs in image mode: it writes the new tag into `.env`, pulls, and recreates the containers whose image changed. Nothing is built. See [updates](/development/updates/).
 
 By hand, from the install directory:
@@ -297,6 +315,8 @@ By hand, from the install directory:
 ```bash
 docker compose -p warmbly pull && docker compose -p warmbly up -d
 ```
+
+An update does not cut off work in progress. The generated stack gives each application container 60 seconds to stop (`stop_grace_period`), and in that time the backend finishes a mailbox connect already under way and the import rows it is connecting, and a worker finishes the send it is on. Anything still unfinished after that is picked up again by the new containers: a mailbox a worker was loading on its first heartbeat, and an import row once its 2-minute lease runs out. See [updates without lost work](/development/deployment-guide/#updates-without-lost-work).
 
 ## Removing it
 
@@ -315,6 +335,7 @@ Stops and removes the containers and leaves every byte of data where it is. Addi
 | `Could not pull the release images` | The tag does not exist, or this host cannot reach `ghcr.io`. Check [releases](https://github.com/warmbly/warmbly/releases) |
 | `The registry refused to serve the release images` | The images are not readable without an account, which is never how a release is meant to ship. Please [report it](https://github.com/warmbly/warmbly/issues). If you passed `--registry`, check it for a typo first: a namespace that does not exist is refused the same way. To get past it, point `--registry` at a mirror you can read, or `docker login ghcr.io` as someone who already has access to the packages. Logging in does not by itself grant it |
 | The API never answers | The first boot applies every migration. `docker compose -p warmbly logs -f backend` |
+| The consumer waits for backend migrations | Consumers wait up to two minutes for the database version required by their image to be clean, then verify that required warmup tables are visible. Update the backend first, check its migration logs and confirm both services use the same database and search path. A dirty migration needs investigation; do not force its version to make the consumer start. |
 | No claim link printed | The database already has accounts, so there is nothing to claim. See [first run](/development/first-run/) |
 
 More in [troubleshooting](/development/troubleshooting/) and [instance health](/development/instance-health/).
@@ -332,4 +353,5 @@ The worker has to be the one on that machine. A `docker compose` install puts it
 - [First run](/development/first-run/): claiming the instance, the first owner, demo data
 - [Data control](/development/data-control/): where every store lives, what each retention window governs, backups, and moving an instance
 - [Configuration](/development/configuration/): every environment variable and every database-backed setting
+- [Whole-domain mailbox connects](/development/whole-domain-connect/): the Google service account and Microsoft app that let a workspace connect a whole Google Workspace domain or Microsoft 365 organization
 - [Self-hosting](/development/deployment-guide/): the full guide, including building from source

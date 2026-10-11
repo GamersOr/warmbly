@@ -1,15 +1,16 @@
 import RippleProvider from "@/hooks/RippleProvider";
-import { useDocumentTitle } from "@/hooks/useDocumentTitle";
-import { Outlet } from "react-router-dom";
+import { ThemeProvider } from "@/components/layout/ThemeProvider";
+import { DocumentTitle } from "@/hooks/useDocumentTitle";
+import { Outlet } from "@tanstack/react-router";
 
 export default function RootLayout() {
-  // Keep the browser tab title in sync with the active route across the whole
-  // app (auth, onboarding, dashboard). See useDocumentTitle for the route map.
-  useDocumentTitle();
-
   return (
-    <RippleProvider>
-      <Outlet />
-    </RippleProvider>
+    <ThemeProvider>
+      <RippleProvider>
+        {/* Tab title for every page; the titles live on the routes in router.tsx. */}
+        <DocumentTitle />
+        <Outlet />
+      </RippleProvider>
+    </ThemeProvider>
   );
 }

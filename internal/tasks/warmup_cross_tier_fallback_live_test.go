@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	warmupapp "github.com/warmbly/warmbly/internal/app/warmup"
-	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/encrypt"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -94,8 +93,8 @@ func (f *crossTierFixture) memberOf(t *testing.T, org, poolID uuid.UUID, provenD
 	t.Helper()
 	id := uuid.New()
 	f.exec(t, `INSERT INTO email_accounts (id, user_id, organization_id, email, name, signature_plain, signature_html,
-	          provider, status, campaign_limit, min_wait_time, timezone)
-	      VALUES ($1, $2, $3, $4, 'Borrow', '', '', 'smtp_imap', 'active', 50, 600, 'UTC')`,
+	          provider, status, campaign_limit, min_wait_time, timezone, test_mode, test_send_enabled, test_receive_enabled)
+	      VALUES ($1, $2, $3, $4, 'Borrow', '', '', 'smtp_imap', 'active', 50, 600, 'UTC', 'diagnostic', true, true)`,
 		id, f.user, org, "borrow-"+id.String()[:8]+"@test.local")
 	f.exec(t, `INSERT INTO warmup_pool_participants (pool_id, email_account_id, participant_role, health_state, joined_at)
 	      VALUES ($1, $2, 'sender_receiver', 'healthy', NOW() - make_interval(days => $3))`, poolID, id, provenDays)
@@ -106,10 +105,94 @@ func (f *crossTierFixture) sender(id uuid.UUID, tier string) models.Email {
 	return models.Email{ID: id, OrganizationID: &f.org, WarmupPoolType: tier}
 }
 
+func TestLiveWarmupBorrowCoverageInALargePremiumPool(t *testing.T) {
+	f := newCrossTierFixture(t)
+	sender := f.member(t, models.WarmupPoolPremiumID, 0)
+	outside := f.workspace(t, models.OrgRiskTrusted)
+	for range 30 {
+		id := f.memberOf(t, outside, models.WarmupPoolPremiumID, 0)
+		f.exec(t, `UPDATE email_accounts SET provider='gmail', mail_host='google_workspace', email=$2 WHERE id=$1`, id, "warmup@"+id.String()+".test")
+	}
+	gmail := f.memberOf(t, outside, models.WarmupPoolFreeID, 4)
+	f.exec(t, `UPDATE email_accounts SET email=$2 WHERE id=$1`, gmail, gmail.String()+"@gmail.com")
+	tooNew := f.memberOf(t, outside, models.WarmupPoolFreeID, 1)
+	f.exec(t, `UPDATE email_accounts SET email=$2 WHERE id=$1`, tooNew, tooNew.String()+"@gmail.com")
+	candidates, err := f.svc.warmupRepo.WarmupPartnerCandidates(context.Background(), "premium", sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range candidates {
+		if c.ID == tooNew {
+			t.Fatal("borrowed an unproven Gmail mailbox")
+		}
+		if c.ID == gmail {
+			found = true
+			if c.Origin != models.WarmupPartnerBorrowed || c.PoolType != "free" {
+				t.Fatalf("coverage metadata = %+v", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("large Workspace pool hid absent Gmail coverage")
+	}
+	hits := 0
+	for range 200 {
+		partner, err := f.svc.selectWarmupPartner(context.Background(), f.sender(sender, "premium"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if partner.ID == gmail {
+			hits++
+		}
+	}
+	if hits < 60 || hits > 140 {
+		t.Fatalf("Gmail coverage draws %d/200, want roughly half", hits)
+	}
+	f.exec(t, `UPDATE email_accounts SET test_receive_enabled=false WHERE id=$1`, gmail)
+	candidates, err = f.svc.warmupRepo.WarmupPartnerCandidates(context.Background(), "premium", sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range candidates {
+		if c.ID == gmail {
+			t.Fatal("coverage borrowed a mailbox that stopped receiving")
+		}
+	}
+	f.exec(t, `UPDATE email_accounts SET test_receive_enabled=true WHERE id=$1`, gmail)
+	for _, state := range []string{"watch", "throttled", "quarantined", "blocked"} {
+		f.exec(t, `UPDATE warmup_pool_participants SET health_state=$2 WHERE email_account_id=$1`, gmail, state)
+		candidates, err = f.svc.warmupRepo.WarmupPartnerCandidates(context.Background(), "premium", sender)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range candidates {
+			if c.ID == gmail {
+				t.Fatalf("premium borrowed a %s free receiver", state)
+			}
+		}
+	}
+	f.exec(t, `UPDATE warmup_pool_participants SET health_state='healthy' WHERE email_account_id=$1`, gmail)
+	for range 10 {
+		task := uuid.New()
+		f.exec(t, `INSERT INTO tasks (id, task_type, email_account_id, status, message_id) VALUES ($1,'warmup',$2,'pending','')`, task, sender)
+		f.exec(t, `INSERT INTO warmup_tokens (task_id,sender_account_id,recipient_account_id) VALUES ($1,$2,$3)`, task, sender, gmail)
+	}
+	candidates, err = f.svc.warmupRepo.WarmupPartnerCandidates(context.Background(), "premium", sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range candidates {
+		if c.ID == gmail {
+			t.Fatal("host balancing overrode the receiving cap")
+		}
+	}
+}
+
 func TestLiveWarmupBorrowThinPremiumTierBorrowsAProvenFreeMailbox(t *testing.T) {
 	f := newCrossTierFixture(t)
 	sender := f.member(t, models.WarmupPoolPremiumID, 0)
-	borrowed := f.member(t, models.WarmupPoolFreeID, 4)
+	borrowed := f.memberOf(t, f.workspace(t, models.OrgRiskTrusted), models.WarmupPoolFreeID, 4)
 
 	partner, err := f.svc.selectWarmupPartner(context.Background(), f.sender(sender, "premium"))
 	if err != nil {
@@ -143,42 +226,60 @@ func TestLiveWarmupBorrowSkipsARestrictedWorkspace(t *testing.T) {
 	}
 }
 
-func TestLiveWarmupBorrowPrefersAFreshOwnTierPartner(t *testing.T) {
+func TestLiveWarmupBorrowIncludesProvenFreeAlongsideFreshPaid(t *testing.T) {
 	f := newCrossTierFixture(t)
 	sender := f.member(t, models.WarmupPoolPremiumID, 0)
-	own := f.member(t, models.WarmupPoolPremiumID, 0)
+	outside := f.workspace(t, models.OrgRiskTrusted)
+	own := f.memberOf(t, outside, models.WarmupPoolPremiumID, 0)
 	for i := 0; i < 5; i++ {
-		f.member(t, models.WarmupPoolFreeID, 4)
+		f.memberOf(t, outside, models.WarmupPoolFreeID, 4)
 	}
 
-	partner, err := f.svc.selectWarmupPartner(context.Background(), f.sender(sender, "premium"))
-	if err != nil {
-		t.Fatal(err)
+	paid := 0
+	for range 100 {
+		partner, err := f.svc.selectWarmupPartner(context.Background(), f.sender(sender, "premium"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if partner.ID == own {
+			paid++
+		}
 	}
-	if partner.ID != own {
-		t.Fatalf("chose %s over the fresh own-tier partner %s", partner.ID, own)
+	if paid > 40 {
+		t.Fatalf("paid inbox received %d/100 draws despite five equally healthy proven free recipients", paid)
 	}
 }
 
-// The floor counts the other mailboxes: a premium tier of exactly the floor
-// including the sender is one short and still borrows.
-func TestLiveWarmupBorrowFloorCountsTheOtherMailboxes(t *testing.T) {
+func TestLiveWarmupBorrowStillAvoidsPartnersUsedToday(t *testing.T) {
 	f := newCrossTierFixture(t)
 	sender := f.member(t, models.WarmupPoolPremiumID, 0)
+	outside := f.workspace(t, models.OrgRiskTrusted)
 	// Every own-tier partner was used today, so only a borrowed one can be picked.
-	for i := 1; i < config.WarmupPoolTierFallbackFloor; i++ {
-		own := f.member(t, models.WarmupPoolPremiumID, 0)
+	for i := 1; i < 25; i++ {
+		own := f.memberOf(t, outside, models.WarmupPoolPremiumID, 0)
 		task := uuid.New()
 		f.exec(t, `INSERT INTO tasks (id, task_type, email_account_id, status, message_id) VALUES ($1, 'warmup', $2, 'completed', '')`, task, sender)
 		f.exec(t, `INSERT INTO warmup_tokens (task_id, sender_account_id, recipient_account_id) VALUES ($1, $2, $3)`, task, sender, own)
 	}
-	borrowed := f.member(t, models.WarmupPoolFreeID, 4)
+	borrowed := f.memberOf(t, outside, models.WarmupPoolFreeID, 4)
 
 	partner, err := f.svc.selectWarmupPartner(context.Background(), f.sender(sender, "premium"))
 	if err != nil {
-		t.Fatalf("a premium tier at the floor including its sender did not borrow: %v", err)
+		t.Fatalf("no fresh partner after excluding today's paid recipients: %v", err)
 	}
 	if partner.ID != borrowed {
 		t.Fatalf("selected %s, want the borrowed free mailbox %s", partner.ID, borrowed)
+	}
+}
+
+// Borrowing a mailbox from the sender's own workspace would add nothing the
+// siblings do not, so the borrow looks only outside it.
+func TestLiveWarmupBorrowSkipsTheSendersOwnWorkspace(t *testing.T) {
+	f := newCrossTierFixture(t)
+	sender := f.member(t, models.WarmupPoolPremiumID, 0)
+	f.member(t, models.WarmupPoolFreeID, 4)
+
+	if partner, err := f.svc.selectWarmupPartner(context.Background(), f.sender(sender, "premium")); !errors.Is(err, errNoWarmupPartners) {
+		t.Fatalf("got (%v, %v); the sender's own free mailbox must not be borrowed", partner, err)
 	}
 }

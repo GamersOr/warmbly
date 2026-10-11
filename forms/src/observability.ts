@@ -16,7 +16,7 @@
 // surface where that is the right call: the screen would be somebody typing
 // their answers into a customer's form. Pageviews, autocapture, heatmaps, web
 // vitals, exceptions and the named funnel events below all work without it.
-import type { PostHog } from "posthog-js";
+import type { CaptureResult, PostHog } from "posthog-js";
 
 let client: PostHog | null = null;
 
@@ -60,6 +60,7 @@ export function initErrorReporting(): void {
                           capture_console_errors: true,
                       }
                     : false,
+                before_send: dropBrowserNoise,
             });
             // Named so form-page events are separable from the dashboard's in a
             // shared project, the same way the Go services set a service
@@ -113,4 +114,34 @@ export function track(event: Event, form: string): void {
         return;
     }
     if (pending && pending.length < PENDING_LIMIT) pending.push({ event, form });
+}
+
+// Browser noise: reported by the window error handler with no stack and no bug
+// behind it. A form page is embedded in a customer's own site, so a script of
+// theirs failing arrives here as the opaque "Script error."; the ResizeObserver
+// notice is a benign scheduling message the spec requires browsers to fire.
+// The dashboard, the admin panel and the marketing site drop the same three.
+const NOISE = [
+    "Script error.",
+    "ResizeObserver loop completed with undelivered notifications.",
+    "ResizeObserver loop limit exceeded",
+];
+
+function dropBrowserNoise(event: CaptureResult | null): CaptureResult | null {
+    if (!event?.properties || event.event !== "$exception") return event;
+    const exceptionList = event.properties.$exception_list;
+    if (Array.isArray(exceptionList) && exceptionList.some((exception) => {
+        if (!exception || typeof exception !== "object") return false;
+        const entry = exception as Record<string, unknown>;
+        const value = entry.value ?? entry.$exception_value;
+        return typeof value === "string" && NOISE.includes(value.trim());
+    })) return null;
+    const message = event.properties.$exception_message;
+    if (typeof message === "string" && NOISE.includes(message.trim())) return null;
+    // Keep accepting flattened payloads while cached SDK chunks are still in
+    // browsers during a rolling release.
+    const values = event.properties.$exception_values;
+    if (!Array.isArray(values)) return event;
+    if (values.some((v) => typeof v === "string" && NOISE.includes(v.trim()))) return null;
+    return event;
 }

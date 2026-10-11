@@ -14,20 +14,24 @@ import (
 
 type TokenRepository interface {
 	GenerateSession(ctx context.Context, tx pgx.Tx, session *models.Session) *errx.Error
+	// StampReauth records that this session just re-proved the account holder.
+	StampReauth(ctx context.Context, sessionID uuid.UUID, at time.Time) error
 	GetSession(ctx context.Context, sessionID uuid.UUID) (*models.Session, *errx.Error)
 	ListSessionsByUser(ctx context.Context, userID uuid.UUID) ([]*models.Session, *errx.Error)
 	RefreshToken(ctx context.Context, sessionID uuid.UUID, oldRefreshNonce, refreshNonce, accessNonce string, issuedAt time.Time) *errx.Error
+	// RevokeOnRefreshReuse revokes the session when the presented refresh nonce
+	// is neither current nor the one rotated away from after raceSince, and
+	// reports whether it did.
+	RevokeOnRefreshReuse(ctx context.Context, sessionID uuid.UUID, presentedNonce string, raceSince time.Time) (bool, *errx.Error)
 	RevokeSession(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, revokedAt time.Time) *errx.Error
 	RevokeSessionByID(ctx context.Context, userID, sessionID uuid.UUID, revokedAt time.Time) (bool, *errx.Error)
 	ListOtherActiveSessionIDs(ctx context.Context, userID, exceptID uuid.UUID) ([]uuid.UUID, *errx.Error)
 	RevokeOtherSessions(ctx context.Context, userID, exceptID uuid.UUID) *errx.Error
 
-	FindExpiredSessions(ctx context.Context, userID uuid.UUID, cutoff time.Time) ([]uuid.UUID, *errx.Error)
-	RevokeSessions(ctx context.Context, userID uuid.UUID) *errx.Error
-
 	// Organization switching
 	UpdateCurrentOrganization(ctx context.Context, sessionID uuid.UUID, orgID *uuid.UUID) *errx.Error
 	DefaultOrganization(ctx context.Context, userID uuid.UUID) (*uuid.UUID, *errx.Error)
+	ClearOrganization(ctx context.Context, userID, orgID uuid.UUID) ([]uuid.UUID, *errx.Error)
 }
 
 type tokenRepository struct {
@@ -47,13 +51,13 @@ func (r *tokenRepository) GenerateSession(ctx context.Context, tx pgx.Tx, sessio
 		 created_at, expires_at, last_refreshed_at, revoked_at,
 		 access_nonce, refresh_nonce,
 		 location_city, location_region, location_country, location_country_code, location_postal_code,
-		 os_name, browser_name, auth_provider
+		 os_name, browser_name, auth_provider, mfa_verified, reauth_at
 		) VALUES (
 		 $1, $2, $3,
 		 $4, $5, $6, $7,
 		 $8, $9,
 		 $10, $11, $12, $13, $14,
-		 $15, $16, $17
+		 $15, $16, $17, $18, $19
 		)
 	`
 
@@ -62,7 +66,7 @@ func (r *tokenRepository) GenerateSession(ctx context.Context, tx pgx.Tx, sessio
 		session.CreatedAt, session.ExpiresAt, session.LastRefreshedAt, session.RevokedAt,
 		session.AccessNonce, session.RefreshNonce,
 		session.LocationCity, session.LocationRegion, session.LocationCountry, session.LocationCountryCode, session.LocationPostalCode,
-		session.OSName, session.BrowserName, session.AuthProvider,
+		session.OSName, session.BrowserName, session.AuthProvider, session.MFAVerified, session.ReauthAt,
 	}
 
 	_, err := tx.Exec(
@@ -84,7 +88,7 @@ func (r *tokenRepository) GetSession(ctx context.Context, sessionID uuid.UUID) (
 		 created_at, expires_at, last_refreshed_at, revoked_at,
 		 access_nonce, refresh_nonce,
 		 location_city, location_region, location_country, location_country_code, location_postal_code,
-		 os_name, browser_name, auth_provider
+		 os_name, browser_name, auth_provider, mfa_verified, reauth_at
 		FROM sessions
 		WHERE id = $1
 	`
@@ -104,7 +108,7 @@ func (r *tokenRepository) GetSession(ctx context.Context, sessionID uuid.UUID) (
 		&sess.CreatedAt, &sess.ExpiresAt, &sess.LastRefreshedAt, &sess.RevokedAt,
 		&sess.AccessNonce, &sess.RefreshNonce,
 		&sess.LocationCity, &sess.LocationRegion, &sess.LocationCountry, &sess.LocationCountryCode, &sess.LocationPostalCode,
-		&sess.OSName, &sess.BrowserName, &sess.AuthProvider,
+		&sess.OSName, &sess.BrowserName, &sess.AuthProvider, &sess.MFAVerified, &sess.ReauthAt,
 	)
 	if err != nil {
 		// A missing session row is an expected auth outcome, not a server
@@ -132,7 +136,7 @@ func (r *tokenRepository) ListSessionsByUser(ctx context.Context, userID uuid.UU
 		 created_at, expires_at, last_refreshed_at, revoked_at,
 		 access_nonce, refresh_nonce,
 		 location_city, location_region, location_country, location_country_code, location_postal_code,
-		 os_name, browser_name, auth_provider
+		 os_name, browser_name, auth_provider, mfa_verified, reauth_at
 		FROM sessions
 		WHERE user_id = $1
 		  AND revoked_at IS NULL
@@ -157,7 +161,7 @@ func (r *tokenRepository) ListSessionsByUser(ctx context.Context, userID uuid.UU
 			&sess.CreatedAt, &sess.ExpiresAt, &sess.LastRefreshedAt, &sess.RevokedAt,
 			&sess.AccessNonce, &sess.RefreshNonce,
 			&sess.LocationCity, &sess.LocationRegion, &sess.LocationCountry, &sess.LocationCountryCode, &sess.LocationPostalCode,
-			&sess.OSName, &sess.BrowserName, &sess.AuthProvider,
+			&sess.OSName, &sess.BrowserName, &sess.AuthProvider, &sess.MFAVerified, &sess.ReauthAt,
 		); err != nil {
 			db.CaptureError(err, "", nil, "scan")
 			return nil, errx.InternalError()
@@ -258,8 +262,8 @@ func (r *tokenRepository) RefreshToken(ctx context.Context, sessionID uuid.UUID,
 	query := `
 		UPDATE sessions
 		SET last_refreshed_at = $5,
-		 access_nonce = $1, refresh_nonce = $2
-		WHERE refresh_nonce = $3 AND id = $4
+		 access_nonce = $1, refresh_nonce = $2, previous_refresh_nonce = $3
+		WHERE refresh_nonce = $3 AND id = $4 AND revoked_at IS NULL
 	`
 
 	params := []any{
@@ -285,6 +289,26 @@ func (r *tokenRepository) RefreshToken(ctx context.Context, sessionID uuid.UUID,
 	return nil
 }
 
+func (r *tokenRepository) RevokeOnRefreshReuse(ctx context.Context, sessionID uuid.UUID, presentedNonce string, raceSince time.Time) (bool, *errx.Error) {
+	query := `
+		UPDATE sessions
+		SET revoked_at = now()
+		WHERE id = $1
+		  AND revoked_at IS NULL
+		  AND refresh_nonce IS DISTINCT FROM $2
+		  AND NOT (previous_refresh_nonce IS NOT DISTINCT FROM $2 AND last_refreshed_at > $3)
+	`
+
+	params := []any{sessionID, presentedNonce, raceSince}
+
+	cmd, err := r.DB.Exec(ctx, query, params...)
+	if err != nil {
+		db.CaptureError(err, query, params, "exec")
+		return false, errx.InternalError()
+	}
+	return cmd.RowsAffected() > 0, nil
+}
+
 func (r *tokenRepository) RevokeSession(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, revokedAt time.Time) *errx.Error {
 	query := `
 		UPDATE sessions
@@ -297,72 +321,6 @@ func (r *tokenRepository) RevokeSession(ctx context.Context, tx pgx.Tx, sessionI
 	}
 
 	_, err := tx.Exec(
-		ctx,
-		query,
-		params...,
-	)
-	if err != nil {
-		db.CaptureError(err, query, params, "exec")
-		return errx.InternalError()
-	}
-
-	return nil
-}
-
-func (r *tokenRepository) FindExpiredSessions(ctx context.Context, userID uuid.UUID, cutoff time.Time) ([]uuid.UUID, *errx.Error) {
-	query := `
-        SELECT id
-        FROM sessions
-        WHERE revoked_at IS NULL
-          AND last_refreshed_at < $1
-    `
-
-	params := []any{
-		cutoff,
-	}
-
-	rows, err := r.DB.Query(
-		ctx,
-		query,
-		cutoff,
-	)
-	if err != nil {
-		db.CaptureError(err, query, params, "query")
-		return nil, errx.InternalError()
-	}
-	defer rows.Close()
-
-	var sessions []uuid.UUID
-	for rows.Next() {
-		var s uuid.UUID
-		if err := rows.Scan(&s); err != nil {
-			db.CaptureError(err, "", nil, "scan")
-			return nil, errx.InternalError()
-		}
-		sessions = append(sessions, s)
-	}
-
-	if err := rows.Err(); err != nil {
-		db.CaptureError(err, "", nil, "rows_err")
-		return nil, errx.InternalError()
-	}
-
-	return sessions, nil
-}
-
-func (r *tokenRepository) RevokeSessions(ctx context.Context, userID uuid.UUID) *errx.Error {
-	query := `
-        UPDATE sessions
-		SET revoked_at = now()
-        WHERE revoked_at IS NULL
-		  AND user_id = $1
-    `
-
-	params := []any{
-		userID,
-	}
-
-	_, err := r.DB.Exec(
 		ctx,
 		query,
 		params...,
@@ -403,6 +361,45 @@ func (r *tokenRepository) UpdateCurrentOrganization(ctx context.Context, session
 	return nil
 }
 
+// ClearOrganization deselects orgID on every live session of userID and returns every live session left
+// with none, so a cached copy of a row the organization's deletion already cleared is evicted too.
+func (r *tokenRepository) ClearOrganization(ctx context.Context, userID, orgID uuid.UUID) ([]uuid.UUID, *errx.Error) {
+	const query = `
+		WITH cleared AS (
+			UPDATE sessions
+			SET current_organization_id = NULL
+			WHERE user_id = $1 AND current_organization_id = $2 AND revoked_at IS NULL
+			RETURNING id
+		)
+		SELECT id FROM cleared
+		UNION
+		SELECT id FROM sessions
+		WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now() AND current_organization_id IS NULL
+	`
+	params := []any{userID, orgID}
+	rows, err := r.DB.Query(ctx, query, params...)
+	if err != nil {
+		db.CaptureError(err, query, params, "query")
+		return nil, errx.InternalError()
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			db.CaptureError(err, query, params, "scan")
+			return nil, errx.InternalError()
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, query, params, "rows")
+		return nil, errx.InternalError()
+	}
+	return ids, nil
+}
+
 // DefaultOrganization picks the workspace a new session starts in: the one the
 // user owns, else their earliest-joined membership. A session without one used
 // to reach org-scoped writes with no tenant, which is what let orgless rows be
@@ -426,4 +423,12 @@ func (r *tokenRepository) DefaultOrganization(ctx context.Context, userID uuid.U
 		return nil, errx.InternalError()
 	}
 	return &orgID, nil
+}
+
+// StampReauth records a successful re-authentication on the session.
+func (r *tokenRepository) StampReauth(ctx context.Context, sessionID uuid.UUID, at time.Time) error {
+	_, err := r.DB.Exec(ctx,
+		`UPDATE sessions SET reauth_at = $2 WHERE id = $1 AND revoked_at IS NULL`,
+		sessionID, at)
+	return err
 }

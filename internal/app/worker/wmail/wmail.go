@@ -2,6 +2,8 @@ package wmail
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/warmbly/warmbly/internal/app/cipher"
@@ -57,8 +59,19 @@ type SmtpImapData struct {
 }
 
 type WMail struct {
-	UserID uuid.UUID
-	ID     uuid.UUID
+	TransportGeneration uuid.UUID
+	lifecycleMu         sync.Mutex
+	stopped             bool
+	stopDone            chan struct{}
+	active              sync.WaitGroup
+	syncMu              sync.Mutex
+	executionKeys       map[[32]byte]struct{}
+	initialExecutionKey [32]byte
+	executionData       *models.AddWorkerEmail
+	diagnosticRetries   map[uuid.UUID]diagnosticRetry
+	ExecutorID          uuid.UUID
+	UserID              uuid.UUID
+	ID                  uuid.UUID
 	// OrgID scopes the organization-wide sync budget; nil for a legacy
 	// personal mailbox.
 	OrgID *uuid.UUID
@@ -95,9 +108,30 @@ type WMail struct {
 	laneCache  laneCache
 	googleTick *tickStats
 	graphTick  *tickStats
+	// googleReconciledAt is when the Gmail folder reconciliation last ran;
+	// googleInboxChecked is when it last looked up an id and found it still
+	// in the inbox (or gone), so the next passes spend lookups elsewhere.
+	googleReconciledAt time.Time
+	googleInboxChecked map[string]time.Time
+	// googleFolders is the folder last reported per Gmail id this tick, so a
+	// move that both adds and removes labels is reported once.
+	googleFolders map[string]string
 	// flagScan is the previous flag snapshot per folder name, used only on
 	// IMAP servers without CONDSTORE, which cannot say what changed.
 	flagScan map[string]*folderFlagScan
+	// skipChecked remembers, for this session, the stored rows that left a
+	// synced folder and were looked for in the skipped folders without being
+	// found, so they are not searched for again on every pass.
+	skipChecked map[string]struct{}
+	// listed is the previous listing's count and UIDNEXT per folder name:
+	// session-local, since the stored cursor advances to the SELECT view.
+	listed map[string]imapListed
+	// skipPending marks folders whose skipped-folder reconciliation hit the
+	// per-pass search cap, so the next pass continues it.
+	skipPending map[string]bool
+	// unmapPending holds map entries for unpublished arrivals whose removal
+	// failed, keyed by map key; every pass retries them before it looks.
+	unmapPending map[string]uuid.UUID
 	// transportFailures counts consecutive passes that could not reach the
 	// mail server, which paces the retry and keeps one outage to one warning.
 	transportFailures int
@@ -129,13 +163,14 @@ func NewWMail(
 	mailCtx, cancel := context.WithCancel(context.Background())
 
 	mail := &WMail{
-		ID:        data.ID,
-		UserID:    data.UserID,
-		OrgID:     data.OrganizationID,
-		Email:     data.Email,
-		FirstName: data.FirstName,
-		LastName:  data.LastName,
-		EmailType: data.Type,
+		ID:                  data.ID,
+		UserID:              data.UserID,
+		TransportGeneration: data.TransportGeneration,
+		OrgID:               data.OrganizationID,
+		Email:               data.Email,
+		FirstName:           data.FirstName,
+		LastName:            data.LastName,
+		EmailType:           data.Type,
 		// Unset in the payload means yes; see AddWorkerEmail.SavesSentCopy.
 		SaveToSent: data.Type == models.InboxProviderSMTPIMAP && data.SavesSentCopy(),
 		onEvent: func(jobType models.JobEventType, body any) error {
@@ -152,6 +187,13 @@ func NewWMail(
 		SyncContext:               syncContext,
 		CipherService:             cipherService,
 	}
+	mail.rememberExecution(data)
+	ready := false
+	defer func() {
+		if !ready {
+			mail.Discard()
+		}
+	}()
 
 	// A publisher older than the sync policy sends no Sync block; compiled
 	// defaults then apply and the mailbox starts its backfill from scratch.
@@ -174,6 +216,7 @@ func NewWMail(
 			State:   st,
 		})
 	})
+	mail.tracker.transportGeneration = mail.TransportGeneration
 
 	switch data.Type {
 	case models.InboxProviderGoogle:
@@ -234,8 +277,10 @@ func NewWMail(
 				FirstName: data.FirstName,
 				LastName:  data.LastName,
 
-				Cache:      mail.Cache,
-				DeltaLinks: cloneStringMap(deltaLinks),
+				User:         data.Graph.User,
+				Cache:        mail.Cache,
+				DeltaLinks:   cloneStringMap(deltaLinks),
+				ImmutableIDs: mail.SyncContext != nil,
 
 				OnMessageSeen:   mail.onGraphMessageSeen,
 				OnMessageRemove: mail.onGraphMessageRemove,
@@ -268,6 +313,7 @@ func NewWMail(
 
 		if data.ImapSync {
 			conn := &imap.Client{
+				Context:     mailCtx,
 				Email:       data.Email,
 				AuthType:    models.AuthPlain,
 				Credentials: data.SmtpImap.Credentials.IMAP,
@@ -276,13 +322,11 @@ func NewWMail(
 				return nil, err
 			}
 			mail.SmtpImapData.ImapClient = conn
-			// Saved folder cursors: live sync resumes from each folder's stored
-			// HIGHESTMODSEQ instead of re-baselining (and, before this, instead
-			// of re-walking every folder on every worker restart).
-			for i := range data.SmtpImap.Mailboxes {
-				box := data.SmtpImap.Mailboxes[i]
-				mail.SmtpImapData.Mailboxes = append(mail.SmtpImapData.Mailboxes, &box)
-			}
+		}
+		// Keep saved cursors even while IMAP sync is temporarily disabled.
+		for i := range data.SmtpImap.Mailboxes {
+			box := data.SmtpImap.Mailboxes[i]
+			mail.SmtpImapData.Mailboxes = append(mail.SmtpImapData.Mailboxes, &box)
 		}
 
 		mail.SmtpImapData.SmtpClient = &smtp.Client{
@@ -301,6 +345,7 @@ func NewWMail(
 		)
 	}
 
+	ready = true
 	return mail, nil
 }
 
@@ -313,4 +358,9 @@ func (w *WMail) ApplySyncPolicy(data *models.AddWorkerEmailSyncData) {
 		return
 	}
 	w.gov.SetPolicy(data.Policy)
+}
+
+// Discard releases a WMail that was built but never put to work.
+func (w *WMail) Discard() {
+	w.Stop()
 }

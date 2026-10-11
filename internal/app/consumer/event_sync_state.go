@@ -21,22 +21,26 @@ func (s *JobsService) HandleSyncState(ctx context.Context, e *models.JobEventSyn
 		return nil
 	}
 
-	var prev *models.SyncState
-	if saved, err := s.EmailSyncStateRepository.Get(ctx, e.EmailID); err == nil {
-		prev = saved
-	}
-
-	if err := s.EmailSyncStateRepository.Put(ctx, e.UserID, e.EmailID, &e.State); err != nil {
-		CaptureError(e.UserID, e.EmailID, err)
+	prev, err := s.EmailSyncStateRepository.Get(ctx, e.EmailID)
+	if err != nil {
 		return err
 	}
 
-	// A relayed state means a pass completed: the worker reached the server,
-	// listed its folders and finished the tick. That is the only signal we
-	// get that an outage is over, and without it a five-minute blip left a
-	// red "needs attention" on the mailbox for good, because nothing but a
-	// credential reconnect ever resolved an error row.
-	s.resolveTransientMailErrors(ctx, e.EmailID, e.State.LastSyncedAt)
+	// Persist recovery before state, so a failed proof write remains retryable.
+	if e.State.LastSyncedAt != nil && e.State.Deferred == 0 && e.State.BackfillCursor.GoogleRecovery == nil &&
+		(prev == nil || prev.LastSyncedAt == nil || !models.ValidMailTransportTime(*prev.LastSyncedAt, time.Now()) || e.State.LastSyncedAt.After(*prev.LastSyncedAt)) {
+		if err := s.resolveTransientMailErrors(ctx, e.EmailID, e.State.LastSyncedAt, e.State.TransportGeneration); err != nil {
+			return err
+		}
+	}
+
+	if err := s.EmailSyncStateRepository.Put(ctx, e.UserID, e.EmailID, &e.State); err != nil {
+		if s.dropForDeletedMailbox(ctx, e.UserID, e.EmailID, err) {
+			return nil
+		}
+		CaptureError(e.UserID, e.EmailID, err)
+		return err
+	}
 
 	if s.StreamingPublisher == nil {
 		return nil
@@ -104,19 +108,24 @@ var transientMailErrorCodes = []string{
 	string(errx.MailErrorCodeImapUnknown),
 }
 
-func (s *JobsService) resolveTransientMailErrors(ctx context.Context, emailID uuid.UUID, syncedAt *time.Time) {
+func (s *JobsService) resolveTransientMailErrors(ctx context.Context, emailID uuid.UUID, syncedAt *time.Time, generation uuid.UUID) error {
 	if s.EmailAccountErrorRepository == nil {
-		return
+		return nil
 	}
 	// Only errors raised before this pass ran. The bus can redeliver an older
 	// event after a newer one, and without the bound a stale success would
 	// clear a failure that happened after it, leaving the mailbox looking
 	// healthy while it was not.
-	if syncedAt == nil {
-		return
+	if syncedAt == nil || generation == uuid.Nil {
+		return nil
 	}
-	if err := s.EmailAccountErrorRepository.ResolveByCodesBefore(ctx, emailID, transientMailErrorCodes, *syncedAt, "sync recovered"); err != nil {
+	if !models.ValidMailTransportTime(*syncedAt, time.Now()) {
+		return nil
+	}
+	if err := s.EmailAccountErrorRepository.RecordTransportSuccess(ctx, emailID, models.MailTransportSync, *syncedAt, nil, generation); err != nil {
 		log.Warn().Str("error", err.Message).Str("email_id", emailID.String()).
 			Msg("could not clear the mailbox's transient errors after a successful sync")
+		return err
 	}
+	return nil
 }

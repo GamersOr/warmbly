@@ -32,7 +32,7 @@ CI is strict. `go build ./...` succeeding is not enough — `golangci-lint` runs
 
 Other CI-touching rules:
 
-- the frontend trees (`admin/`, `web/`, `site/`) each have their own CI jobs; run `pnpm typecheck` in any tree you touched and `pnpm lint` when the rules are non-trivial
+- the frontend trees (`admin/`, `web/`, `site/`, `qa/`) each have their own CI jobs; run `pnpm typecheck` in any tree you touched and `pnpm lint` when the rules are non-trivial
 - never push without first re-running the relevant `*build*` / `*typecheck*` / `*lint*` step on the affected tree
 - a `make lint` (or `gofmt -l`) failure is always a real CI failure; do not push hoping it will pass
 
@@ -173,13 +173,103 @@ is `make cli-check` (and `make cli-sha` after any edit).
 Do not:
 
 - do not run `go build ./...`, `pnpm build`, or docker image builds as a "did it work" check. They are slow and are not what CI gates on. `go run` (via the make dev targets) already compiles; `make fmt` + `make lint` + `pnpm typecheck` are the real signals.
-- do not write or run Python/Playwright (or any browser-automation) scripts to test the app. Manual, in-browser verification is the user's job against the native dev stack (`make infra` + `make backend` + `make web`). Do not add screenshot/e2e test harnesses to this repo.
+- do not write Python or ad-hoc browser scripts, and do not drive the app step by step from screenshots or accessibility snapshots. Browser automation lives in `qa/` and only records proof for a PR (below); it is not a test gate, and manual verification against the native dev stack stays the user's job.
 - do not run the Go test suite as a default gate unless the task is specifically about those tests.
 - do not push hoping CI passes; a `gofmt -l` / `make lint` / `pnpm typecheck` failure is always a real CI failure.
 
+### Visual proof on pull requests
+
+Record proof only for a UI change a reviewer should actually see; most changes need none. `qa/` is the harness and `qa/README.md` is its playbook; read it before the first recording.
+
+- record for: a new page, dialog, drawer or multi-step flow; a redesigned or re-laid-out screen; a changed interaction (new controls, new states, a different path through a task); a visible bug fix where the before was visibly broken; or when the user asks for it
+- skip for: anything without a visible change (backend, API, migrations, workers, tests, CI, docs, refactors, dependency bumps) and small visual tweaks (copy, a label, an icon, spacing or colour nudges), which the PR text describes instead. When unsure, skip
+- a follow-up commit is re-recorded only when it changes what the proof shows
+
+- write a scripted flow in `qa/flows/` from the code you changed, run `pnpm proof <filter>` in `qa/`, and read only pass or the failing step. Never screenshot your way around the page; `pnpm aria <path>` prints the accessibility tree when you need a selector
+- record against this worktree's own stack (`pnpm stack up`, in the smallest of `lite`, `full`, `sandbox` the flow needs), never another session's and never anything but localhost: the repository is public and so is everything attached to its PRs
+- publish with `pnpm share` once the PR exists. The first publish goes into the PR description; every later one is a comment showing before/after of only the stills that changed. Record follow-ups with `pnpm proof:fresh` so the comparison starts from fresh seed data. Media reaches GitHub only through `gh --attach`, never an image host, a commit or another repository
+- keep shot names stable across commits, because follow-up comments diff stills by name
+- the machine is shared: record from the main agent, never from fanned-out subagents (a machine-wide lock runs one recording at a time, so they would only queue while each holds a context), and `pnpm stack down` once the proof is published
+
+## Security And Compliance Invariants
+
+Warmbly's Google OAuth client is assessed against **ADA CASA v2.1.1 at Assurance Level 1**, which maps to OWASP ASVS 4.0.3. The evidence pack is a claim about the code on `main`: a change that breaks one of the invariants below does not just introduce a bug, it makes a submitted statement untrue and puts the OAuth client's verification at risk. Treat them as constraints on every change, not as a checklist run before an audit.
+
+**The pack is not in this repository and must not be added to it.** It maps every control to the file that implements it and lists the advisories still open with the exact conditions under which each is reachable. That is a reconnaissance document for anyone attacking a self-hosted instance that has not updated, which is the same reason the disclosure rule below exists. It lives outside the tree, at `CASA_EVIDENCE_DIR` (default `~/warmbly-casa-private/casa`), and `make casa-evidence` refuses to write anywhere inside the repository.
+
+What stays here is this section: the invariants themselves, stated as what the code does rather than as what it would otherwise allow. When a change alters a control, update the pack in the same sitting, because nothing in CI can tell you the pack has gone stale.
+
+### Disclosure: this repository is public and the product self-hosts
+
+Every instance that has not updated yet runs the code an attacker can read here. So:
+
+- **describe the invariant, never the gap.** A comment, commit subject, PR body or doc that says what used to be possible is a working exploit for every unpatched instance. Write "every read of an organization's data is scoped by `organization_id`", not "before this, X could read Y"
+- do not add a before-and-after account of a security fix to the repository. Keep that out of tree
+- a security fix ships like any other change: a normal subject line naming what the code now does
+
+### Authentication
+
+- passwords are hashed with **Argon2id** and nothing else. No change may introduce a second scheme, weaken the parameters, or store a password in any reversible form
+- `crypt.CheckPassword` (`internal/pkg/crypt/validation.go`) is the only gate on a new or changed password, and it refuses anything on the embedded NCSC breached list (`internal/pkg/crypt/passwords/breached.txt`). Every path that accepts a password must call it: registration, reset, change, invitation acceptance, and any future one
+- every auth-sensitive entry point is behind CAPTCHA (`internal/pkg/captcha/turnstile.go`): login, registration, password reset. The login and registration code-confirmation steps take no second captcha: their signed, single-use session from the start step already proves it passed
+- TOTP verification records the step it consumed (`user_totp_settings.last_used_step`) and refuses a replay of it. Any new second factor needs equivalent single-use enforcement
+- **admin routes require a session that verified a second factor.** `middleware.AdminMiddleware` refuses `!session.MFAVerified` with `admin_mfa_required`, and `RequireAdminPermission` then checks the admin bit. Every admin route sits behind both; never add one outside them. The instance-wide Warmbly Cloud link is gated the same way, because it belongs to the instance, not to a workspace
+- an operation that changes who can get in, or moves money or ownership, requires a fresh authentication (`middleware.RequireFreshAuth`, `POST /v1/auth/reauth`). API-key and OAuth callers pass through, because they present a credential on every call and have no session to refresh
+- a federated identity (Google, Apple, OIDC) is bound to an account by `(issuer, subject)`. The email fallback that finds an existing account on a first sign-in attaches the identity to a password account only after that password is presented (`resolveFederatedUser` parks it as `link_required`, `SSOLinkConfirm` completes it through `finishLoginAs`). Only an account with no password links on the address alone
+
+### Sessions and tokens
+
+- **every token carries a purpose** and is verified against the one purpose its consumer accepts (`internal/app/token/config.go`: `access`, `refresh`, `ws`, `login`, `registration`, `reset`, `2fa`, `sso_link`). A token minted for one flow must never verify in another, and one with no purpose verifies for none. A new token type gets a new purpose constant, not a reused one
+- `VerifyToken` pins the algorithm to HS256 and requires an expiry. Do not relax either, and do not add a verification path that skips `token.VerifyToken`
+- `AUTH_SECRET` has a hard floor of `config.MinAuthSecretLength` (32 bytes) and the backend refuses to boot below it. The realtime service applies the same floor to `JWT_SECRET`, which is the same value. Neither check may become a warning
+- banning a user, changing a password and revoking a session all terminate the sessions they invalidate, and through `RevokeOtherSessions` close the user's realtime sockets. A new "lock this account" path must revoke too, or it locks nothing
+
+### Access control: the rule that is easiest to get wrong
+
+**The route's permission gate and the service's data scope must agree, and both must be the organization.** Mailboxes, contacts, campaigns, tokens and message content are organization assets; they are not owned by the member who created them.
+
+A route gated on an organization permission whose service then filters by `user_id` produces the worst kind of failure: the resource is listed, the caller passes the gate, and the write returns "not found". It reads as data corruption and it strands resources permanently when the member who created them leaves. Going the other way, a user-scoped gate with an organization-scoped query is a tenant leak.
+
+So, for anything organization-owned:
+
+- the SQL predicate is `organization_id = $1`. A helper that takes a "scope" fragment gets the organization one
+- the handler resolves the tenant with `middleware.GetOrganizationID(c)` and refuses when it is absent
+- ownership is checked against the caller's organization before any side effect is published, not after
+- `user_id` stays on the row as a record of who connected it, and is used for attribution and for addressing worker events. It is not an authorization key
+
+Everything else in section 3 of the evidence pack rests on this: no identifier from the request body may select a row without a tenant predicate, and a reference to another entity (a campaign, a contact, a task) is verified to belong to the same organization before it is accepted.
+
+### Communications
+
+- `middleware.SecurityHeaders` sets HSTS, `X-Content-Type-Options`, `X-Frame-Options`, a referrer policy and a default-deny CSP on every API response. Do not remove a header to make a page work; scope the exception
+- the realtime websocket checks the browser's `Origin` against `CHECK_ORIGIN_HOSTS`. Non-browser clients send no origin and are unaffected. Adding a first-party origin means adding it to that list in every environment
+- webhook targets stay HTTPS and HMAC-signed, and SSRF-prone destinations are refused. Only a self-hosted or development instance may opt out
+
+### Input that other people see
+
+Anything one person types that Warmbly later shows to someone else is content injection waiting to happen, and platform email is the worst case: a mail client turns anything shaped like an address into a live link, sent under Warmbly's own domain. `html/template` escaping stops markup, not that. So:
+
+- **every name a person chooses goes through `internal/pkg/displayname`**: first and last names, workspace names, and any new name-like field that can reach another person. It refuses links, web addresses, email addresses, hostnames and IPs (after folding full-width and ideographic dots), control, invisible and bidi characters, markup characters and stacked combining marks, and it bounds length by `Kind`. The refusal is `400 invalid_name`, documented in `api/error-codes.mdx`
+- **the server is the authority and the check sits at every write**, not only the one the dashboard uses: the handler or service behind registration, setup, onboarding, profile, org create and rename, the admin panel, `warmblyctl` and an org-transfer import. A new path that writes one of these fields calls the same package. `web/src/lib/displayName.ts` mirrors the rules so a form can explain a refusal before the request, and it is never the only check
+- **a value nobody can be asked to correct is cleaned, not refused**: a name from an identity provider or an email local part goes through `displayname.Clean`/`FromEmail`, which drops what fails, so a hostile IdP claim costs the user a name, not a sign-in
+- **a stored value is untrusted at render time too.** Rows written before a rule existed are still in the database, so anything interpolated into an email body or subject goes through `displayname.Displayable` (or `FullName`) with a neutral fallback ("A team member", "Your workspace")
+- **tighten a rule in both places and in the docs together**: Go package, `displayName.ts`, their tests, and the `invalid_name` section of `api/error-codes.mdx`
+
+### Errors, logging and data exposure
+
+- a server-class (`Internal`) error answers the caller with one fixed sentence and a request id. The real message is logged against that id. `errx.NewPublic` is the narrow exception, for a message an operator can act on, and never for one built from an underlying error
+- no secret, credential, token or full DSN may reach a log line, an error message or an analytics event. Errors sent to PostHog go through `internal/observability/errs`, and the database wrapper strips parameter values
+- ciphertext columns carry the right key domain. `KeyDomainInstance` is `CREDENTIALS_ENCRYPTION_KEY`, `KeyDomainOrgDEK` is the per-organization DEK. They are not interchangeable
+
+### Dependencies and configuration
+
+- `make casa-evidence` runs `govulncheck`, the Node, Rust and Elixir audits and a Trivy scan, writing outside the repository. A reachable vulnerability with an upstream fix is fixed; one without gets a written justification in the pack, not silence. Do not paste scanner output, an advisory id or a reachability note into this repository
+- no credential of any kind is committed. A node in the fleet holds no cloud credential: the privileged operations are brokered through the internal API
+- a new environment variable is documented in `docs/content/docs/development/configuration.mdx` in the same change
+
 ## Local Development
 
-Event codec: `CODEC_PROVIDER=json` is required wherever workers are exercised (the worker command/result envelopes carry untyped bodies Avro cannot serialize); the Makefile and docker-compose set it everywhere. `tracking-events` reads the same setting: the consumer decodes both of its topics with one codec, so the Rust publisher honours `CODEC_PROVIDER` on Kafka as well as on NATS. Avro there needs a Schema Registry and is refused at boot without one; JSON needs nothing.
+Event codec: `json` is the default the Makefile and docker-compose set, because it needs nothing. `avro` works too: the worker command and result envelopes carry an `any` body, and a schema is derived for each from the declared registry in `internal/models/event_variants.go` (see `event_schema.go`), so a new event type is not carried until it is added there. It is only compiled into the `-kafka` images and resolves every event against `SCHEMA_REGISTRY_URL`. `tracking-events` reads the same setting: the consumer decodes both of its topics with one codec, so the Rust publisher honours `CODEC_PROVIDER` on Kafka as well as on NATS. Avro there needs a Schema Registry and is refused at boot without one; JSON needs nothing.
 
 Infra runs in docker; the Go services and frontends run natively on the host for fast iteration — no docker image rebuilds when you change app code. Targets live in the `Makefile`.
 
@@ -220,8 +310,9 @@ Everything in the dashboard must use our own theme, not browser/library defaults
 
 - Number fields: never ship a raw `<input type="number">` with the native spinner. Use the shared `NumberInput` from `@/components/ui/field` — it strips the native up/down arrows (`appearance:none`) and renders our own themed chevron steppers. Do not re-add the default stepper anywhere.
 - Inputs/labels: reuse `TextInput`, `SearchInput`, `Label`, `NumberInput` from `@/components/ui/field`; don't hand-roll raw `<input>`/`<select>` with ad-hoc classes when a primitive exists.
+- Checkboxes: never ship a visible native `<input type="checkbox">`, not even with `accent-*` classes; every browser draws it differently and some draw it badly. Use `Checkbox` from `@/components/ui/checkbox`, a real input with `appearance-none` under our square, so labels, keyboard, focus and click events stay native (`tone="slate"` for option toggles in forms and dialogs, the sky default for row selection; `className` styles the wrapper). A picker row that is itself the control uses the visual-only `CheckSquare`; a native input hidden behind custom visuals (`sr-only`) is fine.
 - Pickers: tag/category multi-selects share one visual language — bordered chip box + framer-motion dropdown with a search header + checkbox-square rows (see contacts `CategoryPicker` and `popup/select/TagSelector`). Reuse `useFlipPlacement` + `useClickOutside`.
-- Detail drawers + their tab bars share one pattern (see `emails/InboxDetails` and contacts `ContactEdit`): a `shrink-0 px-3 flex items-center gap-1 border-b border-slate-200` bar, each tab a `relative h-10 px-2.5 inline-flex items-center gap-1.5 text-[12.5px]` button with a lucide icon, active = `text-slate-900 font-medium` + a `bg-sky-600` underline span.
+- Detail drawers + their tab bars share one pattern (see `emails/InboxDetails` and contacts `ContactEdit`): a `shrink-0 px-3 flex items-center gap-1 border-b border-slate-200` bar, each tab a `relative h-10 px-2.5 inline-flex items-center gap-1.5 text-[12.5px]` button with a lucide icon, active = `text-slate-900 font-medium` + a `bg-sky-600` underline span. A tab bar or chip row that can overflow goes inside `ScrollStrip` (`@/components/ui/scroll-strip`), which fades the cut-off edge, scrolls on the wheel and keeps the `data-active` child in view; never let it clip silently.
 - Theme tokens: slate borders (`border-slate-200`), sky accents (`focus:border-sky-400 focus:ring-sky-100`, `bg-sky-50 text-sky-700`), `rounded-md`, `text-[12.5px]` base, `h-7` controls, `10px uppercase tracking-[0.14em]` section labels.
 - Multi-select tables: when rows are selected, show a floating bottom-center selection bar with the count + bulk actions (mirror `SelectionBar` in contacts `ContactsTable.tsx`).
 - Row actions must be reachable on touch: never hide the only affordance behind `opacity-0 group-hover` with no mobile fallback. Use `opacity-100 md:opacity-0 md:group-hover:opacity-100`, or surface actions in the detail drawer.
@@ -229,9 +320,11 @@ Everything in the dashboard must use our own theme, not browser/library defaults
 - Row interactions: list rows behave like the campaigns list — clicking anywhere on a row opens that item's detail (drawer or page); right-side action buttons (3-dots / "More") either open a relevant detail/tab or drop a short menu of the actions for that row (the mailbox 3-dots menus Settings and Disconnect). A destructive action belongs in that menu as a `danger` item as well as in the detail's own danger zone, because the selection bar is not where anyone looks to remove one row. Inner interactive controls (checkbox, dropdown trigger, action buttons) must `e.stopPropagation()` so they don't also fire the row's open handler.
 - Prefer realtime over polling: subscribe to the socket and `queryClient.invalidateQueries(...)` on the relevant event instead of `refetchInterval` where an event exists (see `useRealtimeEvents` / `RealtimeManager`).
 - Interaction details are part of "done". Before calling a dashboard change finished, walk the small things a user hits in the first minute, because these are what make the product feel broken even when the data flow is right:
-  - every dropdown / popover / picker closes on click-away and on Escape, including when it sits inside a dialog or drawer. Dialog cards stop `mousedown` propagation so the backdrop does not close them; React's `stopPropagation` also stops the native event, so any click-outside listener must be registered in the **capture** phase (`document.addEventListener("mousedown", fn, true)`, as `PopoverMenu` and `useClickOutside` do), never the bubble phase. Escape must close only the innermost layer: the dialog's Escape handler bails out while a `[data-floating]` popover or the `[role="alertdialog"]` confirm is on screen
+  - every dropdown / popover / picker closes on click-away and on Escape, including when it sits inside a dialog or drawer. Dialog cards stop `mousedown` propagation so the backdrop does not close them; React's `stopPropagation` also stops the native event, so never hand-roll a click-outside listener: every floating layer closes through `useClickOutside` (`@/hooks/useClickOutside`, which `PopoverMenu` uses too). It listens for `pointerdown` in the capture phase, treats a `[data-floating]` layer it opened as inside but the floating panel or dialog holding it as outside, closes on focus moving into an iframe or a tap landing in a same-origin one (a phone moves no focus), and takes Escape for the innermost layer only, stopping it there and handing focus back to the trigger. A dialog's own Escape handler still bails out while a `[data-floating]` popover or the `[role="alertdialog"]` confirm is on screen
   - toggles are the shared `Toggle` (sky pill, 32x18) from `campaigns/preferences/components/CampaignPreferenceBoolBox`; never hand-roll a switch. If a whole row toggles on click, the switch itself must `stopPropagation` so it does not toggle twice, and a `<label htmlFor>` pointing at the switch would double-fire too, so use a plain element for the row title
-  - **a page is not shipped until it is routed, linked and titled.** Three lists have to agree, and nothing fails the build when they do not: the route table in `web/src/main.tsx`, the nav that links to it (`AppNav`, `settings/layout.tsx`), and the title map in `web/src/hooks/useDocumentTitle.ts` (static pathnames in `ROUTE_TITLES`, `:id` routes as a regex in `PARAM_ROUTES`). A nav entry with no route renders nothing; a page component with no route is dead code nobody can reach; a route with no title falls through to the literal `"Page not found | Warmbly"` in the tab, which reads as a broken app on a page that works. All three drift silently, so check them together, and after a merge that touched routing check the settings nav against `main.tsx` specifically
+  - **a page is not shipped until it is routed, linked and titled.** The route table is `web/src/router.tsx` (TanStack Router, code-based): a route carries its tab title in `staticData.title`, and a dashboard page is a lazy chunk listed in `dashboardPages`. A literal `<Link to>` or `navigate({ to })` to a path with no route fails typecheck, so write links as typed paths (`to="/app/campaigns/$id" params={{ id }}`, `search={{ tab: "x" }}`), never template literals. Nav config holds plain strings (`AppNav`, `settings/layout.tsx`), which nothing checks, so after a merge that touched routing check the nav against `router.tsx`. A link to a route with optional params (`/app/unibox/{-$scope}/{-$threadId}`, `/app/settings/billing/{-$tab}`) must set every optional param, `undefined` to drop one, or it inherits the current page's value
+  - **a page opens with its data already there.** Its route loader in `web/src/routeLoaders.ts` prefetches the queries it draws first, through the same `queryOptions` factory its hook uses, and links preload on hover, so a new list page adds both. The dashboard boot (`web/src/lib/boot.ts`) resolves the session, workspace, user and plan before the first paint; nothing under `/app` should gate its first render on those again
+  - **a predictable action is optimistic.** A toggle, rename, label change or row removal patches the cache in `onMutate`, restores the snapshot in `onError` and invalidates in `onSettled`. Anything the server decides (sending, launching, billing, permissions) waits for the answer
   - every detail page reachable from a list has a way back on all viewports: a "← Section" link above the title (see `campaigns/[id]/layout.tsx`) or a back arrow in its header (see `AutomationFlow`); the header breadcrumb is desktop-only and its crumbs must stay clickable, so it does not count as the only route back
   - multi-step flows animate between steps (directional slide via `AnimatePresence`, see `NewCampaignDialog`), explain why a step cannot be left instead of only disabling the button, refuse to skip ahead past an incomplete step, and confirm before discarding a dirty draft
   - a control that does nothing is worse than no control: never ship a checkbox or button whose action cannot succeed (for example "launch after create" when start requires contacts). Remove it or wire it to something that works
@@ -270,7 +363,7 @@ Web conventions:
 
 ### Developer WebSocket
 
-API keys with the `REALTIME_SUBSCRIBE` permission (bit 11) can connect to the same socket. Connection spam is bounded by per-user concurrent-connection caps (plan-based, default 10), per-IP (50), a global cap, join rate limits, and per-key IP restrictions. Documented in `docs/content/docs/api/realtime.mdx` — keep that page in sync with channel/limit changes.
+API keys with the `REALTIME_SUBSCRIBE` permission (bit 11) can connect to the same socket, presenting the key (or a `wmat_` OAuth token) in the `x-warmbly-token` header; the query-string form for them is deprecated and kept only for existing clients, while the 10-minute ws ticket rides the query string. Connection spam is bounded by per-user concurrent-connection caps (plan-based, default 10), per-IP (50), a global cap, join rate limits, and per-key IP restrictions. Documented in `docs/content/docs/api/realtime.mdx` — keep that page in sync with channel/limit changes.
 
 ## System Shape
 
@@ -284,6 +377,7 @@ API keys with the `REALTIME_SUBSCRIBE` permission (bit 11) can connect to the sa
 - `realtime/`: websocket fanout service
 - `web/`: in-product frontend (dashboard). Customer-facing only: it holds no platform-admin screens, and operator tooling must not be added back here
 - `admin/`: platform admin panel (:5174), the single operator surface. Workers, users, orgs, warmup, campaigns, analytics, audit. Every route sits behind `RequireAdmin` and the backend's `RequireAdminPermission` gates
+- `qa/`: the proof harness (scripted Playwright flows recording 1080p walkthroughs and stills for pull requests, published with `gh --attach`). Its own package; see `qa/README.md`
 - `site/`: public marketing site (Astro 5 + Tailwind v4). `site/public/install.sh` is the self-host installer served at warmbly.com/install.sh and `site/public/cli.sh` is the CLI installer served at warmbly.com/cli.sh (with `cli.ps1` for Windows), each with its checksum next to it; see the rules above before touching either
 - `deploy/`: production deploy manifests, infrastructure, and runtime config. `deploy/split-cloud/` is the three-provider shape (control plane on a container host, bus + cache + fleet on machines you own, database + root key + object store in a cloud region), documented at `docs/content/docs/development/split-deployment.mdx`
 - `docs/`: documentation site (docs.warmbly.com); product guides, API reference, and self-hosting/engineering docs under `content/docs/development/`
@@ -397,7 +491,9 @@ This is modeled in:
 
 Migration 000156 guarantees exactly one pool per type on every instance, under `models.WarmupPoolFreeID` and `models.WarmupPoolPremiumID` (`warmup_pools_pool_type_key` makes it structural, and the migration moves any pre-existing pool onto those ids). Nothing else may insert into `warmup_pools`: not the sandbox, not the dev scripts, not a test fixture.
 
-Borrowing across tiers is one-directional and lives in one place: `WarmupPartnerCandidates` in `pg_warmup.go` returns a sender's own tier plus, when premium is thin (fewer than `WarmupPoolTierFallbackFloor` other recipients), up to that many proven free mailboxes (healthy, never blocked, members for `WarmupPoolFallbackMinAgeDays`, workspace not restricted or suspended). `models.WarmupPoolBorrowsFrom` is the direction; the selector and the scheduler both read that one method, so they cannot disagree about who is reachable. A routing rule of weight 0 is an exclusion, not a weight: the candidate is dropped before the draw (and refused on the reply-back path), so a pool of one cannot smuggle it back, and a tick with nothing left ends in `errAllPartnersExcluded` rather than mailing an excluded address (#501). The selector draws its own tier's fresh partners first and gates every candidate with `CanParticipate` pinned to the pool it was drawn from; gating a borrowed recipient against the sender's pool is what made borrowing dead for months (#495). The only free-to-premium warmup mail is a reply-back (`directedWarmupPartner`): a borrowed mailbox answering the thread the paid one started, refused when its workspace is restricted.
+Crossing tiers is an exchange and lives in one place: `WarmupPartnerCandidates` in `pg_warmup.go` returns a sender's own tier plus, when the sender has fewer recipients outside its own workspace than `max(WarmupPoolTierFallbackFloor, warmup_max)`, that many proven free mailboxes from other workspaces (healthy, never blocked, members for `WarmupPoolFallbackMinAgeDays`, workspace not restricted or suspended), best first (Google or Microsoft, then members for `WarmupPoolBorrowSeasonedDays`, then actively sending; random within a rank), and for a free sender that meets the same bar, the premium mailboxes that verifiably wrote to it within `WarmupPoolReturnVisitDays`. Siblings never count toward the floor: a customer with many mailboxes and few premium peers otherwise never borrows and warms against itself. `models.WarmupPoolBorrowsFrom` and `models.WarmupPoolReturnsTo` are the two directions and mirror each other, so nothing unsolicited from the free tier reaches a paying inbox: the paying side always opens the exchange. Before this half existed a thin premium tier sent into the free tier and received almost nothing (#633). Every candidate carries the pool it was drawn from (`PoolType`) and how it got there (`Origin`); the selector and the scheduler both read that one method, so they cannot disagree about who is reachable. A routing rule of weight 0 is an exclusion, not a weight: the candidate is dropped before the draw (and refused on the reply-back path), so a pool of one cannot smuggle it back, and a tick with nothing left ends in `errAllPartnersExcluded` rather than mailing an excluded address (#501). The selector draws its own tier's fresh partners before a borrowed one, but a return visit ranks with the own tier, or a free mailbox with a hundred fresh siblings would never pay a paying inbox back. Every candidate is gated with `CanParticipate` pinned to the pool it was drawn from; gating a borrowed recipient against the sender's pool is what made borrowing dead for months (#495). The reply-back (`directedWarmupPartner`) crosses tiers on the same terms and is refused when the free workspace is restricted.
+
+Reciprocity is a weight and a cap, both read off the candidate. Each carries its verified sends and arrivals over seven days; `Starvation` (how far behind an inbox is on what it sent) multiplies its draw weight by up to `1 + reciprocityBoostK`, fading to nothing at parity, so the pool's traffic flows to whoever is owed the most and settles there instead of overshooting. `InboundDailyCap` (`WarmupInboundDailyMultiple` times daily sends, between `WarmupInboundDailyFloor` and `WarmupInboundDailyCeiling`) is applied inside `WarmupPartnerCandidates`, and a free sender sees every inbox as full at `WarmupFreeInboundSharePercent` of it, so the rest of each inbox's day is kept for premium senders. A recipient at its cap is offered to nobody for the rest of the day and the scheduler's per-day volume cap (`min(target, len(candidates))`) sees the same set. A sender with nobody left to write to sends nothing that tick and rechecks later; do not add a fallback that mails somebody anyway.
 
 Keep this separation intact. Free-tier accounts should not silently mix into premium warmup traffic, and dedicated-worker accounts should still follow the intended warmup pool policy explicitly rather than by accident.
 
@@ -414,11 +510,26 @@ Design intent:
 - relational data the worker needs (encrypted DEKs, the messageId→internal-email map) is reached over the backend's internal HTTP API (`/api/v1/internal/...`), never via direct SQL
 - worker-local state should be minimal and disposable
 - **a node holds no cloud credential.** The two privileged operations it needs are brokered through the internal API: `KMS_PROVIDER=brokered` posts sealed keys to `/api/v1/internal/dek/decrypt` and `BLOB_PROVIDER=brokered` asks `/api/v1/internal/blobs/presign` to sign one operation on one key. `renderNodeEnv` translates `aws`/`s3` into these automatically when rendering a node's env, so an IAM key never reaches a machine in the fleet. Blob bytes still travel node↔store directly; only the signature comes from the control plane
-- those two routes are the one place the internal API hands out something that is worth more than a record, so they take `NODE_BROKER_TOKEN` (falling back to `INTERNAL_API_TOKEN`) rather than the token the internet-facing tracking and forms services also carry, and presign refuses any key outside `nodeKeyPrefixes`. Extend that list when a node starts touching a new prefix; a signed URL is the whole authorisation
+- every route only a node calls (those two brokers, data keys, the message map, sync lookups, worker config, the fleet heartbeat) takes `NODE_BROKER_TOKEN` (falling back to `INTERNAL_API_TOKEN`), never the token the internet-facing tracking and forms services carry; the edge token reaches only tracked links, domain redirects, page hits and forms. A new internal route goes in the group matching who calls it. Presign refuses any key outside `nodeKeyPrefixes`; extend that list when a node starts touching a new prefix, because a signed URL is the whole authorisation
 
 Current code matches that intent in `cmd/worker/main.go`: the worker boots Kafka, Redis cache, KMS, and S3 clients, and reaches DEKs + the email message map through the backend's internal API, but does not open a PostgreSQL connection.
 
 When changing worker behavior, preserve that boundary unless there is a very strong reason not to.
+
+## Mail Servers Are Dialects
+
+A customer can connect any IMAP/SMTP server, and every one of them reads the RFCs a little differently. Production already syncs well over a hundred distinct hosts: Gmail, Zoho (each region its own host), Dovecot behind OVH, Hostinger, GoDaddy and most shared hosting, Infomaniak, Seznam, Lark, and a long tail of one-company servers. Supporting "every mailbox" means a server's quirk may cost us efficiency, never the mailbox.
+
+What makes this sharp is that go-imap closes the whole session on any reply it cannot decode. One unparseable line in an optional extension's answer surfaces as `SERVER_UNREACHABLE` on every pass, forever, on a server that is up and accepting the login. `unreadableReply` in `internal/client/smtpimap/imap/err.go` tells that apart from a dead network (an io failure keeps its own error; a grammar mismatch is `imapwire: ...`), and the worker logs `imap: server sent a reply that could not be read` with the host and the reply. That line is the only place the real cause shows.
+
+Rules:
+
+- **ask in the form the most clients exercise.** A server's mainstream path is the one Thunderbird, Apple Mail and Outlook hit every minute; its rarely used corners are where the bugs are. The CONDSTORE incremental set is `UID FETCH 1:* (UID) (CHANGEDSINCE n)` for that reason, not `SEARCH MODSEQ`: Dovecot answers the ESEARCH form with a parenthesised `(MODSEQ n)` go-imap cannot read, and Zoho answers an empty plain one with a double space
+- **an optional capability degrades, it never fails the mailbox.** When a server's answer to one form cannot be read, the client steps down to the next form for good and says so once (`changedSinceMode` in `client.go`; `sinceRefused` is the same pattern for dated SEARCH). The state lives on the `Client`, so it outlives a reconnect, and the last rung is the plain UIDNEXT path every server supports. Step down only on evidence about the dialect: an unreadable reply, or a refusal of the form against a folder that stayed selected, which leaves the session usable so the next form is asked in the same pass. Never on a network error or a transient NO (`UNAVAILABLE`, `INUSE`, `SERVERBUG`, a bare `UID FETCH failed`)
+- **read capabilities while the session is healthy.** A session the server's reply just closed reports none, so anything the ladder needs (`eSearch`, `condStore`) is recorded at connect
+- **a fix for one provider must not move the others.** #858 fixed Zoho by moving every server onto ESEARCH, which stalled every OVH mailbox for days. Add the provider's real reply to the dialect table in `search_modseq_test.go` (or its equivalent for the command you touch) and keep the whole table green, rather than writing a test that only knows the one server
+- **check a change to what the sync sends against real servers before it ships.** The cheap version: one login per distinct host, from the worker each mailbox already sits on (a new client IP can earn a provider security challenge), running the changed command and reporting only per-host results. Never print a credential or message content while doing it
+- **keep the server's words.** An `[ALERT]` reaches the owner verbatim through `imapErrDetail` (Zoho's `The server details you are using seems incorrect` is how they learn the account lives in another Zoho region). Map one in `classifyAlert` only when it is a known throttle or credentials case
 
 ## Encryption Model
 
@@ -647,8 +758,9 @@ Authentication flows use Cloudflare Turnstile:
 
 - login
 - registration
-- password reset
-- confirmation flows
+- password reset and its confirmation
+
+Login and registration code confirmation are covered by the captcha on the start step: the signed, single-use session it issues is what the confirm step accepts.
 
 The Turnstile verifier also checks:
 
@@ -689,7 +801,10 @@ Signals used:
 
 - every warmup email carries a verification token, minted by the platform, single-use, bound to its recipient
 - no inbound token is evidence against the mailbox that received it. It did not present the token; its worker synced whatever landed in its inbox, and inbound mail is attacker-controlled: every pool member holds tokens naming itself and a partner, and forwarding three to another member used to block that member for 30 days. The recipient check already makes a token worthless anywhere but its own destination, so nothing is charged on that path (#468, #481). Do not reintroduce a charge there, whether gated by a window, a folder check, a clock or by which pair the token names; each of those was tried and each was a way to be wrong (#477, #480)
-- tampering with warmup mail a mailbox verifiably received (deleting it, flagging it as spam) is attributed to that mailbox, because only its owner can do it
+- tampering with warmup mail a mailbox verifiably received (deleting it, flagging it as spam) is attributed to that mailbox, because only its owner can do it. It is a ladder, not a first-strike ban: `evaluateMetrics` counts a deletion and a spam move as one strike each over the seven-day window, and warns at one, quarantines at two and blocks at four. No provider names who moved a message into spam (Microsoft's ZAP, Workspace post-delivery scanning and client junk filters look exactly like a user's report), so a spam move is never charged on sight. A spam label on mail that arrived in spam is the filter's (`warmup_received.landed_spam`; Gmail can report it as a later label change) and is not even held. Any other move is held in `warmup_spam_moves` and `attributeSpamMove` (`internal/app/consumer/warmup_spam_attribution.go`) decides it after `config.WarmupSpamMoveSettleMinutes`: provider when the same sender was junked in another workspace within a day (which also withdraws owner verdicts it explains) or the move came straight after arrival with nobody there; owner when `mailbox_owner_activity` shows the owner at the mailbox around it, or a mailbox in use keeps junking many senders nobody else does; nobody otherwise. Owner activity is only a read, unread or star change the provider reported that our store did not already hold, on mail past its arrival grace, so Warmbly's own echoes and a filter finishing delivery never count. Only an owner verdict strikes the recipient and files a complaint against the sender; the rest are placement (`tampering*Strikes` in `internal/app/warmup/service.go`). One deletion is someone tidying the folder by hand until proven otherwise (#635). `RecordTampering` only records the event and re-evaluates, so a sweep reaches the same answer; a tampering block carries a term like every other band and never requires review
+- a deletion is a strike only inside `config.WarmupDeletionStrikeHours` of arrival (`warmupDeletionCounts` in `internal/app/consumer/event_remove_email.go`), and never for a receipt the retention sweep has retired. The engagement a message earns happens in its first hours; after that the platform deletes it itself (#637), so a later removal, whichever of the owner, Gmail's Trash purge, a server retention rule or our own sweep did it, is housekeeping. Gmail's Delete arrives as the `TRASH` label and is judged there on the same rule, because the `messagesDeleted` history record only comes when Trash is emptied, weeks later and in a burst. Do not widen the window or count a removal past it: every mailbox on a fixed quota has to be able to clear the folder
+- a removal is never a strike on its own. Graph reports a move exactly like a delete, and a provider's filter, a mailbox rule, another Warmbly instance syncing the same mailbox (a self-hosted instance warming in Warmbly Cloud) or our own filing can all move warmup mail. A fresh removal publishes a `verify_removal` warmup action; the worker searches the whole mailbox by Message-ID (`internal/app/worker/event_warmup_verify.go`) and answers `WARMUP_REMOVAL_CHECKED`, and `HandleWarmupRemovalChecked` (`internal/app/consumer/warmup_removal_check.go`) records a strike only for a message in the trash or gone. Found anywhere else withdraws any strike for it (`WithdrawTampering`), and a tampering pause or block is re-decided on the strikes left in the seven days before it was imposed (never on today's window, which old strikes have aged out of), then lowered, shortened from its original decision time, or lifted. The revision lands on the pool row, or on the address's ledger row when no mailbox with the address is in a pool, the one write to `warmup_reputation_ledger` outside its trigger, so a withdrawn hold is not seeded back on rejoin. A search that fails or cannot tell (IMAP only sees synced folders) charges nothing. `warmup_tampering_events.verified_at` is NULL only on strikes from before the search; `StartWarmupTamperingRecheck` asks for those (`Recheck`), stamps `verify_requested_at` and asks again after six hours while unanswered. A recheck never adds a strike: present or retired-by-retention withdraws it, anything else stamps `verified_at` and it stands. Tampering events are kept at least `config.WarmupTamperingKeepDays` so the strikes behind a live hold are there to re-decide it. Gmail's `TRASH` label needs no search, since it is the message entering the trash. Do not add another path that records a deletion without the search; the self-move marker is only a shortcut that skips it for our own filing
+- warmup mail is retained by the platform, not the owner: `StartWarmupMailRetention` (`internal/app/consumer/warmup_mail_retention.go`) retires every received copy and every sender's copy past the mailbox's window (`email_accounts.warmup_retention_days`, else `retention.warmup_mail_days`) and publishes `WarmupActionDelete` to the worker, which trashes it on Gmail, deletes it on Graph, expunges it on IMAP and drops the stored body. The row is retired only after the action is on the bus, so a failed publish is re-offered. The same loop prunes tokens, receipts, tampering events and spam reports past `retention.warmup_event_days`; `warmup_statistics` carries the analytics and is never pruned
 - accounts can be auto-blocked from warmup pools
 
 Current auto-block thresholds in code:
@@ -710,9 +825,16 @@ Do not wait for an inbox to reach an extreme failure state before acting.
 
 Important:
 
-- `80%` spam placement is not a sensible block threshold
-- if a mailbox is landing in spam `80%` of the time, it has already become dangerous to the shared pool
-- action should happen much earlier
+- complaints, bounces and tampering are things a mailbox does to other people, and they act early
+- spam placement is a reading of reputation, not misconduct, and warming is how it recovers, so it only ever slows a mailbox down: watch at `10%`, throttled (half volume, warmup keeps running) at `20%`, and nothing past that. It never quarantines, blocks or needs an appeal. Do not add a placement band above throttled
+- a band a mailbox is already in lifts only below `0.75` of the line that set it (`spamPlacementExitFactor`), so a mailbox near a line is not flipped and announced on every delivery
+
+How placement is read (`WarmupPlacementEvidence` in `internal/models/warmup_deliverability.go`, `placementEvidenceSQL` in `internal/repository/warmup_placement_sql.go`, the one definition behind the health bands and the advisor):
+
+- over verified deliveries (`warmup_received`), not over sends
+- only Google, Microsoft and Yahoo recipients judge a sender. They filter on sender reputation, which is what cold mail is judged on; a small host runs its own filter, so its spam folder is not evidence of spam and is never held against a sender, in the bands, the ramps (`majorRecipientSQL`) or the advisor. A host that junks half of everything once froze the ramp permanently and quarantined healthy mailboxes
+- the headline inbox rate (`WarmupPlacementWindow.Rate`) and the daily rolling rate are taken at the same three providers only; a mailbox whose mail reached only small hosts has no rate, never one built from them
+- partner selection draws a small-host recipient whose own filter junks what it receives less often (`FilterJunkRate`, `recipientFilterPenaltyK`), never excludes it, and never reads this at the big three, where a junk verdict is the senders' reputation
 
 Use separate metrics for separate failure modes:
 
@@ -724,35 +846,33 @@ Use separate metrics for separate failure modes:
 Recommended internal policy for shared paid pools:
 
 - start evaluating after a minimum sample size
-- suggested sample floor for spam placement: at least `20` warmup deliveries in the last `7 days`
+- sample floor for spam placement: at least `20` verified warmup deliveries in the last `7 days`
 - suggested sample floor for complaints: at least `100` delivered emails in the last `30 days`
 
 Suggested automatic actions:
 
 - warning band:
-  spam-folder placement `>= 10%` over the last `20+` warmup deliveries
+  spam placement at the big three `>= 10%` over the last `20+` verified warmup deliveries there
   or complaint rate `>= 0.03%`
   Action: lower warmup volume, increase spacing, increase monitoring
 
+- throttle band:
+  spam placement at the big three `>= 20%`
+  Action: warmup keeps running at half volume and double spacing; cold volume halved; lifts on its own
+
 - quarantine band:
-  spam-folder placement `>= 20%`
-  or complaint rate `>= 0.10%`
+  complaint rate `>= 0.10%`
   or bounce rate `>= 5%`
   or repeated tampering with received warmup mail
-  Action: immediately remove mailbox from the shared paid warmup pool for `7 days`
+  Action: immediately remove mailbox from the shared paid warmup pool for `7 days`; cold sending paused
 
 - hard block band:
-  spam-folder placement `>= 40%`
-  or complaint rate `>= 0.30%`
+  complaint rate `>= 0.30%`
   or bounce rate `>= 10%`
   or clear abuse indicators such as repeated spam flags on received warmup mail
-  Action: block mailbox from shared paid pool for `30 days` and require review before re-entry
+  Action: block mailbox from shared paid pool for `30 days`
 
-- catastrophic band:
-  spam-folder placement `>= 80%`
-  Action: immediate long-duration block and full reputation reset workflow; do not allow the mailbox back into the shared paid pool automatically
-
-These thresholds are intentionally stricter than the point where large providers start penalizing senders, because shared warmup pools should act before provider-level enforcement hits the IP reputation.
+The complaint and bounce thresholds are intentionally stricter than the point where large providers start penalizing senders, because shared warmup pools should act before provider-level enforcement hits the IP reputation.
 
 ### What should happen when a paid-pool mailbox is quarantined
 
@@ -777,8 +897,8 @@ Do not automatically restore a blocked mailbox just because time elapsed.
 
 Two mechanisms make the sentence real, and both are easy to undo by accident:
 
-- a quarantine or block holds until `blocked_until` whatever fresh metrics say. The floor is inside `UpdateParticipantHealth`'s SQL (`internal/repository/pg_warmup.go`), decided against the row at write time, so it is compare-and-swap and an admin unblock landing mid-sweep is not overwritten by the block the sweep read earlier. Equal severity keeps the later end (a 90-day catastrophic block is not cut to 30 by a milder reading); throttled is not floored because the docs promise it lifts on recovery. The bands read windows shorter than the terms they hand out (seven days of placement against a 30-day block), so without this every block cleared within a week, and a re-added mailbox with no history on the next sweep
-- the standing follows the address within the workspace: `warmup_reputation_ledger` is a mirror of the address's worst live standing, written only by the `warmup_reputation_mirror` trigger on `warmup_pool_participants` (migration 000152, scoped to the standing columns by 000156 so a pool move does not restart the retention window), so every path that writes a standing keeps it current and no caller can bypass it. The pool row dies on paths that never touch the mailbox (`LeaveAllPools` on an auth error, a lapsed plan, warmup toggled off) and on `HardDeleteUser`'s cascade, which is why a snapshot at mailbox deletion was not enough. `MoveToPool` seeds a new row from it and never consumes it; `Delete` and `LeaveAllPools` only restart its retention window (`config.WarmupReputationLedgerDays`, applied by the purge in `EvaluateAllParticipants`, never while a live row backs it). A review-required block (`blocked_until NULL`) never lapses. A mailbox in good standing has no row, and recovery clears it (#476)
+- a quarantine or block holds until `blocked_until` whatever fresh metrics say. The floor is inside `UpdateParticipantHealth`'s SQL (`internal/repository/pg_warmup.go`), decided against the row at write time, so it is compare-and-swap and an admin unblock landing mid-sweep is not overwritten by the block the sweep read earlier. Equal severity keeps the later end (a 30-day block is not cut to 7 by a milder reading); throttled is not floored because the docs promise it lifts on recovery. The bands read windows shorter than the terms they hand out (seven days of placement against a 30-day block), so without this every block cleared within a week, and a re-added mailbox with no history on the next sweep
+- the standing follows the address within the workspace: `warmup_reputation_ledger` is a mirror of the address's worst live standing, written only by the `warmup_reputation_mirror` trigger (the one exception is `ReviseWarmupHold` lowering a withdrawn tampering hold for an address with no mailbox in any pool) on `warmup_pool_participants` (migration 000152, scoped to the standing columns by 000156 so a pool move does not restart the retention window), so every path that writes a standing keeps it current and no caller can bypass it. The pool row dies on paths that never touch the mailbox (`LeaveAllPools` on an auth error, a lapsed plan, warmup toggled off) and on `HardDeleteUser`'s cascade, which is why a snapshot at mailbox deletion was not enough. `MoveToPool` seeds a new row from it and never consumes it; `Delete` and `LeaveAllPools` only restart its retention window (`config.WarmupReputationLedgerDays`, applied by the purge in `EvaluateAllParticipants`, never while a live row backs it). A review-required block (`blocked_until NULL`) never lapses. A mailbox in good standing has no row, and recovery clears it (#476)
 
 Require the mailbox to pass re-entry checks such as:
 
@@ -910,6 +1030,7 @@ What resolves a reservation is the worker's per-task result on `jobs.worker-even
 Rules that follow from this:
 
 - never dispatch a send that is not reserved. A reservation that cannot be written means the task retries; a claim refused (`reserved == false`) means another tick already has that pair in flight, and the task ends `skipped_duplicate`
+- a pending `campaign` task is a chain wake-up, never a booked send: it re-picks its mailbox when it fires. Slot conflict resolution reads `GetBookedSendsForAccount`, which leaves them out; spacing around another campaign's parked wake-up throttled every campaign sharing that pool (issue #942). The per-mailbox gap across campaigns is held by `ClaimMailboxSend` (`email_accounts.send_claimed_at`), taken before the send is built and visible on the min-gap clock; a lost claim reschedules the pass within seconds and sends nothing
 - resolve every reservation exactly once: `RecordEmailSent` on a successful hand-off, `ReleaseSend` when the command PROVABLY never left (no worker, worker offline), `RecordSendFailure` on a worker failure. A failure of the publish call itself is ambiguous (`tasks.ErrSendDispatchUnknown`) and must NOT be released
 - a reservation nobody answers is resolved by `StartStuckSendReclaimer` in the consumer after `config.CampaignSendReclaimAfterMinutes`: it believes a task that carries a Message-ID (stamps it) and otherwise walks the step back as a failed attempt. Without it a dead worker parks a lead in flight forever
 - the day's counters belong to the reservation, not the stamp, so a lost stamp can never let the daily cap over-send

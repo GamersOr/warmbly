@@ -16,9 +16,6 @@ package releases
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"log"
 	"net/http"
@@ -28,15 +25,18 @@ import (
 
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
+	"github.com/warmbly/warmbly/internal/version"
 )
 
 type Config struct {
-	Enabled         bool   // RELEASES_ENABLED (default true)
+	BackendVersion  string
+	Enabled         bool   // RELEASES_ENABLED (default false)
 	GithubRepo      string // "owner/repo", e.g. "warmbly/warmbly"
 	WorkerImageRepo string // "ghcr.io/warmbly/warmbly/worker"
-	WebhookSecret   string // shared secret for GitHub webhook HMAC
 	GithubToken     string // optional, raises API rate limit
 	HTTPClient      *http.Client
+	// SchemaGate refuses a tag whose bus schemas are not registered; nil allows any.
+	SchemaGate func(ctx context.Context, tag string) error
 }
 
 type Service struct {
@@ -128,6 +128,15 @@ func (s *Service) CheckGitHub(ctx context.Context) (*models.FleetReleaseState, e
 		// an operator can see what they are declining.
 		return current, nil
 	}
+	if s.cfg.BackendVersion != "" {
+		compatible := make([]Release, 0, len(releases))
+		for _, release := range releases {
+			if version.CheckFleetTarget(s.cfg.BackendVersion, release.TagName) == nil {
+				compatible = append(compatible, release)
+			}
+		}
+		stable, dev = PickChannelHeads(compatible)
+	}
 
 	var head *Release
 	switch current.Channel {
@@ -141,6 +150,14 @@ func (s *Service) CheckGitHub(ctx context.Context) (*models.FleetReleaseState, e
 	}
 	if head.TagName == current.Tag {
 		return current, nil
+	}
+
+	if s.cfg.SchemaGate != nil {
+		if err := s.cfg.SchemaGate(ctx, head.TagName); err != nil {
+			s.recordError(err.Error())
+			log.Printf("releases: fleet held at %s: %v", current.Tag, err)
+			return current, nil
+		}
 	}
 
 	next := &models.FleetReleaseState{
@@ -189,6 +206,11 @@ func (s *Service) SetTag(ctx context.Context, tag string) (*models.FleetReleaseS
 	if strings.TrimSpace(tag) == "" {
 		return nil, errors.New("tag required")
 	}
+	if s.cfg.BackendVersion != "" {
+		if err := version.CheckFleetTarget(s.cfg.BackendVersion, tag); err != nil {
+			return nil, err
+		}
+	}
 	next := &models.FleetReleaseState{
 		Channel:    models.FleetChannelPinned,
 		Tag:        tag,
@@ -199,26 +221,6 @@ func (s *Service) SetTag(ctx context.Context, tag string) (*models.FleetReleaseS
 		return nil, err
 	}
 	return next, nil
-}
-
-// HandleWebhook validates the GitHub `release` event signature and triggers a
-// re-resolve. Returns an error on signature mismatch: only the secret holder
-// can move the fleet.
-func (s *Service) HandleWebhook(ctx context.Context, body []byte, signature, eventType string) error {
-	if !s.cfg.Enabled {
-		return errors.New("releases not enabled")
-	}
-	if s.cfg.WebhookSecret == "" {
-		return errors.New("webhook secret not configured")
-	}
-	if !verifySignature(s.cfg.WebhookSecret, body, signature) {
-		return errors.New("signature mismatch")
-	}
-	if eventType != "release" {
-		return nil
-	}
-	_, err := s.CheckGitHub(ctx)
-	return err
 }
 
 func (s *Service) GetState() State {
@@ -233,8 +235,7 @@ func (s *Service) GetState() State {
 	return st
 }
 
-// RunBootCheck syncs once on start so the dashboard is not empty and a fleet
-// brought up after a release converges without waiting for a webhook.
+// RunBootCheck syncs once on start so a fleet brought up after a release converges.
 func (s *Service) RunBootCheck(ctx context.Context) {
 	if !s.cfg.Enabled {
 		log.Printf("releases: disabled; nodes will not be told to update")
@@ -276,17 +277,4 @@ func (s *Service) channelView(name string, r *Release) ChannelView {
 		PublishedAt: r.PublishedAt,
 		HTMLURL:     r.HTMLURL,
 	}
-}
-
-func verifySignature(secret string, body []byte, header string) bool {
-	if !strings.HasPrefix(header, "sha256=") {
-		return false
-	}
-	got, err := hex.DecodeString(strings.TrimPrefix(header, "sha256="))
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	return hmac.Equal(got, mac.Sum(nil))
 }

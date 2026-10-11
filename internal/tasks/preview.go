@@ -3,10 +3,10 @@ package tasks
 import (
 	"context"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"github.com/warmbly/warmbly/internal/app/unsublink"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
 )
@@ -59,15 +59,19 @@ func (s *tasksService) PreviewEmail(ctx context.Context, orgID uuid.UUID, in Ema
 	var optOut *models.UnsubscribeSettings
 	textOnly := false
 	if in.Campaign != nil {
+		// An inert example on the real origin rather than a minted link: a
+		// preview is a read path, rendered on every keystroke, and has no
+		// business writing a ticket per render.
 		if s.unsubLinks != nil && s.unsubLinks.Enabled() {
-			unsubURL = s.unsubLinks.URL(orgID, in.Campaign.ID, uuid.Nil, time.Now())
+			unsubURL = s.unsubLinks.TicketURL("", unsublink.ExampleTicket)
 		}
 		settings := s.resolveOptOut(ctx, orgID, in.Campaign)
 		optOut = &settings
 		textOnly = in.Campaign.TextOnly
 	}
 
-	out := &EmailPreview{TemplatePreview: previewTemplatesWith(in.Subject, in.BodyHTML, in.BodyPlain, in.Contact, unsubURL)}
+	context := templateContext(in.Account, unsubURL)
+	out := &EmailPreview{TemplatePreview: previewTemplatesWith(in.Subject, in.BodyHTML, in.BodyPlain, in.Contact, context)}
 	out.BodyHTML, out.BodyPlain = finishBody(out.BodyHTML, out.BodyPlain, textOnly, in.Account, optOut, unsubURL)
 	// Linted on what the author wrote, sized on what ships: the findings have
 	// to name the markup they can go and fix, but Gmail measures the wire. A
@@ -78,7 +82,7 @@ func (s *tasksService) PreviewEmail(ctx context.Context, orgID uuid.UUID, in Ema
 	}
 
 	if in.Account != nil {
-		out.From = &EmailPreviewFrom{Name: strings.TrimSpace(in.Account.Name), Email: in.Account.Email}
+		out.From = &EmailPreviewFrom{Name: context.Sender.Name, Email: context.Sender.Email}
 	}
 	if in.Campaign != nil && s.attachmentRepo != nil {
 		atts, err := s.attachmentRepo.ListForStep(ctx, in.Campaign.ID, in.SequenceID)

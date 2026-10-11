@@ -3,6 +3,7 @@ import type { StateCreator } from 'zustand'
 export interface Organization {
   id: string
   name: string
+  category?: "standard" | "test"
   avatar?: string
   avatar_url?: string | null
   plan?: string
@@ -10,6 +11,8 @@ export interface Organization {
   role: string
   // Caller's effective permission bitmask in this org (custom-role aware).
   permissions?: number
+  // "restricted" reaches only the campaigns and mailboxes granted to the caller.
+  access_scope?: "workspace" | "restricted"
 }
 
 export interface OrganizationSlice {

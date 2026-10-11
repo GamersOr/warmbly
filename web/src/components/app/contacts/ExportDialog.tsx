@@ -26,7 +26,7 @@ import {
     PlusIcon,
     XIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 
 import exportContacts, {
     downloadBlob,
@@ -36,6 +36,8 @@ import exportContacts, {
 import type SearchContacts from "@/lib/api/models/app/contacts/SearchContacts";
 import { Label, TextInput } from "@/components/ui/field";
 import { hasNarrowingFilters } from "./filters/helpers";
+import { errorMessage } from "@/lib/errors/message";
+import { Checkbox } from "@/components/ui/checkbox";
 
 interface Props {
     open: boolean;
@@ -69,7 +71,7 @@ const STANDARD_FIELDS: { id: string; label: string; preset: "basic" | "full" | "
     { id: "company",      label: "Company",       preset: "basic" },
     { id: "phone",        label: "Phone",         preset: "basic" },
     { id: "subscribed",   label: "Subscribed",    preset: "basic" },
-    { id: "categories",   label: "Categories",    preset: "full" },
+    { id: "categories",   label: "Labels",        preset: "full" },
     { id: "campaigns",    label: "Campaigns",     preset: "full" },
     { id: "created_at",   label: "Created at",    preset: "full" },
     { id: "updated_at",   label: "Updated at",    preset: "full" },
@@ -87,7 +89,7 @@ const CAMPAIGN_FIELDS: { id: string; label: string }[] = [
 
 const PRESETS: { id: "basic" | "full" | "campaign-ready" | "custom"; label: string; hint: string }[] = [
     { id: "basic",          label: "Basic",          hint: "Core contact details — what most CRMs expect." },
-    { id: "full",           label: "Full",           hint: "Every standard column including categories + campaigns." },
+    { id: "full",           label: "Full",           hint: "Every standard column including labels + campaigns." },
     { id: "campaign-ready", label: "Campaign-ready", hint: "Email, names and company, plus lead status and engagement inside a campaign." },
     { id: "custom",         label: "Custom",         hint: "Pick exactly what you need." },
 ];
@@ -204,7 +206,7 @@ export default function ExportDialog({
             toast.success("Export ready");
             onClose();
         } catch (err) {
-            const msg = err instanceof Error ? err.message : "Export failed.";
+            const msg = errorMessage(err, "Export failed.");
             toast.error(msg);
         } finally {
             setLoading(false);
@@ -343,9 +345,7 @@ export default function ExportDialog({
                                                 key={f.id}
                                                 className="flex items-center gap-2 h-7 px-2 rounded hover:bg-slate-50 cursor-pointer"
                                             >
-                                                <input
-                                                    type="checkbox"
-                                                    className="w-3.5 h-3.5 rounded accent-slate-900"
+                                                <Checkbox tone="slate"
                                                     checked={checked}
                                                     onChange={() => toggleField(f.id)}
                                                 />
@@ -507,4 +507,3 @@ function ScopeButton({
         </button>
     );
 }
-

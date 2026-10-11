@@ -8,15 +8,16 @@
 // labels and colours.
 
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import {
     AlertTriangleIcon,
     ArrowRightIcon,
     CheckIcon,
     CreditCardIcon,
     FileTextIcon,
+    FlameIcon,
     InfoIcon,
     Loader2Icon,
     PlayIcon,
@@ -32,14 +33,17 @@ import useTrialStatus from "@/lib/api/hooks/app/subscription/useTrialStatus";
 import useCancelSubscription from "@/lib/api/hooks/app/subscription/useCancelSubscription";
 import useOrganizationLimits from "@/lib/api/hooks/app/organizations/useOrganizationLimits";
 import useUsageOverview from "@/lib/api/hooks/app/analytics/useUsageOverview";
+import useAPIKeyUsageSummary from "@/lib/api/hooks/app/api-keys/useAPIKeyUsageSummary";
+import { usePermission } from "@/hooks/usePermission";
 import type { AppError } from "@/lib/api/client/normalizeError";
+import type Subscription from "@/lib/api/models/app/subscription/Subscription";
 import buildError from "@/lib/helper/buildError";
 import { AnimatedNumber, DitherMeter, type DitherTone } from "@/components/ui/dither";
 import { PLAN_ACCENT_CLASSES, getPlan } from "@/lib/plans";
 import type OrganizationLimits from "@/lib/api/models/app/organizations/OrganizationLimits";
 import { Section } from "../_components/SectionShell";
 
-export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void }) {
+export default function OverviewTab({ onChangePlan, onWarmupPlan }: { onChangePlan: () => void; onWarmupPlan: () => void }) {
     const access = useFeatureAccess();
     const sub = useSubscription();
     const trial = useTrialStatus();
@@ -48,7 +52,9 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
     const counts = orgLimits.data?.counts;
     const mailboxes = orgLimits.data?.mailboxes;
     const storage = orgLimits.data?.storage;
-    const usage = useUsageOverview().data;
+    const usage = useUsageOverview("month").data;
+    const canManageAPIKeys = usePermission("MANAGE_API_KEYS");
+    const apiUsage = useAPIKeyUsageSummary(canManageAPIKeys).data;
     const cancel = useCancelSubscription();
     const flow = useUpgradeFlow();
     const confirm = useConfirm();
@@ -61,6 +67,14 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
         ? new Date(sub.data.current_period_end as unknown as string)
         : null;
     const onFreeTier = !access.paid;
+    // Free and the Warmup plan both warm without sending, so neither has
+    // send, contact, campaign or seat limits worth metering.
+    const sends = !access.locked;
+    const warmupPlan = getPlan("warmup");
+    const yearly = isYearly(sub.data, periodEnd);
+    const serverPlan = sub.data?.plan;
+    const yearlyPrice =
+        serverPlan?.price_yearly ?? (plan.priceAnnual != null ? plan.priceAnnual * 12 : null);
 
     async function scheduleCancel() {
         confirm.show(
@@ -150,25 +164,47 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
                             <div className="flex flex-wrap gap-x-6 gap-y-2 shrink-0">
                                 <Stat
                                     label="Price"
-                                    value={plan.priceMonthly == null ? "Custom" : `$${plan.priceMonthly}`}
-                                    sub={plan.priceMonthly == null ? "contact sales" : "per month"}
+                                    value={
+                                        yearly && yearlyPrice != null
+                                            ? `$${yearlyPrice.toLocaleString()}`
+                                            : plan.priceMonthly == null
+                                              ? "Custom"
+                                              : `$${plan.priceMonthly}`
+                                    }
+                                    sub={
+                                        yearly && yearlyPrice != null
+                                            ? "per year"
+                                            : plan.priceMonthly == null
+                                              ? "contact sales"
+                                              : "per month"
+                                    }
                                 />
                                 <Stat
                                     label={cancelAtEnd ? "Ends" : "Renews"}
                                     value={fmtDate(periodEnd) || "—"}
                                     sub={periodEnd ? relativeDays(periodEnd) : onFreeTier ? "no subscription" : ""}
                                 />
-                                <Stat
-                                    label="Daily sends"
-                                    value={
-                                        limits?.daily_campaign_limit != null
-                                            ? limits.daily_campaign_limit.toLocaleString()
-                                            : plan.sendsPerDay === Number.POSITIVE_INFINITY
-                                              ? "Custom"
-                                              : plan.sendsPerDay.toLocaleString()
-                                    }
-                                    sub="across the workspace"
-                                />
+                                {access.warmupOnly ? (
+                                    <Stat
+                                        label="Mailboxes"
+                                        value={mailboxes?.allowance != null ? mailboxes.allowance.toLocaleString() : "Unlimited"}
+                                        sub="in the premium pool"
+                                    />
+                                ) : (
+                                    <Stat
+                                        label="Daily sends"
+                                        value={
+                                            limits?.daily_campaign_limit != null
+                                                ? limits.daily_campaign_limit.toLocaleString()
+                                                : orgLimits.data
+                                                  ? "Unlimited"
+                                                  : plan.sendsPerDay === Number.POSITIVE_INFINITY
+                                                  ? "Custom"
+                                                  : plan.sendsPerDay.toLocaleString()
+                                        }
+                                        sub="across the workspace"
+                                    />
+                                )}
                             </div>
                         </div>
 
@@ -182,7 +218,7 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
                                 <SparklesIcon className="w-3 h-3" />
                                 {onFreeTier ? "Choose a plan" : "Change plan"}
                             </button>
-                            <button
+                            {flow.hasBillingCustomer && <button
                                 type="button"
                                 onClick={flow.openPortal}
                                 disabled={flow.portalPending}
@@ -194,8 +230,8 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
                                     <CreditCardIcon className="w-3 h-3" />
                                 )}
                                 Payment method
-                            </button>
-                            <button
+                            </button>}
+                            {flow.hasBillingCustomer && <button
                                 type="button"
                                 onClick={flow.openPortal}
                                 disabled={flow.portalPending}
@@ -203,15 +239,17 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
                             >
                                 <FileTextIcon className="w-3 h-3" />
                                 Invoices
-                            </button>
-                            <Link
-                                to="/app/settings/limits"
-                                className="h-7 px-2.5 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors"
-                            >
-                                <SlidersHorizontalIcon className="w-3 h-3" />
-                                Request a limit increase
-                            </Link>
-                            {!onFreeTier && (
+                            </button>}
+                            {!access.warmupOnly && (
+                                <Link
+                                    to="/app/settings/limits"
+                                    className="h-7 px-2.5 rounded-md border border-slate-200 hover:border-slate-300 text-[12px] text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 transition-colors"
+                                >
+                                    <SlidersHorizontalIcon className="w-3 h-3" />
+                                    Request a limit increase
+                                </Link>
+                            )}
+                            {flow.hasStripeSubscription && (
                                 <div className="ml-auto">
                                     {cancelAtEnd ? (
                                         <button
@@ -243,6 +281,29 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
                         </div>
                     </div>
                 )}
+
+                {/* Only warming, no sending: the one plan that is not in the
+                    grid. Free workspaces only; anything paid already has it. */}
+                {!sub.isPending && onFreeTier && (
+                    <button
+                        type="button"
+                        onClick={onWarmupPlan}
+                        className="mt-3 w-full rounded-lg border border-slate-200 hover:border-sky-300 bg-white px-4 py-3 flex items-center gap-3 text-left transition-colors group"
+                    >
+                        <span className="size-8 rounded-md bg-sky-50 text-sky-600 inline-flex items-center justify-center shrink-0">
+                            <FlameIcon className="w-4 h-4" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                            <span className="block text-[12.5px] font-medium text-slate-900">
+                                Only need warmup? {warmupPlan.label} plan, ${warmupPlan.priceMonthly}/mo
+                            </span>
+                            <span className="block text-[12px] text-slate-500 leading-relaxed">
+                                {warmupPlan.description} Works for mailboxes connected here or on a linked instance.
+                            </span>
+                        </span>
+                        <ArrowRightIcon className="w-3.5 h-3.5 text-slate-400 group-hover:text-sky-600 shrink-0 transition-colors" />
+                    </button>
+                )}
             </Section>
 
             {/* ── Usage against real limits ────────────────────────────── */}
@@ -250,13 +311,15 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
                 eyebrow="Usage and limits"
                 description="Live counts against the limits the server is actually enforcing, not the marketing numbers."
                 actions={
-                    <Link
-                        to="/app/settings/limits"
-                        className="text-[11.5px] font-medium text-slate-500 hover:text-slate-900 inline-flex items-center gap-1 transition-colors"
-                    >
-                        Request an increase
-                        <ArrowRightIcon className="w-3 h-3" />
-                    </Link>
+                    access.warmupOnly ? undefined : (
+                        <Link
+                            to="/app/settings/limits"
+                            className="text-[11.5px] font-medium text-slate-500 hover:text-slate-900 inline-flex items-center gap-1 transition-colors"
+                        >
+                            Request an increase
+                            <ArrowRightIcon className="w-3 h-3" />
+                        </Link>
+                    )
                 }
             >
                 {orgLimits.isPending ? (
@@ -270,59 +333,73 @@ export default function OverviewTab({ onChangePlan }: { onChangePlan: () => void
                             max={mailboxes?.allowance}
                             unmetered="unlimited"
                         />
-                        <UsageMeter
-                            label="Sends today"
-                            hint="Campaign emails sent today against the workspace's daily allowance"
-                            current={counts?.emails_sent_today ?? 0}
-                            max={limits?.daily_campaign_limit}
-                        />
-                        <UsageMeter
-                            label="Contacts"
-                            hint="Recipient records stored in this workspace"
-                            current={counts?.total_contacts ?? usage?.contacts.total ?? 0}
-                            max={limits?.max_contacts}
-                        />
-                        <UsageMeter
-                            label="Campaigns"
-                            hint="Campaigns created in this workspace"
-                            current={counts?.total_campaigns ?? usage?.campaigns.total ?? 0}
-                            max={limits?.max_campaigns}
-                        />
-                        <UsageMeter
-                            label="Team members"
-                            hint="Seats used on this workspace"
-                            current={counts?.total_members ?? 0}
-                            max={limits?.max_team_members}
-                        />
-                        <UsageMeter
-                            label="Attachment storage"
-                            hint={
-                                storage?.over_quota
-                                    ? "Over the quota after a plan change: existing files keep sending, new uploads wait until you are back under"
-                                    : "Files attached to campaign steps, across every campaign"
-                            }
-                            current={storage?.used_bytes ?? 0}
-                            max={storage?.limit_bytes}
-                            format={formatBytes}
-                        />
-                        <UsageMeter
-                            label="Sends this period"
-                            hint="Campaign emails delivered in the current billing period"
-                            current={usage?.campaigns.emails_sent ?? 0}
-                            max={undefined}
-                        />
-                        <UsageMeter
-                            label="API calls today"
-                            hint="Requests made with API keys against the daily quota"
-                            current={usage?.api.total_calls ?? 0}
-                            max={usage?.api.daily_limit}
-                        />
+                        {sends && (
+                            <>
+                                <UsageMeter
+                                    label="Sends today"
+                                    hint="Campaign emails sent today against the workspace's daily allowance"
+                                    current={counts?.emails_sent_today ?? 0}
+                                    max={limits?.daily_campaign_limit}
+                                />
+                                <UsageMeter
+                                    label="Contacts"
+                                    hint="Recipient records stored in this workspace"
+                                    current={counts?.total_contacts ?? usage?.contacts.total ?? 0}
+                                    max={limits?.max_contacts}
+                                />
+                                <UsageMeter
+                                    label="Campaigns"
+                                    hint="Campaigns created in this workspace"
+                                    current={counts?.total_campaigns ?? usage?.campaigns.total ?? 0}
+                                    max={limits?.max_campaigns}
+                                />
+                                <UsageMeter
+                                    label="Team members"
+                                    hint="Seats used on this workspace"
+                                    current={counts?.total_members ?? 0}
+                                    max={limits?.max_team_members}
+                                />
+                                <UsageMeter
+                                    label="Attachment storage"
+                                    hint={
+                                        storage?.over_quota
+                                            ? "Over the quota after a plan change: existing files keep sending, new uploads wait until you are back under"
+                                            : "Files attached to campaign steps, across every campaign"
+                                    }
+                                    current={storage?.used_bytes ?? 0}
+                                    max={storage?.limit_bytes}
+                                    format={formatBytes}
+                                />
+                                <UsageMeter
+                                    label="Sends in the last month"
+                                    hint="Campaign emails sent during the rolling one-month window"
+                                    current={usage?.campaigns.emails_sent}
+                                    max={undefined}
+                                />
+                                <UsageMeter
+                                    label="API calls, last 24h"
+                                    hint={canManageAPIKeys ? "Requests made with API keys during the rolling 24-hour window" : "Requires permission to manage API keys"}
+                                    current={apiUsage?.requests_24h}
+                                    max={undefined}
+                                />
+                            </>
+                        )}
                     </div>
                 )}
                 <p className="text-[11px] text-slate-400 leading-relaxed pt-1 inline-flex items-start gap-1.5">
                     <InfoIcon className="w-3 h-3 mt-0.5 shrink-0" />
-                    A meter with no cap means the limit is unmetered on this plan. Warmup volume is
-                    governed per mailbox and is not capped here.
+                    {sends ? (
+                        "A meter with no cap means the limit is unmetered on this plan. Warmup volume is governed per mailbox and is not capped here."
+                    ) : (
+                        <span>
+                            {access.warmupOnly ? "The Warmup plan" : "A free workspace"} warms mailboxes and does not send.
+                            Campaigns, contacts, the unified inbox and the team come with a{" "}
+                            <button type="button" onClick={onChangePlan} className="font-medium text-slate-600 hover:text-slate-900 underline-offset-2 hover:underline">
+                                plan that sends
+                            </button>
+                            . Warmup volume is governed per mailbox.
+                        </span>
+                    )}
                 </p>
             </Section>
 
@@ -415,6 +492,14 @@ function mailboxHint(a: OrganizationLimits["mailboxes"] | undefined): string {
     }
 }
 
+// Yearly when Stripe charges the plan's yearly price, else by period length (a rotated price or a granted plan).
+function isYearly(sub: Subscription | undefined, periodEnd: Date | null): boolean {
+    const yearlyId = sub?.plan?.stripe_price_id_yearly;
+    if (yearlyId && sub?.stripe_price_id === yearlyId) return true;
+    const start = sub?.current_period_start ? new Date(sub.current_period_start as unknown as string) : null;
+    return !!start && !!periodEnd && periodEnd.getTime() - start.getTime() > 62 * 86_400_000;
+}
+
 function formatBytes(n: number): string {
     if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(n >= 10 * (1 << 30) ? 0 : 1)} GB`;
     if (n >= 1 << 20) return `${Math.round(n / (1 << 20))} MB`;
@@ -432,22 +517,24 @@ function UsageMeter({
 }: {
     label: string;
     hint: string;
-    current: number;
+    current?: number;
     max?: number | null;
     /** The word shown instead of a cap when there is none. */
     unmetered?: string;
     /** Renders both numbers; defaults to a plain count. */
     format?: (n: number) => string;
 }) {
-    const capped = typeof max === "number" && max > 0 && Number.isFinite(max);
-    const pct = capped ? Math.min(100, Math.round((current / (max as number)) * 100)) : 0;
+    const value = current ?? 0;
+    const known = typeof current === "number" && Number.isFinite(current);
+    const capped = known && typeof max === "number" && max > 0 && Number.isFinite(max);
+    const pct = capped ? Math.min(100, Math.round((value / (max as number)) * 100)) : 0;
     const tone: DitherTone = pct >= 90 ? "rose" : pct >= 70 ? "amber" : "sky";
     return (
         <div>
             <div className="flex items-baseline justify-between gap-2 mb-1">
                 <span className="text-[12px] text-slate-700 font-medium">{label}</span>
                 <span className="text-[11.5px] font-mono tabular-nums text-slate-700">
-                    {format ? format(current) : <AnimatedNumber value={current} />}
+                    {!known ? "—" : format ? format(value) : <AnimatedNumber value={value} />}
                     <span className="text-slate-400">
                         {capped ? ` / ${format ? format(max as number) : (max as number).toLocaleString()}` : ` / ${unmetered}`}
                     </span>

@@ -13,8 +13,8 @@ import {
     Loader2Icon,
     LockIcon,
 } from "lucide-react";
-import toast from "react-hot-toast";
-import { Navigate } from "react-router-dom";
+import toast from "react-hot-toast/headless";
+import { Navigate } from "@tanstack/react-router";
 import useFeatureAccess from "@/hooks/useFeatureAccess";
 import useReferral from "@/lib/api/hooks/app/subscription/useReferral";
 import useReferralAttributions from "@/lib/api/hooks/app/subscription/useReferralAttributions";
@@ -488,7 +488,7 @@ function formatMoney(cents: number, currency: string): string {
     }
 }
 
-function formatDate(value?: string): string {
+function formatDate(value?: string | Date): string {
     if (!value) return "—";
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return "—";

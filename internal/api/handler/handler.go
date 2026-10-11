@@ -2,6 +2,7 @@ package handler
 
 import (
 	"github.com/warmbly/warmbly/internal/app/admin"
+	"github.com/warmbly/warmbly/internal/app/admindevice"
 	"github.com/warmbly/warmbly/internal/app/adminoutreach"
 	"github.com/warmbly/warmbly/internal/app/advanced"
 	"github.com/warmbly/warmbly/internal/app/advisor"
@@ -9,18 +10,24 @@ import (
 	"github.com/warmbly/warmbly/internal/app/aitools"
 	"github.com/warmbly/warmbly/internal/app/analytics"
 	"github.com/warmbly/warmbly/internal/app/apikey"
+	"github.com/warmbly/warmbly/internal/app/apollo"
+	"github.com/warmbly/warmbly/internal/app/appdirectory"
 	"github.com/warmbly/warmbly/internal/app/audit"
 	"github.com/warmbly/warmbly/internal/app/auth"
 	"github.com/warmbly/warmbly/internal/app/behavior"
 	"github.com/warmbly/warmbly/internal/app/bootstrap"
 	"github.com/warmbly/warmbly/internal/app/campaign"
+	"github.com/warmbly/warmbly/internal/app/clay"
 	"github.com/warmbly/warmbly/internal/app/cliauth"
 	"github.com/warmbly/warmbly/internal/app/cloudlink"
 	"github.com/warmbly/warmbly/internal/app/compose"
 	"github.com/warmbly/warmbly/internal/app/contact"
+	"github.com/warmbly/warmbly/internal/app/contactimport"
 	"github.com/warmbly/warmbly/internal/app/credits"
 	"github.com/warmbly/warmbly/internal/app/crm"
+	"github.com/warmbly/warmbly/internal/app/crmmode"
 	"github.com/warmbly/warmbly/internal/app/dangerzone"
+	"github.com/warmbly/warmbly/internal/app/delegation"
 	"github.com/warmbly/warmbly/internal/app/discount"
 	"github.com/warmbly/warmbly/internal/app/email"
 	"github.com/warmbly/warmbly/internal/app/emailsend"
@@ -29,12 +36,16 @@ import (
 	"github.com/warmbly/warmbly/internal/app/fleetnode"
 	"github.com/warmbly/warmbly/internal/app/form"
 	"github.com/warmbly/warmbly/internal/app/group"
+	"github.com/warmbly/warmbly/internal/app/hubspot"
 	"github.com/warmbly/warmbly/internal/app/instancecheck"
 	"github.com/warmbly/warmbly/internal/app/instanceconfig"
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
 	"github.com/warmbly/warmbly/internal/app/integration"
 	"github.com/warmbly/warmbly/internal/app/leadsync"
+	"github.com/warmbly/warmbly/internal/app/mailboximport"
 	"github.com/warmbly/warmbly/internal/app/mcp"
+	"github.com/warmbly/warmbly/internal/app/monitoring"
+	"github.com/warmbly/warmbly/internal/app/nodelogs"
 	"github.com/warmbly/warmbly/internal/app/notification"
 	"github.com/warmbly/warmbly/internal/app/oauth"
 	"github.com/warmbly/warmbly/internal/app/opsnotify"
@@ -42,14 +53,18 @@ import (
 	"github.com/warmbly/warmbly/internal/app/orgrisk"
 	"github.com/warmbly/warmbly/internal/app/orgtransfer"
 	"github.com/warmbly/warmbly/internal/app/passkey"
+	"github.com/warmbly/warmbly/internal/app/pipedrive"
 	"github.com/warmbly/warmbly/internal/app/placement"
 	"github.com/warmbly/warmbly/internal/app/poollink"
 	"github.com/warmbly/warmbly/internal/app/ratelimit"
 	"github.com/warmbly/warmbly/internal/app/referral"
 	"github.com/warmbly/warmbly/internal/app/research"
+	"github.com/warmbly/warmbly/internal/app/salesforce"
 	"github.com/warmbly/warmbly/internal/app/segment"
+	"github.com/warmbly/warmbly/internal/app/sendingdomain"
 	"github.com/warmbly/warmbly/internal/app/sequence"
 	"github.com/warmbly/warmbly/internal/app/skills"
+	"github.com/warmbly/warmbly/internal/app/slackapp"
 	"github.com/warmbly/warmbly/internal/app/socket"
 	"github.com/warmbly/warmbly/internal/app/stripe"
 	"github.com/warmbly/warmbly/internal/app/subscription"
@@ -64,12 +79,16 @@ import (
 	"github.com/warmbly/warmbly/internal/app/unsublink"
 	"github.com/warmbly/warmbly/internal/app/updates"
 	"github.com/warmbly/warmbly/internal/app/user"
+	"github.com/warmbly/warmbly/internal/app/vendorconn"
+	"github.com/warmbly/warmbly/internal/app/viewprefs"
 	"github.com/warmbly/warmbly/internal/app/warmup"
 	"github.com/warmbly/warmbly/internal/app/warmupcontent"
 	"github.com/warmbly/warmbly/internal/app/webhook"
 	"github.com/warmbly/warmbly/internal/app/websitetracking"
 	"github.com/warmbly/warmbly/internal/app/worker"
+	"github.com/warmbly/warmbly/internal/infrastructure/eventbus"
 	"github.com/warmbly/warmbly/internal/pkg/generation"
+	"github.com/warmbly/warmbly/internal/pkg/typesafe"
 
 	"github.com/warmbly/warmbly/internal/infrastructure/encryptedkeys"
 	"github.com/warmbly/warmbly/internal/infrastructure/kms"
@@ -103,12 +122,22 @@ type Handler struct {
 	BootstrapService *bootstrap.Service
 	UserService      user.UserService
 	EmailService     email.EmailService
-	CampaignService  campaign.CampaignService
-	ContactService   contact.ContactService
-	SegmentService   segment.Service
-	FormService      form.Service
-	SequenceService  sequence.SequenceService
-	UniboxService    unibox.UniboxService
+	// MailboxImportService runs mailbox imports from files and pasted lists.
+	MailboxImportService *mailboximport.Service
+	// ContactImportService runs contact file imports in the background.
+	ContactImportService *contactimport.Service
+	// DelegationService connects whole Google Workspace domains and Microsoft 365 tenants.
+	DelegationService *delegation.Service
+	// VendorConnService imports mailboxes straight from inbox vendors' APIs.
+	VendorConnService *vendorconn.Service
+	// SendingDomainService manages tracking hosts and bare-domain redirects per sending domain.
+	SendingDomainService *sendingdomain.Service
+	CampaignService      campaign.CampaignService
+	ContactService       contact.ContactService
+	SegmentService       segment.Service
+	FormService          form.Service
+	SequenceService      sequence.SequenceService
+	UniboxService        unibox.UniboxService
 
 	FolderService   group.GroupService
 	TagService      group.GroupService
@@ -119,6 +148,8 @@ type Handler struct {
 	TasksService        tasks.TasksService
 	NotificationService notification.Service
 	TwoFAService        twofa.Service
+	// ViewPreferencesService keeps each member's saved list layouts.
+	ViewPreferencesService viewprefs.Service
 
 	// New services
 	APIKeyService    apikey.APIKeyService
@@ -161,8 +192,10 @@ type Handler struct {
 
 	// Fleet. Nodes enrol with the join token and pull everything else; the
 	// control plane never reaches into a machine.
-	FleetNodes *fleetnode.Service
-	WorkerRepo repository.WorkerRepository
+	FleetNodes        *fleetnode.Service
+	NodeLogs          nodelogs.Store
+	BrokerDiagnostics eventbus.EventBus
+	WorkerRepo        repository.WorkerRepository
 	// UpdatesService backs the admin panel's update indicator and button.
 	UpdatesService *updates.Service
 
@@ -174,6 +207,9 @@ type Handler struct {
 	// UnsubscribeLinks verifies the signed tokens on recipient unsubscribe
 	// links. Nil when the instance has no public API URL to mint them on.
 	UnsubscribeLinks *unsublink.Signer
+	// UnsubscribeTickets resolves the short form of those links. Nil means
+	// only the self-contained signed tokens are honoured.
+	UnsubscribeTickets repository.UnsubscribeLinkRepository
 
 	// Website tracking snippet: settings and the page-view ingest path.
 	WebsiteTrackingService websitetracking.Service
@@ -207,7 +243,11 @@ type Handler struct {
 	// shared by the dashboard agent, research, automation AI nodes, and the
 	// inbox agent. Nil when no LLM provider is configured.
 	AIProvider generation.Provider
-	AISearch   generation.SearchClient
+	// TypeSafe is the shared typed-judgment client. Nil when no key is
+	// configured; every endpoint that reads it degrades to its rules-only
+	// answer.
+	TypeSafe typesafe.Asker
+	AISearch generation.SearchClient
 
 	// AITools is the shared tool registry the dashboard agent and MCP server
 	// run on. Handlers bound to the invoking user's permissions.
@@ -251,9 +291,24 @@ type Handler struct {
 	IntegrationService integration.Service
 	ContactRepo        repository.ContactRepository
 
+	// SlackService is the Slack app (request URLs and the dashboard's Slack
+	// panel). Nil answers slack_not_configured.
+	SlackService *slackapp.Service
+
+	// HubSpot runs a workspace's CRM on HubSpot when it chooses so. Nil on
+	// processes built without it.
+	HubSpot *hubspot.Service
+	// Pipedrive runs a workspace's CRM on Pipedrive when it chooses so.
+	Pipedrive *pipedrive.Service
+	// CRMModes routes the CRM mode endpoints to the CRM a workspace runs on.
+	CRMModes *crmmode.Registry
+
 	// OAuth 2.1 authorization server (third-party app registration + the
 	// authorization-code-with-PKCE flow + bearer-token validation).
 	OAuthService *oauth.Service
+
+	// AppDirectoryService is the community app directory (published OAuth apps).
+	AppDirectoryService *appdirectory.Service
 
 	// Realtime publisher for handler paths that emit live dashboard events
 	// directly (inbound meeting webhooks have no service layer of their own).
@@ -263,6 +318,15 @@ type Handler struct {
 	// On-demand Google Sheets -> leads sync. Reuses the google_sheets OAuth
 	// connection's token to read sheets and the contact import path to upsert.
 	LeadSyncService leadsync.Service
+
+	// SalesforceService is the native Salesforce sync: settings, imports, the
+	// activity log and the contact panel.
+	SalesforceService *salesforce.Service
+
+	// ApolloService imports Apollo lists and enriches contacts through Apollo.
+	ApolloService *apollo.Service
+	// ClayService takes rows from Clay tables and sends events back to them.
+	ClayService *clay.Service
 
 	// Public websocket URL used by frontend clients
 	WebsocketURI string
@@ -290,10 +354,16 @@ type Handler struct {
 	// Mailbox sync state, read by the dashboard (GET /emails/:id/sync) and by
 	// the worker's priority lane over /api/v1/internal/sync/own-conversation.
 	EmailSyncState repository.EmailSyncStateRepository
+	WarmupDispatch repository.WarmupDispatchRepository
 
 	// Click-link store, served to the tracking service over HTTPS at
 	// /api/v1/internal/tracked-links/:id (same no-direct-Postgres rule).
 	TrackedLinks repository.TrackedLinkRepository
+
+	// InboxTagRepo backs the automatic-tagging review page. Optional: nil when
+	// the feature was never configured, and the endpoint says so rather than
+	// failing.
+	InboxTagRepo repository.InboxTagRepository
 
 	// Verified custom tracking and forms domains, read by the on-demand TLS
 	// gate at /tls/authorize so a reverse proxy can obtain a certificate for a
@@ -324,10 +394,12 @@ type Handler struct {
 
 	// Device-code sign-in for the `warmbly` CLI. Nil-safe: routes answer 501.
 	CLIAuthService cliauth.Service
+	AdminDevice    *admindevice.Service
 
 	// Infrastructure liveness probes for the admin System Status page.
 	// Wired in cmd/backend/main.go where the concrete clients live.
 	SystemChecker *sysstatus.Checker
+	Monitoring    *monitoring.Service
 
 	// Admin operations pages: cross-workspace reads of mailbox sync, the send
 	// outcome loop, fleet placement and abuse signals, plus the scheduled job

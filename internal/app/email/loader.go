@@ -2,12 +2,15 @@ package email
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
+	"github.com/warmbly/warmbly/internal/config"
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/repository"
@@ -16,7 +19,7 @@ import (
 
 // WireGraphDelta attaches the Graph delta-cursor repository so the reconciler can
 // seed a Graph mailbox's saved per-folder cursors when (re)loading it. Optional;
-// when unset, Graph mailboxes prime from empty on load.
+// when unset, Graph mailboxes recover from empty on load.
 func (s *emailService) WireGraphDelta(repo repository.EmailGraphDeltaRepository) {
 	s.graphDelta = repo
 }
@@ -28,22 +31,26 @@ func (s *emailService) WireEmailHistoryID(repo repository.EmailHistoryIDReposito
 	s.historyID = repo
 }
 
-// reconcileRepublishInterval bounds how often the reconciler re-publishes a
-// given account. The immediate onboarding load and any reassignment still fire
-// right away (they call LoadAccountOntoWorker directly); this only throttles the
-// steady-state safety-net loop so the fleet isn't re-shipping every account's
-// decrypted credentials over Kafka every tick. A restarted worker is re-seeded
-// within this window rather than within one tick.
-const reconcileRepublishInterval = 5 * time.Minute
+// reconcileRepublishInterval is how often the safety net re-ships a mailbox
+// that nothing else changed. A new placement, a move and a dead worker are
+// acted on within one tick; onboarding and a worker's boot reload ship at once.
+// Each mailbox's turn is spread across the interval, because re-shipping the
+// whole fleet in one tick queued hundreds of commands on every worker at once.
+const reconcileRepublishInterval = 30 * time.Minute
+
+// reconcileEntry is what the reconciler remembers about one mailbox.
+type reconcileEntry struct {
+	worker uuid.UUID
+	next   time.Time
+}
 
 // StartWorkerReconciler periodically ensures every active mailbox is assigned to
 // a worker and loaded onto it. Workers hold accounts in memory only, so this is
-// what makes onboarding, worker restarts, and reassignment converge. Each
-// account is republished at most once per reconcileRepublishInterval;
+// what makes onboarding, worker restarts, and reassignment converge.
 // PublishAddEmail is idempotent worker-side, so a republish is always safe.
 func (s *emailService) StartWorkerReconciler(ctx context.Context, interval time.Duration) {
-	lastPublished := map[uuid.UUID]time.Time{}
-	s.reconcileWorkerAccounts(ctx, lastPublished)
+	seen := map[uuid.UUID]reconcileEntry{}
+	s.reconcileWorkerAccounts(ctx, seen)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -52,39 +59,82 @@ func (s *emailService) StartWorkerReconciler(ctx context.Context, interval time.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.reconcileWorkerAccounts(ctx, lastPublished)
+			s.reconcileWorkerAccounts(ctx, seen)
 		}
 	}
 }
 
-func (s *emailService) reconcileWorkerAccounts(ctx context.Context, lastPublished map[uuid.UUID]time.Time) {
-	ids, err := s.emailRepository.ListActiveWorkerAccounts(ctx)
+// spreadTurn is a random point in the second half of the interval, so turns never bunch up again.
+func spreadTurn(now time.Time) time.Time {
+	half := int64(reconcileRepublishInterval / 2)
+	return now.Add(time.Duration(half + rand.Int63n(half)))
+}
+
+func (s *emailService) reconcileWorkerAccounts(ctx context.Context, seen map[uuid.UUID]reconcileEntry) {
+	rows, err := s.emailRepository.ListActiveWorkerAccounts(ctx)
 	if err != nil {
 		log.Warn().Err(err).Msg("worker reconciler: list active accounts failed")
 		return
 	}
-
-	active := make(map[uuid.UUID]struct{}, len(ids))
+	live := map[uuid.UUID]bool{}
+	isLive := func(id uuid.UUID) bool {
+		v, ok := live[id]
+		if !ok {
+			v = true
+			if s.workerAssignment != nil {
+				if ok, err := s.workerAssignment.IsWorkerLive(ctx, id); err == nil {
+					v = ok
+				}
+			}
+			live[id] = v
+		}
+		return v
+	}
 	now := time.Now()
-	for _, id := range ids {
-		active[id] = struct{}{}
-		if last, ok := lastPublished[id]; ok && now.Sub(last) < reconcileRepublishInterval {
+	for _, r := range reconcileDue(rows, seen, now, isLive) {
+		if err := s.LoadAccountOntoWorker(ctx, r.ID); err != nil {
+			log.Warn().Err(err).Str("email_id", r.ID.String()).Msg("worker reconciler: load account failed")
 			continue
 		}
-		if err := s.LoadAccountOntoWorker(ctx, id); err != nil {
-			log.Warn().Err(err).Str("email_id", id.String()).Msg("worker reconciler: load account failed")
-			continue
+		// The load may have placed or moved it; remember where it went, or the next tick ships it again.
+		var worker uuid.UUID
+		if w, xerr := s.emailRepository.GetWorkerID(ctx, r.ID); xerr == nil && w != nil {
+			worker = *w
+		} else if r.WorkerID != nil {
+			worker = *r.WorkerID
 		}
-		lastPublished[id] = now
+		seen[r.ID] = reconcileEntry{worker: worker, next: spreadTurn(now)}
 	}
+}
 
-	// Drop throttle entries for accounts no longer active so the map can't grow
-	// without bound as mailboxes are disconnected.
-	for id := range lastPublished {
+// reconcileDue picks the mailboxes to ship this tick: at once when unplaced,
+// on a dead worker or moved, otherwise when their spread-out turn comes. It
+// also schedules first sightings and forgets mailboxes that are gone.
+func reconcileDue(rows []repository.MailboxAssignment, seen map[uuid.UUID]reconcileEntry, now time.Time, isLive func(uuid.UUID) bool) []repository.MailboxAssignment {
+	var due []repository.MailboxAssignment
+	active := make(map[uuid.UUID]struct{}, len(rows))
+	for _, r := range rows {
+		active[r.ID] = struct{}{}
+		entry, known := seen[r.ID]
+		urgent := r.WorkerID == nil || !isLive(*r.WorkerID) || (known && entry.worker != *r.WorkerID)
+		switch {
+		case urgent:
+		case !known:
+			// First sight since boot: onboarding or the worker's boot reload
+			// already shipped it, so its safety-net turn is spread out.
+			seen[r.ID] = reconcileEntry{worker: *r.WorkerID, next: now.Add(time.Duration(rand.Int63n(int64(reconcileRepublishInterval))))}
+			continue
+		case now.Before(entry.next):
+			continue
+		}
+		due = append(due, r)
+	}
+	for id := range seen {
 		if _, ok := active[id]; !ok {
-			delete(lastPublished, id)
+			delete(seen, id)
 		}
 	}
+	return due
 }
 
 // ReloadWorkerAccounts publishes every active mailbox assigned to workerID
@@ -135,6 +185,15 @@ func (s *emailService) LoadAccountOntoWorker(ctx context.Context, accountID uuid
 	// this it can put back a mailbox that was deactivated in between and undo
 	// the removal the consumer just sent.
 	if acc.Status != "active" {
+		return nil
+	}
+	// A delegated mailbox without its grant (it arrived in an archive, or the grant
+	// went) has nothing to sign in with; it waits inactive until the domain is
+	// connected again, which relinks and reactivates it.
+	if acc.AuthMethod == models.MailAuthDelegated && acc.DomainGrantID == nil {
+		if xerr := s.emailRepository.SetStatus(ctx, acc.ID, "inactive"); xerr != nil {
+			return xerr
+		}
 		return nil
 	}
 
@@ -194,10 +253,27 @@ func (s *emailService) dropFromWorker(ctx context.Context, userID string, accoun
 		return nil
 	}
 
-	if err := s.publisher.PublishRemoveEmail(ctx, *workerID, &models.RemoveWorkerEmail{
+	remove := &models.RemoveWorkerEmail{
 		UserID:  userID,
 		EmailID: accountID.String(),
-	}); err != nil {
+	}
+	if source, ok := s.emailRepository.(repository.WarmupDisconnectSource); ok {
+		account, aerr := s.emailRepository.GetByID(ctx, accountID)
+		if aerr != nil {
+			log.Warn().Err(aerr).Str("email_id", accountID.String()).Msg("pre-disconnect mailbox lookup failed")
+		} else if account != nil {
+			remove.WarmupPlacement, remove.WarmupFolder = account.WarmupFiling()
+			if remove.WarmupPlacement != models.WarmupPlacementInbox {
+				ids, err := source.WarmupDisconnectMessageIDs(ctx, accountID, 200)
+				if err != nil {
+					log.Warn().Err(err).Str("email_id", accountID.String()).Msg("pre-disconnect warmup lookup failed")
+				} else {
+					remove.WarmupMessageIDs = ids
+				}
+			}
+		}
+	}
+	if err := s.publisher.PublishRemoveEmail(ctx, *workerID, remove); err != nil {
 		log.Warn().Err(err).
 			Str("email_id", accountID.String()).
 			Str("worker_id", workerID.String()).
@@ -247,11 +323,71 @@ func (s *emailService) releaseDeadWorker(ctx context.Context, accountID uuid.UUI
 	return nil, nil
 }
 
-// buildAddWorkerEmail reconstructs the worker payload for an account, decrypting
-// its credentials and attaching the provider-specific data. Cfg is intentionally
-// left zero: it is avro-excluded and the worker rebuilds it locally from its own
-// oauth config.
+type addWorkerEmailPreload struct {
+	syncData  *models.AddWorkerEmailSyncData
+	historyID uint64
+	delta     map[string]string
+	mailboxes []models.Mailbox
+	managed   bool
+}
+
+func (s *emailService) preloadAddWorkerEmail(ctx context.Context, acc *models.Email) (*addWorkerEmailPreload, error) {
+	userID, err := uuid.Parse(acc.UserID)
+	if err != nil {
+		return nil, err
+	}
+	syncData, err := s.syncDataFor(ctx, acc.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	p := &addWorkerEmailPreload{syncData: syncData}
+	switch models.InboxProvider(acc.Provider) {
+	case models.InboxProviderGoogle:
+		p.historyID = s.lastHistoryFor(ctx, userID, acc.ID, nil)
+	case models.InboxProviderOutlook:
+		p.delta, err = s.deltaLinksFor(ctx, userID, acc.ID)
+		if err != nil {
+			return nil, err
+		}
+	case models.InboxProviderSMTPIMAP:
+		p.mailboxes = s.mailboxesFor(ctx, userID, acc.ID)
+	}
+	if acc.AuthMethod != models.MailAuthDelegated && s.cloudLink != nil {
+		if link, err := s.cloudLink.GetByAccount(ctx, acc.ID); err == nil && link != nil {
+			p.managed = link.Managed
+		}
+	}
+	return p, nil
+}
+
 func (s *emailService) buildAddWorkerEmail(ctx context.Context, acc *models.Email) (*models.AddWorkerEmail, error) {
+	if snapshots, ok := s.emailRepository.(repository.EmailTransportSnapshot); ok {
+		preload, err := s.preloadAddWorkerEmail(ctx, acc)
+		if err != nil {
+			return nil, err
+		}
+		var payload *models.AddWorkerEmail
+		err = snapshots.WithTransportSnapshot(ctx, func(repo repository.EmailRepository) error {
+			current, xerr := repo.GetByID(ctx, acc.ID)
+			if xerr != nil {
+				return xerr
+			}
+			if current == nil || current.Status != "active" {
+				return nil
+			}
+			if current.TransportGeneration != acc.TransportGeneration || current.Provider != acc.Provider || current.UserID != acc.UserID || current.AuthMethod != acc.AuthMethod {
+				return fmt.Errorf("mailbox changed while preparing worker load")
+			}
+			var err error
+			payload, err = s.buildAddWorkerEmailSnapshot(ctx, current, repo, preload)
+			return err
+		})
+		return payload, err
+	}
+	return s.buildAddWorkerEmailSnapshot(ctx, acc, s.emailRepository, nil)
+}
+
+func (s *emailService) buildAddWorkerEmailSnapshot(ctx context.Context, acc *models.Email, repo repository.EmailRepository, preload *addWorkerEmailPreload) (*models.AddWorkerEmail, error) {
 	userID, err := uuid.Parse(acc.UserID)
 	if err != nil {
 		return nil, err
@@ -260,28 +396,85 @@ func (s *emailService) buildAddWorkerEmail(ctx context.Context, acc *models.Emai
 	provider := models.InboxProvider(acc.Provider)
 
 	saveToSent := acc.SaveToSent
+	var sync *models.AddWorkerEmailSyncData
+	if preload != nil {
+		folders, xerr := repo.GetSyncSkipFolders(ctx, acc.ID)
+		if xerr != nil {
+			return nil, fmt.Errorf("sync skip folders lookup: %w", xerr)
+		}
+		copy := *preload.syncData
+		copy.Policy.SkipFolders = folders
+		sync = &copy
+	} else {
+		var err error
+		sync, err = s.syncDataFor(ctx, acc.ID, true)
+		if err != nil {
+			return nil, err
+		}
+	}
 	out := &models.AddWorkerEmail{
-		ID:             acc.ID,
-		UserID:         userID,
-		OrganizationID: acc.OrganizationID,
-		Email:          acc.Email,
-		FirstName:      first,
-		LastName:       last,
-		Type:           provider,
-		Sync:           s.syncDataFor(ctx, acc.ID),
+		TransportGeneration: acc.TransportGeneration,
+		ID:                  acc.ID,
+		UserID:              userID,
+		OrganizationID:      acc.OrganizationID,
+		Email:               acc.Email,
+		FirstName:           first,
+		LastName:            last,
+		Type:                provider,
+		Sync:                sync,
 		// Only SMTP/IMAP acts on this; Gmail and Graph file their own copy.
 		SaveToSent: &saveToSent,
+	}
+	if provider == models.InboxProviderOutlook {
+		var links map[string]string
+		if preload != nil {
+			links = preload.delta
+		} else {
+			var err error
+			links, err = s.deltaLinksFor(ctx, userID, acc.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		out.Graph = &models.AddWorkerEmailGraphData{DeltaLinks: links}
+	}
+
+	// A mailbox under an administrator's grant has no stored credential
+	// either; the worker draws tokens the control plane mints per use.
+	if acc.AuthMethod == models.MailAuthDelegated {
+		d, xerr := repo.GetDelegation(ctx, acc.ID)
+		if xerr != nil {
+			return nil, xerr
+		}
+		if d == nil {
+			return nil, nil
+		}
+		out.Brokered = true
+		switch provider {
+		case models.InboxProviderGoogle:
+			out.Google = &models.AddWorkerEmailGoogleData{LastHistoryID: s.workerHistoryID(ctx, userID, acc, preload)}
+		case models.InboxProviderOutlook:
+			out.Graph.User = d.Subject
+		default:
+			return nil, nil
+		}
+		return out, nil
 	}
 
 	// A managed mailbox has no local credential; the worker draws brokered tokens.
 	if s.cloudLink != nil {
-		if m, err := s.cloudLink.GetByAccount(ctx, acc.ID); err == nil && m != nil && m.Managed {
+		managed := preload != nil && preload.managed
+		if preload == nil {
+			m, err := s.cloudLink.GetByAccount(ctx, acc.ID)
+			managed = err == nil && m != nil && m.Managed
+		}
+		if managed {
 			out.Brokered = true
 			switch provider {
 			case models.InboxProviderGoogle:
-				out.Google = &models.AddWorkerEmailGoogleData{LastHistoryID: s.lastHistoryFor(ctx, userID, acc.ID, acc.LastID)}
+				out.Google = &models.AddWorkerEmailGoogleData{LastHistoryID: s.workerHistoryID(ctx, userID, acc, preload)}
 			case models.InboxProviderOutlook:
-				out.Graph = &models.AddWorkerEmailGraphData{DeltaLinks: s.deltaLinksFor(ctx, userID, acc.ID)}
+				// The checkpoint was loaded before selecting the token owner.
 			default:
 				return nil, nil
 			}
@@ -291,25 +484,22 @@ func (s *emailService) buildAddWorkerEmail(ctx context.Context, acc *models.Emai
 
 	switch provider {
 	case models.InboxProviderGoogle:
-		creds, cerr := s.emailRepository.GetOAuthCredentials(ctx, acc.ID)
+		creds, cerr := repo.GetOAuthCredentials(ctx, acc.ID)
 		if cerr != nil {
 			return nil, cerr
 		}
 		out.Google = &models.AddWorkerEmailGoogleData{
 			Token:         oauthToken(creds),
-			LastHistoryID: s.lastHistoryFor(ctx, userID, acc.ID, acc.LastID),
+			LastHistoryID: s.workerHistoryID(ctx, userID, acc, preload),
 		}
 	case models.InboxProviderOutlook:
-		creds, cerr := s.emailRepository.GetOAuthCredentials(ctx, acc.ID)
+		creds, cerr := repo.GetOAuthCredentials(ctx, acc.ID)
 		if cerr != nil {
 			return nil, cerr
 		}
-		out.Graph = &models.AddWorkerEmailGraphData{
-			Token:      oauthToken(creds),
-			DeltaLinks: s.deltaLinksFor(ctx, userID, acc.ID),
-		}
+		out.Graph.Token = oauthToken(creds)
 	case models.InboxProviderSMTPIMAP:
-		creds, cerr := s.emailRepository.GetSMTPCredentials(ctx, acc.ID)
+		creds, cerr := repo.GetSMTPCredentials(ctx, acc.ID)
 		if cerr != nil {
 			return nil, cerr
 		}
@@ -319,13 +509,33 @@ func (s *emailService) buildAddWorkerEmail(ctx context.Context, acc *models.Emai
 				SMTP: &models.Service{Host: creds.SMTPHost, Port: creds.SMTPPort, Username: creds.SMTPUser, Password: creds.SMTPPassword, Security: creds.SMTPSecurity},
 				IMAP: &models.Service{Host: creds.IMAPHost, Port: creds.IMAPPort, Username: creds.IMAPUser, Password: creds.IMAPPassword, Security: creds.IMAPSecurity},
 			},
-			Mailboxes: s.mailboxesFor(ctx, userID, acc.ID),
+			Mailboxes: s.workerMailboxes(ctx, userID, acc, preload),
 		}
 	default:
 		return nil, nil
 	}
 
 	return out, nil
+}
+
+func (s *emailService) workerHistoryID(ctx context.Context, userID uuid.UUID, acc *models.Email, preload *addWorkerEmailPreload) uint64 {
+	if preload == nil {
+		return s.lastHistoryFor(ctx, userID, acc.ID, acc.LastID)
+	}
+	if preload.historyID > 0 {
+		return preload.historyID
+	}
+	if acc.LastID != nil && *acc.LastID > 0 {
+		return uint64(*acc.LastID)
+	}
+	return 0
+}
+
+func (s *emailService) workerMailboxes(ctx context.Context, userID uuid.UUID, acc *models.Email, preload *addWorkerEmailPreload) []models.Mailbox {
+	if preload != nil {
+		return preload.mailboxes
+	}
+	return s.mailboxesFor(ctx, userID, acc.ID)
 }
 
 // lastHistoryFor is the Gmail checkpoint a (re)loaded mailbox resumes from.
@@ -355,7 +565,7 @@ func (s *emailService) lastHistoryFor(ctx context.Context, userID, emailID uuid.
 // state a previous worker left behind. Policy comes from instance settings
 // (compiled defaults when none are wired), so an operator's change applies at
 // the next load: onboarding, reassignment, or the reconciler's republish.
-func (s *emailService) syncDataFor(ctx context.Context, emailID uuid.UUID) *models.AddWorkerEmailSyncData {
+func (s *emailService) syncDataFor(ctx context.Context, emailID uuid.UUID, readFolders bool) (*models.AddWorkerEmailSyncData, error) {
 	budget := instancesettings.DefaultSync()
 	if s.syncBudget != nil {
 		budget = s.syncBudget.SyncBudget(ctx)
@@ -368,6 +578,17 @@ func (s *emailService) syncDataFor(ctx context.Context, emailID uuid.UUID) *mode
 			OrgDailyMessages: budget.DailyMessagesPerOrg,
 		},
 	}
+	// The skip list is part of the policy a republish replaces on the loaded
+	// mailbox, so a failed read cannot fall back to "skip nothing": that
+	// would have the worker baseline and import the excluded folders until
+	// the next republish. The load fails instead and the reconciler retries.
+	if readFolders {
+		skip, xerr := s.emailRepository.GetSyncSkipFolders(ctx, emailID)
+		if xerr != nil {
+			return nil, fmt.Errorf("sync skip folders lookup: %w", xerr)
+		}
+		data.Policy.SkipFolders = skip
+	}
 	// A pool-linked mailbox is a warmup-only mirror: no history import.
 	if s.poolLink != nil {
 		if linked, err := s.poolLink.GetMailboxByAccount(ctx, emailID); err == nil && linked != nil {
@@ -375,14 +596,25 @@ func (s *emailService) syncDataFor(ctx context.Context, emailID uuid.UUID) *mode
 			data.Policy.BackfillMessages = 25
 		}
 	}
-	if s.syncState != nil {
-		if saved, err := s.syncState.Get(ctx, emailID); err == nil {
-			data.State = saved
-		} else {
-			log.Warn().Err(err).Str("email_id", emailID.String()).Msg("sync state lookup failed; worker starts fresh")
+	// A seed receives every workspace's test copies, so the per-mailbox budget
+	// that fits one person's mail would defer them past the classify window.
+	// It never needs its history.
+	if s.seedScope != nil {
+		if scope, err := s.seedScope.SeedScope(ctx, emailID); err == nil && scope != "" {
+			data.Policy.DailyMessages = max(data.Policy.DailyMessages, config.PlacementSeedDailySyncMessages)
+			data.Policy.OrgDailyMessages = max(data.Policy.OrgDailyMessages, config.PlacementSeedDailySyncMessages)
+			data.Policy.BackfillDays = 1
+			data.Policy.BackfillMessages = 25
 		}
 	}
-	return data
+	if s.syncState != nil {
+		saved, err := s.syncState.Get(ctx, emailID)
+		if err != nil {
+			return nil, fmt.Errorf("sync state lookup: %w", err)
+		}
+		data.State = saved
+	}
+	return data, nil
 }
 
 // mailboxesFor is the IMAP folder state (name, UIDVALIDITY, HIGHESTMODSEQ)
@@ -400,15 +632,15 @@ func (s *emailService) mailboxesFor(ctx context.Context, userID, emailID uuid.UU
 	return saved
 }
 
-func (s *emailService) deltaLinksFor(ctx context.Context, userID, emailID uuid.UUID) map[string]string {
+func (s *emailService) deltaLinksFor(ctx context.Context, userID, emailID uuid.UUID) (map[string]string, error) {
 	if s.graphDelta == nil {
-		return nil
+		return nil, nil
 	}
 	links, err := s.graphDelta.Get(ctx, userID, emailID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("graph checkpoint lookup: %w", err)
 	}
-	return links
+	return links, nil
 }
 
 func oauthToken(c *repository.OAuthCredentials) *oauth2.Token {

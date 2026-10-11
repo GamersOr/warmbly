@@ -66,6 +66,7 @@ func (h *Handler) GetFormsConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"base_url":          config.FormsBaseURL(),
 		"captcha_available": config.CaptchaProvider() != "none" && config.TurnstileSiteKey() != "",
+		"triage_available":  config.TypeSafeAPIKey() != "",
 	})
 }
 
@@ -91,7 +92,7 @@ func (h *Handler) CreateForm(c *gin.Context) {
 		Name string `json:"name"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	var createdBy *uuid.UUID
@@ -114,7 +115,7 @@ func (h *Handler) UpdateForm(c *gin.Context) {
 	}
 	var in models.FormWrite
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	out, xerr := h.FormService.Update(c.Request.Context(), orgID, id, &in)
@@ -212,7 +213,7 @@ func (h *Handler) SetFormsDomain(c *gin.Context) {
 		FormsDomain string `json:"forms_domain"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
-		errx.Handle(c, errx.ErrInvalid)
+		errx.Handle(c, errx.InvalidBody(err))
 		return
 	}
 	out, xerr := h.FormService.SetFormsDomain(c.Request.Context(), orgID, in.FormsDomain)

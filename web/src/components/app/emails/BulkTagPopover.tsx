@@ -8,7 +8,7 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CheckIcon, Loader2Icon, PlusIcon, TagIcon } from "lucide-react";
-import toast from "react-hot-toast";
+import toast from "react-hot-toast/headless";
 import { useQueryClient } from "@tanstack/react-query";
 import { useUserProfile } from "@/hooks/context/user";
 import useClickOutside from "@/hooks/useClickOutside";
@@ -16,6 +16,7 @@ import useFlipPlacement from "@/hooks/useFlipPlacement";
 import useBulkTagEmails from "@/lib/api/hooks/app/emails/useBulkTagEmails";
 import createTag from "@/lib/api/client/app/tags/createTag";
 import type User from "@/lib/api/models/auth/User";
+import { errorMessage } from "@/lib/errors/message";
 
 // Same 8 hexes as the tags editor palette; inline creates cycle through
 // them so consecutive new tags don't all share one color.
@@ -43,7 +44,7 @@ export default function BulkTagPopover({ ids }: { ids: string[] }) {
 
     const ref = React.useRef<HTMLDivElement>(null);
     const triggerRef = React.useRef<HTMLButtonElement>(null);
-    useClickOutside(ref, () => setOpen(false));
+    useClickOutside(open, () => setOpen(false), ref);
     // ~330px: toggle + search header + max-h-48 list + footer.
     const placement = useFlipPlacement(triggerRef, open, 330);
 
@@ -80,7 +81,7 @@ export default function BulkTagPopover({ ids }: { ids: string[] }) {
             setPicked((p) => [...p, t.id]);
             setQuery("");
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "Failed to create tag");
+            toast.error(errorMessage(err, "Failed to create tag"));
         } finally {
             setCreating(false);
         }

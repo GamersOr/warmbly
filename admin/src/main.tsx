@@ -8,13 +8,15 @@ import {
     RouterProvider,
     useLocation,
 } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 
 import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
 
 import { initErrorReporting } from "@/lib/observability";
+import { reportFailure } from "@/lib/api/reportFailure";
 
 import { Toaster } from "@/components/ui/sonner";
 import { AppShell } from "@/components/layout/AppShell";
@@ -22,6 +24,7 @@ import { RequireAdmin } from "@/components/layout/RequireAdmin";
 import { RouteError } from "@/components/layout/RouteError";
 
 import LoginPage from "@/app/auth/LoginPage";
+import DeviceApprovalPage from "@/app/auth/DeviceApprovalPage";
 import OverviewPage from "@/app/dashboard/OverviewPage";
 import WorkersPage from "@/app/dashboard/WorkersPage";
 import WorkerDetailPage from "@/app/dashboard/WorkerDetailPage";
@@ -36,13 +39,16 @@ import UserDetailPage from "@/app/dashboard/UserDetailPage";
 import AdminsPage from "@/app/dashboard/AdminsPage";
 import WarmupPage from "@/app/dashboard/WarmupPage";
 import WarmupAppealsPage from "@/app/dashboard/WarmupAppealsPage";
+import DeveloperAppsPage from "@/app/dashboard/DeveloperAppsPage";
 import WarmupContentLayout from "@/app/dashboard/warmup-content/WarmupContentLayout";
 import WarmupContentOverviewPage from "@/app/dashboard/warmup-content/OverviewPage";
 import WarmupContentLibraryPage from "@/app/dashboard/warmup-content/LibraryPage";
 import WarmupContentJobsPage from "@/app/dashboard/warmup-content/JobsPage";
+import PlacementPage from "@/app/dashboard/PlacementPage";
 import CampaignsPage from "@/app/dashboard/CampaignsPage";
 import SendsPage from "@/app/dashboard/SendsPage";
 import LimitRequestsPage from "@/app/dashboard/LimitRequestsPage";
+import DiscountsPage from "@/app/dashboard/DiscountsPage";
 import OutreachPage from "@/app/dashboard/OutreachPage";
 import MailboxesPage from "@/app/dashboard/MailboxesPage";
 import SyncPage from "@/app/dashboard/SyncPage";
@@ -64,6 +70,8 @@ import { AdminPerm } from "@/lib/auth/permissions";
 //     day; we don't want a thundering herd of refetches on focus
 //   - retry: 1 — same reasoning as the dashboard
 const queryClient = new QueryClient({
+    queryCache: new QueryCache({ onError: (error) => reportFailure(error, "query") }),
+    mutationCache: new MutationCache({ onError: (error) => reportFailure(error, "mutation") }),
     defaultOptions: {
         queries: {
             staleTime: 60_000,
@@ -128,6 +136,7 @@ const router = createBrowserRouter([
                         errorElement: <RouteError />,
                         children: [
                             { index: true, element: <OverviewPage /> },
+                            { path: "device", element: <DeviceApprovalPage /> },
 
                             // Operations
                             { path: "workers", element: gated(AdminPerm.ViewWorkers, <WorkersPage />) },
@@ -149,6 +158,7 @@ const router = createBrowserRouter([
                                     { path: "jobs", element: <WarmupContentJobsPage /> },
                                 ],
                             },
+                            { path: "placement", element: gated(AdminPerm.ViewWarmupPool, <PlacementPage />) },
                             { path: "campaigns", element: gated(AdminPerm.ViewCampaigns, <CampaignsPage />) },
                             { path: "sends", element: gated(AdminPerm.ViewCampaigns, <SendsPage />) },
 
@@ -158,6 +168,9 @@ const router = createBrowserRouter([
                             { path: "organizations", element: gated(AdminPerm.ViewOrganizations, <OrganizationsPage />) },
                             { path: "organizations/:id", element: gated(AdminPerm.ViewOrganizations, <OrganizationDetailPage />) },
                             { path: "limit-requests", element: gated(AdminPerm.ViewOrganizations, <LimitRequestsPage />) },
+                            { path: "developer-apps", element: gated(AdminPerm.ViewOrganizations, <DeveloperAppsPage />) },
+                            { path: "app-listings", element: <Navigate to="/developer-apps?tab=directory" replace /> },
+                            { path: "discounts", element: gated(AdminPerm.ViewOrganizations, <DiscountsPage />) },
                             { path: "outreach", element: gated(AdminPerm.ViewOrganizations, <OutreachPage />) },
                             { path: "admins", element: gated(AdminPerm.GrantAdminAccess, <AdminsPage />) },
                             { path: "testers", element: gated(AdminPerm.ViewUsers, <TestersPage />) },

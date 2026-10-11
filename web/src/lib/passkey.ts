@@ -56,7 +56,28 @@ export class PasskeyCancelled extends Error {
     }
 }
 
-function mapError(e: unknown): Error {
+export class PasskeyAutofillUnavailable extends Error {
+    constructor(cause: unknown) {
+        super("Passkey autofill is unavailable on this device", { cause });
+        this.name = "PasskeyAutofillUnavailable";
+    }
+}
+
+export class PasskeyAlreadyRegistered extends Error {
+    constructor() {
+        super("This device already has a passkey for your account.");
+        this.name = "PasskeyAlreadyRegistered";
+    }
+}
+
+function autofillUnavailable(e: unknown): boolean {
+    if (!(e instanceof Error) && !(e instanceof DOMException)) return false;
+    return e.name === "NotSupportedError"
+        || e.message === "Resident credentials or empty allowCredentials lists are not supported at this time."
+        || (e instanceof WebAuthnError && e.cause !== e && autofillUnavailable(e.cause));
+}
+
+function mapError(e: unknown, ceremony: "authentication" | "registration"): Error {
     if (e instanceof PasskeyCancelled) return e;
     if (e instanceof WebAuthnError) {
         switch (e.code) {
@@ -64,14 +85,14 @@ function mapError(e: unknown): Error {
             case "ERROR_CEREMONY_ABORTED":
                 return new PasskeyCancelled("aborted");
             case "ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY":
-                return new PasskeyCancelled("not-allowed");
+                return e.cause && e.cause !== e ? mapError(e.cause, ceremony) : e;
             case "ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED":
-                return new Error("This device already has a passkey for your account.");
+                return new PasskeyAlreadyRegistered();
             case "ERROR_AUTHENTICATOR_MISSING_DISCOVERABLE_CREDENTIAL_SUPPORT":
             case "ERROR_AUTHENTICATOR_MISSING_USER_VERIFICATION_SUPPORT":
                 return new Error("This device can't create a passkey that meets our requirements.");
             default:
-                return new Error("Your device couldn't complete the passkey request.");
+                return e;
         }
     }
     if (e instanceof DOMException) {
@@ -80,10 +101,15 @@ function mapError(e: unknown): Error {
                 return new PasskeyCancelled("aborted");
             case "NotAllowedError":
                 return new PasskeyCancelled("not-allowed");
+            // Registration means a duplicate credential; authentication means a pending request.
+            case "InvalidStateError":
+                return ceremony === "registration" ? new PasskeyAlreadyRegistered() : new PasskeyCancelled("aborted");
             default:
-                return new Error(e.message || "Your device couldn't complete the passkey request.");
+                return e;
         }
     }
+    // SimpleWebAuthn's words for a ceremony the browser ended with no credential.
+    if (e instanceof Error && e.message === "Authentication was not completed") return new PasskeyCancelled("aborted");
     if (e instanceof Error) return e;
     return new Error("Something went wrong with the passkey request.");
 }
@@ -125,7 +151,7 @@ async function startExplicitAuthentication(
     }) as PublicKeyCredential | null;
 
     if (!credential) {
-        throw new Error("Authentication was not completed");
+        throw new PasskeyCancelled("aborted");
     }
 
     const response = credential.response as AuthenticatorAssertionResponse;
@@ -146,13 +172,49 @@ async function startExplicitAuthentication(
     };
 }
 
+/** Whether the page still has the input conditional autofill binds to. */
+function autofillFieldPresent(): boolean {
+    if (typeof document === "undefined") return false;
+    return document.querySelector('input[autocomplete~="webauthn"]') !== null;
+}
+
 /**
  * Start a server-side login challenge. Safari can lose WebAuthn's required
  * user activation if this network request happens after the click, so explicit
  * button flows should prefetch it before calling startAuthentication().
  */
-export async function beginPasskeyLogin(): Promise<PasskeyLoginChallenge> {
-    return await passkeyLoginBegin();
+export async function beginPasskeyLogin(signal?: AbortSignal): Promise<PasskeyLoginChallenge> {
+    try {
+        return await passkeyLoginBegin(signal);
+    } catch (e) {
+        // An aborted request is this page being left, which is a cancellation
+        // and not a failure anybody needs to hear about.
+        if (e instanceof PasskeyCancelled || isAbort(e) || signal?.aborted) throw new PasskeyCancelled("aborted");
+        throw e;
+    }
+}
+
+/**
+ * Whether a failed challenge request is one that retrying later fixes by
+ * itself: the address is throttled, or the request never reached the API.
+ *
+ * The sign-in page asks for a challenge on load and again after every ceremony,
+ * so both of these are ordinary. Neither leaves anything broken — the button
+ * asks again when it is pressed — and reporting them buries the failures that
+ * do mean something.
+ */
+export function passkeyChallengeUnavailable(e: unknown): boolean {
+    const status = (e as { status?: number } | null)?.status;
+    if (status === 429) return true;
+    // A fetch that never got an answer has no status: offline, DNS, a dropped
+    // connection, a tab suspended mid-flight.
+    return status === undefined && e instanceof TypeError;
+}
+
+/** Whether a rejection is an aborted fetch rather than a refusal or a fault. */
+function isAbort(e: unknown): boolean {
+    if (typeof DOMException !== "undefined" && e instanceof DOMException && e.name === "AbortError") return true;
+    return (e as { name?: string } | null)?.name === "AbortError";
 }
 
 /**
@@ -168,6 +230,14 @@ export async function finishPasskeyLogin(
     let timeout: ReturnType<typeof setTimeout> | undefined;
 
     try {
+        // beginPasskeyLogin is a round trip, so the user may have left the
+        // sign-in page by now. Autofill needs the field it attaches to, and
+        // without one SimpleWebAuthn throws a message the browser also logs;
+        // a navigation is a cancellation, not a failure worth reporting.
+        if (opts?.conditional && !autofillFieldPresent()) {
+            throw new PasskeyCancelled("aborted");
+        }
+
         const authentication = opts?.conditional
             ? startAuthentication({
                 optionsJSON: challenge.options.publicKey,
@@ -189,15 +259,16 @@ export async function finishPasskeyLogin(
 
         return await passkeyLoginFinish({ session: challenge.session, credential });
     } catch (e) {
-        throw mapError(e);
+        if (opts?.conditional && autofillUnavailable(e)) throw new PasskeyAutofillUnavailable(e);
+        throw mapError(e, "authentication");
     } finally {
         if (timeout) clearTimeout(timeout);
     }
 }
 
 /** Run a discoverable passkey sign-in from scratch. */
-export async function passkeyLogin(opts?: { conditional?: boolean }): Promise<Token> {
-    return await finishPasskeyLogin(await beginPasskeyLogin(), opts);
+export async function passkeyLogin(opts?: { conditional?: boolean; signal?: AbortSignal }): Promise<Token> {
+    return await finishPasskeyLogin(await beginPasskeyLogin(opts?.signal), opts);
 }
 
 /** Enroll a new passkey for the signed-in user. */
@@ -207,7 +278,7 @@ export async function registerPasskey(name?: string): Promise<Passkey> {
         const credential = await startRegistration({ optionsJSON: options.publicKey });
         return await passkeyRegisterFinish({ name, credential });
     } catch (e) {
-        throw mapError(e);
+        throw mapError(e, "registration");
     }
 }
 
